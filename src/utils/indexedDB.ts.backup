@@ -1,0 +1,136 @@
+
+
+
+
+/**
+ * Apply incremental changes to cache based on Firestore document changes
+ * This optimizes real-time updates by only updating changed records
+ */
+export async function applyIncrementalCacheUpdates(changes: {
+  type: "added" | "modified" | "removed";
+  doc: NumberPool;
+}[]): Promise<void> {
+  if (changes.length === 0) return;
+  
+  const db = await openDB();
+  
+  try {
+    const tx = db.transaction(NUMBERS_STORE, "readwrite");
+    const store = tx.objectStore(NUMBERS_STORE);
+    
+    // Process changes in batch for better performance
+    const updatePromises = changes.map(async (change) => {
+      const { type, doc } = change;
+      
+      if (type === "removed") {
+        // Remove from cache
+        store.delete(doc.id);
+      } else if (type === "added") {
+        // Add to cache with fresh metadata
+        store.put({
+          ...doc,
+          metadata: {
+            timestamp: Date.now(),
+            category: doc.category,
+            totalCount: 1,
+            lastLoadedIndex: 0
+          }
+        });
+      } else if (type === "modified") {
+        // Update existing record while preserving metadata
+        const request = store.get(doc.id);
+        const existingNumber = await new Promise<CachedNumberPool | undefined>((resolve, reject) => {
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        });
+        
+        if (existingNumber) {
+          store.put({
+            ...doc,
+            metadata: {
+              ...existingNumber.metadata,
+              timestamp: Date.now() // Update timestamp to keep cache fresh
+            }
+          });
+        } else {
+          // If not found in cache, add as new
+          store.put({
+            ...doc,
+            metadata: {
+              timestamp: Date.now(),
+              category: doc.category,
+              totalCount: 1,
+              lastLoadedIndex: 0
+            }
+          });
+        }
+      }
+    });
+    
+    await Promise.all(updatePromises);
+    
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Get cached numbers with real-time sync capability
+ * Returns cached data immediately and provides a way to check if data is stale
+ */
+export async function getCachedNumbersWithSync(
+  category: string, 
+  limit: number = INITIAL_LOAD_SIZE
+): Promise<{
+  numbers: NumberPool[];
+  isStale: boolean;
+  timestamp: number;
+} | null> {
+  const db = await openDB();
+  
+  try {
+    const tx = db.transaction(NUMBERS_STORE, "readonly");
+    const store = tx.objectStore(NUMBERS_STORE);
+    const index = store.index("categoryTimestamp");
+
+    const now = Date.now();
+    const validTimestamp = now - CACHE_DURATION;
+    const staleThreshold = now - (5 * 60 * 1000); // 5 minutes
+    
+    const keyRange = IDBKeyRange.bound(
+      [category, validTimestamp],
+      [category, now]
+    );
+
+    const request = index.getAll(keyRange, limit);
+    const numbers = await new Promise<CachedNumberPool[]>((resolve, reject) => {
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+
+    if (numbers.length === 0) {
+      return null;
+    }
+
+    // Check if data is stale (older than 5 minutes)
+    const oldestTimestamp = Math.min(...numbers.map(n => n.metadata?.timestamp || 0));
+    const isStale = oldestTimestamp < staleThreshold;
+    
+    const sortedNumbers = numbers.sort((a, b) => 
+      (a.metadata?.lastLoadedIndex || 0) - (b.metadata?.lastLoadedIndex || 0)
+    );
+
+    return {
+      numbers: sortedNumbers.map(({ metadata, ...number }) => number),
+      isStale,
+      timestamp: oldestTimestamp
+    };
+  } finally {
+    db.close();
+  }
+}
+
