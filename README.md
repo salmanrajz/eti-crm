@@ -182,7 +182,7 @@ Admin (Highest Authority)
 | **Team Management** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Lead Creation** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Lead Verification** | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| **Number Pool Access** | All | All | Group-based | Group-based | Limited | Limited |
+| **Number Pool Access** | All | Team | Group-based | Group-based | Limited | Limited |
 | **Payroll Management** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **System Configuration** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Analytics Access** | All | Team | Limited | Limited | Personal | Personal |
