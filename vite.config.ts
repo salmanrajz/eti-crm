@@ -10,6 +10,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      disable: process.env.NODE_ENV === 'development',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'masked-icon.svg'],
       manifest: {
         name: 'CRM Lead Management',
@@ -54,6 +55,7 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{css,html,ico,svg,json,js}'],
+        globIgnores: ['**/*.ts', '**/*.tsx', '**/node_modules/**'],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5 MB limit
         runtimeCaching: [
           {
@@ -88,6 +90,17 @@ export default defineConfig({
                 maxAgeSeconds: 60 * 60 * 24 * 7 // 1 week
               }
             }
+          },
+          {
+            urlPattern: /\.(ts|tsx)$/i,
+            handler: 'NetworkOnly',
+            options: {
+              cacheName: 'ts-cache',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 // 1 hour
+              }
+            }
           }
         ]
       }
@@ -99,6 +112,36 @@ export default defineConfig({
     cors: true,
     headers: {
       'Access-Control-Allow-Origin': '*',
+    },
+    // Dynamic proxy configuration for WhatsApp API to avoid CORS issues
+    proxy: {
+      '/api/whatsapp': {
+        target: 'http://20.46.233.188:3000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/whatsapp/, '/check'),
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            // Add CORS headers
+            proxyReq.setHeader('Access-Control-Allow-Origin', '*');
+            proxyReq.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+            proxyReq.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+          });
+        }
+      },
+      '/api/bulk-dnc': {
+        target: 'https://us-central1-crms-4f543.cloudfunctions.net',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/bulk-dnc/, '/bulkDNCImport'),
+        secure: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            // Add CORS headers
+            proxyReq.setHeader('Access-Control-Allow-Origin', '*');
+            proxyReq.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+            proxyReq.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+          });
+        }
+      }
     }
   },
   build: {

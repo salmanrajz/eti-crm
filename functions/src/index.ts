@@ -1,18 +1,87 @@
+/**
+ * ===============================================================================
+ * MAIN CLOUD FUNCTIONS FILE - CRM SYSTEM SERVER-SIDE LOGIC
+ * ===============================================================================
+ * 
+ * This file contains the core Firebase Cloud Functions for the CRM system.
+ * It handles the main business logic including:
+ * 
+ * CORE BUSINESS FUNCTIONS:
+ * - Number claiming system (claimNumber)
+ * - Lead rejection processing (processLeadRejection) 
+ * - Number availability checking (checkNumberAvailability)
+ * - Admin password reset functionality (resetUserPassword)
+ * 
+ * SEARCH & TOKENIZATION:
+ * - Phone number search token generation for fast searching
+ * - Automatic token maintenance for number pool documents
+ * - Batch token backfill for existing documents
+ * 
+ * WHATSAPP INTEGRATION:
+ * - Webhook handler for inbound WhatsApp messages (whatsappWebhook)
+ * - Message routing and lead resolution
+ * - Consent parsing from interactive flows and text messages
+ * 
+ * EXTERNAL API INTEGRATION:
+ * - ETI API proxy for number status checking (checkNumberStatus, checkNumberStatusHTTP)
+ * - CORS handling for client-side API calls
+ * 
+ * UTILITY FUNCTIONS:
+ * - Strike limit checking for number claims
+ * - Statistics recomputation (recomputeNumberPoolStats)
+ * 
+ * This file imports and exports functions from other modules:
+ * - numberPoolStats.ts: Statistics management
+ * - claimExpiry.ts: Claim expiry handling
+ * - simpleReservationExpiry.ts: Reservation expiry management
+ * 
+ * All functions are deployed to us-central1 region and handle authentication,
+ * data validation, transaction management, and error handling.
+ * ===============================================================================
+ */
+
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
+import { updateNumberPoolStatsOnCreate, updateNumberPoolStatsOnDelete, initializeNumberPoolStats } from './numberPoolStats';
+import { handleClaimExpiry, realtimeClaimExpiry, smartBatchClaimExpiry, emergencyClaimExpiry } from './claimExpiry';
+import { handleReservationExpiry, processReservationExpiry, testReservationExpiry, triggerReservationExpiry, backupReservationExpiry } from './simpleReservationExpiry';
 
+// Initialize Firebase Admin SDK
 admin.initializeApp();
 const db = admin.firestore();
 const FieldValue = admin.firestore.FieldValue;
 
-// -------------------
-// Utils: tokenization
-// -------------------
+// ===============================================================================
+// SEARCH TOKENIZATION UTILITIES
+// ===============================================================================
+// These utilities generate searchable tokens from phone numbers to enable
+// fast partial number searches in the number pool.
+
+/**
+ * Normalizes a string by removing all non-alphanumeric characters and converting to lowercase
+ * This is used to clean phone numbers for consistent token generation
+ * 
+ * @param input - The string to normalize
+ * @returns Clean string with only alphanumeric characters in lowercase
+ */
 function normalizeString(input: string): string {
   return (input || '').toString().replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
 }
 
-// Optimized n-gram generation for phone numbers with comprehensive search coverage
+/**
+ * Generates comprehensive search tokens from a phone number for fast partial matching
+ * Creates multiple n-grams and search patterns to catch various user search patterns
+ * 
+ * Algorithm generates:
+ * 1. All 3-7 character substrings from last 7 digits
+ * 2. Common consecutive digit groups (first 3, middle 3, last 3)
+ * 3. Last 4 digits (very common search pattern)
+ * 4. Overlapping 4-digit windows for comprehensive coverage
+ * 5. Full number if it's 7 digits or less
+ * 
+ * @param phoneNumber - The phone number to generate tokens for
+ * @returns Array of searchable token strings
+ */
 function generatePhoneNumberTokens(phoneNumber: string): string[] {
   const normalized = normalizeString(phoneNumber);
   if (normalized.length < 4) return []; // Skip very short numbers
@@ -59,8 +128,13 @@ function generatePhoneNumberTokens(phoneNumber: string): string[] {
   return Array.from(tokens);
 }
 
-// (removed generateTextTokens; we only store number tokens)
-
+/**
+ * Updates the search tokens for a number pool document
+ * This function generates and stores normalized search tokens for fast number searching
+ * 
+ * @param docRef - The Firestore document reference to update
+ * @param data - The document data containing the phone number
+ */
 async function upsertTokensForNumberPoolDoc(docRef: FirebaseFirestore.DocumentReference, data: any) {
   const numberRaw = (data && (data.number || data.msisdn || '')) as string;
   const numberTokens = generatePhoneNumberTokens(numberRaw);
@@ -71,7 +145,20 @@ async function upsertTokensForNumberPoolDoc(docRef: FirebaseFirestore.DocumentRe
   }, { merge: true });
 }
 
-// Maintain tokens on writes to numberPool
+/**
+ * ===============================================================================
+ * FIRESTORE TRIGGER: Automatic Token Generation
+ * ===============================================================================
+ * This trigger automatically maintains search tokens for number pool documents.
+ * It fires whenever a document in the 'numberPool' collection is created or updated.
+ * 
+ * Token Update Conditions:
+ * 1. numberTokens field is missing
+ * 2. Phone number has changed since last token update
+ * 3. This is a new document
+ * 
+ * This ensures that all search tokens are always up-to-date for fast searching.
+ */
 export const onNumberPoolWrite = functions.firestore
   .document('numberPool/{id}')
   .onWrite(async (change, context) => {
@@ -99,7 +186,21 @@ export const onNumberPoolWrite = functions.firestore
     }
   });
 
-// Callable: backfill tokens for existing docs
+/**
+ * ===============================================================================
+ * CALLABLE FUNCTION: Batch Token Backfill
+ * ===============================================================================
+ * This function allows administrators to backfill search tokens for existing
+ * number pool documents that may be missing tokens or have outdated tokens.
+ * 
+ * Features:
+ * - Processes documents in configurable batch sizes (default: 500, max: 1000)
+ * - Supports pagination with cursor-based iteration
+ * - Handles large datasets efficiently with batched processing
+ * 
+ * Authentication: Required (authenticated users only)
+ * Usage: Call from admin dashboard or maintenance scripts
+ */
 export const backfillNumberTokens = functions.https.onCall(async (data, context) => {
   // Optional auth check
   if (!context.auth) {
@@ -126,8 +227,30 @@ export const backfillNumberTokens = functions.https.onCall(async (data, context)
 });
 
 /**
- * Cloud Function to claim a number
- * This function handles the entire process of claiming a number atomically
+ * ===============================================================================
+ * CALLABLE FUNCTION: Number Claiming System
+ * ===============================================================================
+ * This function handles the complete number claiming workflow for agents.
+ * It manages the atomic process of claiming a number with full validation and notifications.
+ * 
+ * Business Logic:
+ * - Validates user authentication and number availability
+ * - Enforces strike limits (max 2 claims per 24 hours)
+ * - Checks for existing claims and number status
+ * - Updates number document with new claim in transaction
+ * - Sends notifications to original agent if applicable
+ * 
+ * Input Parameters:
+ * - numberId: The ID of the number to claim (required)
+ * - userId: The ID of the user making the claim (required)
+ * 
+ * Returns:
+ * - success: boolean indicating operation success
+ * - message: Human-readable status message
+ * - claim: The claim object that was created
+ * 
+ * Authentication: Required (authenticated users only)
+ * Transaction: Yes (ensures atomicity across multiple document updates)
  */
 export const claimNumber = functions.https.onCall(async (data, context) => {
   // Ensure user is authenticated
@@ -260,8 +383,31 @@ export const claimNumber = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * Cloud Function to process a lead rejection
- * This function handles updating the lead status and managing the number pool
+ * ===============================================================================
+ * CALLABLE FUNCTION: Lead Rejection Processing
+ * ===============================================================================
+ * This function handles the complete workflow when a lead is rejected by a verifier.
+ * It updates the lead status and manages the number pool queue system.
+ * 
+ * Business Logic:
+ * - Updates lead status to "rejected" with verification notes
+ * - Processes each number in the rejected lead's plans
+ * - Manages claim queue transitions (moves next agent to active claim)
+ * - Releases numbers back to "open" status if no queue exists
+ * - Sends notifications to relevant agents and the original lead creator
+ * - Handles 2-minute claim windows for queued agents
+ * 
+ * Input Parameters:
+ * - leadId: The ID of the lead being rejected (required)
+ * - verifierId: The ID of the verifier rejecting the lead (required)
+ * - verificationNote: Optional notes about why the lead was rejected
+ * 
+ * Returns:
+ * - success: boolean indicating operation success
+ * - message: Human-readable status message
+ * 
+ * Authentication: Required (authenticated users only)
+ * Transaction: Yes (ensures atomicity across lead and number updates)
  */
 export const processLeadRejection = functions.https.onCall(async (data, context) => {
   // Ensure user is authenticated
@@ -394,7 +540,27 @@ export const processLeadRejection = functions.https.onCall(async (data, context)
 });
 
 /**
- * Cloud Function to check if a number is available for claiming
+ * ===============================================================================
+ * CALLABLE FUNCTION: Number Availability Checker
+ * ===============================================================================
+ * This function checks if a specific number is available for claiming.
+ * It validates the number's current status and any active claim windows.
+ * 
+ * Business Logic:
+ * - Retrieves number document and validates existence
+ * - Checks if number status is "open" (immediately available)
+ * - Validates if number is "reserved" but claim has expired
+ * - Returns detailed availability information
+ * 
+ * Input Parameters:
+ * - numberId: The ID of the number to check (required)
+ * 
+ * Returns:
+ * - isAvailable: boolean indicating if number can be claimed now
+ * - status: Current status of the number ("open", "reserved", etc.)
+ * - expiresAt: Timestamp when current claim expires (if applicable)
+ * 
+ * Authentication: Required (authenticated users only)
  */
 export const checkNumberAvailability = functions.https.onCall(async (data, context) => {
   // Ensure user is authenticated
@@ -448,8 +614,34 @@ export const checkNumberAvailability = functions.https.onCall(async (data, conte
 });
 
 /**
- * Webhook to capture inbound WhatsApp messages
- * Expected payload includes leadId in query or body.metadata for routing.
+ * ===============================================================================
+ * HTTP WEBOOK: WhatsApp Message Handler
+ * ===============================================================================
+ * This webhook handles inbound messages from WhatsApp Business API.
+ * It processes customer messages, routes them to appropriate leads, and parses consent data.
+ * 
+ * Features:
+ * - WhatsApp webhook verification (GET requests)
+ * - Message routing via leadId metadata or phone number matching
+ * - Consent parsing from text messages and interactive flows
+ * - Unmatched message storage for later reconciliation
+ * - Batch processing for multiple messages
+ * 
+ * Message Routing Logic:
+ * 1. Extract leadId from webhook metadata or query parameters
+ * 2. Fallback to WhatsApp routing map (48-hour window)
+ * 3. Final fallback to phone number matching (last 8/10 digits)
+ * 
+ * Consent Parsing:
+ * - Text-based consent detection using keyword matching
+ * - Interactive flow (NFM) consent parsing from JSON responses
+ * - Stores parsed consent data in lead's WhatsApp logs
+ * 
+ * HTTP Methods:
+ * - GET: Webhook verification (hub.verify_token validation)
+ * - POST: Message processing and storage
+ * 
+ * Authentication: WhatsApp verify token validation
  */
 export const whatsappWebhook = functions.https.onRequest(async (req, res) => {
   try {
@@ -613,7 +805,125 @@ export const whatsappWebhook = functions.https.onRequest(async (req, res) => {
 });
 
 /**
- * Helper function to check if a user has reached their strike limit
+ * ===============================================================================
+ * CALLABLE FUNCTION: Admin Password Reset
+ * ===============================================================================
+ * This function allows administrators to reset passwords for any user in the system.
+ * It integrates with Firebase Authentication and maintains audit trail in Firestore.
+ * 
+ * Business Logic:
+ * - Validates requesting user has admin role
+ * - Updates password in Firebase Authentication
+ * - Records reset information in user document for audit trail
+ * - Sets passwordResetRequired flag to force user to change password
+ * 
+ * Input Parameters:
+ * - userId: The ID of the user whose password to reset (required)
+ * - newPassword: The new password to set (required)
+ * 
+ * Returns:
+ * - success: boolean indicating operation success
+ * - message: Human-readable status message
+ * 
+ * Authentication: Required (admin role required)
+ * Audit Trail: Records who reset the password and when
+ */
+export const resetUserPassword = functions.https.onCall(async (data, context) => {
+  // Ensure user is authenticated
+  if (!context.auth) {
+    throw new functions.https.HttpsError(
+      "unauthenticated",
+      "You must be logged in to reset a password"
+    );
+  }
+
+  const { userId, newPassword } = data;
+  
+  if (!userId || !newPassword) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "User ID and new password are required"
+    );
+  }
+
+  // Verify the requesting user is an admin
+  const adminUserRef = db.collection("users").doc(context.auth.uid);
+  const adminUserDoc = await adminUserRef.get();
+  
+  if (!adminUserDoc.exists) {
+    throw new functions.https.HttpsError(
+      "not-found",
+      "Admin user not found"
+    );
+  }
+
+  const adminUserData = adminUserDoc.data();
+  if (!adminUserData || adminUserData.role !== 'admin') {
+    throw new functions.https.HttpsError(
+      "permission-denied",
+      "Only admins can reset passwords"
+    );
+  }
+
+  try {
+    // Update the user's password using Firebase Admin SDK
+    await admin.auth().updateUser(userId, {
+      password: newPassword
+    });
+
+    // Update the user document with reset information
+    const userRef = db.collection("users").doc(userId);
+    await userRef.update({
+      passwordResetRequired: true,
+      passwordResetBy: context.auth.uid,
+      passwordResetAt: admin.firestore.Timestamp.now(),
+      updatedAt: admin.firestore.Timestamp.now()
+    });
+
+    return {
+      success: true,
+      message: "Password has been successfully reset"
+    };
+  } catch (error: any) {
+    console.error('Password reset failed:', error);
+    
+    if (error.code === 'auth/user-not-found') {
+      throw new functions.https.HttpsError(
+        "not-found",
+        "User not found in Firebase Auth"
+      );
+    } else if (error.code === 'auth/invalid-password') {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "The new password is invalid"
+      );
+    } else {
+      throw new functions.https.HttpsError(
+        "internal",
+        "Failed to reset password: " + error.message
+      );
+    }
+  }
+});
+
+/**
+ * ===============================================================================
+ * UTILITY FUNCTION: Strike Limit Checker
+ * ===============================================================================
+ * This helper function enforces business rules for number claiming by checking
+ * if a user has exceeded their claim strike limit within a 24-hour period.
+ * 
+ * Business Rules:
+ * - Maximum of 2 claims per user per 24-hour period
+ * - Counts all claims made in the last 24 hours across all numbers
+ * - Returns detailed information about remaining strikes and next available time
+ * 
+ * @param userId - The ID of the user to check strike limit for
+ * @returns Object containing strike limit information:
+ *   - remainingStrikes: Number of claims remaining (0-2)
+ *   - lastStrikeTime: Timestamp of most recent claim
+ *   - canStrike: Boolean indicating if user can make another claim
+ *   - nextAvailableTime: Human-readable time when user can claim again
  */
 async function checkStrikeLimit(userId: string) {
   // Get all claims made by this agent in the last 24 hours
@@ -657,3 +967,314 @@ async function checkStrikeLimit(userId: string) {
     nextAvailableTime
   };
 }
+
+// Export number pool stats functions
+export { updateNumberPoolStatsOnCreate, updateNumberPoolStatsOnDelete };
+
+// Export claim expiry functions
+export { handleClaimExpiry, realtimeClaimExpiry, smartBatchClaimExpiry, emergencyClaimExpiry };
+
+// Export simple reservation expiry functions
+export { handleReservationExpiry, processReservationExpiry, testReservationExpiry, triggerReservationExpiry, backupReservationExpiry };
+
+// Export bulk DNC import functions
+export { bulkDNCImport, bulkDNCImportStatus } from './bulkDNCImport';
+
+/**
+ * ===============================================================================
+ * CALLABLE FUNCTION: Statistics Recalculation
+ * ===============================================================================
+ * This function manually recalculates number pool statistics.
+ * Useful for administrative maintenance or after bulk data operations.
+ * 
+ * Authentication: Required (authenticated users only)
+ * Usage: Call from admin dashboard or maintenance scripts
+ */
+export const recomputeNumberPoolStats = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
+  }
+  try {
+    await initializeNumberPoolStats();
+    return { ok: true };
+  } catch (e: any) {
+    console.error('recomputeNumberPoolStats failed', e);
+    throw new functions.https.HttpsError('internal', e?.message || 'Failed to recompute stats');
+  }
+});
+
+/**
+ * ===============================================================================
+ * CALLABLE FUNCTION: ETI API Number Status Checker
+ * ===============================================================================
+ * This function serves as a proxy to the ETI API for checking number status.
+ * It bypasses CORS issues and handles authentication on the server side.
+ * 
+ * Features:
+ * - Validates and cleans phone number input (10-11 digits)
+ * - Makes HTTP request to ETI API (quickpay.riuman.com)
+ * - Handles timeouts and error responses gracefully
+ * - Parses and returns structured response data
+ * 
+ * Input Parameters:
+ * - number: Phone number to check (10-11 digits, cleaned automatically)
+ * 
+ * Returns:
+ * - isActive: Boolean indicating if number is active
+ * - status: HTTP status from ETI API
+ * - message: Human-readable status message
+ * - etiResponse: Full response from ETI API for debugging
+ * 
+ * Authentication: Required (authenticated users only)
+ * Timeout: 10 seconds
+ */
+export const checkNumberStatus = functions.https.onCall(async (data, context) => {
+  console.log('checkNumberStatus function called with data:', data);
+  
+  if (!context.auth) {
+    console.log('Authentication failed');
+    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
+  }
+
+  const { number } = data;
+  
+  if (!number) {
+    console.log('Number parameter missing');
+    throw new functions.https.HttpsError('invalid-argument', 'Number is required');
+  }
+
+  // Clean the number (remove any spaces, dashes, etc.)
+  const cleanNumber = number.replace(/[\s\-\(\)]/g, '');
+  console.log('Cleaned number:', cleanNumber);
+  
+  // Validate number format
+  if (!/^\d{10,11}$/.test(cleanNumber)) {
+    console.log('Invalid number format:', cleanNumber);
+    throw new functions.https.HttpsError('invalid-argument', 'Invalid number format');
+  }
+
+  try {
+    const url = `https://quickpay.riuman.com/number-check-eti?number=${cleanNumber}`;
+    console.log('Making request to:', url);
+    
+    const response = await new Promise<{ status: number; data: any }>((resolve, reject) => {
+      const https = require('https');
+      const http = require('http');
+      
+      const client = url.startsWith('https') ? https : http;
+      
+      const request = client.get(url, {
+        timeout: 10000, // Reduced from 15s to 10s
+        headers: {
+          'User-Agent': 'Firebase-Cloud-Function/1.0'
+        }
+      }, (res: any) => {
+        let data = '';
+        
+        res.on('data', (chunk: any) => {
+          data += chunk;
+        });
+        
+        res.on('end', () => {
+          console.log('ETI API response - Status:', res.statusCode, 'Data:', data);
+          resolve({
+            status: res.statusCode,
+            data: data
+          });
+        });
+      });
+      
+      request.on('error', (error: any) => {
+        console.error('Request error:', error);
+        reject(error);
+      });
+      
+      request.on('timeout', () => {
+        console.error('Request timeout');
+        request.destroy();
+        reject(new Error('Request timeout'));
+      });
+    });
+
+    // Parse the ETI API JSON response
+    let etiResponse;
+    try {
+      etiResponse = JSON.parse(response.data);
+      console.log('Parsed ETI API response:', etiResponse);
+    } catch (parseError) {
+      console.error('Failed to parse ETI API response:', response.data);
+      etiResponse = { status: 500, message: 'Invalid response format' };
+    }
+
+    // Determine if number is active based on ETI API response
+    const isActive = etiResponse.status === 200;
+    
+    const result = {
+      isActive: isActive,
+      status: etiResponse.status,
+      message: isActive ? 'Number is active' : 'Number is not active',
+      etiResponse: etiResponse // Include full response for debugging
+    };
+    
+    console.log('Returning result:', result);
+    return result;
+
+  } catch (error: any) {
+    console.error('Error checking number status:', error);
+    
+    // Return a more specific error based on the error type
+    if (error.message === 'Request timeout') {
+      throw new functions.https.HttpsError('deadline-exceeded', 'Request timeout - ETI API took too long to respond');
+    }
+    
+    throw new functions.https.HttpsError('internal', `Unable to verify number status: ${error.message}`);
+  }
+});
+
+/**
+ * ===============================================================================
+ * HTTP FUNCTION: ETI API Proxy with CORS Support
+ * ===============================================================================
+ * This HTTP function provides the same ETI API number checking functionality
+ * as the callable function but with better CORS handling for direct HTTP requests.
+ * 
+ * Features:
+ * - Full CORS headers for cross-origin requests
+ * - OPTIONS method handling for preflight requests
+ * - Same validation and API integration as callable version
+ * - HTTP status codes for better error handling
+ * 
+ * HTTP Methods:
+ * - OPTIONS: Preflight CORS handling
+ * - POST: Number status checking
+ * 
+ * Request Body:
+ * - number: Phone number to check (required)
+ * - uid: User ID for authentication (required)
+ * 
+ * Response: JSON object with same structure as callable version
+ * CORS: Enabled for all origins with appropriate headers
+ */
+export const checkNumberStatusHTTP = functions.https.onRequest(async (req, res) => {
+  // Set CORS headers
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+  
+  // Only allow POST requests
+  if (req.method !== 'POST') {
+    res.status(405).send('Method not allowed');
+    return;
+  }
+
+  try {
+    const { number, uid } = req.body;
+    
+    if (!number) {
+      res.status(400).json({ error: 'Number is required' });
+      return;
+    }
+
+    if (!uid) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    // Clean the number (remove any spaces, dashes, etc.)
+    const cleanNumber = number.replace(/[\s\-\(\)]/g, '');
+    
+    // Validate number format
+    if (!/^\d{10,11}$/.test(cleanNumber)) {
+      res.status(400).json({ error: 'Invalid number format' });
+      return;
+    }
+
+    const url = `https://quickpay.riuman.com/number-check-eti?number=${cleanNumber}`;
+    
+    const response = await new Promise<{ status: number; data: any }>((resolve, reject) => {
+      const https = require('https');
+      const http = require('http');
+      
+      const client = url.startsWith('https') ? https : http;
+      
+      const request = client.get(url, {
+        timeout: 10000, // Reduced from 15s to 10s
+        headers: {
+          'User-Agent': 'Firebase-Cloud-Function/1.0'
+        }
+      }, (res: any) => {
+        let data = '';
+        
+        res.on('data', (chunk: any) => {
+          data += chunk;
+        });
+        
+        res.on('end', () => {
+          console.log('ETI API raw response - Status:', res.statusCode, 'Data:', data);
+          resolve({
+            status: res.statusCode,
+            data: data
+          });
+        });
+      });
+      
+      request.on('error', (error: any) => {
+        reject(error);
+      });
+      
+      request.on('timeout', () => {
+        request.destroy();
+        reject(new Error('Request timeout'));
+      });
+    });
+
+    // Parse the ETI API JSON response
+    let etiResponse;
+    try {
+      etiResponse = JSON.parse(response.data);
+      console.log('Parsed ETI API response:', etiResponse);
+    } catch (parseError) {
+      console.error('Failed to parse ETI API response:', response.data);
+      etiResponse = { status: 500, message: 'Invalid response format' };
+    }
+
+    // Determine if number is active based on ETI API response
+    const isActive = etiResponse.status === 200;
+    
+    const result = {
+      isActive: isActive,
+      status: etiResponse.status,
+      message: isActive ? 'Number is active' : 'Number is not active',
+      etiResponse: etiResponse // Include full response for debugging
+    };
+    
+    res.status(200).json(result);
+
+    } catch (error: any) {
+      console.error('Error checking number status:', error);
+      
+      // If it's a timeout, return a more specific error
+      if (error.message === 'Request timeout') {
+        res.status(408).json({ 
+          error: 'ETI API timeout - please try again',
+          isActive: false,
+          status: 408,
+          message: 'API timeout - assuming number is inactive'
+        });
+        return;
+      }
+      
+      res.status(500).json({ 
+        error: 'Unable to verify number status',
+        isActive: false,
+        status: 500,
+        message: 'Service unavailable'
+      });
+    }
+});

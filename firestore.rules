@@ -11,18 +11,18 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    // OPTIMIZED: Cache user data to reduce Firebase allows
-    function getUserData() {
+    // Safe user data getter that handles missing documents
+    function getSafeUserData() {
       return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data : null;
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data : {};
     }
 
     function hasRole(role) {
-      return isSignedIn() && getUserData() != null && getUserData().role == role;
+      return isSignedIn() && getSafeUserData().role == role;
     }
 
     function hasAnyRole(roles) {
-      return isSignedIn() && getUserData() != null && getUserData().role in roles;
+      return isSignedIn() && getSafeUserData().role in roles;
     }
 
     function isTeamManager(teamId) {
@@ -32,7 +32,7 @@ service cloud.firestore {
     }
 
     function isTeamMember(teamId) {
-      return isSignedIn() && getUserData() != null && getUserData().teamId == teamId;
+      return isSignedIn() && getSafeUserData().teamId == teamId;
     }
 
     function isFirstAdmin() {
@@ -53,13 +53,6 @@ service cloud.firestore {
         hasRole('manager') ||
         hasRole('coordinator') ||
         hasRole('verifier') ||
-        
-         // Allow team members to read each other's data for team performance
-        (resource.data.teamId != null && 
-         getUserData() != null && getUserData().teamId == resource.data.teamId) ||
-        // Allow reading manager data for notifications
-        (exists(/databases/$(database)/documents/leads/$(request.path.split('/')[4])) &&
-         get(/databases/$(database)/documents/leads/$(request.path.split('/')[4])).data.managerId == userId) ||
         // Allow reading any user data if the user is signed in
         isSignedIn()
       );
@@ -72,7 +65,7 @@ service cloud.firestore {
       allow update: if isSignedIn() && (
         isOwner(userId) ||
         hasRole('admin') ||
-        (hasRole('manager') && getUserData() != null && resource.data.teamId == getUserData().teamId)
+        (hasRole('manager') && getSafeUserData().teamId == resource.data.teamId)
       );
       allow delete: if hasRole('admin');
     }
@@ -93,12 +86,12 @@ service cloud.firestore {
     match /teamSettings/{teamId} {
       allow read: if isSignedIn() && (
         hasRole('admin') ||
-        (hasRole('manager') && getUserData() != null && teamId == getUserData().teamId) ||
+        (hasRole('manager') && getSafeUserData().role != null && teamId == getSafeUserData().teamId) ||
         isTeamMember(teamId)
       );
       allow write: if isSignedIn() && (
         hasRole('admin') ||
-        (hasRole('manager') && getUserData() != null && teamId == getUserData().teamId)
+        (hasRole('manager') && getSafeUserData().role != null && teamId == getSafeUserData().teamId)
       );
     }
     
@@ -110,7 +103,7 @@ service cloud.firestore {
       );
       allow create, update: if isSignedIn() && (
         hasRole('admin') ||
-        (hasRole('manager') && getUserData() != null && teamId == getUserData().teamId)
+        (hasRole('manager') && getSafeUserData().role != null && teamId == getSafeUserData().teamId)
       );
       allow delete: if hasRole('admin');
     }
@@ -213,7 +206,7 @@ service cloud.firestore {
         resource.data.agentId == request.auth.uid ||
          // Allow team members to read each other's leads for performance tracking
         (resource.data.agentId != null && 
-         getUserData() != null && getUserData().teamId == resource.data.teamId)
+         getSafeUserData().role != null && getSafeUserData().teamId == resource.data.teamId)
       );
       
       
@@ -299,7 +292,7 @@ service cloud.firestore {
       allow read: if isSignedIn() && (
         resource.data.userId == request.auth.uid ||
         hasAnyRole(['admin', 'manager']) ||
-        (hasRole('manager') && getUserData() != null && resource.data.teamId == getUserData().teamId)
+        (hasRole('manager') && getSafeUserData().role != null && resource.data.teamId == getSafeUserData().teamId)
       );
       allow create, update: if hasAnyRole(['admin', 'manager']);
     }
@@ -344,15 +337,15 @@ service cloud.firestore {
         hasRole('coordinator') ||
         hasRole('verifier') ||
         targetId.matches(request.auth.uid + '.*') ||
-        (hasRole('manager') && getUserData() != null && resource.data.teamId == getUserData().teamId) ||
+        (hasRole('manager') && getSafeUserData().role != null && resource.data.teamId == getSafeUserData().teamId) ||
         // Allow team members to read each other's targets for performance tracking
         (resource.data.agentId != null && 
-         getUserData() != null && getUserData().teamId == resource.data.teamId)
+         getSafeUserData().role != null && getSafeUserData().teamId == resource.data.teamId)
       );
   
   allow create, update: if isSignedIn() && (
     hasRole('admin') ||
-    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+    (hasRole('manager') && getSafeUserData().role != null && request.resource.data.teamId == getSafeUserData().teamId)
   );
   
   allow delete: if hasRole('admin');
@@ -469,7 +462,7 @@ match /salaries/{salaryId} {
   
   allow create, update: if isSignedIn() && (
     hasRole('admin') ||
-    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+    (hasRole('manager') && getSafeUserData().role != null && request.resource.data.teamId == getSafeUserData().teamId)
   );
   
   allow delete: if hasRole('admin');
@@ -484,7 +477,7 @@ match /expenses/{expenseId} {
   
   allow create, update: if isSignedIn() && (
     hasRole('admin') ||
-    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+    (hasRole('manager') && getSafeUserData().role != null && request.resource.data.teamId == getSafeUserData().teamId)
   );
   
   allow delete: if hasRole('admin');
@@ -516,7 +509,7 @@ match /invoices/{invoiceId} {
   
   allow create: if isSignedIn() && (
     hasRole('admin') ||
-    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+    (hasRole('manager') && getSafeUserData().role != null && request.resource.data.teamId == getSafeUserData().teamId)
   );
   
   allow update: if isSignedIn() && (
@@ -563,9 +556,97 @@ match /invoices/{invoiceId} {
       allow update, delete: if isSignedIn() && hasRole('admin');
     }
 
+    // Plans collection rules - Admin only
+    match /plans/{planId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('coordinator') ||
+        hasRole('verifier') ||
+        hasRole('agent') ||
+        hasRole('freelancer')
+      );
+      allow create, update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // Plan Categories collection rules - Admin only
+    match /planCategories/{categoryId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('coordinator') ||
+        hasRole('verifier') ||
+        hasRole('agent') ||
+        hasRole('freelancer')
+      );
+      allow create, update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // Group Targets per month (e.g., docId: '2025-09')
+    match /groupTargets/{monthId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        // Coordinators can read when visibility is enabled
+        (hasRole('coordinator') && resource.data.visibleToCoordinators == true)
+      );
+      allow create, update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // DNC (Do Not Call) collection rules
+    match /dncNumbers/{dncId} {
+      allow read: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
+      allow create: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
+      allow update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // App Configuration collection rules - Admin only
+    match /config/{configId} {
+      allow read: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
+      allow create, update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // Trusted Devices Collection
+    match /trustedDevices/{deviceId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || hasRole('admin'));
+      allow create: if isSignedIn() && request.auth.uid != null;
+      allow update: if isSignedIn() && (
+        resource.data.userId == request.auth.uid || 
+        hasRole('admin') ||
+        // Allow updates for last seen timestamp even if role check fails
+        (request.resource.data.keys().hasOnly(['lastSeen']) && resource.data.userId == request.auth.uid)
+      );
+      allow delete: if isSignedIn() && (resource.data.userId == request.auth.uid || hasRole('admin'));
+      // Allow list queries for trusted devices
+      allow list: if isSignedIn() && (
+        request.query.filters[0].op == '==' &&
+        request.query.filters[0].fieldPath == 'userId' &&
+        request.query.filters[0].value == request.auth.uid
+      );
+    }
+
+    // Settings Collection
+    match /settings/{settingId} {
+      allow read: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
+      allow create, update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // WhatsApp Check Logs collection rules - Admin only
+    match /whatsappCheckLogs/{logId} {
+      allow read: if isSignedIn() && hasRole('admin');
+      allow create: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
+      allow update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+    // Number Pool Stats collection rules - Read for all authenticated users, write for admin/cloud functions
+    match /stats/{statId} {
+      allow read: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
+      allow create, update: if isSignedIn() && hasRole('admin');
+      // Allow Cloud Functions to update stats (they run with admin privileges)
+    }
+
   }
   
- 
+  
  
   
 }
