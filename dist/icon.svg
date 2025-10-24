@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="256" fill="#52AA03"/>
+  
+  <!-- CRM Icon - People/Users symbol -->
+  <g fill="#ffffff">
+    <!-- Main person -->
+    <circle cx="256" cy="180" r="60"/>
+    <path d="M256 260c-66.3 0-120 53.7-120 120v32h240v-32c0-66.3-53.7-120-120-120z"/>
+    
+    <!-- Secondary person (smaller) -->
+    <circle cx="180" cy="220" r="40"/>
+    <path d="M180 280c-44.2 0-80 35.8-80 80v24h160v-24c0-44.2-35.8-80-80-80z"/>
+    
+    <!-- Third person (smaller) -->
+    <circle cx="332" cy="220" r="40"/>
+    <path d="M332 280c-44.2 0-80 35.8-80 80v24h160v-24c0-44.2-35.8-80-80-80z"/>
+  </g>
+</svg> 

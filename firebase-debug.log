@@ -1,0 +1,58 @@
+[debug] [2025-09-16T02:20:37.437Z] ----------------------------------------------------------------------
+[debug] [2025-09-16T02:20:37.441Z] Command:       /usr/local/bin/node /usr/local/bin/firebase deploy --only firestore:rules --project crms-4f543
+[debug] [2025-09-16T02:20:37.442Z] CLI Version:   14.8.0
+[debug] [2025-09-16T02:20:37.442Z] Platform:      darwin
+[debug] [2025-09-16T02:20:37.442Z] Node Version:  v22.14.0
+[debug] [2025-09-16T02:20:37.442Z] Time:          Tue Sep 16 2025 07:50:37 GMT+0530 (India Standard Time)
+[debug] [2025-09-16T02:20:37.442Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2025-09-16T02:20:37.542Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-09-16T02:20:37.542Z] > authorizing via signed-in user (tayaserbhat@gmail.com)
+[debug] [2025-09-16T02:20:37.542Z] [iam] checking project crms-4f543 for permissions ["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]
+[debug] [2025-09-16T02:20:37.543Z] Checked if tokens are valid: false, expires at: 1757926938501
+[debug] [2025-09-16T02:20:37.543Z] Checked if tokens are valid: false, expires at: 1757926938501
+[debug] [2025-09-16T02:20:37.543Z] > refreshing access token with scopes: []
+[debug] [2025-09-16T02:20:37.544Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2025-09-16T02:20:37.544Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2025-09-16T02:20:37.846Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2025-09-16T02:20:37.846Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2025-09-16T02:20:37.857Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions [none]
+[debug] [2025-09-16T02:20:37.857Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions x-goog-quota-user=projects/crms-4f543
+[debug] [2025-09-16T02:20:37.857Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]}
+[debug] [2025-09-16T03:49:13.506Z] ----------------------------------------------------------------------
+[debug] [2025-09-16T03:49:13.512Z] Command:       /usr/local/bin/node /usr/local/bin/firebase deploy --only firestore:rules
+[debug] [2025-09-16T03:49:13.512Z] CLI Version:   14.8.0
+[debug] [2025-09-16T03:49:13.512Z] Platform:      darwin
+[debug] [2025-09-16T03:49:13.512Z] Node Version:  v22.14.0
+[debug] [2025-09-16T03:49:13.513Z] Time:          Tue Sep 16 2025 09:19:13 GMT+0530 (India Standard Time)
+[debug] [2025-09-16T03:49:13.513Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2025-09-16T03:49:13.615Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-09-16T03:49:13.615Z] > authorizing via signed-in user (tayaserbhat@gmail.com)
+[debug] [2025-09-16T03:49:13.615Z] [iam] checking project crms-4f543 for permissions ["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]
+[debug] [2025-09-16T03:49:13.616Z] Checked if tokens are valid: false, expires at: 1757992836846
+[debug] [2025-09-16T03:49:13.616Z] Checked if tokens are valid: false, expires at: 1757992836846
+[debug] [2025-09-16T03:49:13.616Z] > refreshing access token with scopes: []
+[debug] [2025-09-16T03:49:13.617Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2025-09-16T03:49:13.617Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2025-09-16T03:49:13.955Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2025-09-16T03:49:13.955Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2025-09-16T03:49:13.967Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions [none]
+[debug] [2025-09-16T03:49:13.967Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions x-goog-quota-user=projects/crms-4f543
+[debug] [2025-09-16T03:49:13.967Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]}
+[debug] [2025-09-16T03:53:22.945Z] ----------------------------------------------------------------------
+[debug] [2025-09-16T03:53:22.949Z] Command:       /usr/local/bin/node /usr/local/bin/firebase deploy --only firestore:rules --dry-run
+[debug] [2025-09-16T03:53:22.949Z] CLI Version:   14.8.0
+[debug] [2025-09-16T03:53:22.949Z] Platform:      darwin
+[debug] [2025-09-16T03:53:22.949Z] Node Version:  v22.14.0
+[debug] [2025-09-16T03:53:22.950Z] Time:          Tue Sep 16 2025 09:23:22 GMT+0530 (India Standard Time)
+[debug] [2025-09-16T03:53:22.950Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2025-09-16T03:53:23.049Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-09-16T03:53:23.049Z] > authorizing via signed-in user (tayaserbhat@gmail.com)
+[debug] [2025-09-16T03:53:23.049Z] [iam] checking project crms-4f543 for permissions ["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]
+[debug] [2025-09-16T03:53:23.050Z] Checked if tokens are valid: true, expires at: 1757998152955
+[debug] [2025-09-16T03:53:23.050Z] Checked if tokens are valid: true, expires at: 1757998152955
+[debug] [2025-09-16T03:53:23.050Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions [none]
+[debug] [2025-09-16T03:53:23.050Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions x-goog-quota-user=projects/crms-4f543
+[debug] [2025-09-16T03:53:23.050Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/crms-4f543:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get"]}

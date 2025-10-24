@@ -1,0 +1,571 @@
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions - OPTIMIZED to reduce Firebase allows
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // OPTIMIZED: Cache user data to reduce Firebase allows
+    function getUserData() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data : null;
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && getUserData() != null && getUserData().role == role;
+    }
+
+    function hasAnyRole(roles) {
+      return isSignedIn() && getUserData() != null && getUserData().role in roles;
+    }
+
+    function isTeamManager(teamId) {
+      return isSignedIn() && 
+        exists(/databases/$(database)/documents/teams/$(teamId)) &&
+        get(/databases/$(database)/documents/teams/$(teamId)).data.managerId == request.auth.uid;
+    }
+
+    function isTeamMember(teamId) {
+      return isSignedIn() && getUserData() != null && getUserData().teamId == teamId;
+    }
+
+    function isFirstAdmin() {
+      return !exists(/databases/$(database)/documents/users/admin-check);
+    }
+
+    // Admin check document
+    match /users/admin-check {
+      allow read: if true;
+      allow create: if isSignedIn();
+    }
+
+    // Users collection rules
+    match /users/{userId} {
+      allow read: if isSignedIn() && (
+        isOwner(userId) ||
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('coordinator') ||
+        hasRole('verifier') ||
+        
+         // Allow team members to read each other's data for team performance
+        (resource.data.teamId != null && 
+         getUserData() != null && getUserData().teamId == resource.data.teamId) ||
+        // Allow reading manager data for notifications
+        (exists(/databases/$(database)/documents/leads/$(request.path.split('/')[4])) &&
+         get(/databases/$(database)/documents/leads/$(request.path.split('/')[4])).data.managerId == userId) ||
+        // Allow reading any user data if the user is signed in
+        isSignedIn()
+      );
+      
+      allow create: if 
+        (isSignedIn() && hasRole('admin')) || 
+        (isSignedIn() && userId == request.auth.uid && isFirstAdmin()) ||
+        (!exists(/databases/$(database)/documents/users/$(userId)));
+      
+      allow update: if isSignedIn() && (
+        isOwner(userId) ||
+        hasRole('admin') ||
+        (hasRole('manager') && getUserData() != null && resource.data.teamId == getUserData().teamId)
+      );
+      allow delete: if hasRole('admin');
+    }
+
+    // Teams collection rules
+    match /teams/{teamId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') || 
+        hasRole('manager') || 
+        hasRole('coordinator') || 
+        hasRole('verifier') ||
+        isTeamMember(teamId)
+      );
+      allow create, update, delete: if hasRole('admin');
+    }
+    
+     // Team Settings rules
+    match /teamSettings/{teamId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        (hasRole('manager') && getUserData() != null && teamId == getUserData().teamId) ||
+        isTeamMember(teamId)
+      );
+      allow write: if isSignedIn() && (
+        hasRole('admin') ||
+        (hasRole('manager') && getUserData() != null && teamId == getUserData().teamId)
+      );
+    }
+    
+   match /bonusTiers/{teamId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        isTeamMember(teamId)
+      );
+      allow create, update: if isSignedIn() && (
+        hasRole('admin') ||
+        (hasRole('manager') && getUserData() != null && teamId == getUserData().teamId)
+      );
+      allow delete: if hasRole('admin');
+    }
+    
+    
+    // Set Open Requests collection rules
+    match /setOpenRequests/{requestId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') || hasRole('manager') || hasRole('coordinator') ||
+        resource.data.requestedBy == request.auth.uid
+        
+        
+      );
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && (
+        hasRole('admin') || hasRole('manager') || hasRole('coordinator')
+      );
+    }
+    
+    
+    // WhatsApp verification logs under a lead
+    match /leads/{leadId}/whatsappLogs/{logId} {
+      function leadData() {
+        return get(/databases/$(database)/documents/leads/$(leadId)).data;
+      }
+
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('verifier') ||
+        hasRole('coordinator') ||
+        leadData().agentId == request.auth.uid ||
+        (leadData().teamId != null && isTeamMember(leadData().teamId))
+      );
+
+      allow create: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('coordinator') ||
+        hasRole('verifier') ||
+        leadData().agentId == request.auth.uid ||
+        (leadData().teamId != null && isTeamMember(leadData().teamId))
+      );
+
+      // Updates/deletes not required for now
+    }
+    
+     // WhatsApp routing map (phone -> leadId)
+    match /whatsappRouting/{phone} {
+      allow read, create, update: if isSignedIn();
+    }
+
+    // Unmatched inbound WhatsApp messages for later reconciliation
+    match /whatsappInboundUnmatched/{docId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') || hasRole('manager') || hasRole('coordinator') || hasRole('verifier')
+      );
+      allow delete: if isSignedIn() && (
+        hasRole('admin') || hasRole('manager') || hasRole('coordinator') || hasRole('verifier')
+      );
+    }
+
+  // Number pool rules - OPTIMIZED to reduce Firebase allows
+    match /numberPool/{numberId} {
+      // Allow read based on user role and visibility settings
+      allow read: if isSignedIn() && (
+        // All non-freelancer roles can see all numbers
+        hasAnyRole(['admin', 'manager', 'agent', 'verifier', 'coordinator']) ||
+        // Freelancers can see numbers explicitly visible OR when visibility is not set
+        (hasRole('freelancer') && (
+          resource.data.visibleToFreelancers == true ||
+          !resource.data.keys().hasAny(['visibleToFreelancers'])
+        ))
+      );
+      
+      // Only admins and coordinators can create numbers
+      allow create: if isSignedIn() && hasAnyRole(['admin', 'coordinator']);
+      
+      // Only admins can delete numbers
+      allow delete: if isSignedIn() && hasRole('admin');
+      
+      // OPTIMIZED update rules - simplified to reduce Firebase allows
+      allow update: if isSignedIn() && (
+        // All authenticated users with roles can update
+        hasAnyRole(['admin', 'manager', 'agent', 'verifier', 'coordinator', 'freelancer']) ||
+        // Users can update their own reserved numbers
+        (resource.data.reservedBy == request.auth.uid) ||
+        // Users can claim numbers they're claiming
+        (resource.data.claimingAgentId == request.auth.uid)
+      );
+    }
+    // Leads rules
+    match /leads/{leadId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('verifier') ||
+        hasRole('coordinator') ||
+        hasRole('freelancer') ||
+        resource.data.agentId == request.auth.uid ||
+         // Allow team members to read each other's leads for performance tracking
+        (resource.data.agentId != null && 
+         getUserData() != null && getUserData().teamId == resource.data.teamId)
+      );
+      
+      
+      
+      
+      
+       // ADD THIS NEW RULE:
+  allow list: if isSignedIn() && (
+    hasRole('admin') ||
+    hasRole('manager') ||
+    hasRole('verifier') ||
+    hasRole('coordinator') ||
+    hasRole('freelancer') ||
+    request.query.limit <= 300 &&
+    (
+      request.query.filters[0].op == '==' &&
+      request.query.filters[0].fieldPath == 'agentId' &&
+      request.query.filters[0].value == request.auth.uid
+    )
+  );
+  
+  allow create: if isSignedIn() && (
+    hasRole('agent') ||
+    hasRole('freelancer') ||
+    (hasRole('coordinator') && request.resource.data.originalLeadId != null)
+  );
+  
+       allow create: if isSignedIn() && (
+        hasRole('agent') ||
+        hasRole('freelancer') ||
+        (hasRole('coordinator') && request.resource.data.originalLeadId != null)
+      );
+     allow update: if isSignedIn() && (
+  hasRole('admin') ||
+  hasRole('manager') ||
+  hasRole('coordinator') ||
+  (hasRole('verifier') && resource.data.status != 'verified') ||
+  (resource.data.agentId == request.auth.uid && resource.data.status == 'pending_verification') ||
+  // Agent can reject if status is NOT pending_verification or activated, and is setting status to 'rejected'
+  (resource.data.agentId == request.auth.uid && !(resource.data.status in ['pending_verification', 'activated']) && request.resource.data.status == 'rejected') ||
+  // Agent can resubmit follow-up back to pending_verification
+  (resource.data.agentId == request.auth.uid && resource.data.status == 'follow_verification' && request.resource.data.status == 'pending_verification')
+);
+      allow delete: if hasRole('admin');
+    }
+
+    // Chat messages rules
+    match /chatMessages/{messageId} {
+      allow read: if isSignedIn() && (
+        hasAnyRole(['admin', 'manager', 'verifier', 'coordinator']) ||
+        resource.data.userId == request.auth.uid || (
+          exists(/databases/$(database)/documents/leads/$(resource.data.leadId)) &&
+          get(/databases/$(database)/documents/leads/$(resource.data.leadId)).data.agentId == request.auth.uid
+        )
+      );
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        hasAnyRole(['admin', 'manager', 'verifier', 'coordinator'])
+        
+        );
+        
+        
+        // Number Open Requests rules
+    match /numberOpenRequests/{requestId} {
+      allow create: if isSignedIn() && hasRole('coordinator') && request.resource.data.requestedBy == request.auth.uid;
+      allow read: if isSignedIn() && (resource.data.requestedBy == request.auth.uid || hasRole('admin'));
+      allow update: if isSignedIn() && (resource.data.requestedBy == request.auth.uid || hasRole('admin'));
+      allow delete: if hasRole('admin');
+    }
+    }
+
+    // Notifications rules
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if hasAnyRole(['admin', 'manager', 'coordinator', 'verifier']);
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // Performance metrics rules
+    match /performanceMetrics/{metricId} {
+      allow read: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        hasAnyRole(['admin', 'manager']) ||
+        (hasRole('manager') && getUserData() != null && resource.data.teamId == getUserData().teamId)
+      );
+      allow create, update: if hasAnyRole(['admin', 'manager']);
+    }
+
+   // Rules for chat messages
+    match /chatMessages/{messageId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null && request.auth.uid == resource.data.userId;
+      allow delete: if request.auth != null && request.auth.uid == resource.data.userId;
+    }
+    
+    // Rules for notifications
+    match /notifications/{notificationId} {
+      allow read: if request.auth != null && request.auth.uid == resource.data.userId;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null && request.auth.uid == resource.data.userId;
+      allow delete: if request.auth != null && request.auth.uid == resource.data.userId;
+    }
+   
+    // Rules for strikes
+    match /strikes/{strikeId} {
+      allow read: if isSignedIn() && (
+        hasAnyRole(['admin', 'manager', 'coordinator']) ||
+        resource.data.agentId == request.auth.uid ||
+        exists(/databases/$(database)/documents/leads/$(resource.data.leadId)) &&
+        get(/databases/$(database)/documents/leads/$(resource.data.leadId)).data.agentId == request.auth.uid
+      );
+      allow create: if isSignedIn() && hasAnyRole(['admin', 'manager', 'agent', 'coordinator']);
+      allow update, delete: if hasAnyRole(['admin', 'manager']);
+      
+    
+      
+    }
+    // Agent Targets rules
+ match /agentTargets/{targetId} {
+      allow read: if isSignedIn() && (
+        hasRole('agent') ||
+        hasRole('freelancer') ||
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('coordinator') ||
+        hasRole('verifier') ||
+        targetId.matches(request.auth.uid + '.*') ||
+        (hasRole('manager') && getUserData() != null && resource.data.teamId == getUserData().teamId) ||
+        // Allow team members to read each other's targets for performance tracking
+        (resource.data.agentId != null && 
+         getUserData() != null && getUserData().teamId == resource.data.teamId)
+      );
+  
+  allow create, update: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+  );
+  
+  allow delete: if hasRole('admin');
+
+    }
+  // Status Checks rules
+    match /statusChecks/{checkId} {
+      allow read: if isSignedIn();
+     
+      
+      allow create: if isSignedIn() && (
+        hasRole('agent') &&
+        request.resource.data.requestedBy == request.auth.uid
+      );
+      
+      allow update: if isSignedIn() && (
+       hasRole('coordinator') ||
+        hasRole('admin')
+      
+      );
+      
+      allow delete: if hasRole('admin');
+    }
+     // Strikes rules
+    match /strikes/{strikeId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        resource.data.agentId == request.auth.uid
+      );
+      allow create: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('agent') ||
+        hasRole('verifier') ||
+        hasRole('coordinator')
+      );
+      allow update, delete: if hasRole('admin');
+      
+    
+    }
+     // Set Open Requests rules
+  match /setOpenRequests/{requestId} {
+  allow read: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('coordinator') && resource.data.requestedBy == request.auth.uid)
+  );
+  
+  allow create: if isSignedIn() && hasRole('coordinator') && request.resource.data.requestedBy == request.auth.uid;
+  
+  allow update: if isSignedIn() && hasRole('admin');
+  
+  allow delete: if isSignedIn() && hasRole('admin');
+
+    }
+
+    // Status Checks rules
+    match /statusChecks/{checkId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('coordinator') ||
+        hasRole('manager') ||
+        resource.data.requestedBy == request.auth.uid
+      );
+      
+      allow create: if isSignedIn() && hasAnyRole(['agent', 'manager']);
+      
+      allow update: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('coordinator') ||
+        hasRole('manager')
+      );
+      
+      allow delete: if isSignedIn() && hasRole('admin');
+    }
+  
+  // Leave Applications rules
+match /leaveApplications/{leaveId} {
+  // Agents can read/write their own leave applications
+  allow read, update, delete: if isSignedIn() && (
+    resource.data.userId == request.auth.uid ||
+    hasAnyRole(['admin', 'manager'])
+  );
+  allow create: if isSignedIn() && (
+    request.resource.data.userId == request.auth.uid ||
+    hasAnyRole(['admin', 'manager'])
+  );
+}
+
+// Attendance rules
+match /attendance/{attendanceId} {
+  allow read: if isSignedIn() && (
+    // If doc exists, check userId
+    (resource.data.userId == request.auth.uid)
+    // If doc does not exist, allow read (so the UI can check for existence)
+    || (!exists(/databases/$(database)/documents/attendance/$(attendanceId)) && request.auth.uid != null)
+    // Managers and admins can access all
+    || hasAnyRole(['admin', 'manager'])
+  );
+  allow write: if isSignedIn() && (
+    (request.resource.data.userId == request.auth.uid)
+    || hasAnyRole(['admin', 'manager'])
+  );
+}
+
+
+// Salaries collection rules
+match /salaries/{salaryId} {
+  allow read: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && resource.data.teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId) ||
+    (resource.data.employeeId == request.auth.uid)
+  );
+  
+  allow create, update: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+  );
+  
+  allow delete: if hasRole('admin');
+}
+
+// Expenses collection rules
+match /expenses/{expenseId} {
+  allow read: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && resource.data.teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId)
+  );
+  
+  allow create, update: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+  );
+  
+  allow delete: if hasRole('admin');
+}
+
+
+// Invoice Configuration collection rules
+match /invoiceConfigurations/{teamId} {
+  allow read: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId)
+  );
+  
+  allow create, update: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId)
+  );
+  
+  allow delete: if hasRole('admin');
+}
+
+// Invoices collection rules
+match /invoices/{invoiceId} {
+  allow read: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && resource.data.teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId) ||
+    (resource.data.employeeId == request.auth.uid)
+  );
+  
+  allow create: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && getUserData() != null && request.resource.data.teamId == getUserData().teamId)
+  );
+  
+  allow update: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && resource.data.teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId)
+  );
+  
+  allow delete: if hasRole('admin');
+}
+ 
+ 
+   // Commission Configs collection rules
+    match /commissionConfigs/{configId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        isTeamManager(configId) ||
+        isTeamMember(configId)
+      );
+      allow create, update: if isSignedIn() && (
+        hasRole('admin') ||
+        isTeamManager(configId)
+      );
+      allow delete: if hasRole('admin');
+    }
+  
+    // Allow all authenticated users to read the notice
+      match /notices/{docId} {
+     allow read: if isSignedIn();
+     allow write: if hasRole('coordinator');
+   }
+  
+  
+  
+    // Number Logs collection rules - Admin only
+    match /number_logs/{logId} {
+      allow read: if isSignedIn() && hasRole('admin');
+      allow create: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        hasRole('coordinator') ||
+        hasRole('verifier') ||
+        hasRole('agent')
+      );
+      allow update, delete: if isSignedIn() && hasRole('admin');
+    }
+
+  }
+  
+ 
+ 
+  
+}
