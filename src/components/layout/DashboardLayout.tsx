@@ -1,0 +1,761 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
+import { Users, PhoneCall, ClipboardList, Settings, Menu, X, UserCog, LogOut, Building2, Upload, LayoutDashboard, Bell, MessageSquare, Volume2, VolumeX, User, Phone, Hash, Activity, ChevronDown, Star, PlusCircle } from 'lucide-react';
+import { Dialog, Transition } from '@headlessui/react';
+import { Fragment } from 'react';
+import { useAuthStore } from '../../store/authStore';
+import { auth } from '../../lib/firebase';
+import { toast } from 'react-hot-toast';
+import { collection, query, where, onSnapshot, orderBy, updateDoc, doc, writeBatch, getDoc, addDoc } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
+import type { Notification, Lead } from '../../types';
+import { format } from 'date-fns';
+import { clsx } from 'clsx';
+import TranslationChat from '../TranslationChat';
+import { MARStrip } from '../MARStrip';
+import NoticeBoard from '../NoticeBoard';
+
+export function DashboardLayout() {
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [leadDetails, setLeadDetails] = useState<Record<string, Lead>>({});
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
+  const [hasUserInteracted, setHasUserInteracted] = useState(false);
+  const [isClearingNotifications, setIsClearingNotifications] = useState(false);
+  const [showNoticeBoard, setShowNoticeBoard] = useState(false);
+  const [notificationTimeout, setNotificationTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [userMenuTimeout, setUserMenuTimeout] = useState<NodeJS.Timeout | null>(null);
+  const { user, isAdmin, isManager } = useAuthStore();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const notificationSound = useRef<HTMLAudioElement | null>(null);
+  const notificationsRef = useRef<HTMLDivElement>(null);
+  const lastNotificationIds = useRef<Set<string>>(new Set());
+
+  // Add user interaction handler
+  const handleUserInteraction = useCallback(() => {
+    if (!hasUserInteracted) {
+      setHasUserInteracted(true);
+      // Initialize audio after user interaction
+      if (!notificationSound.current) {
+        notificationSound.current = new Audio('/notification.mp3');
+      }
+    }
+  }, [hasUserInteracted]);
+
+  // Add event listeners for user interaction
+  useEffect(() => {
+    const events = ['click', 'keydown', 'touchstart'];
+    events.forEach(event => {
+      document.addEventListener(event, handleUserInteraction, { once: true });
+    });
+
+    return () => {
+      events.forEach(event => {
+        document.removeEventListener(event, handleUserInteraction);
+      });
+    };
+  }, [handleUserInteraction]);
+
+  // Update notification handling
+  useEffect(() => {
+    if (!user) {
+      console.log('No user found, skipping notification setup');
+      return;
+    }
+
+    try {
+      const q = query(
+        collection(db, 'notifications'),
+        where('userId', '==', user.id),
+        where('read', '==', false),
+        orderBy('createdAt', 'desc')
+      );
+
+      const unsubscribe = onSnapshot(q, 
+        (snapshot) => {
+          const changes = snapshot.docChanges();
+          const newNotifications = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+            createdAt: doc.data().createdAt?.toDate?.() || new Date()
+          })) as Notification[];
+
+          const addedDocs = changes.filter(change => change.type === 'added');
+          if (addedDocs.length > 0 && hasUserInteracted) {
+            // Only play sound if user has interacted and sound is not muted
+            if (notificationSound.current && !isMuted) {
+              notificationSound.current.play().catch(error => {
+                console.warn('Failed to play notification sound:', error);
+              });
+            }
+            setShowNotifications(true);
+          }
+
+          setNotifications(newNotifications);
+        },
+        (error) => {
+          console.error('Error in notification listener:', error);
+          toast.error('Failed to load notifications');
+        }
+      );
+
+      return () => {
+        unsubscribe();
+      };
+    } catch (error) {
+      console.error('Error setting up notification listener:', error);
+      toast.error('Failed to set up notifications');
+    }
+  }, [user, isMuted, hasUserInteracted]);
+
+  useEffect(() => {
+    const fetchLeadDetails = async () => {
+      const leadIds = notifications
+        .filter(n => n.data?.leadId)
+        .map(n => n.data?.leadId)
+        .filter((id): id is string => id !== undefined);
+
+      const newLeadDetails: Record<string, Lead> = { ...leadDetails };
+      
+      for (const leadId of leadIds) {
+        if (!newLeadDetails[leadId]) {
+          try {
+            const leadDoc = await getDoc(doc(db, 'leads', leadId));
+            if (leadDoc.exists()) {
+              newLeadDetails[leadId] = {
+                id: leadDoc.id,
+                ...leadDoc.data()
+              } as Lead;
+            }
+          } catch (error) {
+            console.error('Error fetching lead details:', error);
+          }
+        }
+      }
+      
+      setLeadDetails(newLeadDetails);
+    };
+
+    fetchLeadDetails();
+  }, [notifications]);
+
+  const handleNotificationClick = async (notification: Notification) => {
+    try {
+      if (!notification.read) {
+        await updateDoc(doc(db, 'notifications', notification.id), {
+          read: true
+        });
+      }
+      
+      if (notification.data?.leadId) {
+        navigate(`/dashboard/leads/${notification.data.leadId}`);
+      } else if (notification.data?.numberId) {
+        // Navigate to the number pool page and open the chat
+        navigate(`/dashboard/numbers?numberId=${notification.data.numberId}`);
+      }
+      
+      setShowNotifications(false);
+    } catch (error) {
+      console.error('Error handling notification click:', error);
+      toast.error('Failed to process notification');
+    }
+  };
+
+  const handleClearAllNotifications = async () => {
+    if (isClearingNotifications) return; // Prevent multiple clicks
+    
+    try {
+      setIsClearingNotifications(true);
+      const batch = writeBatch(db);
+      notifications.forEach(notification => {
+        if (!notification.read) {
+          const notificationRef = doc(db, 'notifications', notification.id);
+          batch.update(notificationRef, { read: true });
+        }
+      });
+      await batch.commit();
+      toast.success('All notifications cleared');
+      setShowNotifications(false);
+    } catch (error) {
+      console.error('Error clearing notifications:', error);
+      toast.error('Failed to clear notifications');
+    } finally {
+      setIsClearingNotifications(false);
+    }
+  };
+
+  const handleClearNotification = async (notificationId: string) => {
+    try {
+      await updateDoc(doc(db, 'notifications', notificationId), {
+        read: true
+      });
+      toast.success('Notification cleared');
+    } catch (error) {
+      console.error('Error clearing notification:', error);
+      toast.error('Failed to clear notification');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await auth.signOut();
+      toast.success('Logged out successfully');
+      navigate('/login');
+    } catch (error) {
+      console.error('Error logging out:', error);
+      toast.error('Failed to log out');
+    }
+  };
+
+  const navigation = [
+    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { name: 'Number Pool', href: '/dashboard/numbers', icon: PhoneCall },
+    { name: 'Leads', href: '/dashboard/leads', icon: ClipboardList },
+    { name: 'Team', href: '/dashboard', icon: Users },
+    ...(isAdmin() ? [
+      { name: 'User Management', href: '/dashboard/admin/users', icon: UserCog },
+      { name: 'Team Management', href: '/dashboard/admin/teams', icon: Building2 },
+      { name: 'Upload Numbers', href: '/dashboard/admin/numbers/upload', icon: Upload }
+    ] : []),
+    ...(isManager() ? [
+      { name: 'Bonus Management', href: '/dashboard/bonus-management', icon: Star }
+    ] : []),
+    { name: 'Settings', href: '/dashboard/settings', icon: Settings },
+  ];
+
+  // ✅ COMPACT: Clean and condensed notification content layout with Lucide icons
+  const renderNotificationContent = (notification: Notification) => {
+    const lead = notification.data?.leadId ? leadDetails[notification.data.leadId] : null;
+    const isChatMessage = notification.type === 'chat_message';
+    
+    return (
+      <div className="space-y-2">
+        {/* Compact Header with inline badge */}
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-semibold text-gray-900 leading-tight flex-1 pr-2">
+            {notification.title}
+          </h4>
+          <div className={clsx(
+            "flex items-center px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0",
+            isChatMessage ? "bg-red-100 text-red-700" : "bg-blue-100 text-blue-700"
+          )}>
+            <MessageSquare className="h-3 w-3 mr-1" />
+            {isChatMessage ? "Chat" : "System"}
+          </div>
+        </div>
+
+        {/* Compact Lead Information with icons */}
+        {lead && (
+          <div className="bg-gray-50 rounded-md p-2 text-xs space-y-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-1.5 text-gray-600 font-medium">
+                <User className="h-3 w-3" />
+                <span>{lead.customerName}</span>
+              </div>
+              <div className="flex items-center space-x-1 text-gray-800">
+                <Phone className="h-3 w-3" />
+                <span>{lead.customerNumber}</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-1.5 text-indigo-600 font-medium">
+                <Hash className="h-3 w-3" />
+                <span>{lead.plans?.[0]?.number || 'No number'}</span>
+              </div>
+              <div className="flex items-center space-x-1">
+                <Activity className="h-3 w-3" />
+                <span className={clsx(
+                  "px-1.5 py-0.5 rounded text-xs font-medium",
+                  getStatusColor(lead.status)
+                )}>
+                  {lead.status?.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Compact Message with icon */}
+        <div className={clsx(
+          "p-2 rounded-md text-xs leading-relaxed",
+          isChatMessage 
+            ? "bg-red-50 border border-red-200 text-red-800" 
+            : "bg-blue-50 border border-blue-200 text-blue-800"
+        )}>
+          <div className="flex items-start space-x-1.5">
+            <MessageSquare className="h-3 w-3 mt-0.5 flex-shrink-0" />
+            <p className="whitespace-pre-wrap break-words flex-1">
+              {notification.message}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Top Navigation */}
+      <div className="fixed top-0 left-0 right-0 z-50 relative"> {/* <-- add relative here */}
+        <div className="bg-white/80 backdrop-blur-lg border-b border-gray-200/80 shadow-sm">
+          <div className="flex h-16 items-center justify-between px-4">
+            {/* Left side */}
+            <div className="flex items-center space-x-4">
+              <div 
+                className="relative"
+                onMouseEnter={() => setIsSidebarOpen(true)}
+                onMouseLeave={() => setIsSidebarOpen(false)}
+              >
+                <button
+                className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+                {/* Hover area */}
+                <div className="absolute left-0 top-0 w-8 h-16 -ml-4" />
+              </div>
+              <div className="hidden sm:block">
+                <h1 className="text-xl font-semibold text-gray-900"></h1>
+              </div>
+              {/* Navigation Buttons */}
+              <div className="hidden md:flex items-center space-x-2 ml-4">
+                <Link
+                  to="/dashboard"
+                  className={clsx(
+                    "px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+                    location.pathname === '/dashboard'
+                      ? "bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/20"
+                      : "text-gray-600 hover:text-indigo-600 hover:bg-indigo-50"
+                  )}
+                >
+                  <div className="flex items-center space-x-2">
+                    <LayoutDashboard className="h-4 w-4" />
+                    <span>Dashboard</span>
+                  </div>
+                </Link>
+                <Link
+                  to="/dashboard/numbers"
+                  className={clsx(
+                    "px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+                    location.pathname === '/dashboard/numbers'
+                      ? "bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/20"
+                      : "text-gray-600 hover:text-indigo-600 hover:bg-indigo-50"
+                  )}
+                >
+                  <div className="flex items-center space-x-2">
+                    <PhoneCall className="h-4 w-4" />
+                    <span>Number Pool</span>
+                  </div>
+                </Link>
+                <Link
+                  to="/dashboard/leads"
+                  className={clsx(
+                    "px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+                    location.pathname === '/dashboard/leads'
+                      ? "bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/20"
+                      : "text-gray-600 hover:text-indigo-600 hover:bg-indigo-50"
+                  )}
+                >
+                  <div className="flex items-center space-x-2">
+                    <ClipboardList className="h-4 w-4" />
+                    <span>Leads</span>
+                  </div>
+                </Link>
+                <Link
+                  to="/dashboard/leads/create"
+                  className={clsx(
+                    "px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+                    location.pathname === '/dashboard/leads/create'
+                      ? "bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/20"
+                      : "text-gray-600 hover:text-indigo-600 hover:bg-indigo-50"
+                  )}
+                >
+                  <div className="flex items-center space-x-2">
+                    <PlusCircle className="h-4 w-4" />
+                    <span>Submit Lead</span>
+                  </div>
+                </Link>
+              </div>
+            </div>
+
+            {/* MAR Strip for Agents - Integrated in Header */}
+            {user && user.role === 'agent' && location.pathname !== '/dashboard' && (
+              <div className="hidden lg:flex items-center mx-4">
+                <MARStrip user={user} />
+              </div>
+            )}
+
+            {/* Right side items */}
+            <div className="flex items-center space-x-4 relative"> {/* <-- add relative here for user menu */}
+              {/* Delivery Schedule Button in header */}
+              <button
+                className="px-3 py-1.5 rounded-md bg-gradient-to-r from-indigo-500 to-purple-600 text-white text-sm font-medium shadow-md hover:shadow-lg hover:scale-102 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-300 flex items-center space-x-1.5"
+                onClick={() => setShowNoticeBoard(true)}
+                aria-label="Open Delivery Schedule Notice Board"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                </svg>
+                <span>Schedule</span>
+              </button>
+              {/* Notifications - Fixed hover area including dropdown */}
+              <div className="relative">
+                <div
+                  onMouseEnter={() => {
+                    if (notificationTimeout) clearTimeout(notificationTimeout);
+                    setShowNotifications(true);
+                  }}
+                  onMouseLeave={() => {
+                    // Longer delay to allow smooth transition to dropdown
+                    const timeout = setTimeout(() => setShowNotifications(false), 500);
+                    setNotificationTimeout(timeout);
+                  }}
+                  className="relative"
+                >
+                  <button
+                    className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors relative"
+                  >
+                    <Bell className="h-5 w-5" />
+                    {notifications.length > 0 && (
+                      <span className="absolute top-1 right-1 h-2 w-2 bg-red-500 rounded-full" />
+                    )}
+                  </button>
+
+                  {/* FIXED: Notification Dropdown now inside hover area */}
+                  {showNotifications && (
+                    <div 
+                      className="absolute top-full right-0 mt-2 w-96 bg-white rounded-2xl shadow-2xl border border-gray-200 max-h-[calc(100vh-5rem)] flex flex-col z-[60] p-4"
+                      onMouseEnter={() => {
+                        // Clear timeout when mouse enters dropdown
+                        if (notificationTimeout) clearTimeout(notificationTimeout);
+                      }}
+                      onMouseLeave={() => {
+                        // Auto-hide after 3 seconds when mouse leaves dropdown
+                        const timeout = setTimeout(() => setShowNotifications(false), 3000);
+                        setNotificationTimeout(timeout);
+                      }}
+                    >
+                      <div className="pb-4 border-b border-gray-200 flex-shrink-0">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-lg font-semibold text-gray-900">Notifications</h3>
+                          <div className="flex items-center space-x-2">
+                            <button
+                              onClick={() => setIsMuted(!isMuted)}
+                              className="p-1.5 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                            >
+                              {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                            </button>
+                            {notifications.some(n => !n.read) && (
+                              <button
+                                onClick={handleClearAllNotifications}
+                                disabled={isClearingNotifications}
+                                className="text-sm text-gray-500 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {isClearingNotifications ? 'Clearing...' : 'Clear all'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-y-auto">
+                        {notifications.length === 0 ? (
+                          <div className="py-8 text-center text-gray-500">
+                            No new notifications
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {notifications.map((notification) => (
+                              <div
+                                key={notification.id}
+                                onClick={() => handleNotificationClick(notification)}
+                                className="bg-white rounded-xl shadow p-4 mb-3 hover:bg-gray-50 cursor-pointer transition-colors break-all whitespace-pre-line"
+                              >
+                                {renderNotificationContent(notification)}
+                                <div className="mt-2 text-xs text-gray-500">
+                                  {format(notification.createdAt, 'MMM d, h:mm a')}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {/* User Menu */}
+              <div className="relative"
+                onMouseEnter={() => {
+                  if (userMenuTimeout) clearTimeout(userMenuTimeout);
+                  setShowUserMenu(true);
+                }}
+                onMouseLeave={() => {
+                  const timeout = setTimeout(() => setShowUserMenu(false), 300);
+                  setUserMenuTimeout(timeout);
+                }}
+              >
+                <button
+                  className="flex items-center space-x-2 p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  <div className="h-8 w-8 rounded-full bg-indigo-100 flex items-center justify-center">
+                    <span className="text-sm font-medium text-indigo-600">
+                      {user?.email?.[0].toUpperCase()}
+                    </span>
+                  </div>
+                  <ChevronDown className="h-4 w-4" />
+                </button>
+
+                {showUserMenu && (
+                  <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 py-1">
+                    <div className="px-4 py-2 border-b border-gray-200">
+                      <p className="text-sm font-medium text-gray-900">{user?.email}</p>
+                      <p className="text-xs text-gray-500">{isAdmin() ? 'Administrator' : 'User'}</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowUserMenu(false);
+                        setIsLogoutDialogOpen(true);
+                      }}
+                      className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center space-x-2"
+                    >
+                      <LogOut className="h-4 w-4" />
+                      <span>Sign out</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sidebar */}
+      <div 
+        className={clsx(
+          "fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 transform transition-transform duration-200 ease-in-out",
+          !isSidebarOpen && "-translate-x-full"
+        )}
+        onMouseEnter={() => setIsSidebarOpen(true)}
+        onMouseLeave={() => setIsSidebarOpen(false)}
+      >
+        <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200">
+          <h2 className="text-xl font-semibold text-gray-900">Menu</h2>
+          <button
+            onClick={() => setIsSidebarOpen(false)}
+            className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <nav className="p-4 space-y-1">
+          {navigation.map((item) => {
+            const isActive = location.pathname === item.href;
+            return (
+              <Link
+                key={item.name}
+                to={item.href}
+                className={clsx(
+                  "flex items-center space-x-3 px-4 py-2 rounded-lg transition-colors",
+                  isActive
+                    ? "bg-indigo-50 text-indigo-600"
+                    : "text-gray-600 hover:bg-gray-50"
+                )}
+              >
+                <item.icon className="h-5 w-5" />
+                <span>{item.name}</span>
+              </Link>
+            );
+          })}
+        </nav>
+      </div>
+
+      {/* Main Content */}
+      <div className={clsx(
+        "transition-all duration-200 ease-in-out",
+        isSidebarOpen ? "ml-64" : "ml-0",
+        "px-2 sm:px-4 md:px-6 lg:px-8 pb-20 md:pb-0"
+      )}>
+        <div className="min-h-screen w-full max-w-7xl mx-auto flex flex-col">
+          <div className="flex-1">
+          <Outlet />
+          </div>
+          
+          {/* Minimalist Footer */}
+          <footer className="mt-12 py-6 border-t border-gray-200 bg-white/50 backdrop-blur-sm">
+            <div className="flex flex-col sm:flex-row items-center justify-between text-sm text-gray-600">
+              <div className="flex items-center space-x-2 mb-2 sm:mb-0">
+                <div className="flex items-center space-x-2">
+                  <span className="font-bold text-gray-600 bg-gray-100 px-2 py-1 rounded text-sm">CRM</span>
+                  <span className="text-gray-500 text-sm hidden sm:block">Customer Relationship Management</span>
+                  <span>•</span>
+                  <span>Version 1.0</span>
+                </div>
+              </div>
+              <div className="flex items-center space-x-4">
+                <span>© {new Date().getFullYear()} All rights reserved</span>
+                
+              </div>
+            </div>
+          </footer>
+        </div>
+      </div>
+
+      {/* Mobile Navigation Bar */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 z-50">
+        <div className="flex items-center justify-around h-16">
+          <Link
+            to="/dashboard"
+            className={clsx(
+              "flex flex-col items-center justify-center w-full h-full transition-colors",
+              location.pathname === '/dashboard'
+                ? "text-indigo-600"
+                : "text-gray-600"
+            )}
+          >
+            <LayoutDashboard className="h-6 w-6" />
+            <span className="text-xs mt-1 font-medium">Dashboard</span>
+          </Link>
+          <Link
+            to="/dashboard/numbers"
+            className={clsx(
+              "flex flex-col items-center justify-center w-full h-full transition-colors",
+              location.pathname === '/dashboard/numbers'
+                ? "text-indigo-600"
+                : "text-gray-600"
+            )}
+          >
+            <PhoneCall className="h-6 w-6" />
+            <span className="text-xs mt-1 font-medium">Numbers</span>
+          </Link>
+          <Link
+            to="/dashboard/leads"
+            className={clsx(
+              "flex flex-col items-center justify-center w-full h-full transition-colors",
+              location.pathname === '/dashboard/leads'
+                ? "text-indigo-600"
+                : "text-gray-600"
+            )}
+          >
+            <ClipboardList className="h-6 w-6" />
+            <span className="text-xs mt-1 font-medium">Leads</span>
+          </Link>
+        </div>
+      </div>
+
+      {/* Logout Confirmation Dialog */}
+      <Transition appear show={isLogoutDialogOpen} as={Fragment}>
+        <Dialog
+          as="div"
+          className="relative z-50"
+          onClose={() => setIsLogoutDialogOpen(false)}
+        >
+          <Transition.Child
+            as={Fragment}
+            enter="ease-out duration-300"
+            enterFrom="opacity-0"
+            enterTo="opacity-100"
+            leave="ease-in duration-200"
+            leaveFrom="opacity-100"
+            leaveTo="opacity-0"
+          >
+            <div className="fixed inset-0 bg-black bg-opacity-25" />
+          </Transition.Child>
+
+          <div className="fixed inset-0 overflow-y-auto">
+            <div className="flex min-h-full items-center justify-center p-4 text-center">
+              <Transition.Child
+                as={Fragment}
+                enter="ease-out duration-300"
+                enterFrom="opacity-0 scale-95"
+                enterTo="opacity-100 scale-100"
+                leave="ease-in duration-200"
+                leaveFrom="opacity-100 scale-100"
+                leaveTo="opacity-0 scale-95"
+              >
+                <Dialog.Panel className="w-full max-w-md transform overflow-hidden rounded-2xl bg-white p-6 text-left align-middle shadow-xl transition-all">
+                  <Dialog.Title
+                    as="h3"
+                    className="text-lg font-medium leading-6 text-gray-900"
+                  >
+                    Confirm Sign Out
+                  </Dialog.Title>
+                  <div className="mt-2">
+                    <p className="text-sm text-gray-500">
+                      Are you sure you want to sign out? Any unsaved changes will be lost.
+                    </p>
+                  </div>
+
+                  <div className="mt-4 flex justify-end space-x-3">
+                    <button
+                      type="button"
+                      className="inline-flex justify-center rounded-md border border-transparent bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:ring-offset-2"
+                      onClick={() => setIsLogoutDialogOpen(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex justify-center rounded-md border border-transparent bg-red-100 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
+                      onClick={() => {
+                        setIsLogoutDialogOpen(false);
+                        handleLogout();
+                      }}
+                    >
+                      Sign Out
+                    </button>
+                  </div>
+                </Dialog.Panel>
+              </Transition.Child>
+            </div>
+          </div>
+        </Dialog>
+      </Transition>
+
+      <Toaster
+        position={window.innerWidth < 640 ? 'bottom-center' : 'top-right'}
+        toastOptions={{
+          className: 'fixed left-0 right-0 bottom-4 w-full max-w-full rounded-xl shadow-lg text-center break-all whitespace-pre-line text-sm sm:text-base px-2 py-3 sm:px-6 sm:py-4 z-[9999] mx-0',
+          style: {
+            background: '#222',
+            color: '#fff',
+            fontSize: window.innerWidth < 640 ? '1rem' : '1.05rem',
+            borderRadius: '1rem',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+          },
+          duration: 4000,
+        }}
+      />
+      
+      {/* AI Assistant Floating Button */}
+      <TranslationChat />
+
+      {/* NoticeBoard Modal Popup */}
+      {showNoticeBoard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 animate-fade-in">
+          <NoticeBoard onClose={() => setShowNoticeBoard(false)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function getStatusColor(status: string | undefined) {
+  switch (status) {
+    case 'verified':
+      return 'bg-green-100 text-green-800';
+    case 'rejected':
+      return 'bg-red-100 text-red-800';
+    case 'pending_verification':
+      return 'bg-yellow-100 text-yellow-800';
+    case 'follow_verification':
+      return 'bg-orange-100 text-orange-800';
+    default:
+      return 'bg-gray-100 text-gray-800';
+  }
+}

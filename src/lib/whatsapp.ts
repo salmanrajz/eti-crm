@@ -1,0 +1,1 @@
+// Remove this file as we're not using direct WhatsApp integration from the frontend

@@ -1,0 +1,1580 @@
+import { useState, useEffect, useRef } from 'react';
+import { format } from 'date-fns';
+import { useNavigate } from 'react-router-dom';
+import { doc, updateDoc, addDoc, collection, getDoc, getDocs, serverTimestamp } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
+import { useAuthStore } from '../../store/authStore';
+import { toast } from 'react-hot-toast';
+import { logNumberAction } from '../../utils/numberLogging';
+import { 
+  UserIcon, Phone, MapPin, Calendar, Globe2, 
+  Languages, Users, Clock, Package, Hash,
+  FileText, CheckCircle, Building2, FileCheck,
+  ChevronLeft, AtSign, User2, CreditCard, Mail,
+  MapPinned, FileSpreadsheet, Briefcase,
+  Clock as ClockIcon, CheckCircle2, AlertCircle, ThumbsDown,
+  MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
+  MessageCircle, Check, Paperclip
+} from 'lucide-react';
+import type { Lead, UserRole } from '../../types';
+import { FormSection } from './FormSection';
+import { FormInput } from './FormInput';
+import { FormSelect } from './FormSelect';
+import { NumberSelect } from './NumberSelect';
+import clsx from 'clsx';
+import { MediaUpload } from './MediaUpload';
+import { SplitLead } from './SplitLead';
+import { Dialog } from '@headlessui/react';
+import { planBenefits } from '../../utils/planBenefits';
+
+// Use Lead type's verificationMedia definition from src/types
+
+const emirates = [
+  'Abu Dhabi',
+  'Dubai',
+  'Sharjah',
+  'Ajman',
+  'Umm Al Quwain',
+  'Ras Al Khaimah',
+  'Fujairah'
+];
+
+const areas = {
+  'Abu Dhabi': ['Abu Dhabi City', 'Al Ain', 'Al Dhafra', 'Musaffah', 'Khalifa City'],
+  'Dubai': ['Deira', 'Bur Dubai', 'Dubai Marina', 'JLT', 'Downtown Dubai'],
+  'Sharjah': ['Al Majaz', 'Al Nahda', 'Al Qasimia', 'Al Taawun'],
+  'Ajman': ['Ajman City', 'Al Jurf', 'Al Rashidiya'],
+  'Umm Al Quwain': ['UAQ City', 'Al Salamah', 'Al Raas'],
+  'Ras Al Khaimah': ['RAK City', 'Al Hamra', 'Al Nakheel'],
+  'Fujairah': ['Fujairah City', 'Dibba', 'Al Faseel']
+};
+
+const languages = ['Arabic', 'English', 'Hindi', 'Urdu', 'Malayalam', 'Filipino', 'Bengali'];
+const productTypes = ['New', 'Port In'];
+const numberTypes = ['Gold', 'Gold Plus', 'Platinum', 'Silver', 'Silver Plus', 'Standard'];
+const plans = ['Basic', 'Standard', 'Premium', 'VIP'];
+
+const VERIFY_CHECKLIST = [
+  {
+    header: 'Number & Rental Explained',
+    details: [
+      'I have confirmed with the customer their selected mobile number.',
+      'I have clearly explained the monthly rental amount, including 5% VAT.'
+    ]
+  },
+  {
+    header: 'Benefits & Contract Duration',
+    details: [
+      'I have informed the customer about the plan benefits (minutes, data, speed).',
+      'I have explained the contract duration.'
+    ]
+  },
+  {
+    header: 'Early Cancellation Terms',
+    details: [
+      'I have informed the customer that early cancellation requires:',
+      'Payment of all outstanding bills',
+      'One extra month\'s rental + 5% VAT',
+      'Number will be taken back by the telecom provider.'
+    ]
+  },
+  {
+    header: 'Number Ownership After Contract',
+    details: [
+      'I have explained that the number will become the customer\'s only after completing the contract.'
+    ]
+  },
+  {
+    header: 'Usage Restrictions During Contract',
+    details: [
+      'I have informed the customer that they cannot:',
+      'Transfer ownership',
+      'Port out to another telecom',
+      'Upgrade/downgrade the plan',
+      'Convert to prepaid',
+      'Use multi-SIM with this plan'
+    ]
+  },
+  {
+    header: 'Pro-Rated Billing & 5-Day Cancellation Grace',
+    details: [
+      'I have explained that the plan is pro-rated based on usage days.',
+      'I have informed them that cancellation is allowed within 5 days only in case of valid technical/network issues.'
+    ]
+  },
+  {
+    header: 'Acknowledgement of Terms',
+    details: [
+      'I have clearly stated that this communication serves as the valid terms of agreement.'
+    ]
+  }
+];
+
+type LeadMediaItem = Lead['verificationMedia'] extends Array<infer T> ? T : never;
+
+export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { lead: Lead; onEdit: () => void; onResubmit?: () => void; isResubmitting?: boolean }) {
+  const { user, isAdmin, isVerifier, isCoordinator } = useAuthStore();
+  const navigate = useNavigate();
+  const chatBoxRef = useRef<HTMLDivElement>(null);
+  const pageEndRef = useRef<HTMLDivElement>(null);
+  const [showVerifyDialog, setShowVerifyDialog] = useState(false);
+  const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'follow_verification' | null>(null);
+  const [verificationNote, setVerificationNote] = useState('');
+  const [showMediaModal, setShowMediaModal] = useState(false);
+  const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
+  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | null>(null);
+  const [coordinatorNote, setCoordinatorNote] = useState('');
+  const [showSplitLead, setShowSplitLead] = useState(false);
+  const [verificationMedia, setVerificationMedia] = useState<LeadMediaItem[]>([]);
+  const [verifyChecklist, setVerifyChecklist] = useState<boolean[]>(VERIFY_CHECKLIST.map(() => false));
+  const [sharedWithNames, setSharedWithNames] = useState<string[]>([]);
+  const [rejecting, setRejecting] = useState(false);
+  const [showRejectDialog, setShowRejectDialog] = useState(false);
+  const [localStatus, setLocalStatus] = useState(lead.status);
+  const [isVerifyActionProcessing, setIsVerifyActionProcessing] = useState(false);
+  const [isCoordinatorActionProcessing, setIsCoordinatorActionProcessing] = useState(false);
+  const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
+  const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
+  const [expandedSections, setExpandedSections] = useState<boolean[]>(VERIFY_CHECKLIST.map(() => false));
+
+  const canEdit = (
+    lead.status === 'pending_verification' ||
+    (user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification') ||
+    isAdmin()
+  );
+  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'follow_verification');
+  const isUserCoordinator = isCoordinator();
+
+  useEffect(() => {
+    // Auto scroll to chat box when component mounts
+    if (chatBoxRef.current) {
+      chatBoxRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, []);
+
+  useEffect(() => {
+    // Auto scroll to end of page when component mounts
+    if (pageEndRef.current) {
+      pageEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (lead.verificationMedia) {
+      const transformedMedia = lead.verificationMedia.map(media => {
+        if (typeof media === 'string') {
+          const isImage = media.toLowerCase().endsWith('.jpg') || 
+                         media.toLowerCase().endsWith('.jpeg') || 
+                         media.toLowerCase().endsWith('.png');
+          const isVideo = media.toLowerCase().endsWith('.mp4') || 
+                         media.toLowerCase().endsWith('.webm');
+          
+          return {
+            url: media,
+            type: isImage ? 'image' as const : isVideo ? 'video' as const : 'audio' as const,
+            name: `Media ${media.split('/').pop()}`
+          };
+        }
+        return media;
+      });
+      setVerificationMedia(transformedMedia);
+    }
+  }, [lead.verificationMedia]);
+
+  useEffect(() => {
+    const fetchSharedWithNames = async () => {
+      if (lead.sharedWith && lead.sharedWith.length > 0) {
+        const names = await Promise.all(
+          lead.sharedWith.map(async (agentId) => {
+            const agentRef = doc(db, 'users', agentId);
+            const agentDoc = await getDoc(agentRef);
+            if (agentDoc.exists()) {
+              const agentData = agentDoc.data();
+              return agentData.name || 'Unknown Agent';
+            }
+            return 'Unknown Agent';
+          })
+        );
+        setSharedWithNames(names);
+      }
+    };
+
+    fetchSharedWithNames();
+  }, [lead.sharedWith]);
+
+  const handleVerificationAction = async () => {
+    setIsVerifyActionProcessing(true);
+    try {
+      const leadRef = doc(db, 'leads', lead.id);
+      
+      const leadStatus = verifyAction === 'verify' ? 'verified' 
+                      : verifyAction === 'reject' ? 'rejected'
+                      : 'follow_verification';
+      
+     // console.log('Setting lead status to:', leadStatus);
+      
+      await updateDoc(leadRef, {
+        status: leadStatus,
+        verifierId: user?.id,
+        verificationNotes: verificationNote,
+        verificationMedia: verificationMedia,
+        updatedAt: new Date(),
+        ...(leadStatus === 'verified' ? { verifiedAt: new Date() } : {})
+      });
+
+      // Update all numbers in the lead's plans
+      if (lead.plans && lead.plans.length > 0) {
+        const updatePromises = lead.plans.map(async plan => {
+          const numberRef = doc(db, 'numberPool', plan.numberId);
+          const numberDoc = await getDoc(numberRef);
+          const numberData = numberDoc.data();
+
+          if (leadStatus === 'rejected') {
+            // For rejected leads, check if there's a claim queue
+            if (numberData?.claimQueue && numberData.claimQueue.length > 0) {
+              // Get the next agent in queue
+              const nextClaim = numberData.claimQueue[0];
+
+              // Update the number with the next claim
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: nextClaim.agentId,
+                claimingStartedAt: serverTimestamp(),
+                claimingExpiresAt: new Date(Date.now() + 2 * 60 * 1000), // 2 minutes
+                claimQueue: numberData.claimQueue.slice(1),
+                leadId: lead.id
+              });
+
+              // Log status change for number (rejected -> reserved transfer)
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status },
+                { status: 'reserved', leadId: lead.id },
+                `Verifier ${user?.name || 'Unknown'} rejected lead, moved number to next claim`
+              );
+
+              // If there's a second claim, send them notification
+              if (numberData.claimQueue.length > 1) {
+        await addDoc(collection(db, 'notifications'), {
+                  userId: numberData.claimQueue[1].agentId,
+                  type: 'number_claimed',
+                  title: 'Number Claim Started',
+                  message: `The number is now available for your claim. You have 2 minutes to take ownership.`,
+          read: false,
+                  createdAt: serverTimestamp(),
+                  numberId: plan.numberId
+                });
+              }
+            } else {
+              // No claims in queue, just set to open
+              await updateDoc(numberRef, {
+                status: 'open',
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: null,
+                claimingStartedAt: null,
+                claimingExpiresAt: null,
+                claimQueue: [],
+                leadId: lead.id
+              });
+
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status },
+                { status: 'open', leadId: lead.id },
+                `Verifier ${user?.name || 'Unknown'} rejected lead, set number open`
+              );
+          }
+          } else {
+            // For other verification actions, update normally
+            await updateDoc(numberRef, {
+              status: leadStatus,
+              lastStatusChange: serverTimestamp(),
+              leadId: lead.id
+            });
+
+            await logNumberAction(
+              plan.numberId,
+              plan.number || '',
+              'status_changed',
+              { status: numberData?.status },
+              { status: leadStatus, leadId: lead.id },
+              `Verifier ${user?.name || 'Unknown'} set status to ${leadStatus}`
+            );
+          }
+        });
+
+        await Promise.all(updatePromises);
+      }
+
+      // Send notification to the agent
+      if (lead.agentId) {
+        const statusMessage = leadStatus === 'verified' ? 'Lead Verified' : 
+                            leadStatus === 'rejected' ? 'Lead Rejected' : 
+                            'Lead Marked for Follow-up Verification';
+        
+        await addDoc(collection(db, 'notifications'), {
+          userId: lead.agentId,
+          type: 'lead_verification',
+          title: statusMessage,
+          message: `${user?.name} has ${leadStatus === 'verified' ? 'verified' : 
+                    leadStatus === 'rejected' ? 'rejected' : 
+                    'marked for follow-up'} your lead${verificationNote ? `: ${verificationNote}` : ''}`,
+          read: false,
+          createdAt: new Date(),
+          data: {
+            leadId: lead.id
+          }
+        });
+
+        // Send WhatsApp notification to agent if they have a phone number
+        try {
+          const agentRef = doc(db, 'users', lead.agentId);
+          const agentDoc = await getDoc(agentRef);
+          if (agentDoc.exists()) {
+            const agentData = agentDoc.data();
+            const agentPhone = agentData.phoneNumber || agentData.phoneNumbers?.[0];
+            
+            if (agentPhone) {
+              const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
+              const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
+
+              await fetch(WHATSAPP_API_URL, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  messaging_product: "whatsapp",
+                  to: agentPhone,
+                  type: "template",
+                  template: {
+                    name: "leadstatus",
+                    language: {
+                      code: "en"
+                    },
+                    components: [
+                      {
+                        type: "body",
+                        parameters: [
+                          {
+                            type: "text",
+                            text: lead.customerName || "N/A"
+                          },
+                          {
+                            type: "text",
+                            text: lead.customerNumber || "N/A"
+                          },
+                          {
+                            type: "text",
+                            text: lead.plans?.[0]?.number || "N/A"
+                          },
+                          {
+                            type: "text",
+                            text: statusMessage
+                          },
+                          {
+                            type: "text",
+                            text: user?.name || "N/A"
+                          },
+                          {
+                            type: "text",
+                            text: `${window.location.origin}/dashboard/leads/${lead.id}`
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                })
+              });
+            }
+          }
+        } catch (error) {
+          //console.error('Error sending WhatsApp notification to agent:', error);
+          // Continue with the rest of the function even if WhatsApp fails
+        }
+      }
+
+      toast.success(`Lead ${verifyAction === 'verify' ? 'verified' : verifyAction === 'reject' ? 'rejected' : 'updated'} successfully`);
+      setShowVerifyDialog(false);
+      setVerificationNote('');
+      setVerifyAction(null);
+      navigate('/dashboard');
+    } catch (error) {
+     console.error('Error updating lead status:', error);
+      toast.error('Failed to update lead status');
+    } finally {
+      setIsVerifyActionProcessing(false);
+    }
+  };
+
+  const handleCoordinatorAction = async () => {
+    setIsCoordinatorActionProcessing(true);
+    try {
+      const leadRef = doc(db, 'leads', lead.id);
+      const updateData: Partial<Lead> = {
+        status: coordinatorAction === 'assign' ? 'assigned' : 
+                coordinatorAction === 'activate' ? 'activated' : 'follow_up',
+        coordinatorNotes: coordinatorNote,
+        updatedAt: new Date()
+      };
+
+      if (coordinatorAction === 'assign') {
+        updateData.coordinatorId = user!.id;
+      }
+
+      await updateDoc(leadRef, updateData);
+
+      // Update all numbers in the lead's plans
+      if (lead.plans && lead.plans.length > 0) {
+        const updatePromises = lead.plans.map(async (plan) => {
+          const numberRef = doc(db, 'numberPool', plan.numberId);
+          const numberDoc = await getDoc(numberRef);
+          const numberData = numberDoc.data();
+          await updateDoc(numberRef, {
+            status: updateData.status,
+            lastStatusChange: new Date(),
+            leadId: lead.id
+          });
+
+          await logNumberAction(
+            plan.numberId,
+            plan.number || '',
+            'status_changed',
+            { status: numberData?.status },
+            { status: updateData.status, leadId: lead.id },
+            `Coordinator ${user?.name || 'Unknown'} performed ${coordinatorAction}`
+          );
+        });
+        
+        await Promise.all(updatePromises);
+      }
+
+      // Send notifications
+      const notificationPromises = [];
+
+      // Notify agent
+      notificationPromises.push(
+        addDoc(collection(db, 'notifications'), {
+          userId: lead.agentId,
+          type: 'lead_update',
+          title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
+                 coordinatorAction === 'activate' ? 'Lead Activated' : 'Lead Marked for Follow-up',
+          message: coordinatorAction === 'assign' ? 
+            'Your lead has been assigned by the coordinator' : 
+            coordinatorAction === 'activate' ?
+            'Your lead has been activated by the coordinator' :
+            'Your lead has been marked for follow-up by the coordinator',
+          read: false,
+          createdAt: new Date(),
+          data: {
+            leadId: lead.id
+          }
+        })
+      );
+
+      // Notify manager if exists
+      if (lead.managerId) {
+        notificationPromises.push(
+          addDoc(collection(db, 'notifications'), {
+            userId: lead.managerId,
+            type: 'lead_update',
+            title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
+                   coordinatorAction === 'activate' ? 'Lead Activated' : 'Lead Marked for Follow-up',
+            message: coordinatorAction === 'assign' ? 
+              'A lead has been assigned by the coordinator' : 
+              coordinatorAction === 'activate' ?
+              'A lead has been activated by the coordinator' :
+              'A lead has been marked for follow-up by the coordinator',
+            read: false,
+            createdAt: new Date(),
+            data: {
+              leadId: lead.id
+            }
+          })
+        );
+      }
+
+        await Promise.all(notificationPromises);
+
+      toast.success(
+        coordinatorAction === 'assign' ? 'Lead assigned successfully' :
+        coordinatorAction === 'activate' ? 'Lead activated successfully' :
+        'Lead marked for follow-up'
+      );
+
+      setShowCoordinatorDialog(false);
+      setCoordinatorNote('');
+      setCoordinatorAction(null);
+      navigate('/dashboard/leads');
+    } catch (error) {
+      console.error('Error updating lead:', error);
+      toast.error('Failed to update lead');
+    } finally {
+      setIsCoordinatorActionProcessing(false);
+    }
+  };
+
+  const handleSplitComplete = async () => {
+    // Refresh the lead data by navigating back and forth
+    navigate(-1);
+    navigate(`/leads/${lead.id}`);
+  };
+
+  // Handler for agent self-reject
+  const handleAgentReject = async () => {
+    if (!user || user.id !== lead.agentId) return;
+    setRejecting(true);
+    try {
+      const leadRef = doc(db, 'leads', lead.id);
+      await updateDoc(leadRef, {
+        status: 'rejected',
+        updatedAt: new Date(),
+        rejectionReason: 'Rejected by agent',
+      });
+      if (lead.plans && lead.plans.length > 0) {
+        const reservePromises = lead.plans.map(async plan => {
+          if (!plan.numberId) return;
+          const numberRef = doc(db, 'numberPool', plan.numberId);
+          await updateDoc(numberRef, {
+            status: 'reserved',
+            reservedBy: user.id,
+            reservedAt: serverTimestamp(),
+            lastStatusChange: serverTimestamp(),
+            claimingAgentId: null,
+            claimingStartedAt: null,
+            claimingExpiresAt: null,
+            claimQueue: [],
+            leadId: lead.id
+          });
+        });
+        await Promise.all(reservePromises);
+      }
+      toast.success('Lead rejected and number(s) reserved for you.');
+      setLocalStatus('rejected');
+      setShowRejectDialog(false);
+    } catch (error) {
+      console.error('Error rejecting lead:', error);
+      toast.error('Failed to reject lead.');
+    } finally {
+      setRejecting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div
+          className="flex items-center gap-2 cursor-pointer group"
+          onClick={() => navigate('/dashboard')}
+          role="button"
+          tabIndex={0}
+          onKeyDown={e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              navigate('/dashboard');
+            }
+          }}
+        >
+          <span className="p-1 text-gray-400 group-hover:text-gray-500">
+            <ChevronLeft className="w-4 h-4" />
+          </span>
+          <h1 className="text-sm font-medium text-gray-900 group-hover:underline">
+            Back to Dashboard
+          </h1>
+        </div>
+      </div>
+
+      {/* Restored header and action bar */}
+      <div className="px-2 sm:px-0 py-2 border-b border-gray-200 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
+        <div>
+          <h2 className="text-lg sm:text-xl font-semibold text-gray-900">Lead Details</h2>
+          <p className="text-xs sm:text-sm text-gray-500 mt-1">
+            View and manage lead information
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 sm:gap-3">
+          {isUserCoordinator && (
+            <>
+              {lead.status === 'verified' && (
+            <button
+                  onClick={() => {
+                    setCoordinatorAction('assign');
+                    setShowCoordinatorDialog(true);
+                  }}
+                  className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+                  <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                  Assign
+            </button>
+          )}
+              {lead.status === 'assigned' && (
+                <>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('activate');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                  >
+                    <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Activate
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('followup');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                  >
+                    <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Follow-up
+                  </button>
+                </>
+              )}
+              {lead.status === 'activated' && (
+                <div className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600">
+                  <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                  Lead Activated
+                </div>
+              )}
+              {lead.status === 'follow_up' && (
+                <button
+                  onClick={() => {
+                    setCoordinatorAction('assign');
+                    setShowCoordinatorDialog(true);
+                  }}
+                  className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                  <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                  Assign
+                </button>
+              )}
+            </>
+          )}
+          {canVerify && (
+            <>
+              <button
+                onClick={() => {
+                  setShowMediaModal(true);
+                }}
+                className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+              >
+                <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                {lead.status === 'follow_verification' ? 'Verify Follow-up' : 'Verify'}
+              </button>
+              <button
+                onClick={() => {
+                  setVerifyAction('reject');
+                  setShowVerifyDialog(true);
+                }}
+                className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+              >
+                <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                Reject
+              </button>
+              <button
+                onClick={() => {
+                  setVerifyAction('follow_verification');
+                  setShowVerifyDialog(true);
+                }}
+                className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+              >
+                <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                Follow-up
+              </button>
+            </>
+          )}
+          {canEdit && (
+            <button
+              onClick={onEdit}
+              className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+              {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification' ? 'Edit & Resubmit' : 'Edit Lead'}
+            </button>
+          )}
+          {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification' && (
+            <button
+              onClick={() => !isResubmitting && onResubmit && onResubmit()}
+              disabled={isResubmitting}
+              className={`inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md shadow-sm text-white focus:outline-none focus:ring-2 focus:ring-offset-2 ${isResubmitting ? 'bg-yellow-400 cursor-not-allowed' : 'bg-yellow-600 hover:bg-yellow-700 focus:ring-yellow-500'}`}
+            >
+              {isResubmitting ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                  </svg>
+                  Resubmitting...
+                </>
+              ) : (
+                'Resubmit Now'
+              )}
+            </button>
+          )}
+           {user?.id === lead.agentId && !['pending_verification', 'activated', 'rejected'].includes(localStatus) && (
+            <button
+              onClick={() => setShowRejectDialog(true)}
+              disabled={rejecting}
+              className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+            >
+              {rejecting ? 'Rejecting...' : 'Reject My Lead'}
+            </button>
+          )}
+          {user?.id === lead.agentId && localStatus === 'rejected' && (
+            <span className="inline-flex items-center px-3 sm:px-4 py-2 rounded-md text-xs sm:text-sm font-medium text-white bg-red-400 cursor-not-allowed">
+              Rejected
+            </span>
+          )}
+          {/* WhatsApp Chat Button for Agents */}
+          {(() => {
+            return user?.role === 'agent' && user.id === lead.agentId && (lead as any).verificationMethod === 'whatsapp';
+          })() && (
+            <button
+              onClick={async () => {
+                setShowWhatsAppChat(true);
+                try {
+                  const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
+                  const logsSnapshot = await getDocs(logsCol);
+                  const rows = logsSnapshot.docs.map((doc: any) => ({
+                    id: doc.id,
+                    ...doc.data(),
+                    createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt
+                  }));
+                  setWhatsAppLogs(rows as any[]);
+                } catch (error) {
+                  console.error('Error fetching WhatsApp logs:', error);
+                  toast.error('Failed to load WhatsApp chat');
+                }
+              }}
+              className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+            >
+              <MessageCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+              WhatsApp Chat
+            </button>
+          )}
+        </div>
+      </div>
+
+      {showVerifyDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg p-4 sm:p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">
+              {verifyAction === 'verify' ? 'Verify Lead' :
+               verifyAction === 'reject' ? 'Reject Lead' :
+               'Mark for Follow-up Verification'}
+            </h3>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Verification Notes
+              </label>
+              <textarea
+                rows={4}
+                className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                value={verificationNote}
+                onChange={(e) => setVerificationNote(e.target.value)}
+                placeholder="Enter any notes about this verification..."
+              />
+            </div>
+            <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 sm:space-x-3">
+              <button
+                onClick={() => setShowVerifyDialog(false)}
+                className="px-3 sm:px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleVerificationAction}
+                disabled={isVerifyActionProcessing}
+                className={`inline-flex items-center px-3 sm:px-4 py-2 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed ${
+                  verifyAction === 'verify' ? 'bg-green-600 hover:bg-green-700 focus:ring-green-500' :
+                  verifyAction === 'reject' ? 'bg-red-600 hover:bg-red-700 focus:ring-red-500' :
+                  'bg-yellow-600 hover:bg-yellow-700 focus:ring-yellow-500'
+                }`}
+              >
+                {isVerifyActionProcessing ? (
+                  <>
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                    </svg>
+                    Processing...
+                  </>
+                ) : (
+                  'Confirm'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMediaModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4">
+          <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-6 w-full max-w-6xl mx-2 sm:mx-4 shadow-2xl max-h-[95vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center space-x-2 sm:space-x-2.5">
+                <div className="w-6 h-6 sm:w-7 sm:h-7 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-md flex items-center justify-center">
+                  <CheckCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-gray-900">Verification Checklist</h3>
+                  <p className="text-xs text-gray-500">Complete all items to proceed</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowMediaModal(false);
+                  setVerifyChecklist(VERIFY_CHECKLIST.map(() => false));
+                }}
+                className="text-gray-400 hover:text-gray-500 p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-medium text-gray-600">Progress</span>
+                <span className="text-xs font-bold text-indigo-600">
+                  {verifyChecklist.filter(Boolean).length}/{VERIFY_CHECKLIST.length}
+                </span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-1.5 sm:h-1">
+                <div 
+                  className="bg-gradient-to-r from-indigo-500 to-purple-600 h-1.5 sm:h-1 rounded-full transition-all duration-300"
+                  style={{ width: `${(verifyChecklist.filter(Boolean).length / VERIFY_CHECKLIST.length) * 100}%` }}
+                ></div>
+              </div>
+            </div>
+
+            {/* Checklist */}
+            <div className="mb-4 sm:mb-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3">
+                {VERIFY_CHECKLIST.map((section, idx) => {
+                  const hasLongContent = section.details.length > 2 || section.details.some(item => item.length > 50);
+                  const isExpanded = expandedSections[idx];
+                  const isAcknowledgementOfTerms = section.header === 'Acknowledgement of Terms';
+                  
+                  return (
+                    <div 
+                      key={section.header} 
+                      className={`p-2.5 sm:p-3 rounded-lg border transition-all duration-300 active:scale-95 ${
+                        verifyChecklist[idx] 
+                          ? 'border-green-300 bg-green-50/70 shadow-sm' 
+                          : 'border-gray-200 bg-white active:bg-gray-50'
+                      }`}
+                    >
+                      <label className="flex items-start space-x-2 sm:space-x-2.5 cursor-pointer select-none min-h-[44px]">
+                        <div className="relative flex-shrink-0 mt-0.5">
+                          <input
+                            type="checkbox"
+                            checked={verifyChecklist[idx]}
+                            onChange={e => {
+                              const updated = [...verifyChecklist];
+                              updated[idx] = e.target.checked;
+                              setVerifyChecklist(updated);
+                            }}
+                            className="sr-only"
+                          />
+                          <div className={`w-6 h-6 sm:w-5 sm:h-5 rounded-md border-2 flex items-center justify-center transition-all duration-200 ${
+                            verifyChecklist[idx]
+                              ? 'bg-green-500 border-green-500 shadow-sm'
+                              : 'bg-white border-gray-300'
+                          }`}>
+                            {verifyChecklist[idx] && (
+                              <Check className="w-4 h-4 sm:w-3 sm:h-3 text-white" />
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between mb-1 sm:mb-1.5">
+                            <span className={`font-semibold text-xs sm:text-xs ${
+                              verifyChecklist[idx] ? 'text-green-800' : 'text-gray-800'
+                            }`}>
+                              {section.header}
+                            </span>
+                            {verifyChecklist[idx] && (
+                              <div className="w-2 h-2 sm:w-1.5 sm:h-1.5 bg-green-500 rounded-full animate-pulse"></div>
+                            )}
+                          </div>
+                          
+                          <div className={`space-y-0.5 sm:space-y-1 transition-all duration-300 ${
+                            hasLongContent && !isExpanded ? 'max-h-10 sm:max-h-12 overflow-hidden' : ''
+                          }`}>
+                            {section.details.map((item, i) => (
+                              <div key={i} className="flex items-start space-x-1 sm:space-x-1.5">
+                                <div className={`w-1 h-1 rounded-full mt-1 flex-shrink-0 transition-colors ${
+                                  verifyChecklist[idx] ? 'bg-green-500' : 'bg-gray-400'
+                                }`}></div>
+                                <span className={`text-xs leading-tight ${
+                                  verifyChecklist[idx] ? 'text-green-700' : 'text-gray-600'
+                                }`}>
+                                  {item}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          
+                          {hasLongContent && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const newExpanded = [...expandedSections];
+                                newExpanded[idx] = !isExpanded;
+                                setExpandedSections(newExpanded);
+                              }}
+                              className={`mt-1 sm:mt-1.5 text-xs font-medium transition-colors py-1 px-2 rounded ${
+                                verifyChecklist[idx] 
+                                  ? 'text-green-600 hover:text-green-700 bg-green-50' 
+                                  : 'text-indigo-600 hover:text-indigo-700 bg-indigo-50'
+                              }`}
+                            >
+                              {isExpanded ? 'Show Less' : 'Read More'}
+                            </button>
+                          )}
+                        </div>
+                      </label>
+                    </div>
+                  );
+                })}
+                
+                {/* Media Upload Card - Positioned next to Acknowledgement of Terms */}
+                <div className="p-2.5 sm:p-3 rounded-lg border border-blue-200 bg-blue-50/30">
+                  <div className="flex items-center space-x-2 mb-2">
+                    <div className="w-4 h-4 bg-gradient-to-r from-blue-500 to-cyan-600 rounded flex items-center justify-center">
+                      <Paperclip className="w-2 h-2 text-white" />
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-xs text-gray-900">Upload Verification Media</h4>
+                      <p className="text-xs text-gray-500">Upload supporting documents</p>
+                    </div>
+                  </div>
+                  
+                  {verifyChecklist.every(Boolean) ? (
+                    <div className="bg-green-50 border border-green-200 rounded-md p-2">
+                      <MediaUpload 
+                        leadId={lead.id} 
+                        onUploadComplete={(files) => {
+                          setVerificationMedia(files.map(file => ({
+                            ...file,
+                            type: file.type as 'image' | 'video' | 'audio'
+                          })));
+                          setShowMediaModal(false);
+                          setVerifyAction('verify');
+                          setShowVerifyDialog(true);
+                        }} 
+                      />
+                    </div>
+                  ) : (
+                    <div className="bg-amber-50 border border-amber-200 rounded-md p-2">
+                      <div className="flex items-center space-x-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                        <span className="text-xs font-medium text-amber-800">
+                          Complete all checklist items first
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end mt-3 pt-2 border-t border-gray-200">
+              <button
+                onClick={() => {
+                  setShowMediaModal(false);
+                  setVerifyChecklist(VERIFY_CHECKLIST.map(() => false));
+                  setExpandedSections(VERIFY_CHECKLIST.map(() => false));
+                }}
+                className="px-4 sm:px-6 py-2 sm:py-2.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors active:scale-95"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCoordinatorDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg p-4 sm:p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">
+              {coordinatorAction === 'assign' ? 'Assign Lead' :
+               coordinatorAction === 'activate' ? 'Activate Lead' : 'Mark for Follow-up'}
+            </h3>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Notes
+              </label>
+              <textarea
+                rows={4}
+                className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                value={coordinatorNote}
+                onChange={(e) => setCoordinatorNote(e.target.value)}
+                placeholder="Enter any notes about this action..."
+              />
+            </div>
+            <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 sm:space-x-3">
+              <button
+                onClick={() => setShowCoordinatorDialog(false)}
+                disabled={isCoordinatorActionProcessing}
+                className="px-3 sm:px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCoordinatorAction}
+                disabled={isCoordinatorActionProcessing}
+                className={`px-3 sm:px-4 py-2 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  coordinatorAction === 'assign' ? 'bg-indigo-600 hover:bg-indigo-700 focus:ring-indigo-500' :
+                  coordinatorAction === 'activate' ? 'bg-green-600 hover:bg-green-700 focus:ring-green-500' :
+                  'bg-orange-600 hover:bg-orange-700 focus:ring-orange-500'
+                }`}
+              >
+                {isCoordinatorActionProcessing ? (
+                  <div className="flex items-center">
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Processing...
+                  </div>
+                ) : (
+                  'Confirm'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <SplitLead
+        isOpen={showSplitLead}
+        onClose={() => setShowSplitLead(false)}
+        lead={lead}
+        onSplit={handleSplitComplete}
+      />
+
+      <div className="px-2 sm:px-0 space-y-3 sm:space-y-4 md:space-y-6">
+        <FormSection
+          icon={User2}
+          title="Customer Information"
+          description="Basic customer details"
+        >
+          <FormInput
+            label="Full Name"
+            icon={User2}
+            type="text"
+            value={lead.customerName}
+            readOnly
+          />
+          <FormInput
+            label="Phone Number"
+            icon={Phone}
+            type="tel"
+            value={lead.customerNumber}
+            readOnly
+          />
+          <FormInput
+            label="Age"
+            icon={User2}
+            type="number"
+            value={lead.customerAge?.toString()}
+            readOnly
+          />
+          <FormInput
+            label="Gender"
+            icon={User2}
+            type="text"
+            value={lead.gender}
+            readOnly
+          />
+        </FormSection>
+
+        <FormSection
+          icon={Package}
+          title="Selected Plans"
+          description="Number and plan details"
+        >
+          {lead.plans?.map((plan, index) => (
+            <div key={index} className="col-span-1 lg:col-span-2">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-gray-50 p-3 sm:p-4 rounded-lg gap-2 sm:gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:space-x-4">
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{plan.number}</p>
+                    <p className="text-xs sm:text-sm text-gray-500">Category: {plan.category}</p>
+                  </div>
+                </div>
+                <div className="px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800 self-start sm:self-auto">
+                    {plan.plan}
+                </div>
+                  </div>
+                </div>
+              ))}
+        </FormSection>
+
+        <FormSection
+          icon={MapPinned}
+          title="Location Details"
+          description="Customer location information"
+        >
+          <FormInput
+            label="Emirate"
+            icon={MapPin}
+            type="text"
+            value={lead.emirate}
+            readOnly
+          />
+          <FormInput
+            label="Area"
+            icon={MapPin}
+            type="text"
+            value={lead.area}
+            readOnly
+          />
+          <FormInput
+            label="Address"
+            icon={MapPin}
+            type="text"
+            value={lead.customerAddress}
+            readOnly
+          />
+          <FormInput
+            label="Location URL"
+            icon={Globe2}
+            type="url"
+            value={lead.locationUrl}
+            readOnly
+          />
+          <div className="col-span-1 lg:col-span-2">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6">
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                  checked={lead.hasEmirateId}
+                  readOnly
+                />
+                <span className="ml-2 text-sm text-gray-700">Emirates ID Available</span>
+              </div>
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                  checked={lead.advancePayment}
+                  readOnly
+                />
+                <span className="ml-2 text-sm text-gray-700">Advance Payment</span>
+              </div>
+            </div>
+          </div>
+        </FormSection>
+
+        <FormSection
+          icon={Languages}
+          title="Communication Preferences"
+          description="Language and sharing preferences"
+        >
+          <FormInput
+            label="Language"
+            icon={Languages}
+            type="text"
+            value={lead.language}
+            readOnly
+          />
+          <FormInput
+            label="Shared With"
+            icon={Users}
+            type="text"
+            value={sharedWithNames.join(', ') || 'None'}
+            readOnly
+          />
+        </FormSection>
+
+        <FormSection
+          icon={Calendar}
+          title="Scheduling & Timing"
+          description="Service start details"
+        >
+          <FormInput
+            label="Start Date"
+            icon={Calendar}
+            type="date"
+            value={format(lead.startDate, 'yyyy-MM-dd')}
+            readOnly
+          />
+          <FormInput
+            label="Start Time"
+            icon={ClockIcon}
+            type="time"
+            value={lead.startTime}
+            readOnly
+          />
+        </FormSection>
+
+        <FormSection
+          icon={Package}
+          title="Service & Plan Details"
+          description="Product and number information"
+        >
+          <FormInput
+            label="Product Type"
+            icon={Package}
+            type="text"
+            value={lead.productType}
+            readOnly
+          />
+          <FormInput
+            label="Number Category"
+            icon={Hash}
+            type="text"
+            value={lead.plans?.[0]?.category || 'N/A'}
+            readOnly
+          />
+        </FormSection>
+
+        <FormSection
+          icon={Clock}
+          title="Lead Status"
+          description="Current status and timestamps"
+        >
+          <div className="col-span-1 lg:col-span-2">
+            <div className="flex items-center space-x-2">
+              <div className={clsx(
+                'px-2.5 py-1 rounded-full text-xs font-medium',
+                lead.status === 'verified' ? 'bg-green-100 text-green-800' :
+                lead.status === 'rejected' ? 'bg-red-100 text-red-800' :
+                lead.status === 'follow_verification' ? 'bg-yellow-100 text-yellow-800' :
+                lead.status === 'pending_coordinator' ? 'bg-blue-100 text-blue-800' :
+                lead.status === 'split' ? 'bg-purple-100 text-purple-800' :
+                'bg-gray-100 text-gray-800'
+              )}>
+                {lead.status === 'follow_up' ? 'Follow-up Verification' : lead.status}
+              </div>
+            </div>
+          </div>
+          <FormInput
+            label="Created At"
+            icon={Calendar}
+            type="text"
+            value={format(lead.createdAt, 'PPP pp')}
+            readOnly
+          />
+          <FormInput
+            label="Last Updated"
+            icon={Clock}
+            type="text"
+            value={format(lead.updatedAt, 'PPP pp')}
+            readOnly
+          />
+        </FormSection>
+
+        {lead.remarks && (
+          <FormSection
+            icon={MessageSquare}
+            title="Remarks"
+            description="Additional notes and comments"
+          >
+            <div className="col-span-1 lg:col-span-2" ref={chatBoxRef}>
+              <textarea
+                rows={4}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm"
+                value={lead.remarks}
+                readOnly
+              />
+            </div>
+          </FormSection>
+        )}
+
+        {lead.verificationMedia && lead.verificationMedia.length > 0 && (
+          <FormSection
+            icon={FileCheck}
+            title="Verification Media"
+            description="Media files attached during verification"
+          >
+            <div className="col-span-1 lg:col-span-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                {lead.verificationMedia.map((media, index) => {
+                  // Ensure we're working with the correct media object structure
+                  const mediaUrl = typeof media === 'string' ? media : media.url;
+                  const mediaType = typeof media === 'string' 
+                    ? media.toLowerCase().endsWith('.jpg') || media.toLowerCase().endsWith('.jpeg') || media.toLowerCase().endsWith('.png')
+                      ? 'image'
+                      : media.toLowerCase().endsWith('.mp4') || media.toLowerCase().endsWith('.webm')
+                        ? 'video'
+                        : media.toLowerCase().endsWith('.mp3') || media.toLowerCase().endsWith('.wav')
+                          ? 'audio'
+                          : media.toLowerCase().endsWith('.pdf')
+                            ? 'pdf'
+                            : 'unknown'
+                    : media.type;
+                  const mediaName = typeof media === 'string' ? `Media ${index + 1}` : media.name;
+
+                  return (
+                  <div key={index} className="bg-gray-50 p-3 sm:p-4 rounded-lg">
+                    <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
+                        {mediaType === 'image' ? (
+                        <img
+                            src={mediaUrl}
+                            alt={mediaName}
+                          className="w-full h-full object-cover"
+                        />
+                        ) : mediaType === 'video' ? (
+                        <video
+                            src={mediaUrl}
+                          controls
+                          className="w-full h-full object-cover"
+                        />
+                        ) : mediaType === 'audio' ? (
+                        <audio
+                            src={mediaUrl}
+                          controls
+                          className="w-full"
+                        />
+                        ) : mediaType === 'pdf' ? (
+                        <a href={mediaUrl} target="_blank" rel="noreferrer" className="flex items-center justify-center h-full text-indigo-600 underline">
+                          Open PDF
+                        </a>
+                        ) : (
+                          <div className="flex items-center justify-center h-full">
+                            <FileText className="w-8 h-8 text-gray-400" />
+                          </div>
+                      )}
+                    </div>
+                      <div className="mt-2 text-xs sm:text-sm text-gray-500">
+                        {mediaName}
+                    </div>
+          </div>
+                  );
+                })}
+              </div>
+            </div>
+          </FormSection>
+        )}
+
+        {lead.verificationNotes && (
+          <FormSection
+            icon={FileText}
+            title="Verification Notes"
+            description="Notes added during verification"
+          >
+            <div className="col-span-1 lg:col-span-2">
+              <textarea
+                rows={4}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm"
+                value={lead.verificationNotes}
+                readOnly
+              />
+            </div>
+          </FormSection>
+        )}
+
+        {/* Add a div at the end of the page for scrolling */}
+        <div ref={pageEndRef} />
+      </div>
+
+      {/* Confirmation Dialog */}
+      <Dialog open={showRejectDialog} onClose={() => setShowRejectDialog(false)} className="fixed z-50 inset-0 overflow-y-auto">
+        <div className="flex items-center justify-center min-h-screen px-4">
+          <Dialog.Overlay className="fixed inset-0 bg-black opacity-30" />
+          <div className="relative bg-white rounded-lg max-w-md w-full mx-auto p-4 sm:p-6 z-10 shadow-xl">
+            <Dialog.Title className="text-lg font-semibold text-gray-900 mb-2">Reject Lead?</Dialog.Title>
+            <Dialog.Description className="text-gray-600 mb-4">
+              Are you sure you want to reject this lead? This action cannot be undone. The number(s) will be reserved for you.
+            </Dialog.Description>
+            <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 sm:space-x-3">
+              <button
+                onClick={() => setShowRejectDialog(false)}
+                className="px-3 sm:px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAgentReject}
+                disabled={rejecting}
+                className="px-3 sm:px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+              >
+                {rejecting ? 'Rejecting...' : 'Confirm Reject'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* WhatsApp Chat Modal */}
+      {showWhatsAppChat && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-4xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">WhatsApp Verification Chat</h3>
+              <button
+                onClick={() => setShowWhatsAppChat(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              {whatsAppLogs.length === 0 ? (
+                <div className="text-center text-gray-500 py-8">
+                  <MessageCircle className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                  <p>No WhatsApp messages found for this lead.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {whatsAppLogs
+                    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+                    .map((log) => {
+                      const created = (log.createdAt?.toDate?.() || log.createdAt) ? new Date(log.createdAt?.toDate?.() || log.createdAt) : null;
+                      const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
+                      const fromDigits = (log.from || '').toString().replace(/\D/g, '');
+                      const fromDisplay = fromDigits ? `+${fromDigits}` : '';
+                      const firstPlan = lead.plans?.[0];
+                      const planInfo = firstPlan ? (planBenefits as any)[firstPlan.plan] : null;
+                      const isOutbound = log.direction === 'outbound';
+                      const CONSENT_ORDER: Array<{ key: string; label: string }> = [
+                        {
+                          key: 'ownershipAfterContract',
+                          label:
+                            'The chosen number becomes yours only after completing the contract. During this period, transfer of ownership is not permitted, and porting out to other telecom providers is restricted. Plan upgrades (within the same category) are allowed; downgrades or switching to prepaid are not allowed.'
+                        },
+                        {
+                          key: 'proRatedAgree',
+                          label:
+                            'Multi-SIM is available exclusively with the Limited Data Packages; this feature is not available with Non-Stop Data plans. The plan will be pro-rated. In case of early cancellation, all pending bills must be cleared along with one-month rental + 5% VAT, and the number will be reclaimed by Etisalat.'
+                        },
+                        {
+                          key: 'gracePeriodAcknowledge',
+                          label:
+                            'If you are not a UAE citizen, you must pay half or full monthly rental in advance at activation, which will be adjusted in the 4th month of your billing cycle. In case of technical or network-related issues, or misinformation, you can cancel the plan without charges within the first five days.'
+                        },
+                        {
+                          key: 'dataAccuracyAcknowledge',
+                          label:
+                            'The information provided regarding the number and plan is accurate. Any other information received will not be considered valid. Please read this carefully and confirm, as this communication will be referenced in the event of any future complaints regarding the number or plan.'
+                        },
+                        {
+                          key: 'acceptAllTerms',
+                          label: 'Accept all the Terms & Conditions.'
+                        }
+                      ];
+                      const accepted = Array.isArray(CONSENT_ORDER)
+                        ? CONSENT_ORDER.filter(i => log.consents?.[i.key] === true)
+                        : [];
+                      
+                      return (
+                        <div key={log.id} className={clsx('flex', isOutbound ? 'justify-end' : 'justify-start')}>
+                          <div className={clsx('max-w-[85%] rounded-2xl px-4 py-3 shadow-sm border',
+                            isOutbound ? 'bg-indigo-50 text-indigo-900 border-indigo-100' : 'bg-emerald-50 text-emerald-900 border-emerald-100'
+                          )}>
+                            <div className="flex items-center justify-between text-[11px] text-gray-500/80 mb-2">
+                              <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
+                                {isOutbound ? 'Outbound' : 'Inbound'}
+                              </span>
+                              <span className="ml-2">
+                                {fromDisplay && (
+                                  <span className="font-bold text-blue-600">From {fromDisplay}</span>
+                                )}
+                                {createdStr && ` · ${createdStr}`}
+                              </span>
+                            </div>
+                            {/* Summary only for the acceptance message (when consents are present) */}
+                            {accepted.length > 0 && firstPlan && (
+                              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 mb-3 shadow-sm">
+                                <div className="flex items-center gap-2 mb-3">
+                                  <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                                  <h4 className="text-sm font-semibold text-blue-900">Plan & Number Summary</h4>
+                                </div>
+                                <div className="space-y-2 text-sm">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-gray-700">Selected Number:</span>
+                                    <span className="font-semibold text-gray-900">{firstPlan.number}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-gray-700">Monthly Plan:</span>
+                                    <span className="font-semibold text-gray-900">
+                                      {firstPlan.plan ? 
+                                        (() => {
+                                          const match = firstPlan.plan.match(/\d+/);
+                                          return match ? `${match[0]} AED + 5% VAT` : firstPlan.plan;
+                                        })() 
+                                        : ''
+                                      }
+                                    </span>
+                                  </div>
+                                  {planInfo?.benefits && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-gray-700">Benefits:</span>
+                                      <span className="font-semibold text-gray-900">{planInfo.benefits}</span>
+                                    </div>
+                                  )}
+                                  {planInfo?.duration && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-gray-700">Contract Duration:</span>
+                                      <span className="font-semibold text-gray-900">{planInfo.duration} Year</span>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            {log.messageText && (
+                              <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
+                            )}
+                            {accepted.length > 0 && (
+                              <ol className="mt-1 space-y-2 text-sm">
+                                {accepted.map((item, idx) => (
+                                  <li key={item.key} className="flex items-start">
+                                    <span className="mr-2 text-gray-700">{idx + 1}.</span>
+                                    <span className="text-gray-900">
+                                      {item.label}
+                                      <span className="ml-2 inline-flex items-center text-green-600 text-xs font-medium align-middle">
+                                        <svg className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M16.704 5.29a1 1 0 00-1.408-1.418L7.5 11.66 4.704 8.864a1 1 0 10-1.408 1.418l3.5 3.5a1 1 0 001.408 0l8.5-8.5z" clipRule="evenodd"/></svg>
+                                        Accepted
+                                      </span>
+                                    </span>
+                                  </li>
+                                ))}
+                              </ol>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function getStatusColor(status: string | undefined) {
+  switch (status) {
+    case 'verified':
+      return 'text-green-600 font-medium';
+    case 'rejected':
+      return 'text-red-600 font-medium';
+    case 'pending_verification':
+      return 'text-yellow-600 font-medium';
+    case 'Follow-up Verification':
+      return 'text-orange-600 font-medium';
+    default:
+      return 'text-gray-900';
+  }
+}
+
+function getBooleanColor(value: string | undefined) {
+  return value === 'Yes' ? 'text-green-600 font-medium' : 'text-red-600 font-medium';
+}
