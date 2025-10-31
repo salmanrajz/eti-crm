@@ -681,6 +681,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         setSearchResults(prev => prev.map(x => (x.id === updated.id ? updated : x)));
         // Optionally keep base numbers in sync too
         setNumbers(prev => prev.map(x => (x.id === updated.id ? updated : x)));
+      }, (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          return;
+        }
+        
+        console.error('Error in NumberPool search listener:', error);
       });
       unsubs.set(n.id, unsub);
     });
@@ -752,7 +760,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         });
         setReservedNumbers(items);
       },
-      () => {
+      (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          return;
+        }
+        
         if (!isMounted) return;
         
         // Fallback without orderBy to avoid index requirement; client-side sort
@@ -779,6 +793,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             })
             .sort((a, b) => (new Date(b.reservedAt || 0).getTime() - new Date(a.reservedAt || 0).getTime()));
           setReservedNumbers(items);
+        }, (error) => {
+          // ✅ FIX: Handle permission errors gracefully during logout
+          if (error.code === 'permission-denied') {
+            // User logged out or lost permissions - cleanup silently
+            return;
+          }
+          
+          console.error('Error in NumberPool fallback listener:', error);
         });
       }
     );
@@ -1168,6 +1190,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         };
       }) as StatusCheck[];
       setStatusChecks(checks);
+    }, (error) => {
+      // ✅ FIX: Handle permission errors gracefully during logout
+      if (error.code === 'permission-denied') {
+        // User logged out or lost permissions - cleanup silently
+        return;
+      }
+      
+      console.error('Error in NumberPool status checks listener:', error);
     });
 
     return () => {

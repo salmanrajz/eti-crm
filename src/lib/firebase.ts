@@ -65,20 +65,13 @@ import { getStorage } from 'firebase/storage';
 import { getMessaging } from 'firebase/messaging';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import type { UserRole, CoordinatorType } from '../types';
+import { getSecureConfig } from './firebaseConfig';
 
 // ===============================================================================
 // FIREBASE CONFIGURATION
 // ===============================================================================
-// Environment-based Firebase configuration using Vite environment variables
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
-};
+// Secure Firebase configuration with environment variable validation
+const firebaseConfig = getSecureConfig();
 
 // ===============================================================================
 // FIREBASE SERVICES INITIALIZATION
