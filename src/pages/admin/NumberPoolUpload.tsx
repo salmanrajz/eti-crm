@@ -37,7 +37,7 @@
  */
 
 import { useState, useMemo, useCallback } from 'react';
-import { collection, writeBatch, doc } from 'firebase/firestore';
+import { collection, writeBatch, doc, getDocs, query } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
 import { Upload, Plus, FileSpreadsheet, FileUp, Download } from 'lucide-react';
@@ -68,6 +68,7 @@ interface ExcelRow {
   Code: string;
   Group: string;
   Passcode: string;
+  TeamVisibility?: string; // optional team ID to restrict visibility
 }
 
 export function NumberPoolUpload() {
@@ -96,21 +97,24 @@ export function NumberPoolUpload() {
         Category: 'Standard',
         Code: 'ETS-1',
         Group: 'Group A',
-        Passcode: '123456'
+        Passcode: '123456',
+        TeamVisibility: ''
       },
       {
         Number: '0501234568',
         Category: 'Silver',
         Code: 'ETS-2',
         Group: 'Group B',
-        Passcode: '654321'
+        Passcode: '654321',
+        TeamVisibility: 'team_abc123' // Example teamId to restrict
       },
       {
         Number: '0501234569',
         Category: 'Gold',
         Code: 'ETS-3',
         Group: 'Group C',
-        Passcode: '789012'
+        Passcode: '789012',
+        TeamVisibility: ''
       }
     ];
 
@@ -124,7 +128,8 @@ export function NumberPoolUpload() {
       { width: 12 }, // Category
       { width: 10 }, // Code
       { width: 12 }, // Group
-      { width: 12 }  // Passcode
+      { width: 12 }, // Passcode
+      { width: 20 }  // TeamVisibility (optional teamId)
     ];
 
     writeFile(wb, 'sample_numbers_template.xlsx');
@@ -217,6 +222,16 @@ export function NumberPoolUpload() {
     }
 
     setLoading(true);
+    // Load teams to validate TeamVisibility values (support both ID and Name)
+    const teamsSnap = await getDocs(query(collection(db, 'teams')));
+    const teamIdByName = new Map<string, string>();
+    const validTeamIds = new Set<string>();
+    teamsSnap.docs.forEach(t => {
+      const data = t.data() as any;
+      const name = (data?.name || data?.teamName || '').toString();
+      if (name) teamIdByName.set(name.toLowerCase(), t.id);
+      validTeamIds.add(t.id);
+    });
     setUploadProgress({
       total: parsedExcelData.length,
       current: 0,
@@ -238,6 +253,14 @@ export function NumberPoolUpload() {
       for (let i = 0; i < parsedExcelData.length; i++) {
         const row = parsedExcelData[i];
         const numberRef = doc(collection(db, 'numberPool'));
+        let teamVisibility: string | undefined = (row.TeamVisibility || '').trim() || undefined;
+        if (teamVisibility) {
+          // Accept team ID directly, or resolve by name
+          if (!validTeamIds.has(teamVisibility)) {
+            const resolved = teamIdByName.get(teamVisibility.toLowerCase());
+            teamVisibility = resolved || undefined;
+          }
+        }
         const numberData = {
           number: row.Number,
           category: row.Category.trim() as typeof numberCategories[number],
@@ -246,6 +269,7 @@ export function NumberPoolUpload() {
           status: 'open',
           visibleToFreelancers: visibleToFreelancers,
           passcode: row.Passcode.trim(),
+          teamVisibility,
           lastStatusChange: new Date()
         };
         
