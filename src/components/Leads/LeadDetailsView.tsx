@@ -47,7 +47,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { format } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
-import { doc, updateDoc, addDoc, collection, getDoc, getDocs, serverTimestamp } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
@@ -189,6 +189,37 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const [expandedSections, setExpandedSections] = useState<boolean[]>(VERIFY_CHECKLIST.map(() => false));
   const [plans, setPlans] = useState<any[]>([]);
+  const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
+
+  // Load plan details from Firebase when lead changes
+  useEffect(() => {
+    async function loadPlanDetails() {
+      if (!lead?.plans?.[0]?.plan) {
+        setPlanDetails(null);
+        return;
+      }
+      try {
+        const planName = lead.plans[0].plan;
+        const plansQuery = query(collection(db, 'plans'), where('name', '==', planName));
+        const plansSnapshot = await getDocs(plansQuery);
+        if (!plansSnapshot.empty) {
+          const planDoc = plansSnapshot.docs[0];
+          const planData = planDoc.data();
+          setPlanDetails({
+            amount: planData.amount || 'N/A',
+            benefits: planData.benefits || 'N/A',
+            duration: planData.duration || 'N/A'
+          });
+        } else {
+          setPlanDetails(null);
+        }
+      } catch (error) {
+        console.error('Error loading plan details:', error);
+        setPlanDetails(null);
+      }
+    }
+    loadPlanDetails();
+  }, [lead]);
 
   const canEdit = (
     lead.status === 'pending_verification' ||
@@ -483,55 +514,26 @@ Language: ${lead.language || 'N/A'}`;
               const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
               const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
 
-              await fetch(WHATSAPP_API_URL, {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  messaging_product: "whatsapp",
+              try {
+                const { sendWhatsAppTemplateByGroup, getPartnerLabel } = await import('../../utils/whatsappRouter');
+                const group = lead.plans?.[0]?.group || undefined;
+                const partnerLabel = getPartnerLabel(group);
+                await sendWhatsAppTemplateByGroup({
                   to: agentPhone,
-                  type: "template",
-                  template: {
-                    name: "leadstatus",
-                    language: {
-                      code: "en"
-                    },
-                    components: [
-                      {
-                        type: "body",
-                        parameters: [
-                          {
-                            type: "text",
-                            text: lead.customerName || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: lead.customerNumber || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: lead.plans?.[0]?.number || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: statusMessage
-                          },
-                          {
-                            type: "text",
-                            text: user?.name || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: `${window.location.origin}/dashboard/leads/${lead.id}`
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                })
-              });
+                  group,
+                  bodyParameters: [
+                    { type: 'text', text: lead.customerName || 'N/A' },
+                    { type: 'text', text: lead.customerNumber || 'N/A' },
+                    { type: 'text', text: lead.plans?.[0]?.number || 'N/A' },
+                    { type: 'text', text: statusMessage },
+                    { type: 'text', text: user?.name || 'N/A' },
+                    { type: 'text', text: `${window.location.origin}/dashboard/leads/${lead.id}` }
+                  ],
+                  // Optional: override template if agent notification template differs
+                  // templateOverride: { templateName: 'leadstatus', languageCode: 'en' }
+                });
+              } catch (e) {
+              }
             }
           }
         } catch (error) {
@@ -2075,13 +2077,7 @@ Language: ${lead.language || 'N/A'}`;
                       const fromDigits = (log.from || '').toString().replace(/\D/g, '');
                       const fromDisplay = fromDigits ? `+${fromDigits}` : '';
                       const firstPlan = lead.plans?.[0];
-                      // For now, we'll use a simplified approach - in a real implementation,
-                      // you'd want to load plan data from Firebase here
-                      const planInfo = firstPlan ? {
-                        amount: 'N/A',
-                        benefits: 'Plan details not available',
-                        duration: 'N/A'
-                      } : null;
+                      const planInfo = planDetails;
                       const isOutbound = log.direction === 'outbound';
                       const CONSENT_ORDER: Array<{ key: string; label: string }> = [
                         {
@@ -2153,13 +2149,13 @@ Language: ${lead.language || 'N/A'}`;
                                       }
                                     </span>
                                   </div>
-                                  {planInfo?.benefits && (
+                                  {planInfo?.benefits && planInfo.benefits !== 'N/A' && (
                                     <div className="flex items-center gap-2">
                                       <span className="text-gray-700">Benefits:</span>
                                       <span className="font-semibold text-gray-900">{planInfo.benefits}</span>
                                     </div>
                                   )}
-                                  {planInfo?.duration && (
+                                  {planInfo?.duration && planInfo.duration !== 'N/A' && (
                                     <div className="flex items-center gap-2">
                                       <span className="text-gray-700">Contract Duration:</span>
                                       <span className="font-semibold text-gray-900">{planInfo.duration} Year</span>
