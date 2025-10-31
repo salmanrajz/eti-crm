@@ -930,17 +930,22 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           
           // If we have plan details, send WhatsApp message
           if (planDetails) {
-            // Log outbound verification message
+            // Log outbound verification message (rendered text with group-specific partner)
             try {
+              const group = selectedPlans?.[0]?.group || undefined;
+              const { getPartnerLabel } = await import('../../utils/whatsappRouter');
+              const partnerLabel = getPartnerLabel(group);
+              const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+              const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
               await logOutboundVerificationMessage(
                 docRef.id,
                 formattedNumber,
                 'flow_template_temp',
                 [
                   user?.name || 'N/A',
-                  'Express Dial',
+                  partnerLabel,
                   selectedPlans[0]?.number || 'N/A',
-                  planDetails.amount,
+                  monthlyLabel,
                   planDetails.benefits,
                   planDetails.duration
                 ]
@@ -948,64 +953,34 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             } catch (e) {
             }
 
-            const actsResponse = await fetch(WHATSAPP_API_URL, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                messaging_product: "whatsapp",
+            try {
+              const group = selectedPlans?.[0]?.group || undefined;
+              const { sendWhatsAppWithComponentsByGroup, getPartnerLabel } = await import('../../utils/whatsappRouter');
+              const partnerLabel = getPartnerLabel(group);
+              // Preserve Flow-style template usage with button sub_type: 'flow'
+              await sendWhatsAppWithComponentsByGroup({
                 to: formattedNumber,
-                type: "template",
-                template: {
-                  name: "flow_template_temp",
-                  language: {
-                    code: "en"
+                group,
+                templateName: 'flow_template_temp',
+                components: [
+                  {
+                    type: 'body',
+                    parameters: [
+                      { type: 'text', text: user?.name || 'N/A' },
+                      { type: 'text', text: partnerLabel },
+                      { type: 'text', text: selectedPlans[0]?.number || 'N/A' },
+                      { type: 'text', text: planDetails.amount },
+                      { type: 'text', text: planDetails.benefits },
+                      { type: 'text', text: planDetails.duration }
+                    ]
                   },
-                  components: [
-                    {
-                      type: "body",
-                      parameters: [
-                        {
-                          type: "text",
-                          text: user?.name || "N/A"
-                        },
-                        {
-                          type: "text",
-                          text: "Express Dial"
-                        },
-                        {
-                          type: "text",
-                          text: selectedPlans[0]?.number || "N/A"
-                        },
-                        {
-                          type: "text",
-                          text: planDetails.amount
-                        },
-                        {
-                          type: "text",
-                          text: planDetails.benefits
-                        },
-                        {
-                          type: "text",
-                          text: planDetails.duration
-                        }
-                      ]
-                    },
-                    {
-                      type: "button",
-                      sub_type: "flow",
-                      index: 0
-                    }
-                  ]
-                }
-              })
-            });
-
-            if (!actsResponse.ok) {
-              toast.error('Failed to send verification message to customer');
-            } else {
+                  {
+                    type: 'button',
+                    sub_type: 'flow',
+                    index: 0
+                  }
+                ]
+              });
               setSuccessMessage('Lead created and verification message sent to customer');
               setShowSuccessPopup(true);
               
@@ -1013,6 +988,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               setTimeout(() => {
                 navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
               }, 2000);
+            } catch (e) {
+              toast.error('Failed to send verification message to customer');
             }
           }
         }
