@@ -188,7 +188,38 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [replyText, setReplyText] = useState('');
   const [expandedSections, setExpandedSections] = useState<boolean[]>(VERIFY_CHECKLIST.map(() => false));
   const [sendingReply, setSendingReply] = useState(false);
+  const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Load plan details from Firebase when selectedLead changes
+  useEffect(() => {
+    async function loadPlanDetails() {
+      if (!selectedLead?.plans?.[0]?.plan) {
+        setPlanDetails(null);
+        return;
+      }
+      try {
+        const planName = selectedLead.plans[0].plan;
+        const plansQuery = query(collection(db, 'plans'), where('name', '==', planName));
+        const plansSnapshot = await getDocs(plansQuery);
+        if (!plansSnapshot.empty) {
+          const planDoc = plansSnapshot.docs[0];
+          const planData = planDoc.data();
+          setPlanDetails({
+            amount: planData.amount || 'N/A',
+            benefits: planData.benefits || 'N/A',
+            duration: planData.duration || 'N/A'
+          });
+        } else {
+          setPlanDetails(null);
+        }
+      } catch (error) {
+        console.error('Error loading plan details:', error);
+        setPlanDetails(null);
+      }
+    }
+    loadPlanDetails();
+  }, [selectedLead]);
 
   // Function to handle template message selection
   const handleTemplateMessage = (template: any) => {
@@ -1544,13 +1575,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                     const fromDigits = (log.from || '').toString().replace(/\D/g, '');
                     const fromDisplay = fromDigits ? `+${fromDigits}` : '';
                     const firstPlan = selectedLead?.plans?.[0];
-                    // For now, we'll use a simplified approach - in a real implementation,
-                    // you'd want to load plan data from Firebase here
-                    const planInfo = firstPlan ? {
-                      amount: 'N/A',
-                      benefits: 'Plan details not available',
-                      duration: 'N/A'
-                    } : null;
+                    const planInfo = planDetails;
                     const isOutbound = log.direction === 'outbound';
                     const CONSENT_ORDER: Array<{ key: string; label: string }> = [
                       {
@@ -1621,13 +1646,13 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                     }
                                   </span>
                                 </div>
-                                {planInfo?.benefits && (
+                                {planInfo?.benefits && planInfo.benefits !== 'N/A' && (
                                   <div className="flex items-center gap-2">
                                     <span className="text-gray-700">Benefits:</span>
                                     <span className="font-semibold text-gray-900">{planInfo.benefits}</span>
                                   </div>
                                 )}
-                                {planInfo?.duration && (
+                                {planInfo?.duration && planInfo.duration !== 'N/A' && (
                                   <div className="flex items-center gap-2">
                                     <span className="text-gray-700">Contract Duration:</span>
                                     <span className="font-semibold text-gray-900">{planInfo.duration} Year</span>
