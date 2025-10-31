@@ -54,9 +54,11 @@ import {
   FileText, 
   Download,
   TrendingUp,
-  Settings
+  Settings,
+  Edit,
+  Trash2
 } from 'lucide-react';
-import { collection, query, where, getDocs, doc, getDoc, addDoc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc, addDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { User, Lead } from '../types';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
@@ -126,6 +128,7 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
     category: 'office' as 'office' | 'additional'
   });
   const [editingSalary, setEditingSalary] = useState<string | null>(null); // Track which salary is being edited
+  const [editingExpense, setEditingExpense] = useState<string | null>(null); // Track which expense is being edited
 
   // Invoice related states
   const [showInvoiceConfig, setShowInvoiceConfig] = useState(false);
@@ -258,8 +261,6 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
         return;
       }
       
-      console.log(`Checking carry forward: ${previousMonthStr} -> ${selectedMonth}`);
-      console.log(`Current employees: ${employeeList.length}, Current salaries: ${salaryList.length}`);
       
       // Query previous month salaries
       const previousSalaryQuery = query(
@@ -273,7 +274,6 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
         ...doc.data()
       })) as EmployeeSalary[];
 
-      console.log(`Previous month salaries found: ${previousSalaries.length}`);
 
       // Carry forward salaries for employees who don't have current month salary
       const carriedForwardSalaries: EmployeeSalary[] = [];
@@ -283,7 +283,6 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
         if (!existingSalary) {
           const previousSalary = previousSalaries.find(s => s.employeeId === employee.id);
           if (previousSalary) {
-            console.log(`Carrying forward salary for ${employee.name} (${employee.role})`);
             // Carry forward the salary
             const carriedForwardSalary: EmployeeSalary = {
               id: '',
@@ -314,17 +313,14 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
             carriedForwardSalary.id = docRef.id;
             carriedForwardSalaries.push(carriedForwardSalary);
           } else {
-            console.log(`No previous salary found for ${employee.name} (${employee.role})`);
           }
         } else {
-          console.log(`Salary already exists for ${employee.name} (${employee.role})`);
         }
       }
 
       // Update local state with carried forward salaries
       if (carriedForwardSalaries.length > 0) {
         setSalaries(prev => [...prev, ...carriedForwardSalaries]);
-        console.log(`Carried forward ${carriedForwardSalaries.length} salaries from ${previousMonthStr} to ${selectedMonth}`);
         alert(`✅ ${carriedForwardSalaries.length} salaries automatically carried forward from ${format(previousMonth, 'MMMM yyyy')} to ${format(currentDate, 'MMMM yyyy')}. You can edit them if needed.`);
         
         // Reload salaries to get the updated list
@@ -341,7 +337,6 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
         })) as EmployeeSalary[];
         setSalaries(updatedSalaryList);
       } else {
-        console.log('No salaries to carry forward');
       }
     } catch (error) {
       console.error('Error carrying forward salaries:', error);
@@ -644,6 +639,19 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
 
   const saveExpense = async () => {
     try {
+      if (editingExpense) {
+        // Update existing expense
+        const expenseData = {
+          description: expenseForm.description,
+          amount: expenseForm.amount,
+          category: expenseForm.category,
+          updatedAt: new Date()
+        };
+
+        await updateDoc(doc(db, 'expenses', editingExpense), expenseData);
+        setEditingExpense(null);
+      } else {
+        // Create new expense
       const expenseData = {
         description: expenseForm.description,
         amount: expenseForm.amount,
@@ -654,11 +662,38 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
       };
 
       await addDoc(collection(db, 'expenses'), expenseData);
+      }
+      
       setExpenseForm({ description: '', amount: 0, category: 'office' });
       loadData();
     } catch (error) {
       console.error('Error saving expense:', error);
     }
+  };
+
+  const editExpense = (expense: OfficeExpense) => {
+    setExpenseForm({
+      description: expense.description,
+      amount: expense.amount,
+      category: expense.category
+    });
+    setEditingExpense(expense.id);
+  };
+
+  const deleteExpense = async (expenseId: string) => {
+    if (window.confirm('Are you sure you want to delete this expense?')) {
+      try {
+        await deleteDoc(doc(db, 'expenses', expenseId));
+        loadData();
+      } catch (error) {
+        console.error('Error deleting expense:', error);
+      }
+    }
+  };
+
+  const cancelExpenseEdit = () => {
+    setExpenseForm({ description: '', amount: 0, category: 'office' });
+    setEditingExpense(null);
   };
 
   const generateInvoice = () => {
@@ -1337,7 +1372,9 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
                 className="space-y-6"
               >
                 <div className="bg-white rounded-xl shadow-lg p-6">
-                  <h3 className="text-xl font-bold mb-4">Add Expense</h3>
+                  <h3 className="text-xl font-bold mb-4">
+                    {editingExpense ? 'Edit Expense' : 'Add Expense'}
+                  </h3>
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <input
                       type="text"
@@ -1361,12 +1398,22 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
                       <option value="office">Office Expense</option>
                       <option value="additional">Additional Expense</option>
                     </select>
+                    <div className="flex gap-2">
                     <button
                       onClick={saveExpense}
                       className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
                     >
-                      Add Expense
+                        {editingExpense ? 'Update Expense' : 'Add Expense'}
                     </button>
+                      {editingExpense && (
+                        <button
+                          onClick={cancelExpenseEdit}
+                          className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -1380,6 +1427,7 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
@@ -1402,6 +1450,24 @@ export default function PayrollSystem({ open, onClose, role, user }: PayrollSyst
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                               {format(expense.date, 'MMM dd, yyyy')}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              <div className="flex space-x-2">
+                                <button
+                                  onClick={() => editExpense(expense)}
+                                  className="text-indigo-600 hover:text-indigo-900 transition-colors"
+                                  title="Edit expense"
+                                >
+                                  <Edit className="h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={() => deleteExpense(expense.id)}
+                                  className="text-red-600 hover:text-red-900 transition-colors"
+                                  title="Delete expense"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}

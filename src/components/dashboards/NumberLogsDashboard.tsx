@@ -116,6 +116,14 @@ export function NumberLogsDashboard() {
         } catch (e) {
           // ignore
         }
+      }, (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          return;
+        }
+        
+        console.error('Error in NumberLogsDashboard listener:', error);
       });
 
       return () => unsub();

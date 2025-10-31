@@ -354,6 +354,12 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
           // Cache the updated data
           setCache(cacheKey, teamData);
         }, (error) => {
+          // ✅ FIX: Handle permission errors gracefully during logout
+          if (error.code === 'permission-denied') {
+            // User logged out or lost permissions - cleanup silently
+            return;
+          }
+          
           console.error('Snapshot error for agent', agent.id, error);
         });
         

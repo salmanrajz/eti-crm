@@ -1947,6 +1947,7 @@ Language: ${lead.language || 'N/A'}`;
                             : 'unknown'
                     : media.type;
                   const mediaName = typeof media === 'string' ? `Media ${index + 1}` : media.name;
+                  const azureUrl = typeof media === 'string' ? undefined : (media as any).azureUrl as string | undefined;
 
                   return (
                   <div key={index} className="bg-gray-50 p-3 sm:p-4 rounded-lg">
@@ -1979,8 +1980,14 @@ Language: ${lead.language || 'N/A'}`;
                           </div>
                       )}
                     </div>
-                      <div className="mt-2 text-xs sm:text-sm text-gray-500">
-                        {mediaName}
+                      <div className="mt-2 text-xs sm:text-sm text-gray-700 space-y-1">
+                        <div className="font-medium">{mediaName}</div>
+                        <div className="flex flex-wrap gap-2">
+                          <a href={mediaUrl} target="_blank" rel="noreferrer" className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-indigo-700 bg-white hover:bg-indigo-50">Open in Firebase</a>
+                          {azureUrl && (
+                            <a href={azureUrl} target="_blank" rel="noreferrer" className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-emerald-700 bg-white hover:bg-emerald-50">Open in Azure</a>
+                          )}
+                        </div>
                     </div>
           </div>
                   );

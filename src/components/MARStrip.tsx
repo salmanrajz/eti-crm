@@ -113,6 +113,14 @@ export function MARStrip({ user }: MARStripProps) {
           mar: targetData?.mar || 0
         });
         setLoading(false);
+      }, (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          return;
+        }
+        
+        console.error('Error in MARStrip listener:', error);
       });
 
       return unsubscribe;

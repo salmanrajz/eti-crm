@@ -313,6 +313,17 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
           console.error('Error processing metrics snapshot:', error);
         }
       }, (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          activeListeners.delete(listenerKey);
+          if (metricsUnsubscribeRef.current) {
+            metricsUnsubscribeRef.current();
+            metricsUnsubscribeRef.current = null;
+          }
+          return;
+        }
+        
         console.error('Error in metrics listener:', error);
         activeListeners.delete(listenerKey);
       });
@@ -394,6 +405,16 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
           console.error('Error processing leads snapshot:', error);
         }
       }, (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          if (leadsUnsubscribeRef.current) {
+            leadsUnsubscribeRef.current();
+            leadsUnsubscribeRef.current = null;
+          }
+          return;
+        }
+        
         console.error('Error in leads listener:', error);
       });
 

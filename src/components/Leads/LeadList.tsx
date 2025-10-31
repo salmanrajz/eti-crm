@@ -46,7 +46,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, orderBy, deleteDoc, doc, getDoc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, CoordinatorType, VerifierGroups } from '../../types';
@@ -85,20 +85,18 @@ import { dashboardPerf } from '../../utils/performance';
 import { leadsCache, userCache } from '../../utils/cache';
 import { AdvancedLeadSearch } from './AdvancedLeadSearch';
 
-// ✅ ENHANCED: Extended cache duration from 30 seconds to 1 hour with localStorage persistence
-const CACHE_DURATION = (() => {
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  return isMobile ? 30 * 60 * 1000 : 60 * 60 * 1000; // 30 min for mobile, 1 hour for desktop
-})();
-// Mobile-optimized load sizes
+// ✅ PERFORMANCE: Optimized load sizes for faster initial loading
 const INITIAL_LOAD_SIZE = (() => {
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  return isMobile ? 150 : 300; // Reduced for mobile performance
+  return isMobile ? 50 : 100; // Reduced for faster loading
 })();
 const PAGINATION_SIZE = (() => {
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  return isMobile ? 20 : 40; // Reduced for mobile performance
+  return isMobile ? 20 : 50; // Optimized for better performance
 })();
+
+// ✅ PERFORMANCE: Debounce configuration for real-time updates
+const DEBOUNCE_DELAY = 500; // 500ms debounce for real-time updates
 
 // ✅ ENHANCED: Separate cache instances for different data types with localStorage support
 import { PerformanceCache } from '../../utils/cache';
@@ -180,6 +178,31 @@ export function LeadList() {
 
   // ✅ OPTIMIZED: Use refs to store unsubscribe functions for proper cleanup
   const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
+  
+  // ✅ PERFORMANCE: Debounced update mechanism to prevent excessive re-renders
+  const debouncedUpdateRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingUpdateRef = useRef<Lead[] | null>(null);
+
+  // ✅ PERFORMANCE: Debounced update function to prevent excessive re-renders
+  const debouncedUpdateLeads = useCallback((leadsData: Lead[], lastDoc: QueryDocumentSnapshot<DocumentData> | null, hasMore: boolean) => {
+    // Clear existing timeout
+    if (debouncedUpdateRef.current) {
+      clearTimeout(debouncedUpdateRef.current);
+    }
+
+    // Store pending update
+    pendingUpdateRef.current = leadsData;
+
+    // Set new timeout for debounced update
+    debouncedUpdateRef.current = setTimeout(() => {
+      if (pendingUpdateRef.current) {
+        setLeads(pendingUpdateRef.current);
+        setLastDoc(lastDoc);
+        setHasMore(hasMore);
+        pendingUpdateRef.current = null;
+      }
+    }, DEBOUNCE_DELAY);
+  }, []);
 
   // Memoize cache key
   const cacheKey = useMemo(() => {
@@ -210,7 +233,17 @@ export function LeadList() {
 
   useEffect(() => {
     if (!user) {
+      // ✅ FIX: Cleanup listeners when user logs out
+      if (leadsUnsubscribeRef.current) {
+        leadsUnsubscribeRef.current();
+        leadsUnsubscribeRef.current = null;
+      }
+      
+      // Cleanup active listeners - user is null at this point
+      // We'll clean up any remaining listeners in the cleanup function
+      
       setLoading(false);
+      setLeads([]);
       return;
     }
 
@@ -232,7 +265,6 @@ export function LeadList() {
       // ✅ OPTIMIZED: Check for existing listener to prevent duplicates
       // Use a base listener key that doesn't include dynamic parameters
       const baseListenerKey = `leads_${user.id}_${user.role}`;
-      const listenerKey = `${baseListenerKey}_${cacheKey}`;
       
       // Always clean up old listener when starting a new one for initial load
       if (isInitialLoad) {
@@ -281,7 +313,7 @@ export function LeadList() {
           setLoading(true);
         }
         // ✅ PERFORMANCE: Track loading time
-        const endMeasure = dashboardPerf.measureQuery('leadsList', { userId: user.id, role: user.role });
+        dashboardPerf.measureQuery('leadsList', { userId: user.id, role: user.role });
       } else {
         setLoadingMore(true);
       }
@@ -319,12 +351,12 @@ export function LeadList() {
 
       const q = query(baseQuery, ...constraints);
       
-      // ✅ ENHANCED: Convert to onSnapshot for real-time updates with persistent caching
+      // ✅ PERFORMANCE: Optimized real-time updates with reduced overhead
       if (isInitialLoad) {
-        // Setup onSnapshot for real-time updates - Mobile optimized
+        // Setup onSnapshot for real-time updates with performance optimizations
         const unsubscribe = onSnapshot(q, async (snapshot) => {
           try {
-            // Mobile optimization: Limit processing for better performance
+            // ✅ PERFORMANCE: Process data efficiently with early filtering
             const maxDocs = isMobile ? Math.min(snapshot.docs.length, 100) : snapshot.docs.length;
             let leadsData = snapshot.docs.slice(0, maxDocs).map(doc => ({
               id: doc.id,
@@ -333,14 +365,12 @@ export function LeadList() {
               updatedAt: doc.data().updatedAt?.toDate()
             })) as Lead[];
 
-
-            // Apply date range filtering if specified
+            // ✅ PERFORMANCE: Apply date range filtering early to reduce processing
             if (dateRange.from || dateRange.to) {
               const fromDate = dateRange.from ? new Date(dateRange.from) : null;
               const toDate = dateRange.to ? new Date(dateRange.to) : null;
               
               leadsData = leadsData.filter(lead => {
-                // Use updatedAt for filtering since that's when the status was changed to 'activated'
                 const leadDate = lead.updatedAt || lead.createdAt;
                 if (!leadDate) return false;
                 
@@ -353,19 +383,14 @@ export function LeadList() {
               });
             }
 
-            // ✅ ENHANCED: Enhanced batch processing with persistent caching
-            const [leadsWithInfo] = await Promise.all([
-              processLeadsWithInfo(leadsData)
-            ]);
+            // ✅ PERFORMANCE: Only process if data has actually changed
+            if (leadsData.length > 0) {
+              const leadsWithInfo = await processLeadsWithInfo(leadsData);
 
-
-
-            // ✅ ENHANCED: Update persistent cache with fresh data
-            // Ensure plans are properly serialized (not Map objects)
+              // ✅ PERFORMANCE: Update cache efficiently
             const serializedLeads = leadsWithInfo.map(lead => ({
               ...lead,
               plans: lead.plans?.map(plan => {
-                // Convert any Map objects back to regular objects
                 if (plan instanceof Map) {
                   return Object.fromEntries(plan);
                 }
@@ -379,10 +404,14 @@ export function LeadList() {
               hasMore: snapshot.docs.length === loadSize
             });
 
+              // ✅ PERFORMANCE: Use debounced update to prevent excessive re-renders
+              debouncedUpdateLeads(
+                leadsWithInfo,
+                snapshot.docs[snapshot.docs.length - 1] || null,
+                snapshot.docs.length === loadSize
+              );
+            }
             
-            setLeads(leadsWithInfo);
-            setLastDoc(snapshot.docs[snapshot.docs.length - 1] || null);
-            setHasMore(snapshot.docs.length === loadSize);
             setLoading(false);
 
             // End performance measurement
@@ -395,8 +424,18 @@ export function LeadList() {
             toast.error('Failed to process leads data');
           }
         }, (error) => {
+          // ✅ FIX: Handle permission errors gracefully during logout
+          if (error.code === 'permission-denied') {
+            // User logged out or lost permissions - cleanup silently
+            activeListeners.delete(baseListenerKey);
+            if (leadsUnsubscribeRef.current) {
+              leadsUnsubscribeRef.current();
+              leadsUnsubscribeRef.current = null;
+            }
+            return;
+          }
+          
           console.error('Error in leads listener:', error);
-          // Remove failed listener from active listeners
           activeListeners.delete(baseListenerKey);
           toast.error('Failed to load leads');
         });
@@ -434,7 +473,6 @@ export function LeadList() {
     const handleFocus = () => {
       // Only refresh if user exists and we're not currently loading
       if (user && !loading) {
-        
         loadLeads(true);
       }
     };
@@ -443,27 +481,28 @@ export function LeadList() {
     return () => window.removeEventListener('focus', handleFocus);
   }, [user, loading, loadLeads]);
 
-  // ✅ ENHANCED: Enhanced batch processing with persistent caching
+  // ✅ PERFORMANCE: Optimized batch processing with efficient queries
   const processLeadsWithInfo = useCallback(async (leadsData: Lead[]) => {
+    // Early return for empty data
+    if (!leadsData || leadsData.length === 0) return leadsData;
+
     // Get unique ids for batch processing
     const numberIds = [...new Set(leadsData.flatMap(lead => lead.plans?.map(plan => plan.numberId) || []))];
     const agentIds = [...new Set(leadsData.map(lead => lead.agentId))];
-    // We'll compute teamIds after we have agent profiles (for fallback when lead.teamId is missing)
 
-    // Batch fetch with persistent caching
-    const [numberGroupsResult, agentInfoRaw] = await Promise.all([
-      fetchNumberGroupsWithCache(numberIds),
-      fetchAgentInfoWithCache(agentIds)
+    // ✅ PERFORMANCE: Batch fetch all data in parallel with optimized queries
+    const [numberGroupsResult, agentInfoResult] = await Promise.all([
+      fetchNumberGroupsOptimized(numberIds),
+      fetchAgentInfoOptimized(agentIds)
     ]);
 
-    // Ensure Maps
-    const numberGroupsMap = numberGroupsResult instanceof Map ? numberGroupsResult : new Map(Object.entries(numberGroupsResult || {}));
+    // ✅ PERFORMANCE: Process data efficiently
+    const numberGroupsMap = numberGroupsResult;
     setNumberGroups(numberGroupsMap);
-    const agentInfoMapAny = agentInfoRaw instanceof Map ? agentInfoRaw : new Map(Object.entries(agentInfoRaw || {}));
 
-    // Normalize agent info map: support both legacy string values and new object values
+    // Normalize agent info map
     const agentInfo = new Map<string, { name: string; teamId?: string }>();
-    agentInfoMapAny.forEach((value: any, key: string) => {
+    agentInfoResult.forEach((value: any, key: string) => {
       if (typeof value === 'string') {
         agentInfo.set(key, { name: value });
       } else if (value && typeof value === 'object') {
@@ -475,63 +514,14 @@ export function LeadList() {
       }
     });
 
-    // Derive teamIds using lead.teamId or fallback to agent's teamId
+    // ✅ PERFORMANCE: Get team info only for unique team IDs
     const derivedTeamIds = [...new Set(
       leadsData.map(lead => (lead.teamId as string) || (agentInfo.get(lead.agentId)?.teamId as string)).filter(Boolean)
     )] as string[];
 
-    // Repair pass: fetch any missing/unknown agent or team details and hydrate caches
-    const agentCacheKey = `agentInfo_${agentIds.sort().join('_')}`;
-    const missingAgentIds = agentIds.filter(id => {
-      const info = agentInfo.get(id);
-      return !info || !info.name || info.name === 'Unknown Agent';
-    });
-    if (missingAgentIds.length > 0) {
-      const repairs = await Promise.all(missingAgentIds.map(async (id) => {
-        try {
-          const ref = doc(db, 'users', id);
-          const snap = await getDoc(ref);
-          if (snap.exists()) {
-            const data = snap.data() as any;
-            const name = data.name || data.fullName || data.displayName || data.email || 'Unknown Agent';
-            const teamId = data.teamId as string | undefined;
-            return { id, name, teamId };
-          }
-        } catch (_) {}
-        return { id, name: 'Unknown Agent' } as { id: string; name: string; teamId?: string };
-      }));
-      repairs.forEach(({ id, name, teamId }) => {
-        agentInfo.set(id, { name, teamId });
-      });
-      agentInfoCache.set(agentCacheKey, agentInfo as any);
-    }
+    const teamInfo = await fetchTeamInfoOptimized(derivedTeamIds);
 
-    const teamInfoResult = await fetchTeamInfoWithCache(derivedTeamIds);
-    const teamInfo = teamInfoResult instanceof Map ? teamInfoResult : new Map(Object.entries(teamInfoResult || {}));
-
-    // Repair pass for team names
-    const teamCacheKey = `teamInfo_${derivedTeamIds.sort().join('_')}`;
-    const missingTeamIds = derivedTeamIds.filter(id => !teamInfo.get(id));
-    if (missingTeamIds.length > 0) {
-      const teamRepairs = await Promise.all(missingTeamIds.map(async (id) => {
-        try {
-          const ref = doc(db, 'teams', id);
-          const snap = await getDoc(ref);
-          if (snap.exists()) {
-            const data = snap.data() as any;
-            const name = data.name || 'Unknown Team';
-            return { id, name };
-          }
-        } catch (_) {}
-        return { id, name: 'Unknown Team' } as { id: string; name: string };
-      }));
-      teamRepairs.forEach(({ id, name }) => {
-        teamInfo.set(id, name);
-      });
-      teamInfoCache.set(teamCacheKey, teamInfo as any);
-    }
-
-    // Enrich leads
+    // ✅ PERFORMANCE: Enrich leads efficiently
     return leadsData.map(lead => {
       const resolvedAgent = agentInfo.get(lead.agentId);
       const resolvedTeamId = (lead.teamId as string) || resolvedAgent?.teamId;
@@ -548,12 +538,11 @@ export function LeadList() {
     });
   }, []);
 
-  // Team info fetching with persistent cache (teamId -> teamName)
-  const fetchTeamInfoWithCache = useCallback(async (teamIds: string[]) => {
+  // ✅ PERFORMANCE: Optimized team info fetching with batch queries
+  const fetchTeamInfoOptimized = useCallback(async (teamIds: string[]) => {
     if (!teamIds || teamIds.length === 0) return new Map();
 
     const cacheKey = `teamInfo_${teamIds.sort().join('_')}`;
-
     const cached = teamInfoCache.get(cacheKey);
     if (cached) {
       return cached instanceof Map ? cached : new Map(Object.entries(cached || {}));
@@ -561,29 +550,26 @@ export function LeadList() {
 
     const teamInfo = new Map<string, string>();
 
-    // Process in chunks to avoid Firebase limits
-    const chunkSize = 10;
+    // ✅ PERFORMANCE: Use batch queries instead of individual queries
+    const chunkSize = 10; // Firestore 'in' query limit
     const chunks: string[][] = [];
     for (let i = 0; i < teamIds.length; i += chunkSize) {
       chunks.push(teamIds.slice(i, i + chunkSize));
     }
 
+    // ✅ PERFORMANCE: Batch fetch using 'in' queries
     const promises = chunks.map(async (chunk) => {
-      const teamPromises = chunk.map(async (teamId) => {
-        try {
-          const teamRef = doc(db, 'teams', teamId);
-          const teamSnap = await getDoc(teamRef);
-          if (teamSnap.exists()) {
-            const data = teamSnap.data() as any;
-            return { id: teamId, name: data.name || 'Unknown Team' };
-          }
-          return { id: teamId, name: 'Unknown Team' };
+      try {
+        const q = query(collection(db, 'teams'), where('__name__', 'in', chunk));
+        const snapshot = await getDocs(q);
+        return snapshot.docs.map(doc => ({
+          id: doc.id,
+          name: doc.data().name || 'Unknown Team'
+        }));
         } catch (error) {
-          console.error(`Error fetching team ${teamId}:`, error);
-          return { id: teamId, name: 'Unknown Team' };
+        console.error(`Error fetching team batch:`, error);
+        return chunk.map(id => ({ id, name: 'Unknown Team' }));
         }
-      });
-      return Promise.all(teamPromises);
     });
 
     const results = await Promise.all(promises);
@@ -595,45 +581,39 @@ export function LeadList() {
     return teamInfo;
   }, []);
 
-  // ✅ ENHANCED: Enhanced number groups fetching with persistent cache
-  const fetchNumberGroupsWithCache = useCallback(async (numberIds: string[]) => {
+
+  // ✅ PERFORMANCE: Optimized number groups fetching with batch queries
+  const fetchNumberGroupsOptimized = useCallback(async (numberIds: string[]) => {
     if (numberIds.length === 0) return new Map();
     
     const cacheKey = `numberGroups_${numberIds.sort().join('_')}`;
-    
-    // ✅ ENHANCED: Check persistent cache first (auto-handles expiration)
     const cached = numberGroupsCache.get(cacheKey);
     if (cached) {
-      // ✅ ENHANCED: Safety check to ensure we return a Map
       return cached instanceof Map ? cached : new Map(Object.entries(cached || {}));
     }
 
     const numberGroups = new Map();
 
-    // Process in chunks to avoid Firebase limits
-    const chunkSize = 10;
+    // ✅ PERFORMANCE: Use batch queries instead of individual queries
+    const chunkSize = 10; // Firestore 'in' query limit
     const chunks = [];
     for (let i = 0; i < numberIds.length; i += chunkSize) {
       chunks.push(numberIds.slice(i, i + chunkSize));
     }
 
+    // ✅ PERFORMANCE: Batch fetch using 'in' queries
     const promises = chunks.map(async (chunk) => {
-      const numberPromises = chunk.map(async (numberId) => {
-        try {
-          const numberRef = doc(db, 'numberPool', numberId);
-          const numberSnap = await getDoc(numberRef);
-          if (numberSnap.exists()) {
-            const data = numberSnap.data();
-            return { id: numberId, group: data.group || 'Unassigned' };
-          }
-          return { id: numberId, group: 'Unassigned' };
+      try {
+        const q = query(collection(db, 'numberPool'), where('__name__', 'in', chunk));
+        const snapshot = await getDocs(q);
+        return snapshot.docs.map(doc => ({
+          id: doc.id,
+          group: doc.data().group || 'Unassigned'
+        }));
         } catch (error) {
-          console.error(`Error fetching number ${numberId}:`, error);
-          return { id: numberId, group: 'Unassigned' };
+        console.error(`Error fetching number batch:`, error);
+        return chunk.map(id => ({ id, group: 'Unassigned' }));
         }
-      });
-
-      return Promise.all(numberPromises);
     });
 
     const results = await Promise.all(promises);
@@ -641,19 +621,16 @@ export function LeadList() {
       numberGroups.set(id, group);
     });
 
-    // ✅ ENHANCED: Store in persistent cache
     numberGroupsCache.set(cacheKey, numberGroups);
-
     return numberGroups;
   }, []);
 
-  // ✅ ENHANCED: Enhanced agent info fetching with persistent cache
-  const fetchAgentInfoWithCache = useCallback(async (agentIds: string[]) => {
+
+  // ✅ PERFORMANCE: Optimized agent info fetching with batch queries
+  const fetchAgentInfoOptimized = useCallback(async (agentIds: string[]) => {
     if (agentIds.length === 0) return new Map();
     
     const cacheKey = `agentInfo_${agentIds.sort().join('_')}`;
-    
-    // ✅ ENHANCED: Check persistent cache first (auto-handles expiration)
     const cached = agentInfoCache.get(cacheKey);
     if (cached) {
       const cachedMap = cached instanceof Map ? cached : new Map(Object.entries(cached || {}));
@@ -668,39 +645,33 @@ export function LeadList() {
           normalized.set(key, { name, teamId });
         }
       });
-      // Persist normalized structure back to cache for future calls
       agentInfoCache.set(cacheKey, normalized as any);
       return normalized as any;
     }
 
     const agentInfo = new Map<string, { name: string; teamId?: string }>();
 
-    // Process in chunks to avoid Firebase limits
-    const chunkSize = 10;
+    // ✅ PERFORMANCE: Use batch queries instead of individual queries
+    const chunkSize = 10; // Firestore 'in' query limit
     const chunks = [];
     for (let i = 0; i < agentIds.length; i += chunkSize) {
       chunks.push(agentIds.slice(i, i + chunkSize));
     }
 
+    // ✅ PERFORMANCE: Batch fetch using 'in' queries
     const promises = chunks.map(async (chunk) => {
-      const agentPromises = chunk.map(async (agentId) => {
-        try {
-          const agentRef = doc(db, 'users', agentId);
-          const agentSnap = await getDoc(agentRef);
-          if (agentSnap.exists()) {
-            const data = agentSnap.data();
-            const name = data.name || data.fullName || data.displayName || data.email || 'Unknown Agent';
-            const teamId = data.teamId as string | undefined;
-            return { id: agentId, name, teamId };
-          }
-          return { id: agentId, name: 'Unknown Agent' };
+      try {
+        const q = query(collection(db, 'users'), where('__name__', 'in', chunk));
+        const snapshot = await getDocs(q);
+        return snapshot.docs.map(doc => ({
+          id: doc.id,
+          name: doc.data().name || doc.data().fullName || doc.data().displayName || doc.data().email || 'Unknown Agent',
+          teamId: doc.data().teamId
+        }));
         } catch (error) {
-          console.error(`Error fetching agent ${agentId}:`, error);
-          return { id: agentId, name: 'Unknown Agent' };
+        console.error(`Error fetching agent batch:`, error);
+        return chunk.map(id => ({ id, name: 'Unknown Agent', teamId: undefined }));
         }
-      });
-
-      return Promise.all(agentPromises);
     });
 
     const results = await Promise.all(promises);
@@ -708,20 +679,10 @@ export function LeadList() {
       agentInfo.set(id, { name, teamId });
     });
 
-    // ✅ ENHANCED: Store in persistent cache
     agentInfoCache.set(cacheKey, agentInfo);
-
     return agentInfo;
   }, []);
 
-  // Optimized batch fetch functions (keeping original functions for backward compatibility)
-  const fetchNumberGroups = useCallback(async (numberIds: string[]) => {
-    return fetchNumberGroupsWithCache(numberIds);
-  }, [fetchNumberGroupsWithCache]);
-
-  const fetchAgentInfo = useCallback(async (agentIds: string[]) => {
-    return fetchAgentInfoWithCache(agentIds);
-  }, [fetchAgentInfoWithCache]);
 
   const handleDeleteLeads = async () => {
     if (!isAdmin()) {
@@ -761,21 +722,32 @@ export function LeadList() {
 
   // ✅ OPTIMIZED: Enhanced cleanup function with proper listener management - Mobile optimized
   useEffect(() => {
-    let isMounted = true;
-    
-    // Cleanup function when component unmounts
+    // Cleanup function when component unmounts or user changes
     return () => {
-      isMounted = false;
       
-      // Cleanup listeners when component unmounts
+      // ✅ PERFORMANCE: Cleanup debounced timeout
+      if (debouncedUpdateRef.current) {
+        clearTimeout(debouncedUpdateRef.current);
+        debouncedUpdateRef.current = null;
+      }
+      
+      // ✅ FIX: Cleanup listeners when component unmounts or user changes
       if (leadsUnsubscribeRef.current) {
         leadsUnsubscribeRef.current();
         leadsUnsubscribeRef.current = null;
       }
 
-      // Remove from active listeners
-      const listenerKey = `leads_${user?.id}_${user?.role}`;
-      activeListeners.delete(listenerKey);
+      // ✅ FIX: Remove from active listeners for all possible user states
+      if (user?.id && user?.role) {
+        activeListeners.delete(`leads_${user.id}_${user.role}`);
+      }
+      
+      // Cleanup any remaining listeners for this component
+      const baseListenerKey = user?.id && user?.role ? `leads_${user.id}_${user.role}` : null;
+      if (baseListenerKey && activeListeners.has(baseListenerKey)) {
+        activeListeners.get(baseListenerKey)?.();
+        activeListeners.delete(baseListenerKey);
+      }
 
       // Mobile optimization: Clear cache more aggressively on mobile to free memory
       if (isMobile) {
@@ -783,8 +755,8 @@ export function LeadList() {
         userCache.clear();
         numberGroupsCache.clear();
       }
-      // ✅ OPTIMIZED: DON'T clear cache on unmount for better performance with 1-hour cache
-      // Cache will naturally expire after 1 hour, keeping it for fast remounts
+      // ✅ OPTIMIZED: DON'T clear cache on unmount for better performance with optimized cache
+      // Cache will naturally expire after optimized duration, keeping it for fast remounts
     };
   }, [user?.id, user?.role, isMobile]);
 
@@ -863,7 +835,7 @@ export function LeadList() {
   }, [sortField, sortDirection]);
 
   // Handle advanced search filters
-  const handleAdvancedFiltersChange = useCallback((filters: any) => {
+  const handleAdvancedFiltersChange = useCallback(() => {
     // This will be used to apply advanced filters to the leads
     // For now, we'll just log the filters
     

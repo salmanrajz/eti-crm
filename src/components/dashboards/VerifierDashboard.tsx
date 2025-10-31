@@ -1103,6 +1103,14 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                               onSnapshot(query(logsCol, orderBy('createdAt', 'asc')), (snap) => {
                                 const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                                 setWhatsAppLogs(rows as any[]);
+                              }, (error) => {
+                                // ✅ FIX: Handle permission errors gracefully during logout
+                                if (error.code === 'permission-denied') {
+                                  // User logged out or lost permissions - cleanup silently
+                                  return;
+                                }
+                                
+                                console.error('Error in VerifierDashboard WhatsApp logs listener:', error);
                               });
                             }}
                             title="WhatsApp Verification"

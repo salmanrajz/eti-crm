@@ -147,6 +147,14 @@ export default function LeaveApplicationModal({ user, role, teamId, open, onClos
         appliedAt: doc.data().appliedAt?.toDate ? doc.data().appliedAt.toDate() : undefined
       })) as LeaveApp[]);
       setLoading(false);
+    }, (error) => {
+      // ✅ FIX: Handle permission errors gracefully during logout
+      if (error.code === 'permission-denied') {
+        // User logged out or lost permissions - cleanup silently
+        return;
+      }
+      
+      console.error('Error in LeaveApplicationModal listener:', error);
     });
     return () => unsub();
   }, [role, user?.id, teamId]);
@@ -486,6 +494,7 @@ export default function LeaveApplicationModal({ user, role, teamId, open, onClos
                                       <div className="flex flex-col">
                                         <span className="font-semibold text-gray-900">{format(app.date, 'EEEE, MMMM d, yyyy')}</span>
                                         <span className="text-sm text-gray-600">{app.reason}</span>
+                                        <span className="text-xs text-gray-700 font-medium">By: {app.agentName || 'Unknown'}</span>
                                         <span className="text-xs text-gray-500">Applied: {app.appliedAt ? format(app.appliedAt, 'MMM d, yyyy h:mm a') : 'N/A'}</span>
                                       </div>
                                     </div>
@@ -718,6 +727,7 @@ export default function LeaveApplicationModal({ user, role, teamId, open, onClos
                                 <div className="flex flex-col">
                                   <span className="font-semibold text-gray-900">{format(app.date, 'EEEE, MMMM d, yyyy')}</span>
                                   <span className="text-sm text-gray-600">{app.reason}</span>
+                                  <span className="text-xs text-gray-700 font-medium">By: {app.agentName || 'Unknown'}</span>
                                   <span className="text-xs text-gray-500">Applied: {app.appliedAt ? format(app.appliedAt, 'MMM d, yyyy h:mm a') : 'N/A'}</span>
                                 </div>
                               </div>

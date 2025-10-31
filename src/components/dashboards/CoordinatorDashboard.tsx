@@ -226,6 +226,14 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         };
       }) as StatusCheck[];
       setStatusChecks(checks);
+    }, (error) => {
+      // ✅ FIX: Handle permission errors gracefully during logout
+      if (error.code === 'permission-denied') {
+        // User logged out or lost permissions - cleanup silently
+        return;
+      }
+      
+      console.error('Error in CoordinatorDashboard listener:', error);
     });
 
     return () => {

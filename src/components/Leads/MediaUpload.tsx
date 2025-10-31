@@ -41,6 +41,7 @@ import { db } from '../../lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { Upload, X, CheckCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { uploadVerificationFileToAzure } from '../../utils/azureUpload';
 
 interface MediaUploadProps {
   leadId: string;
@@ -82,14 +83,17 @@ export function MediaUpload({ leadId, onUploadComplete }: MediaUploadProps) {
 
     try {
       const urls = await Promise.all(uploadPromises);
+      const azureResults = await Promise.allSettled(files.map((file) => uploadVerificationFileToAzure(leadId, file)));
       const mediaFiles = urls.map((url, index) => {
         const file = files[index];
         const isPdf = file.type === 'application/pdf';
         const type = (isPdf ? 'pdf' : file.type.split('/')[0]) as 'image' | 'video' | 'audio' | 'pdf';
+        const azureUrl = (azureResults[index].status === 'fulfilled') ? (azureResults[index] as PromiseFulfilledResult<{ success: boolean; url: string; path: string }>).value.url : undefined;
         return {
           url,
           type,
-          name: file.name
+          name: file.name,
+          azureUrl
         };
       });
 
