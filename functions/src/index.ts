@@ -40,9 +40,11 @@
  * ===============================================================================
  */
 
+import 'dotenv/config';
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
 import { updateNumberPoolStatsOnCreate, updateNumberPoolStatsOnDelete, initializeNumberPoolStats } from './numberPoolStats';
+import { uploadVerificationMediaToAzure } from './azureStorage';
 import { handleClaimExpiry, realtimeClaimExpiry, smartBatchClaimExpiry, emergencyClaimExpiry } from './claimExpiry';
 import { handleReservationExpiry, processReservationExpiry, testReservationExpiry, triggerReservationExpiry, backupReservationExpiry } from './simpleReservationExpiry';
 
@@ -691,11 +693,27 @@ export const whatsappWebhook = functions.https.onRequest(async (req, res) => {
     }
 
     const batch = db.batch();
+
+    async function getLatestLeadByCustomerNumber(value: string) {
+      try {
+        const snap = await db.collection('leads')
+          .where('customerNumber', '==', value)
+          .orderBy('createdAt', 'desc')
+          .limit(1)
+          .get();
+        if (!snap.empty) {
+          return snap.docs[0];
+        }
+      } catch (e) {
+        console.warn('getLatestLeadByCustomerNumber failed:', e);
+      }
+      return null;
+    }
     for (const msg of messages) {
       const from = (msg.from || '').replace(/\D/g, '');
       const text = msg.text?.body || '';
       console.log('Inbound message from:', from, 'text length:', text.length);
-      // Resolve leadId via routing map first, then by phone, if not provided
+      // Resolve leadId via routing map first; we will still prefer the newest lead by number
       let resolvedLeadId = leadId;
       if (!resolvedLeadId) {
         try {
@@ -713,19 +731,32 @@ export const whatsappWebhook = functions.https.onRequest(async (req, res) => {
         }
       }
 
-      // Fallback by matching last 8 or 10 digits
-      if (!resolvedLeadId) {
-        try {
-          const last8 = from.slice(-8);
-          const last10 = from.slice(-10);
-          async function findLeadByCustomerNumber(num: string) {
-            const snap = await db.collection('leads').where('customerNumber', '==', num).limit(1).get();
-            return snap.empty ? null : snap.docs[0].id;
-          }
-          resolvedLeadId = (await findLeadByCustomerNumber(last8)) || (await findLeadByCustomerNumber(last10)) || '';
-        } catch (e) {
-          console.warn('Lead resolution by phone failed:', e);
+      // Normalize WhatsApp number 971XXXXXXXXX -> 0XXXXXXXXX and prefer the newest lead by customerNumber
+      try {
+        let normalizedUae = from;
+        if (from.startsWith('971')) {
+          normalizedUae = '0' + from.slice(3);
+          console.log(`Normalized ${from} -> ${normalizedUae} (971 -> 0)`);
+        } else if (from.startsWith('+971')) {
+          normalizedUae = '0' + from.slice(4);
+          console.log(`Normalized ${from} -> ${normalizedUae} (+971 -> 0)`);
+        } else if (!from.startsWith('0') && from.length === 10) {
+          normalizedUae = '0' + from;
+          console.log(`Normalized ${from} -> ${normalizedUae} (10-digit -> 0)`);
         }
+
+        const latestLeadDoc = await getLatestLeadByCustomerNumber(normalizedUae);
+        if (latestLeadDoc) {
+          const latestId = latestLeadDoc.id;
+          if (resolvedLeadId && resolvedLeadId !== latestId) {
+            console.log(`Overriding resolvedLeadId ${resolvedLeadId} -> latest by number ${latestId}`);
+          }
+          resolvedLeadId = latestId;
+        } else if (!resolvedLeadId) {
+          console.log(`No lead found by customerNumber (${normalizedUae}) and no prior resolution`);
+        }
+      } catch (e) {
+        console.warn('Latest lead resolution by customerNumber failed:', e);
       }
       if (!resolvedLeadId) {
         // Store unmatched for later reconciliation
@@ -979,6 +1010,9 @@ export { handleReservationExpiry, processReservationExpiry, testReservationExpir
 
 // Export bulk DNC import functions
 export { bulkDNCImport, bulkDNCImportStatus } from './bulkDNCImport';
+
+// Export Azure upload callable
+export { uploadVerificationMediaToAzure };
 
 /**
  * ===============================================================================

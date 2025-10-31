@@ -480,7 +480,10 @@ match /expenses/{expenseId} {
     (hasRole('manager') && getSafeUserData().role != null && request.resource.data.teamId == getSafeUserData().teamId)
   );
   
-  allow delete: if hasRole('admin');
+  allow delete: if isSignedIn() && (
+    hasRole('admin') ||
+    (hasRole('manager') && resource.data.teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId)
+  );
 }
 
 

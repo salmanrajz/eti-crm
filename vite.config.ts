@@ -147,7 +147,16 @@ export default defineConfig({
   build: {
     // Ensure proper module format
     target: 'esnext',
-    minify: 'esbuild',
+    minify: 'terser', // Use terser for better obfuscation
+    terserOptions: {
+      compress: {
+        drop_console: true, // Remove console.log in production
+        drop_debugger: true,
+        pure_funcs: ['console.log', 'console.info', 'console.debug', 'console.warn']
+      },
+      // Important: Do not mangle top-level or properties to avoid breaking React/runtime across chunks
+      mangle: false
+    },
     rollupOptions: {
       output: {
         // Improve chunk splitting for better loading
@@ -165,7 +174,7 @@ export default defineConfig({
       }
     },
     chunkSizeWarningLimit: 1000,
-    // Ensure source maps for debugging
+    // Disable source maps in production for security
     sourcemap: false
   },
   optimizeDeps: {

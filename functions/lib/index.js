@@ -41,12 +41,15 @@
  * ===============================================================================
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkNumberStatusHTTP = exports.checkNumberStatus = exports.recomputeNumberPoolStats = exports.bulkDNCImportStatus = exports.bulkDNCImport = exports.backupReservationExpiry = exports.triggerReservationExpiry = exports.testReservationExpiry = exports.processReservationExpiry = exports.handleReservationExpiry = exports.emergencyClaimExpiry = exports.smartBatchClaimExpiry = exports.realtimeClaimExpiry = exports.handleClaimExpiry = exports.updateNumberPoolStatsOnDelete = exports.updateNumberPoolStatsOnCreate = exports.resetUserPassword = exports.whatsappWebhook = exports.checkNumberAvailability = exports.processLeadRejection = exports.claimNumber = exports.backfillNumberTokens = exports.onNumberPoolWrite = void 0;
+exports.checkNumberStatusHTTP = exports.checkNumberStatus = exports.recomputeNumberPoolStats = exports.uploadVerificationMediaToAzure = exports.bulkDNCImportStatus = exports.bulkDNCImport = exports.backupReservationExpiry = exports.triggerReservationExpiry = exports.testReservationExpiry = exports.processReservationExpiry = exports.handleReservationExpiry = exports.emergencyClaimExpiry = exports.smartBatchClaimExpiry = exports.realtimeClaimExpiry = exports.handleClaimExpiry = exports.updateNumberPoolStatsOnDelete = exports.updateNumberPoolStatsOnCreate = exports.resetUserPassword = exports.whatsappWebhook = exports.checkNumberAvailability = exports.processLeadRejection = exports.claimNumber = exports.backfillNumberTokens = exports.onNumberPoolWrite = void 0;
+require("dotenv/config");
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const numberPoolStats_1 = require("./numberPoolStats");
 Object.defineProperty(exports, "updateNumberPoolStatsOnCreate", { enumerable: true, get: function () { return numberPoolStats_1.updateNumberPoolStatsOnCreate; } });
 Object.defineProperty(exports, "updateNumberPoolStatsOnDelete", { enumerable: true, get: function () { return numberPoolStats_1.updateNumberPoolStatsOnDelete; } });
+const azureStorage_1 = require("./azureStorage");
+Object.defineProperty(exports, "uploadVerificationMediaToAzure", { enumerable: true, get: function () { return azureStorage_1.uploadVerificationMediaToAzure; } });
 const claimExpiry_1 = require("./claimExpiry");
 Object.defineProperty(exports, "handleClaimExpiry", { enumerable: true, get: function () { return claimExpiry_1.handleClaimExpiry; } });
 Object.defineProperty(exports, "realtimeClaimExpiry", { enumerable: true, get: function () { return claimExpiry_1.realtimeClaimExpiry; } });
@@ -595,11 +598,36 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
             return;
         }
         const batch = db.batch();
+        async function getLatestLeadByCustomerNumber(value) {
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+            try {
+                const snap = await db.collection('leads')
+                    .where('customerNumber', '==', value)
+                    .get();
+                if (snap.empty)
+                    return null;
+                let newest = snap.docs[0];
+                let newestTs = (((_c = (_b = (_a = newest.data()) === null || _a === void 0 ? void 0 : _a.createdAt) === null || _b === void 0 ? void 0 : _b.toDate) === null || _c === void 0 ? void 0 : _c.call(_b)) || ((_d = newest.data()) === null || _d === void 0 ? void 0 : _d.createdAt) || ((_f = (_e = newest.createTime) === null || _e === void 0 ? void 0 : _e.toDate) === null || _f === void 0 ? void 0 : _f.call(_e)));
+                for (const doc of snap.docs) {
+                    const data = doc.data();
+                    const ts = (((_h = (_g = data === null || data === void 0 ? void 0 : data.createdAt) === null || _g === void 0 ? void 0 : _g.toDate) === null || _h === void 0 ? void 0 : _h.call(_g)) || (data === null || data === void 0 ? void 0 : data.createdAt) || ((_k = (_j = doc.createTime) === null || _j === void 0 ? void 0 : _j.toDate) === null || _k === void 0 ? void 0 : _k.call(_j)));
+                    if (!newestTs || (ts && ts > newestTs)) {
+                        newest = doc;
+                        newestTs = ts;
+                    }
+                }
+                return newest;
+            }
+            catch (e) {
+                console.warn('getLatestLeadByCustomerNumber failed:', e);
+                return null;
+            }
+        }
         for (const msg of messages) {
             const from = (msg.from || '').replace(/\D/g, '');
             const text = ((_o = msg.text) === null || _o === void 0 ? void 0 : _o.body) || '';
             console.log('Inbound message from:', from, 'text length:', text.length);
-            // Resolve leadId via routing map first, then by phone, if not provided
+            // Resolve leadId via routing map first; we will still prefer the newest lead by number
             let resolvedLeadId = leadId;
             if (!resolvedLeadId) {
                 try {
@@ -617,20 +645,35 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
                     console.warn('Routing map lookup failed:', e);
                 }
             }
-            // Fallback by matching last 8 or 10 digits
-            if (!resolvedLeadId) {
-                try {
-                    const last8 = from.slice(-8);
-                    const last10 = from.slice(-10);
-                    async function findLeadByCustomerNumber(num) {
-                        const snap = await db.collection('leads').where('customerNumber', '==', num).limit(1).get();
-                        return snap.empty ? null : snap.docs[0].id;
+            // Normalize WhatsApp number 971XXXXXXXXX -> 0XXXXXXXXX and prefer the newest lead by customerNumber
+            try {
+                let normalizedUae = from;
+                if (from.startsWith('971')) {
+                    normalizedUae = '0' + from.slice(3);
+                    console.log(`Normalized ${from} -> ${normalizedUae} (971 -> 0)`);
+                }
+                else if (from.startsWith('+971')) {
+                    normalizedUae = '0' + from.slice(4);
+                    console.log(`Normalized ${from} -> ${normalizedUae} (+971 -> 0)`);
+                }
+                else if (!from.startsWith('0') && from.length === 10) {
+                    normalizedUae = '0' + from;
+                    console.log(`Normalized ${from} -> ${normalizedUae} (10-digit -> 0)`);
+                }
+                const latestLeadDoc = await getLatestLeadByCustomerNumber(normalizedUae);
+                if (latestLeadDoc) {
+                    const latestId = latestLeadDoc.id;
+                    if (resolvedLeadId && resolvedLeadId !== latestId) {
+                        console.log(`Overriding resolvedLeadId ${resolvedLeadId} -> latest by number ${latestId}`);
                     }
-                    resolvedLeadId = (await findLeadByCustomerNumber(last8)) || (await findLeadByCustomerNumber(last10)) || '';
+                    resolvedLeadId = latestId;
                 }
-                catch (e) {
-                    console.warn('Lead resolution by phone failed:', e);
+                else if (!resolvedLeadId) {
+                    console.log(`No lead found by customerNumber (${normalizedUae}) and no prior resolution`);
                 }
+            }
+            catch (e) {
+                console.warn('Latest lead resolution by customerNumber failed:', e);
             }
             if (!resolvedLeadId) {
                 // Store unmatched for later reconciliation
