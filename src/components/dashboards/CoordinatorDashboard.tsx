@@ -242,6 +242,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   }, [user?.id]);
 
   // Filter leads based on search term and status
+  // For coordinators, manager-assigned verified leads (status='verified' && managerAssigned=true) should show when filtering by 'verified'
   const filteredLeads = leads.filter(lead => {
     const matchesSearch = searchTerm === '' || 
       lead.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -249,6 +250,14 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       lead.plans?.some(plan => plan.number.includes(searchTerm));
     
     let matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
+    
+    // Handle manager-assigned verified and follow_up leads - they should show when statusFilter is 'verified' (Unassigned Leads)
+    if (!matchesStatus && statusFilter === 'verified') {
+      // Show manager-assigned verified and follow_up leads in the "verified" filter (Unassigned Leads)
+      matchesStatus = (lead.status === 'verified' && lead.managerAssigned === true) ||
+                      (lead.status === 'follow_up' && lead.managerAssigned === true);
+    }
+    
     if (!matchesStatus && statusFilter === 'yesterday') {
       const now = new Date();
       const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
@@ -340,9 +349,28 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       );
 
       // For non-All Groups coordinators, exclude pending_coordinator status leads
-      const filteredCoordinatorLeads = (coordinatorType !== 'all' && coordinatorType !== undefined)
+      let filteredCoordinatorLeads = (coordinatorType !== 'all' && coordinatorType !== undefined)
         ? coordinatorLeads.filter(lead => lead.status !== 'pending_coordinator')
         : coordinatorLeads;
+      
+      // Include verified leads that have been assigned by manager (these should appear as "unassigned")
+      // These are leads with status='verified' and managerAssigned=true
+      const managerAssignedVerifiedLeads = coordinatorLeads.filter(
+        lead => lead.status === 'verified' && lead.managerAssigned === true
+      );
+      
+      // Include follow_up leads that have been assigned by manager (these should also appear as "unassigned")
+      // These are leads with status='follow_up' and managerAssigned=true
+      const managerAssignedFollowUpLeads = coordinatorLeads.filter(
+        lead => lead.status === 'follow_up' && lead.managerAssigned === true
+      );
+      
+      // Add manager-assigned verified and follow_up leads to filtered list if not already present
+      [...managerAssignedVerifiedLeads, ...managerAssignedFollowUpLeads].forEach(lead => {
+        if (!filteredCoordinatorLeads.find(l => l.id === lead.id)) {
+          filteredCoordinatorLeads.push(lead);
+        }
+      });
 
       // Get current month's start and end dates
       const now = new Date();
@@ -364,12 +392,18 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       }, 0);
 
       // Calculate metrics from coordinator's leads only
+      // For "unassigned", count verified and follow_up leads with managerAssigned: true (these are unassigned to coordinators)
+      const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
+        l => (l.status === 'verified' && l.managerAssigned === true) ||
+             (l.status === 'follow_up' && l.managerAssigned === true)
+      ).length;
+      
       const metrics = {
         totalLeads: filteredCoordinatorLeads.length,
-        verified: filteredCoordinatorLeads.filter(l => l.status === 'verified').length,
-        assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length,
+        verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
+        assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Only actual assigned leads
         activated: totalActivations, // Use the total number of activations
-        followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up').length,
+        followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
         rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
         yesterday: filteredCoordinatorLeads.filter(l => l.createdAt && l.createdAt >= yesterdayStart && l.createdAt <= yesterdayEnd).length
       };
@@ -377,10 +411,17 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       setMetrics(metrics);
 
       // Then filter leads based on current status (including special 'yesterday')
+      // For "verified" status, show manager-assigned verified leads (these are "unassigned" to coordinators)
       let filteredLeads: Lead[] = filteredCoordinatorLeads;
       if (currentStatus !== 'all') {
         if (currentStatus === 'yesterday') {
           filteredLeads = filteredCoordinatorLeads.filter(lead => lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd);
+        } else if (currentStatus === 'verified') {
+          // Show manager-assigned verified and follow_up leads (these appear in "Unassigned Leads" for coordinators)
+          filteredLeads = filteredCoordinatorLeads.filter(lead => 
+            (lead.status === 'verified' && lead.managerAssigned === true) ||
+            (lead.status === 'follow_up' && lead.managerAssigned === true)
+          );
         } else {
           filteredLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
         }
@@ -470,6 +511,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           status: actionType === 'assign' ? 'assigned' :
                   actionType === 'activate' ? 'activated' : 'follow_up'
         };
+        
+        // When marking as follow_up, reset managerAssigned to false so manager can see it in unassigned section
+        if (actionType === 'follow_up') {
+          updates.managerAssigned = false;
+        }
       }
 
       // Update lead status

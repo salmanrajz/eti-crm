@@ -158,7 +158,9 @@ export function LeadDetails() {
           remarks: leadData.remarks || '',
           plans: leadData.plans || [],
           verificationMedia: leadData.verificationMedia || [],
-          etisalatLeadId: leadData.etisalatLeadId || ''
+          etisalatLeadId: leadData.etisalatLeadId || '',
+          managerAssigned: leadData.managerAssigned || false,
+          managerNotes: leadData.managerNotes || ''
         } as Lead;
         
        // console.log('Processed lead data:', lead);

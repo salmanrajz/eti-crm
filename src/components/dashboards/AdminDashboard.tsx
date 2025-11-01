@@ -251,6 +251,7 @@ const clearAdminCache = (): void => {
 };
 
 export function AdminDashboard({ user }: AdminDashboardProps) {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [metrics, setMetrics] = useState({
     totalLeads: 0,
     pendingVerification: 0,
@@ -511,6 +512,16 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       const cachedTeamMetrics = getCachedData(cacheKey);
       if (cachedTeamMetrics) {
         setTeamMetrics(cachedTeamMetrics);
+        
+        // Check if teamId is in URL params and select the team
+        const teamIdFromUrl = searchParams.get('teamId');
+        if (teamIdFromUrl && cachedTeamMetrics) {
+          const team = cachedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+          if (team) {
+            setSelectedTeam(team);
+          }
+        }
+        
         return;
       }
 
@@ -640,6 +651,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
       setTeamMetrics(sortedTeamMetrics);
       setCachedData(cacheKey, sortedTeamMetrics);
+      
+      // Check if teamId is in URL params and select the team
+      const teamIdFromUrl = searchParams.get('teamId');
+      if (teamIdFromUrl && sortedTeamMetrics) {
+        const team = sortedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+        if (team) {
+          setSelectedTeam(team);
+        }
+      }
     } catch (error) {
     }
   }, [teamLeads]);
@@ -787,6 +807,16 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         setMetrics(cachedMetrics);
         setTeamLeads(cachedLeads);
         setTeamMetrics(cachedTeamMetrics);
+        
+        // Check if teamId is in URL params and select the team
+        const teamIdFromUrl = searchParams.get('teamId');
+        if (teamIdFromUrl && cachedTeamMetrics) {
+          const team = cachedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+          if (team) {
+            setSelectedTeam(team);
+          }
+        }
+        
         setLoading(false);
         return;
       }
@@ -1009,6 +1039,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         setCachedData(ADMIN_LEADS_CACHE_KEY, allLeads);
         setCachedData(ADMIN_TEAM_METRICS_CACHE_KEY, sortedTeamMetrics);
         lastLoadTimeRef.current = Date.now();
+        
+        // Check if teamId is in URL params and select the team
+        const teamIdFromUrl = searchParams.get('teamId');
+        if (teamIdFromUrl && sortedTeamMetrics) {
+          const team = sortedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+          if (team) {
+            setSelectedTeam(team);
+          }
+        }
       }
     } catch (error) {
       toast.error('Failed to load admin data');
@@ -1332,6 +1371,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       icon: Activity,
       color: 'bg-gradient-to-br from-cyan-500 to-cyan-600',
       textColor: 'text-cyan-600',
+    },
+    {
+      name: 'Reports',
+      description: 'Daily & Monthly analytics',
+      value: 'View',
+      href: '/dashboard/admin/reports',
+      icon: BarChart3,
+      color: 'bg-gradient-to-br from-pink-500 to-rose-600',
+      textColor: 'text-pink-600',
     },
     {
       name: 'Number Visibility',

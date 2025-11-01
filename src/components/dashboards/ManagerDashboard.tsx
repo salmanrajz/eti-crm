@@ -336,6 +336,10 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         if (lead.status === 'rejected') teamMetrics.rejected++;
         if (lead.status === 'activated') teamMetrics.activated++;
         if (lead.status === 'pending_assignment') teamMetrics.pendingAssignment++;
+        // Include follow_up leads with managerAssigned === false in pendingAssignment
+        if (lead.status === 'follow_up' && !lead.managerAssigned) {
+          teamMetrics.pendingAssignment++;
+        }
         if (lead.status === 'assigned') teamMetrics.assigned++;
 
         // Monthly metrics - for most statuses, check if created in current month
@@ -345,6 +349,10 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
           if (lead.status === 'verified') monthlyMetricsData.verified++;
           if (lead.status === 'rejected') monthlyMetricsData.rejected++;
           if (lead.status === 'pending_assignment') monthlyMetricsData.pendingAssignment++;
+          // Include follow_up leads with managerAssigned === false in pendingAssignment
+          if (lead.status === 'follow_up' && !lead.managerAssigned) {
+            monthlyMetricsData.pendingAssignment++;
+          }
           if (lead.status === 'assigned') monthlyMetricsData.assigned++;
         }
       });
@@ -755,8 +763,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     {
       name: 'Pending Assignment',
       description: 'Awaiting assignment',
-      value: metrics.verified,
-      href: '/dashboard/leads?status=verified',
+      value: metrics.pendingAssignment,
+      href: '/dashboard/leads?status=pending_assignment',
       icon: Building2,
       color: 'bg-gradient-to-br from-orange-500 to-orange-600',
       textColor: 'text-orange-600',

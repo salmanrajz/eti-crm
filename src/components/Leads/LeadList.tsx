@@ -296,7 +296,12 @@ export function LeadList() {
             })
           }));
 
-          setLeads(fixedCachedLeads);
+          // ✅ SECURITY: Freelancers must ONLY see their own leads in cached data
+          const filteredCachedLeads = user?.role === 'freelancer' && user?.id
+            ? fixedCachedLeads.filter((lead: Lead) => lead.agentId === user.id)
+            : fixedCachedLeads;
+
+          setLeads(filteredCachedLeads);
           setLastDoc(cachedData.lastDoc || null);
           setHasMore(cachedData.hasMore);
           setLoading(false);
@@ -322,7 +327,7 @@ export function LeadList() {
       let constraints = [];
 
       // Add role-based filters
-      if (user.role === 'agent') {
+      if (user.role === 'agent' || user.role === 'freelancer') {
         constraints.push(where('agentId', '==', user.id));
       } else if (isVerifier()) {
         constraints.push(
@@ -381,6 +386,11 @@ export function LeadList() {
                 
                 return true;
               });
+            }
+
+            // ✅ SECURITY: Defense-in-depth - Freelancers must ONLY see their own leads
+            if (user?.role === 'freelancer' && user?.id) {
+              leadsData = leadsData.filter(lead => lead.agentId === user.id);
             }
 
             // ✅ PERFORMANCE: Only process if data has actually changed
@@ -446,12 +456,17 @@ export function LeadList() {
       } else {
         // For pagination, use getDocs to append data
         const snapshot = await getDocs(q);
-        const leadsData = snapshot.docs.map(doc => ({
+        let leadsData = snapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data(),
           createdAt: doc.data().createdAt?.toDate(),
           updatedAt: doc.data().updatedAt?.toDate()
         })) as Lead[];
+
+        // ✅ SECURITY: Defense-in-depth - Freelancers must ONLY see their own leads
+        if (user?.role === 'freelancer' && user?.id) {
+          leadsData = leadsData.filter(lead => lead.agentId === user.id);
+        }
 
         const leadsWithInfo = await processLeadsWithInfo(leadsData);
         setLeads(prev => [...prev, ...leadsWithInfo]);
@@ -764,6 +779,11 @@ export function LeadList() {
   const filteredLeads = useMemo(() => {
     let filtered = leads;
 
+    // Freelancers must ONLY see their own leads (security-critical)
+    if (user?.role === 'freelancer' && user?.id) {
+      filtered = filtered.filter(lead => lead.agentId === user.id);
+    }
+
     // Coordinators should never see pending_verification leads
     if (user?.role === 'coordinator') {
       filtered = filtered.filter(lead => lead.status !== 'pending_verification');
@@ -778,6 +798,21 @@ export function LeadList() {
       if (user.coordinatorType !== 'all' && user.coordinatorType !== undefined) {
         filtered = filtered.filter(lead => lead.status !== 'pending_coordinator');
       }
+      
+      // Include verified and follow_up leads that have been assigned by manager (these should appear as "unassigned" to coordinators)
+      // These leads have status='verified' or 'follow_up' and managerAssigned=true
+      const managerAssignedLeads = leads.filter(
+        lead => ((lead.status === 'verified' && lead.managerAssigned === true) ||
+                 (lead.status === 'follow_up' && lead.managerAssigned === true)) &&
+                isLeadInCoordinatorGroup(lead, user.coordinatorType as CoordinatorType)
+      );
+      
+      // Add manager-assigned leads to filtered list if not already present
+      managerAssignedLeads.forEach(lead => {
+        if (!filtered.find(l => l.id === lead.id)) {
+          filtered.push(lead);
+        }
+      });
     }
 
     // Apply verifier group filtering
@@ -818,7 +853,13 @@ export function LeadList() {
         lead.status?.replace(/_/g, ' ').toLowerCase().includes(searchTerm.toLowerCase())
       );
       
-      const matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
+      let matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
+      
+      // For managers, include follow_up leads with managerAssigned=false in pending_assignment filter
+      if (!matchesStatus && statusFilter === 'pending_assignment' && isManager()) {
+        matchesStatus = lead.status === 'pending_assignment' || 
+                       (lead.status === 'follow_up' && !lead.managerAssigned);
+      }
       
       return matchesSearch && matchesStatus;
     });

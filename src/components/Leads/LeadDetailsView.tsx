@@ -61,7 +61,7 @@ import {
   MapPinned, FileSpreadsheet, Briefcase,
   Clock as ClockIcon, CheckCircle2, AlertCircle, ThumbsDown,
   MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
-  MessageCircle, Check, Paperclip
+  MessageCircle, Check, Paperclip, RefreshCw
 } from 'lucide-react';
 import type { Lead, UserRole } from '../../types';
 import { FormSection } from './FormSection';
@@ -160,7 +160,7 @@ const VERIFY_CHECKLIST = [
 type LeadMediaItem = Lead['verificationMedia'] extends Array<infer T> ? T : never;
 
 export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { lead: Lead; onEdit: () => void; onResubmit?: () => void; isResubmitting?: boolean }) {
-  const { user, isAdmin, isVerifier, isCoordinator } = useAuthStore();
+  const { user, isAdmin, isVerifier, isCoordinator, isManager } = useAuthStore();
   const navigate = useNavigate();
   const chatBoxRef = useRef<HTMLDivElement>(null);
   const pageEndRef = useRef<HTMLDivElement>(null);
@@ -171,6 +171,9 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
   const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
+  const [showManagerAssignDialog, setShowManagerAssignDialog] = useState(false);
+  const [managerNote, setManagerNote] = useState('');
+  const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
   const [etisalatLeadId, setEtisalatLeadId] = useState('');
   const [selectedEmirate, setSelectedEmirate] = useState('');
   const [showAssignmentMessage, setShowAssignmentMessage] = useState(false);
@@ -229,6 +232,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   );
   const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'follow_verification');
   const isUserCoordinator = isCoordinator();
+  const isUserManager = isManager();
+  // Manager can assign verified leads or follow_up leads that haven't been assigned yet
+  const canManagerAssign = isUserManager && 
+    ((lead.status === 'verified' && !lead.managerAssigned) || 
+     (lead.status === 'follow_up' && !lead.managerAssigned)) && 
+    user?.id === lead.managerId;
 
   // Helper function to get service provider based on group
   const getServiceProvider = (group: string) => {
@@ -647,6 +656,42 @@ Language: ${lead.language || 'N/A'}`;
     }
   };
 
+  const handleManagerAssign = async () => {
+    setIsManagerActionProcessing(true);
+    try {
+      const leadRef = doc(db, 'leads', lead.id);
+      // Keep status as 'verified', only set managerAssigned and managerNotes
+      await updateDoc(leadRef, {
+        managerAssigned: true,
+        managerNotes: managerNote.trim() || '',
+        updatedAt: serverTimestamp()
+      });
+
+      // Note: Coordinators will see this lead in their unassigned list via filtering
+      // No need to send notification as coordinators check for verified leads with managerAssigned: true
+
+      toast.success('Lead assigned to coordinator successfully');
+      setShowManagerAssignDialog(false);
+      setManagerNote('');
+      
+      // Reload the lead data
+      const leadDoc = await getDoc(leadRef);
+      if (leadDoc.exists()) {
+        const leadData = leadDoc.data();
+        Object.assign(lead, {
+          ...leadData,
+          createdAt: leadData.createdAt?.toDate(),
+          updatedAt: leadData.updatedAt?.toDate()
+        });
+      }
+    } catch (error) {
+      console.error('Error assigning lead:', error);
+      toast.error('Failed to assign lead');
+    } finally {
+      setIsManagerActionProcessing(false);
+    }
+  };
+
   const handleCoordinatorAction = async () => {
     // Validate required fields for assignment
     if (coordinatorAction === 'assign') {
@@ -675,6 +720,11 @@ Language: ${lead.language || 'N/A'}`;
         // Store additional assignment data
         updateData.etisalatLeadId = etisalatLeadId;
         updateData.emirate = selectedEmirate;
+      }
+      
+      // When marking as follow_up, reset managerAssigned to false so manager can see it in unassigned section
+      if (coordinatorAction === 'followup') {
+        updateData.managerAssigned = false;
       }
 
       await updateDoc(leadRef, updateData);
@@ -946,9 +996,19 @@ Language: ${lead.language || 'N/A'}`;
           </p>
         </div>
         <div className="flex flex-wrap gap-2 sm:gap-3">
+          {canManagerAssign && (
+            <button
+              onClick={() => setShowManagerAssignDialog(true)}
+              className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+            >
+              <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+              Assign to Coordinator
+            </button>
+          )}
           {isUserCoordinator && (
             <>
-              {lead.status === 'verified' && (
+              {(lead.status === 'verified' && lead.managerAssigned === true) || 
+               (lead.status === 'follow_up' && lead.managerAssigned === true) ? (
             <button
                   onClick={() => {
                     setCoordinatorAction('assign');
@@ -959,7 +1019,7 @@ Language: ${lead.language || 'N/A'}`;
                   <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                   Assign
             </button>
-          )}
+          ) : null}
               {lead.status === 'assigned' && (
                 <>
                   <button
@@ -990,7 +1050,8 @@ Language: ${lead.language || 'N/A'}`;
                   Lead Activated
                 </div>
               )}
-              {lead.status === 'follow_up' && (
+              {/* Follow_up leads without manager assignment show assign button, but if managerAssigned is true, it's already shown above */}
+              {lead.status === 'follow_up' && !lead.managerAssigned && (
                 <button
                   onClick={() => {
                     setCoordinatorAction('assign');
@@ -1656,6 +1717,77 @@ Language: ${lead.language || 'N/A'}`;
         </div>
       )}
 
+      {showManagerAssignDialog && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-lg w-full mx-4 overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-purple-500 to-purple-600 px-6 py-4">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <User2 className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Assign to Coordinator</h3>
+                  <p className="text-purple-100 text-sm">
+                    Assign this verified lead to the coordinator for final processing
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Content */}
+            <div className="p-6 space-y-6">
+              {/* Comment Box */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-900">
+                  Comments (Optional)
+                </label>
+                <textarea
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-purple-300 focus:ring-2 focus:ring-purple-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                  rows={4}
+                  value={managerNote}
+                  onChange={(e) => setManagerNote(e.target.value)}
+                  placeholder="Add any comments or notes for the coordinator..."
+                />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-100">
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => {
+                    setShowManagerAssignDialog(false);
+                    setManagerNote('');
+                  }}
+                  disabled={isManagerActionProcessing}
+                  className="px-6 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleManagerAssign}
+                  disabled={isManagerActionProcessing}
+                  className="px-6 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isManagerActionProcessing ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin inline" />
+                      Assigning...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircleIcon className="h-4 w-4 mr-2 inline" />
+                      Assign to Coordinator
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <SplitLead
         isOpen={showSplitLead}
         onClose={() => setShowSplitLead(false)}
@@ -1704,7 +1836,7 @@ Language: ${lead.language || 'N/A'}`;
           title="Selected Plans"
           description="Number and plan details"
           rightElement={
-            lead.status === 'assigned' && lead.etisalatLeadId ? (
+            (lead.status === 'assigned' || lead.status === 'follow_up') && lead.etisalatLeadId ? (
               <div className="bg-gradient-to-r from-red-50 to-red-100 border border-red-200 rounded-lg px-3 py-2 shadow-sm">
                 <div className="flex items-center space-x-2">
                   <div className="w-2 h-2 bg-red-500 rounded-full"></div>
@@ -1840,7 +1972,7 @@ Language: ${lead.language || 'N/A'}`;
             label="Start Date"
             icon={Calendar}
             type="date"
-            value={format(lead.startDate, 'yyyy-MM-dd')}
+            value={lead.startDate && lead.startDate instanceof Date && !isNaN(lead.startDate.getTime()) ? format(lead.startDate, 'yyyy-MM-dd') : ''}
             readOnly
           />
           <FormInput
@@ -1897,14 +2029,14 @@ Language: ${lead.language || 'N/A'}`;
             label="Created At"
             icon={Calendar}
             type="text"
-            value={format(lead.createdAt, 'PPP pp')}
+            value={lead.createdAt && lead.createdAt instanceof Date && !isNaN(lead.createdAt.getTime()) ? format(lead.createdAt, 'PPP pp') : 'N/A'}
             readOnly
           />
           <FormInput
             label="Last Updated"
             icon={Clock}
             type="text"
-            value={format(lead.updatedAt, 'PPP pp')}
+            value={lead.updatedAt && lead.updatedAt instanceof Date && !isNaN(lead.updatedAt.getTime()) ? format(lead.updatedAt, 'PPP pp') : 'N/A'}
             readOnly
           />
         </FormSection>
