@@ -197,6 +197,8 @@ export interface Lead {
   assignmentId: string;
   teamId: string;
   managerId: string | null;
+  managerAssigned?: boolean; // True when manager has assigned the verified lead
+  managerNotes?: string; // Manager's assignment notes
   manager?: {
     id: string;
     name: string;

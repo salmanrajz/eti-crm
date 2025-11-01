@@ -24,6 +24,7 @@ import { ManagerDashboard } from '../components/dashboards/ManagerDashboard';
 import { ModernLoading } from '../components/ModernLoading';
 import { useMinimumLoading } from '../hooks/useMinimumLoading';
 import { NumberLogsDashboard } from '../components/dashboards/NumberLogsDashboard';
+import { Reports } from '../components/admin/Reports';
 
 export function AppRoutes() {
   const { user, loading } = useAuthStore();
@@ -131,6 +132,14 @@ export function AppRoutes() {
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <NumberLogsDashboard />
+            </RoleBasedRoute>
+          } 
+        />
+        <Route 
+          path="admin/reports" 
+          element={
+            <RoleBasedRoute allowedRoles={['admin']}>
+              <Reports />
             </RoleBasedRoute>
           } 
         />

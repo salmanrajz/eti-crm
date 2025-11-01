@@ -50,11 +50,11 @@ import { read, utils, writeFile } from 'xlsx';
 
 /**
  * Batch processing configuration for efficient Firestore uploads
- * Optimized to prevent quota issues and rate limiting
+ * Optimized for maximum performance while respecting Firestore limits
  */
-const BATCH_SIZE = 100; // Reduced batch size to avoid quota issues
-const MAX_RETRIES = 3;
-const INITIAL_RETRY_DELAY = 1000; // 1 second
+const BATCH_SIZE = 500; // Firestore max batch size for optimal performance
+const MAX_RETRIES = 0; // No retries for maximum speed - failures will be logged
+const INITIAL_RETRY_DELAY = 100; // Minimal delay
 
 /**
  * Valid number categories for the number pool
@@ -222,7 +222,8 @@ export function NumberPoolUpload() {
     }
 
     setLoading(true);
-    // Load teams to validate TeamVisibility values (support both ID and Name)
+    
+    // Load teams once at the start
     const teamsSnap = await getDocs(query(collection(db, 'teams')));
     const teamIdByName = new Map<string, string>();
     const validTeamIds = new Set<string>();
@@ -232,6 +233,7 @@ export function NumberPoolUpload() {
       if (name) teamIdByName.set(name.toLowerCase(), t.id);
       validTeamIds.add(t.id);
     });
+
     setUploadProgress({
       total: parsedExcelData.length,
       current: 0,
@@ -240,69 +242,137 @@ export function NumberPoolUpload() {
       retries: 0
     });
 
-    let successCount = 0;
-    let errorCount = 0;
+    // Pre-process all data and prepare batches upfront
+    const batches: Array<{ batch: any; numbers: ExcelRow[]; startIndex: number }> = [];
     let currentBatch = writeBatch(db);
     let operationsInCurrentBatch = 0;
-    let totalBatches = Math.ceil(parsedExcelData.length / BATCH_SIZE);
-    let completedBatches = 0;
+    let batchStartIndex = 0;
 
-    const failedNumbers: { number: string; error: string }[] = [];
-
-    try {
-      for (let i = 0; i < parsedExcelData.length; i++) {
-        const row = parsedExcelData[i];
-        const numberRef = doc(collection(db, 'numberPool'));
-        let teamVisibility: string | undefined = (row.TeamVisibility || '').trim() || undefined;
-        if (teamVisibility) {
-          // Accept team ID directly, or resolve by name
-          if (!validTeamIds.has(teamVisibility)) {
-            const resolved = teamIdByName.get(teamVisibility.toLowerCase());
-            teamVisibility = resolved || undefined;
-          }
+    // Prepare all batches first (no I/O, just data preparation)
+    for (let i = 0; i < parsedExcelData.length; i++) {
+      const row = parsedExcelData[i];
+      const numberRef = doc(collection(db, 'numberPool'));
+      
+      // Resolve team visibility once during preprocessing
+      let teamVisibility: string | undefined = (row.TeamVisibility || '').trim() || undefined;
+      if (teamVisibility) {
+        if (!validTeamIds.has(teamVisibility)) {
+          const resolved = teamIdByName.get(teamVisibility.toLowerCase());
+          teamVisibility = resolved || undefined;
         }
-        const numberData = {
-          number: row.Number,
-          category: row.Category.trim() as typeof numberCategories[number],
-          code: row.Code,
-          group: row.Group.trim(),
-          status: 'open',
-          visibleToFreelancers: visibleToFreelancers,
-          passcode: row.Passcode.trim(),
-          teamVisibility,
-          lastStatusChange: new Date()
-        };
-        
-        currentBatch.set(numberRef, numberData);
-        operationsInCurrentBatch++;
-
-        if (operationsInCurrentBatch === BATCH_SIZE || i === parsedExcelData.length - 1) {
-          const success = await commitBatchWithRetry(currentBatch, parsedExcelData.slice(i - operationsInCurrentBatch + 1, i + 1));
-          
-          if (success) {
-            completedBatches++;
-            successCount += operationsInCurrentBatch;
-          } else {
-            errorCount += operationsInCurrentBatch;
-            parsedExcelData.slice(i - operationsInCurrentBatch + 1, i + 1).forEach(n => {
-              failedNumbers.push({ number: n.Number, error: 'Batch commit failed after retries' });
-            });
-          }
-          
-          currentBatch = writeBatch(db);
-          operationsInCurrentBatch = 0;
-        }
-
-        setUploadProgress(prev => ({
-          ...prev,
-          current: i + 1,
-          success: successCount,
-          failed: errorCount
-        }));
       }
 
+      const numberData: any = {
+        number: row.Number,
+        category: row.Category.trim() as typeof numberCategories[number],
+        code: row.Code,
+        group: row.Group.trim(),
+        status: 'open',
+        visibleToFreelancers: visibleToFreelancers,
+        passcode: row.Passcode.trim(),
+        lastStatusChange: new Date()
+      };
+
+      // Only add teamVisibility if it's not undefined (Firestore doesn't allow undefined)
+      if (teamVisibility !== undefined) {
+        numberData.teamVisibility = teamVisibility;
+      }
+
+      currentBatch.set(numberRef, numberData);
+      operationsInCurrentBatch++;
+
+      // Create batch when full or at the end
+      if (operationsInCurrentBatch === BATCH_SIZE || i === parsedExcelData.length - 1) {
+        batches.push({
+          batch: currentBatch,
+          numbers: parsedExcelData.slice(batchStartIndex, i + 1),
+          startIndex: batchStartIndex
+        });
+        currentBatch = writeBatch(db);
+        batchStartIndex = i + 1;
+        operationsInCurrentBatch = 0;
+      }
+    }
+
+    // Process ALL batches with true parallel concurrency
+    const CONCURRENT_LIMIT = 15; // Process 15 batches simultaneously (increased for speed)
+    let successCount = 0;
+    let errorCount = 0;
+    let completedCount = 0;
+    const failedNumbers: { number: string; error: string }[] = [];
+
+    // Proper concurrency limiter: continuously processes batches as they complete
+    const processWithConcurrency = async () => {
+      const executing: Promise<void>[] = [];
+      let batchIndex = 0;
+
+      while (batchIndex < batches.length || executing.length > 0) {
+        // Start new batches up to the limit
+        while (executing.length < CONCURRENT_LIMIT && batchIndex < batches.length) {
+          const { batch, numbers } = batches[batchIndex++];
+          
+          // Create a promise that removes itself when done
+          const promise = (async () => {
+            try {
+              const success = await commitBatchWithRetry(batch, numbers);
+              completedCount += numbers.length;
+              if (success) {
+                successCount += numbers.length;
+              } else {
+                errorCount += numbers.length;
+                numbers.forEach(n => {
+                  failedNumbers.push({ number: n.Number, error: 'Batch commit failed' });
+                });
+              }
+
+              // Update progress every 5000 items or on completion
+              if (completedCount % 5000 < numbers.length || completedCount === parsedExcelData.length) {
+                setUploadProgress({
+                  total: parsedExcelData.length,
+                  current: completedCount,
+                  success: successCount,
+                  failed: errorCount,
+                  retries: 0
+                });
+              }
+            } catch (error) {
+              errorCount += numbers.length;
+              numbers.forEach(n => {
+                failedNumbers.push({ number: n.Number, error: 'Batch commit failed' });
+              });
+            } finally {
+              // Remove from executing when done
+              const index = executing.indexOf(promise);
+              if (index > -1) {
+                executing.splice(index, 1);
+              }
+            }
+          })();
+
+          executing.push(promise);
+        }
+
+        // Wait for at least one batch to complete before starting more
+        if (executing.length > 0) {
+          await Promise.race(executing);
+        }
+      }
+    };
+
+    try {
+      await processWithConcurrency();
+
+      // Final progress update
+      setUploadProgress({
+        total: parsedExcelData.length,
+        current: parsedExcelData.length,
+        success: successCount,
+        failed: errorCount,
+        retries: 0
+      });
+
       if (successCount > 0) {
-        toast.success(`Successfully uploaded ${successCount} numbers in ${completedBatches} batches`);
+        toast.success(`Successfully uploaded ${successCount} numbers`);
         setParsedExcelData([]);
         setExcelFile(null);
       }
@@ -320,28 +390,19 @@ export function NumberPoolUpload() {
   };
 
   const commitBatchWithRetry = useCallback(async (batch: any, numbers: ExcelRow[]) => {
-    let retries = MAX_RETRIES;
-    let delay = INITIAL_RETRY_DELAY;
-
-    while (retries >= 0) {
-      try {
-        await batch.commit();
-        return true;
-      } catch (error: any) {
-        console.error(`Batch commit failed (retries left: ${retries}):`, error);
-        
-        if (retries === 0 || error.code === 'permission-denied') {
-          return false;
-        }
-
-        setUploadProgress(prev => ({ ...prev, retries: prev.retries + 1 }));
-        await sleep(delay);
-        delay *= 2;
-        retries--;
+    try {
+      await batch.commit();
+      return true;
+    } catch (error: any) {
+      // Fast fail - no retries for maximum speed
+      if (error.code === 'permission-denied') {
+        console.error(`Batch commit failed (permission denied):`, error);
+      } else {
+        console.error(`Batch commit failed:`, error);
       }
+      return false;
     }
-    return false;
-  }, [sleep]);
+  }, []);
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

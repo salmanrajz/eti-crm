@@ -145,25 +145,14 @@ export async function createUserWithDocument(
   options: CreateUserOptions = {}
 ) {
   try {
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    const userId = userCredential.user.uid;
-
-    const userRef = doc(db, 'users', userId);
-    const userData = {
-      id: userId,
-      email,
-      role,
-      name,
-      ...(options.teamId && { teamId: options.teamId }),
-      ...(options.managerId && { managerId: options.managerId }),
-      ...(options.coordinatorType && { coordinatorType: options.coordinatorType }),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    };
-
-    await setDoc(userRef, userData, { merge: true });
-    await signOut(auth);
-    return userCredential.user;
+    // Use admin-side creation via callable to avoid switching current session
+    const callable = httpsCallable(getFunctions(app, 'us-central1'), 'createUserAsAdmin');
+    const extra: any = {};
+    if (options.teamId) extra.teamId = options.teamId;
+    if (options.managerId) extra.managerId = options.managerId;
+    if (options.coordinatorType) extra.coordinatorType = options.coordinatorType;
+    const res = await callable({ email, password, role, name, extra });
+    return res.data as any;
   } catch (error: any) {
     console.error('Error creating user:', error);
 

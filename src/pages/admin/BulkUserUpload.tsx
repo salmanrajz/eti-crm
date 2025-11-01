@@ -43,12 +43,15 @@ import { createUserWithDocument } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
 import { Upload, FileSpreadsheet, AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
 import type { UserRole } from '../../types';
+import { db } from '../../lib/firebase';
+import { collection, getDocs } from 'firebase/firestore';
 
 interface UserRow {
   email: string;
   name: string;
   role: UserRole;
   password: string;
+  teamName?: string;
 }
 
 // ===============================================================================
@@ -129,7 +132,8 @@ export function BulkUserUpload() {
         email: row.email.trim(),
         name: row.name.trim(),
         role: row.role as UserRole,
-        password: row.password
+        password: row.password,
+        teamName: (row.teamName || row.Team || row.team || '').toString().trim() || undefined
       });
     });
 
@@ -180,13 +184,33 @@ export function BulkUserUpload() {
       failed: 0
     });
 
+    // Preload teams mapping (name -> {id, managerId})
+    const teamsSnap = await getDocs(collection(db, 'teams'));
+    const teamByName = new Map<string, { id: string; managerId?: string }>();
+    teamsSnap.docs.forEach(doc => {
+      const d = doc.data() as any;
+      const name = (d?.name || d?.teamName || '').toString().trim().toLowerCase();
+      if (name) teamByName.set(name, { id: doc.id, managerId: d?.managerId });
+    });
+
     for (const [index, user] of validatedUsers.entries()) {
       try {
+        let extra: any = undefined;
+        if (user.teamName) {
+          const key = user.teamName.toLowerCase();
+          const team = teamByName.get(key);
+          if (team) {
+            extra = { teamId: team.id, managerId: team.managerId };
+          } else {
+            console.warn('Team not found for user row, teamName:', user.teamName);
+          }
+        }
         await createUserWithDocument(
           user.email,
           user.password,
           user.role,
-          user.name
+          user.name,
+          extra
         );
 
         setCreationProgress(prev => ({
@@ -374,11 +398,12 @@ export function BulkUserUpload() {
             <h3 className="text-sm font-medium text-blue-800">Instructions</h3>
             <div className="mt-2 text-sm text-blue-700">
               <ul className="list-disc list-inside">
-                <li>The Excel file must have these exact column headers:</li>
-                <li className="ml-4">- email (required, must be valid email format)</li>
+                <li>The Excel file must have these headers:</li>
+                <li className="ml-4">- email (required, valid email)</li>
                 <li className="ml-4">- name (required)</li>
-                <li className="ml-4">- role (required, must be: agent, verifier, coordinator, or manager)</li>
+                <li className="ml-4">- role (required: agent, verifier, coordinator, manager)</li>
                 <li className="ml-4">- password (required, minimum 6 characters)</li>
+                <li className="ml-4">- teamName (optional, exact team name to assign)</li>
                 <li>Each row represents one user to be created</li>
                 <li>Passwords will be set as provided in the Excel file</li>
                 <li>Users should change their password upon first login</li>
