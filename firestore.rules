@@ -166,17 +166,22 @@ service cloud.firestore {
       );
     }
 
-  // Number pool rules - OPTIMIZED to reduce Firebase allows
+    // Number pool rules - OPTIMIZED to reduce Firebase allows
     match /numberPool/{numberId} {
       // Allow read based on user role and visibility settings
-      allow read: if isSignedIn() && (
-        // All non-freelancer roles can see all numbers
-        hasAnyRole(['admin', 'manager', 'agent', 'verifier', 'coordinator']) ||
-        // Freelancers can see numbers explicitly visible OR when visibility is not set
-        (hasRole('freelancer') && (
-          resource.data.visibleToFreelancers == true ||
-          !resource.data.keys().hasAny(['visibleToFreelancers'])
-        ))
+      allow read: if (
+        // Authenticated users with roles
+        (isSignedIn() && (
+          // All non-freelancer roles can see all numbers
+          hasAnyRole(['admin', 'manager', 'agent', 'verifier', 'coordinator']) ||
+          // Freelancers can see numbers explicitly visible OR when visibility is not set
+          (hasRole('freelancer') && (
+            resource.data.visibleToFreelancers == true ||
+            !resource.data.keys().hasAny(['visibleToFreelancers'])
+          ))
+        )) ||
+        // Allow anonymous access for customer landing page - only open numbers
+        (!isSignedIn() && resource.data.status == 'open')
       );
       
       // Only admins and coordinators can create numbers
@@ -202,7 +207,8 @@ service cloud.firestore {
         hasRole('manager') ||
         hasRole('verifier') ||
         hasRole('coordinator') ||
-        hasRole('freelancer') ||
+        // Freelancers can only read their own leads
+        (hasRole('freelancer') && resource.data.agentId == request.auth.uid) ||
         resource.data.agentId == request.auth.uid ||
          // Allow team members to read each other's leads for performance tracking
         (resource.data.agentId != null && 
@@ -213,19 +219,25 @@ service cloud.firestore {
       
       
       
-       // ADD THIS NEW RULE:
+       // List query rules - freelancers can only list their own leads
   allow list: if isSignedIn() && (
     hasRole('admin') ||
     hasRole('manager') ||
     hasRole('verifier') ||
     hasRole('coordinator') ||
-    hasRole('freelancer') ||
-    request.query.limit <= 300 &&
-    (
-      request.query.filters[0].op == '==' &&
-      request.query.filters[0].fieldPath == 'agentId' &&
-      request.query.filters[0].value == request.auth.uid
-    )
+    // Freelancers can only list leads where agentId matches their userId
+    (hasRole('freelancer') && 
+     request.query.limit <= 300 &&
+     request.query.filters.size() > 0 &&
+     request.query.filters[0].op == '==' &&
+     request.query.filters[0].fieldPath == 'agentId' &&
+     request.query.filters[0].value == request.auth.uid) ||
+    // Agents can only list leads where agentId matches their userId
+    (request.query.limit <= 300 &&
+     request.query.filters.size() > 0 &&
+     request.query.filters[0].op == '==' &&
+     request.query.filters[0].fieldPath == 'agentId' &&
+     request.query.filters[0].value == request.auth.uid)
   );
   
   allow create: if isSignedIn() && (
@@ -244,11 +256,12 @@ service cloud.firestore {
   hasRole('manager') ||
   hasRole('coordinator') ||
   (hasRole('verifier') && resource.data.status != 'verified') ||
-  (resource.data.agentId == request.auth.uid && resource.data.status == 'pending_verification') ||
-  // Agent can reject if status is NOT pending_verification or activated, and is setting status to 'rejected'
-  (resource.data.agentId == request.auth.uid && !(resource.data.status in ['pending_verification', 'activated']) && request.resource.data.status == 'rejected') ||
-  // Agent can resubmit follow-up back to pending_verification
-  (resource.data.agentId == request.auth.uid && resource.data.status == 'follow_verification' && request.resource.data.status == 'pending_verification')
+  // Agents and freelancers can update their own leads under specific conditions
+  ((resource.data.agentId == request.auth.uid) && (
+    resource.data.status == 'pending_verification' ||
+    (!(resource.data.status in ['pending_verification', 'activated']) && request.resource.data.status == 'rejected') ||
+    (resource.data.status == 'follow_verification' && request.resource.data.status == 'pending_verification')
+  ))
 );
       allow delete: if hasRole('admin');
     }
@@ -484,6 +497,7 @@ match /expenses/{expenseId} {
     hasRole('admin') ||
     (hasRole('manager') && resource.data.teamId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamId)
   );
+
 }
 
 
@@ -645,6 +659,45 @@ match /invoices/{invoiceId} {
       allow read: if isSignedIn() && hasAnyRole(['admin', 'manager', 'coordinator', 'verifier', 'agent', 'freelancer']);
       allow create, update: if isSignedIn() && hasRole('admin');
       // Allow Cloud Functions to update stats (they run with admin privileges)
+    }
+
+    // Agent Links collection rules - for customer landing page lead attribution
+    match /agentLinks/{linkId} {
+      allow read: if true; // Allow public read for link validation
+      allow create: if (
+        isSignedIn() && hasAnyRole(['admin', 'manager', 'agent', 'freelancer'])
+      ) || (
+        !isSignedIn() // Allow anonymous creation for tracking clicks
+      );
+      allow update: if (
+        isSignedIn() && (
+          hasRole('admin') ||
+          (resource.data.agentId == request.auth.uid) ||
+          (request.resource.data.agentId == request.auth.uid)
+        )
+      ) || (
+        !isSignedIn() // Allow anonymous updates for click tracking
+      );
+      allow delete: if isSignedIn() && (
+        hasRole('admin') ||
+        (resource.data.agentId == request.auth.uid)
+      );
+    }
+
+    // Lead Attributions collection rules - for tracking customer bookings through agent links
+    match /leadAttributions/{attributionId} {
+      allow read: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        (resource.data.agentId == request.auth.uid)
+      );
+      allow create: if true; // Allow anonymous creation for customer bookings
+      allow update: if isSignedIn() && (
+        hasRole('admin') ||
+        hasRole('manager') ||
+        (resource.data.agentId == request.auth.uid)
+      );
+      allow delete: if isSignedIn() && hasRole('admin');
     }
 
   }

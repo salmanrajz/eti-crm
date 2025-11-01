@@ -1312,3 +1312,54 @@ export const checkNumberStatusHTTP = functions.https.onRequest(async (req, res) 
       });
     }
 });
+
+export const createUserAsAdmin = functions.https.onCall(async (data, context) => {
+  // Require authentication
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Auth required');
+  }
+  try {
+    const callerUid = context.auth.uid;
+    const callerDoc = await admin.firestore().collection('users').doc(callerUid).get();
+    const callerData = callerDoc.data();
+    if (!callerData || (callerData.role !== 'admin' && callerData.role !== 'manager' && callerData.role !== 'coordinator')) {
+      throw new functions.https.HttpsError('permission-denied', 'Only admins/managers/coordinators can create users');
+    }
+
+    const { email, password, role, name, extra } = data || {};
+    if (!email || !password || !role || !name) {
+      throw new functions.https.HttpsError('invalid-argument', 'email, password, role, and name are required');
+    }
+
+    // Create user in Firebase Auth
+    const userRecord = await admin.auth().createUser({
+      email,
+      password,
+      displayName: name,
+      disabled: false,
+    });
+
+    // Write user document
+    const userRef = admin.firestore().collection('users').doc(userRecord.uid);
+    const payload: any = {
+      id: userRecord.uid,
+      email,
+      role,
+      name,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    if (extra && typeof extra === 'object') {
+      Object.assign(payload, extra);
+    }
+    await userRef.set(payload, { merge: true });
+
+    return { ok: true, uid: userRecord.uid };
+  } catch (e: any) {
+    console.error('createUserAsAdmin failed', e);
+    if (e.code === 'auth/email-already-exists') {
+      throw new functions.https.HttpsError('already-exists', 'Email already in use');
+    }
+    throw new functions.https.HttpsError('internal', e?.message || 'Failed to create user');
+  }
+});

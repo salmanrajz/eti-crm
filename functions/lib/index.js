@@ -41,7 +41,7 @@
  * ===============================================================================
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkNumberStatusHTTP = exports.checkNumberStatus = exports.recomputeNumberPoolStats = exports.uploadVerificationMediaToAzure = exports.bulkDNCImportStatus = exports.bulkDNCImport = exports.backupReservationExpiry = exports.triggerReservationExpiry = exports.testReservationExpiry = exports.processReservationExpiry = exports.handleReservationExpiry = exports.emergencyClaimExpiry = exports.smartBatchClaimExpiry = exports.realtimeClaimExpiry = exports.handleClaimExpiry = exports.updateNumberPoolStatsOnDelete = exports.updateNumberPoolStatsOnCreate = exports.resetUserPassword = exports.whatsappWebhook = exports.checkNumberAvailability = exports.processLeadRejection = exports.claimNumber = exports.backfillNumberTokens = exports.onNumberPoolWrite = void 0;
+exports.createUserAsAdmin = exports.checkNumberStatusHTTP = exports.checkNumberStatus = exports.recomputeNumberPoolStats = exports.uploadVerificationMediaToAzure = exports.bulkDNCImportStatus = exports.bulkDNCImport = exports.backupReservationExpiry = exports.triggerReservationExpiry = exports.testReservationExpiry = exports.processReservationExpiry = exports.handleReservationExpiry = exports.emergencyClaimExpiry = exports.smartBatchClaimExpiry = exports.realtimeClaimExpiry = exports.handleClaimExpiry = exports.updateNumberPoolStatsOnDelete = exports.updateNumberPoolStatsOnCreate = exports.resetUserPassword = exports.whatsappWebhook = exports.checkNumberAvailability = exports.processLeadRejection = exports.claimNumber = exports.backfillNumberTokens = exports.onNumberPoolWrite = void 0;
 require("dotenv/config");
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
@@ -599,29 +599,20 @@ exports.whatsappWebhook = functions.https.onRequest(async (req, res) => {
         }
         const batch = db.batch();
         async function getLatestLeadByCustomerNumber(value) {
-            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
             try {
                 const snap = await db.collection('leads')
                     .where('customerNumber', '==', value)
+                    .orderBy('createdAt', 'desc')
+                    .limit(1)
                     .get();
-                if (snap.empty)
-                    return null;
-                let newest = snap.docs[0];
-                let newestTs = (((_c = (_b = (_a = newest.data()) === null || _a === void 0 ? void 0 : _a.createdAt) === null || _b === void 0 ? void 0 : _b.toDate) === null || _c === void 0 ? void 0 : _c.call(_b)) || ((_d = newest.data()) === null || _d === void 0 ? void 0 : _d.createdAt) || ((_f = (_e = newest.createTime) === null || _e === void 0 ? void 0 : _e.toDate) === null || _f === void 0 ? void 0 : _f.call(_e)));
-                for (const doc of snap.docs) {
-                    const data = doc.data();
-                    const ts = (((_h = (_g = data === null || data === void 0 ? void 0 : data.createdAt) === null || _g === void 0 ? void 0 : _g.toDate) === null || _h === void 0 ? void 0 : _h.call(_g)) || (data === null || data === void 0 ? void 0 : data.createdAt) || ((_k = (_j = doc.createTime) === null || _j === void 0 ? void 0 : _j.toDate) === null || _k === void 0 ? void 0 : _k.call(_j)));
-                    if (!newestTs || (ts && ts > newestTs)) {
-                        newest = doc;
-                        newestTs = ts;
-                    }
+                if (!snap.empty) {
+                    return snap.docs[0];
                 }
-                return newest;
             }
             catch (e) {
                 console.warn('getLatestLeadByCustomerNumber failed:', e);
-                return null;
             }
+            return null;
         }
         for (const msg of messages) {
             const from = (msg.from || '').replace(/\D/g, '');
@@ -1142,6 +1133,53 @@ exports.checkNumberStatusHTTP = functions.https.onRequest(async (req, res) => {
             status: 500,
             message: 'Service unavailable'
         });
+    }
+});
+exports.createUserAsAdmin = functions.https.onCall(async (data, context) => {
+    // Require authentication
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Auth required');
+    }
+    try {
+        const callerUid = context.auth.uid;
+        const callerDoc = await admin.firestore().collection('users').doc(callerUid).get();
+        const callerData = callerDoc.data();
+        if (!callerData || (callerData.role !== 'admin' && callerData.role !== 'manager' && callerData.role !== 'coordinator')) {
+            throw new functions.https.HttpsError('permission-denied', 'Only admins/managers/coordinators can create users');
+        }
+        const { email, password, role, name, extra } = data || {};
+        if (!email || !password || !role || !name) {
+            throw new functions.https.HttpsError('invalid-argument', 'email, password, role, and name are required');
+        }
+        // Create user in Firebase Auth
+        const userRecord = await admin.auth().createUser({
+            email,
+            password,
+            displayName: name,
+            disabled: false,
+        });
+        // Write user document
+        const userRef = admin.firestore().collection('users').doc(userRecord.uid);
+        const payload = {
+            id: userRecord.uid,
+            email,
+            role,
+            name,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        if (extra && typeof extra === 'object') {
+            Object.assign(payload, extra);
+        }
+        await userRef.set(payload, { merge: true });
+        return { ok: true, uid: userRecord.uid };
+    }
+    catch (e) {
+        console.error('createUserAsAdmin failed', e);
+        if (e.code === 'auth/email-already-exists') {
+            throw new functions.https.HttpsError('already-exists', 'Email already in use');
+        }
+        throw new functions.https.HttpsError('internal', (e === null || e === void 0 ? void 0 : e.message) || 'Failed to create user');
     }
 });
 //# sourceMappingURL=index.js.map
