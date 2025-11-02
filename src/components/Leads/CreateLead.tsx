@@ -41,7 +41,7 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { collection, addDoc, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
@@ -50,7 +50,7 @@ import { User, NumberPool, Lead } from '../../types';
 import { toast } from 'react-hot-toast';
 import { logNumberAction } from '../../utils/numberLogging';
 import { format } from 'date-fns';
-import { getPlanCategoriesWithPlans, PlanCategoryGroup } from '../../utils/planService';
+import { getPlanCategoriesWithPlans, PlanCategoryGroup, getPlans, Plan } from '../../utils/planService';
 // import { countries } from 'countries-list';
 import { FormSection } from './FormSection';
 import { FormInput } from './FormInput';
@@ -302,6 +302,7 @@ interface FormErrors {
   customerAge?: string;
   locationUrl?: string;
   plans?: string;
+  selectedNumber?: string; // Error for number selection
   customerAddress?: string;
   [key: string]: string | undefined;
 }
@@ -328,9 +329,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [currentNumber, setCurrentNumber] = useState(
     initialData?.plans?.[0]?.number || ''
   );
-  const [currentPlan, setCurrentPlan] = useState(
-    initialData?.plans?.[0]?.plan || ''
-  );
+  const [currentPlan, setCurrentPlan] = useState<string>('');
   const [currentNumberData, setCurrentNumberData] = useState<NumberPool | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>(
     initialData?.plans?.[0]?.category || 'Standard'
@@ -343,6 +342,113 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [whatsappVerificationEnabled, setWhatsappVerificationEnabled] = useState(true);
   const [planCategories, setPlanCategories] = useState<PlanCategoryGroup[]>([]);
   const [loadingPlans, setLoadingPlans] = useState(true);
+  const [allPlans, setAllPlans] = useState<Plan[]>([]);
+
+  // Load all plans separately to access their category field
+  useEffect(() => {
+    async function loadAllPlans() {
+      try {
+        const plans = await getPlans();
+        setAllPlans(plans);
+      } catch (error) {
+        // Error loading plans
+      }
+    }
+    loadAllPlans();
+  }, []);
+
+  // Filter and group plans based on their category field from Firebase
+  // The plan's `category` field stores the number category (e.g., "Standard", "Silver", "Gold", "Platinum")
+  // Plans should be grouped by this category field to show proper headings
+  const filteredPlanCategories = useMemo(() => {
+    // Normalize category strings for comparison (handles typos and variations)
+    const normalizeCategory = (cat: string): string => {
+      if (!cat) return '';
+      // Normalize to lowercase and handle common typos
+      let normalized = cat.toLowerCase().trim();
+      // Handle common typos: "Sillver" -> "Silver", "Siver" -> "Silver"
+      if (normalized.includes('sillver') || normalized.includes('siver') || normalized === 'silver') {
+        normalized = 'silver';
+      }
+      return normalized;
+    };
+
+    // Filter plans if a number category is selected
+    let filteredPlans = allPlans;
+    if (selectedCategory) {
+      const normalizedSelected = normalizeCategory(selectedCategory);
+      filteredPlans = allPlans.filter(plan => {
+        if (!plan.category) return false;
+        return normalizeCategory(plan.category) === normalizedSelected;
+      });
+    }
+
+    // Group plans by their category field (number category like "Silver", "Gold", etc.)
+    const plansByCategory = new Map<string, typeof filteredPlans>();
+    filteredPlans.forEach(plan => {
+      const category = plan.category || 'Other';
+      if (!plansByCategory.has(category)) {
+        plansByCategory.set(category, []);
+      }
+      plansByCategory.get(category)!.push(plan);
+    });
+
+    // Convert to PlanCategoryGroup format with proper headings based on plan category
+    const grouped: PlanCategoryGroup[] = [];
+    // Sort categories for consistent display order
+    const sortedCategories = Array.from(plansByCategory.keys()).sort((a, b) => {
+      // Sort order: Standard, Silver, Gold, Platinum, then others
+      const order: { [key: string]: number } = {
+        'Standard': 1,
+        'Silver': 2,
+        'Sillver': 2, // Handle typo
+        'Gold': 3,
+        'Platinum': 4
+      };
+      return (order[a] || 99) - (order[b] || 99);
+    });
+
+    sortedCategories.forEach(category => {
+      const plansInCategory = plansByCategory.get(category)!;
+      // Capitalize first letter of category name
+      const normalizedCat = normalizeCategory(category);
+      // Handle special case for typo "Sillver" -> "Silver"
+      let displayCategory = category.charAt(0).toUpperCase() + category.slice(1).toLowerCase();
+      if (normalizedCat === 'silver') {
+        displayCategory = 'Silver';
+      }
+      
+      // Remove duplicates: first by ID (preferred), then by name if no ID
+      // Keep only one instance of each plan to avoid duplicate keys
+      const uniquePlansMap = new Map<string, typeof plansInCategory[0]>();
+      plansInCategory.forEach(plan => {
+        if (plan.id) {
+          // Use ID as key to ensure uniqueness
+          if (!uniquePlansMap.has(plan.id)) {
+            uniquePlansMap.set(plan.id, plan);
+          }
+        } else {
+          // If no ID, use name as key (but this might cause duplicates)
+          const key = plan.name;
+          if (!uniquePlansMap.has(key)) {
+            uniquePlansMap.set(key, plan);
+          }
+        }
+      });
+      const uniquePlans = Array.from(uniquePlansMap.values());
+      
+      grouped.push({
+        label: `✅ ${displayCategory}`, // Use the plan's category field as the heading with ✅ emoji
+        categoryName: category,
+        options: uniquePlans.map((plan, index) => ({
+          value: plan.id ? `${plan.id}|${plan.name}` : `${category}|${plan.name}|${index}`, // Use plan ID to ensure uniqueness
+          label: plan.name
+        }))
+      });
+    });
+
+    return grouped;
+  }, [selectedCategory, allPlans]);
 
   const [formData, setFormData] = useState<FormData>({
     customerName: initialData?.customerName || '',
@@ -383,7 +489,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       const enabled = await getWhatsAppVerificationEnabled();
       setWhatsappVerificationEnabled(enabled);
     } catch (error) {
-      console.error('Error loading WhatsApp verification setting:', error);
       // Keep default value (true) on error
     }
   };
@@ -394,7 +499,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       const categories = await getPlanCategoriesWithPlans();
       setPlanCategories(categories);
     } catch (error) {
-      console.error('Error loading plan categories:', error);
       toast.error('Failed to load plans');
     } finally {
       setLoadingPlans(false);
@@ -437,13 +541,18 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const handleNumberSelect = useCallback((number: NumberPool) => {
     setCurrentNumber(number.number);
     setCurrentNumberData(number);
+    const previousCategory = selectedCategory;
     setSelectedCategory(number.category);
     setShowNumberPool(false);
+    // Reset current plan only if category actually changed
+    if (previousCategory !== number.category) {
+      setCurrentPlan('');
+    }
     setFormErrors(prev => {
-      const { plans, ...rest } = prev;
+      const { plans, selectedNumber, ...rest } = prev;
       return rest;
     });
-  }, []);
+  }, [selectedCategory]);
 
   const handlePlanSelect = useCallback((plan: string) => {
     // Prevent selection of category headers (values starting with "category-")
@@ -451,6 +560,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       return;
     }
     
+    // If plan is just a name, we need to find the full value from options
+    // The plan value format is either "planId|planName" or "category|planName|index"
+    // But we also need to handle when it's passed directly as the full value
     setCurrentPlan(plan);
     setFormErrors(prev => {
       const { plans, ...rest } = prev;
@@ -459,15 +571,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   }, []);
 
   const handleAddPlan = useCallback(() => {
-    if (!currentNumber || !currentNumberData) {
-      toast.error('Please select a number');
-      setFormErrors(prev => ({
-        ...prev,
-        plans: 'Please select a number'
-      }));
-      return;
-    }
-
     if (!currentPlan || currentPlan === '') {
       toast.error('Please select a plan');
       setFormErrors(prev => ({
@@ -477,29 +580,66 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       return;
     }
 
-    if (selectedPlans.some(p => p.numberId === currentNumberData.id)) {
-      toast.error('This number has already been selected');
-      setFormErrors(prev => ({
-        ...prev,
-        plans: 'This number has already been selected'
-      }));
-      return;
+    // Extract plan name from value if it contains plan ID (format: "planId|planName" or "category|planName|index")
+    const planName = currentPlan.includes('|') 
+      ? currentPlan.split('|')[1] 
+      : currentPlan;
+
+    // If a number is selected, check if it's already in selectedPlans
+    if (currentNumber && currentNumberData) {
+      const existingPlanIndex = selectedPlans.findIndex(p => p.numberId === currentNumberData.id);
+      
+      if (existingPlanIndex !== -1) {
+        // Update the plan for existing number
+        setSelectedPlans(prev => prev.map((plan, index) => 
+          index === existingPlanIndex 
+            ? { ...plan, plan: planName }
+            : plan
+        ));
+        toast.success('Plan updated successfully');
+      } else {
+        // Add new number with plan
+        setSelectedPlans(prev => [...prev, {
+          numberId: currentNumberData.id,
+          number: currentNumber,
+          plan: planName,
+          category: currentNumberData.category,
+          group: currentNumberData.group
+        }]);
+      }
+
+      setCurrentNumber('');
+      setCurrentPlan('');
+      setCurrentNumberData(null);
+      setSelectedCategory('Standard');
+    } else {
+      // If no number is selected, check if we have existing plans
+      // Allow updating plan for the first existing plan if no number is selected
+      if (selectedPlans.length > 0) {
+        // Update the plan for the first existing number
+        setSelectedPlans(prev => prev.map((plan, index) => 
+          index === 0 
+            ? { ...plan, plan: planName }
+            : plan
+        ));
+        toast.success('Plan updated successfully');
+        setCurrentPlan('');
+        setFormErrors(prev => {
+          const { plans, ...rest } = prev;
+          return rest;
+        });
+      } else {
+        // If no plans exist yet, require number selection
+        toast.error('Please select a number');
+        setFormErrors(prev => ({
+          ...prev,
+          selectedNumber: 'Please select a number.',
+          plans: undefined // Clear plan error if there was one
+        }));
+        return;
+      }
     }
 
-
-
-    setSelectedPlans(prev => [...prev, {
-      numberId: currentNumberData.id,
-      number: currentNumber,
-      plan: currentPlan,
-      category: currentNumberData.category,
-      group: currentNumberData.group
-    }]);
-
-    setCurrentNumber('');
-    setCurrentPlan('');
-    setCurrentNumberData(null);
-    setSelectedCategory('Standard');
     setFormErrors(prev => {
       const { plans, ...rest } = prev;
       return rest;
@@ -923,7 +1063,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   };
                 }
               } catch (error) {
-                console.error('Error fetching plan details:', error);
+                // Error fetching plan details
               }
             }
           }
@@ -1253,6 +1393,11 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   )}
                 </div>
               </div>
+              {formErrors.selectedNumber && (
+                <div className="mt-1 text-sm text-red-600">
+                  {formErrors.selectedNumber}
+                </div>
+              )}
               {currentNumber && (
                 <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
                   <div className="flex items-center justify-between">
@@ -1265,6 +1410,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                       onClick={() => {
                         setCurrentNumber('');
                         setCurrentNumberData(null);
+                        setSelectedCategory('Standard');
+                        setCurrentPlan('');
                       }}
                       className="text-sm font-medium text-red-600 hover:text-red-700"
                     >
@@ -1280,16 +1427,29 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 icon={Package}
                 options={[
                   { value: '', label: 'Select a plan' },
-                  ...planCategories.flatMap((category, categoryIndex) => [
+                  ...filteredPlanCategories.flatMap((category, categoryIndex) => [
                     { value: `category-${categoryIndex}`, label: category.label, disabled: true },
-                    ...category.options.map((option, optionIndex) => ({
-                      ...option,
-                      value: option.value || `plan-${categoryIndex}-${optionIndex}`
+                    ...category.options.map((option) => ({
+                      value: option.value, // Use the exact value from filteredPlanCategories (planId|planName format)
+                      label: option.label
                     }))
                     ])
                 ]}
                 value={currentPlan}
-                  onChange={(e) => handlePlanSelect(e.target.value)}
+                  onChange={(e) => {
+                    const selectedValue = e.target.value;
+                    // Prevent selection of category headers or empty value
+                    if (selectedValue.startsWith('category-') || !selectedValue || selectedValue === '') {
+                      return;
+                    }
+                    // Store the full value (with plan ID if present) for uniqueness
+                    // This ensures the select dropdown shows the selected plan
+                    setCurrentPlan(selectedValue);
+                    setFormErrors(prev => {
+                      const { plans, ...rest } = prev;
+                      return rest;
+                    });
+                  }}
                   error={formErrors.plans}
               />
 

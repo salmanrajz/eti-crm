@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import { collection, addDoc, updateDoc, deleteDoc, doc, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
-import { Plus, Edit, Trash2, Save, X, Package } from 'lucide-react';
+import { Plus, Edit, Trash2, Save, X, Package, Upload, Download, CheckSquare, Square } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { read, utils, writeFile } from 'xlsx';
 
 interface Plan {
   id?: string;
@@ -36,6 +37,9 @@ export function PlanManagement() {
   const [showPlanForm, setShowPlanForm] = useState(false);
   const [showCategoryForm, setShowCategoryForm] = useState(false);
   const [activeTab, setActiveTab] = useState<'plans' | 'categories'>('plans');
+  const [uploadingPlans, setUploadingPlans] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0, success: 0, failed: 0 });
+  const [selectedPlanIds, setSelectedPlanIds] = useState<string[]>([]);
 
   // Form states
   const [planForm, setPlanForm] = useState({
@@ -395,6 +399,292 @@ export function PlanManagement() {
     setEditingCategory(null);
   };
 
+  // Handle plan selection
+  const handlePlanSelect = (planId: string) => {
+    setSelectedPlanIds(prev => 
+      prev.includes(planId) 
+        ? prev.filter(id => id !== planId)
+        : [...prev, planId]
+    );
+  };
+
+  // Handle select all plans
+  const handleSelectAll = () => {
+    if (selectedPlanIds.length === plans.length) {
+      setSelectedPlanIds([]);
+    } else {
+      setSelectedPlanIds(plans.filter(p => p.id).map(p => p.id!));
+    }
+  };
+
+  // Bulk activate plans
+  const handleBulkActivate = async () => {
+    if (selectedPlanIds.length === 0) {
+      toast.error('Please select at least one plan');
+      return;
+    }
+
+    try {
+      const updatePromises = selectedPlanIds.map(planId =>
+        updateDoc(doc(db, 'plans', planId), {
+          isActive: true,
+          updatedAt: new Date()
+        })
+      );
+
+      await Promise.all(updatePromises);
+      toast.success(`Activated ${selectedPlanIds.length} plan(s) successfully`);
+      setSelectedPlanIds([]);
+      await loadData();
+    } catch (error) {
+      console.error('Error activating plans:', error);
+      toast.error('Failed to activate plans');
+    }
+  };
+
+  // Bulk deactivate plans
+  const handleBulkDeactivate = async () => {
+    if (selectedPlanIds.length === 0) {
+      toast.error('Please select at least one plan');
+      return;
+    }
+
+    try {
+      const updatePromises = selectedPlanIds.map(planId =>
+        updateDoc(doc(db, 'plans', planId), {
+          isActive: false,
+          updatedAt: new Date()
+        })
+      );
+
+      await Promise.all(updatePromises);
+      toast.success(`Deactivated ${selectedPlanIds.length} plan(s) successfully`);
+      setSelectedPlanIds([]);
+      await loadData();
+    } catch (error) {
+      console.error('Error deactivating plans:', error);
+      toast.error('Failed to deactivate plans');
+    }
+  };
+
+  // Bulk delete plans
+  const handleBulkDelete = async () => {
+    if (selectedPlanIds.length === 0) {
+      toast.error('Please select at least one plan');
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to delete ${selectedPlanIds.length} plan(s)? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      const deletePromises = selectedPlanIds.map(planId =>
+        deleteDoc(doc(db, 'plans', planId))
+      );
+
+      await Promise.all(deletePromises);
+      toast.success(`Deleted ${selectedPlanIds.length} plan(s) successfully`);
+      setSelectedPlanIds([]);
+      await loadData();
+    } catch (error) {
+      console.error('Error deleting plans:', error);
+      toast.error('Failed to delete plans');
+    }
+  };
+
+  // Download template Excel file
+  const downloadTemplate = () => {
+    const templateData = [
+      {
+        'Plan Name': 'Example Plan 1',
+        'Category': 'New Freedom Plans',
+        'Description': 'Example plan description',
+        'Benefits': '1000 local minutes, Non-Stop Data (up to 3 Mbps)',
+        'Amount (AED)': '250',
+        'Duration (Years)': '1',
+        'Is Active': 'Yes'
+      },
+      {
+        'Plan Name': 'Example Plan 2',
+        'Category': 'Smart Plans',
+        'Description': 'Another example plan',
+        'Benefits': '50GB data, 100 local minutes',
+        'Amount (AED)': '100',
+        'Duration (Years)': '1',
+        'Is Active': 'Yes'
+      }
+    ];
+
+    const ws = utils.json_to_sheet(templateData);
+    const wb = utils.book_new();
+    utils.book_append_sheet(wb, ws, 'Plans');
+    
+    // Set column widths
+    const colWidths = [
+      { wch: 20 }, // Plan Name
+      { wch: 20 }, // Category
+      { wch: 30 }, // Description
+      { wch: 40 }, // Benefits
+      { wch: 15 }, // Amount
+      { wch: 15 }, // Duration
+      { wch: 12 }  // Is Active
+    ];
+    ws['!cols'] = colWidths;
+
+    writeFile(wb, 'Plan_Template.xlsx');
+    toast.success('Template downloaded successfully');
+  };
+
+  // Handle Excel file upload
+  const handleExcelUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Reset input
+    event.target.value = '';
+
+    if (!file.name.match(/\.(xlsx|xls)$/i)) {
+      toast.error('Please upload a valid Excel file (.xlsx or .xls)');
+      return;
+    }
+
+    try {
+      setUploadingPlans(true);
+      const data = await file.arrayBuffer();
+      const workbook = read(data);
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const jsonData = utils.sheet_to_json(worksheet);
+
+      if (!Array.isArray(jsonData) || jsonData.length === 0) {
+        toast.error('Excel file is empty or invalid format');
+        setUploadingPlans(false);
+        return;
+      }
+
+      // Validate and process plans
+      const validPlans: Plan[] = [];
+      const errors: string[] = [];
+
+      jsonData.forEach((row: any, index: number) => {
+        const rowNumber = index + 2; // Account for header row
+
+        // Normalize column names (handle different variations)
+        const planName = row['Plan Name'] || row['plan name'] || row['PlanName'] || row['planName'] || row['Name'] || row['name'];
+        const category = row['Category'] || row['category'] || row['Category Name'] || row['categoryName'];
+        const description = row['Description'] || row['description'] || row['Desc'] || row['desc'] || '';
+        const benefits = row['Benefits'] || row['benefits'] || row['Benefit'] || row['benefit'] || '';
+        const amount = row['Amount (AED)'] || row['amount'] || row['Amount'] || row['Price'] || row['price'] || '';
+        const duration = row['Duration (Years)'] || row['duration'] || row['Duration'] || row['durationYears'] || '1';
+        const isActive = row['Is Active'] || row['isActive'] || row['IsActive'] || row['Active'] || row['active'] || 'Yes';
+
+        // Validation
+        if (!planName || !planName.toString().trim()) {
+          errors.push(`Row ${rowNumber}: Plan Name is required`);
+          return;
+        }
+
+        if (!category || !category.toString().trim()) {
+          errors.push(`Row ${rowNumber}: Category is required`);
+          return;
+        }
+
+        // Check if category exists
+        const categoryExists = categories.some(cat => 
+          cat.name.toLowerCase() === category.toString().trim().toLowerCase()
+        );
+
+        if (!categoryExists) {
+          errors.push(`Row ${rowNumber}: Category "${category}" does not exist. Please create it first or use an existing category.`);
+          return;
+        }
+
+        // Convert isActive to boolean
+        const activeValue = typeof isActive === 'string' 
+          ? isActive.toString().toLowerCase().trim() === 'yes' || isActive.toString().toLowerCase().trim() === 'true'
+          : Boolean(isActive);
+
+        validPlans.push({
+          name: planName.toString().trim(),
+          category: category.toString().trim(),
+          description: description ? description.toString().trim() : '',
+          benefits: benefits ? benefits.toString().trim() : '',
+          amount: amount ? amount.toString().trim() : '',
+          duration: duration ? duration.toString().trim() : '1',
+          isActive: activeValue
+        } as Plan);
+      });
+
+      if (errors.length > 0) {
+        toast.error(`Found ${errors.length} validation error(s). Please check the console.`);
+        console.error('Validation errors:', errors);
+        setUploadingPlans(false);
+        return;
+      }
+
+      if (validPlans.length === 0) {
+        toast.error('No valid plans found in the Excel file');
+        setUploadingPlans(false);
+        return;
+      }
+
+      // Upload plans to Firestore
+      let successCount = 0;
+      let failedCount = 0;
+
+      setUploadProgress({
+        total: validPlans.length,
+        current: 0,
+        success: 0,
+        failed: 0
+      });
+
+      for (const [index, plan] of validPlans.entries()) {
+        try {
+          await addDoc(collection(db, 'plans'), {
+            ...plan,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          });
+
+          successCount++;
+          setUploadProgress({
+            total: validPlans.length,
+            current: index + 1,
+            success: successCount,
+            failed: failedCount
+          });
+        } catch (error) {
+          console.error(`Error creating plan ${plan.name}:`, error);
+          failedCount++;
+          setUploadProgress({
+            total: validPlans.length,
+            current: index + 1,
+            success: successCount,
+            failed: failedCount
+          });
+        }
+      }
+
+      // Reload data
+      await loadData();
+
+      toast.success(`Successfully imported ${successCount} plan(s)`);
+      if (failedCount > 0) {
+        toast.error(`Failed to import ${failedCount} plan(s)`);
+      }
+
+      setUploadingPlans(false);
+      setUploadProgress({ current: 0, total: 0, success: 0, failed: 0 });
+      setShowPlanForm(false);
+    } catch (error) {
+      console.error('Error reading Excel file:', error);
+      toast.error('Failed to read Excel file. Please ensure the file format is correct.');
+      setUploadingPlans(false);
+      setUploadProgress({ current: 0, total: 0, success: 0, failed: 0 });
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -469,6 +759,50 @@ export function PlanManagement() {
           {/* Plans Tab */}
           {activeTab === 'plans' && (
             <div className="space-y-4">
+              {/* Bulk Actions Bar */}
+              {plans.length > 0 && (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <label className="flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedPlanIds.length === plans.length && plans.length > 0}
+                          onChange={handleSelectAll}
+                          className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                        />
+                        <span className="ml-2 text-sm font-medium text-gray-700">
+                          Select All ({selectedPlanIds.length} selected)
+                        </span>
+                      </label>
+                    </div>
+                    {selectedPlanIds.length > 0 && (
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={handleBulkActivate}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                        >
+                          Activate ({selectedPlanIds.length})
+                        </button>
+                        <button
+                          onClick={handleBulkDeactivate}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-yellow-600 rounded-md hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+                        >
+                          Deactivate ({selectedPlanIds.length})
+                        </button>
+                        <button
+                          onClick={handleBulkDelete}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                        >
+                          <Trash2 className="h-4 w-4 mr-1" />
+                          Delete ({selectedPlanIds.length})
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
               {categories.length === 0 ? (
                 <div className="text-center py-12">
                   <Package className="mx-auto h-12 w-12 text-gray-400" />
@@ -499,10 +833,21 @@ export function PlanManagement() {
                       key={plan.id}
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
-                      className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow"
+                      className={`bg-white border rounded-lg p-4 hover:shadow-md transition-shadow ${
+                        selectedPlanIds.includes(plan.id!) 
+                          ? 'border-indigo-500 ring-2 ring-indigo-500' 
+                          : 'border-gray-200'
+                      }`}
                     >
                       <div className="flex items-start justify-between">
-                        <div className="flex-1">
+                        <div className="flex items-start space-x-3 flex-1">
+                          <input
+                            type="checkbox"
+                            checked={selectedPlanIds.includes(plan.id!)}
+                            onChange={() => handlePlanSelect(plan.id!)}
+                            className="mt-1 h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                          />
+                          <div className="flex-1">
                           <h4 className="text-lg font-medium text-gray-900">{plan.name}</h4>
                           <p className="text-sm text-gray-500 mt-1">{plan.category}</p>
                           {plan.description && (
@@ -537,8 +882,9 @@ export function PlanManagement() {
                               {plan.isActive ? 'Active' : 'Inactive'}
                             </span>
                           </div>
+                          </div>
                         </div>
-                        <div className="flex space-x-2 ml-4">
+                        <div className="flex space-x-2">
                           <button
                             onClick={() => handleEditPlan(plan)}
                             className="text-indigo-600 hover:text-indigo-900"
@@ -626,7 +972,7 @@ export function PlanManagement() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4"
+              className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto"
             >
               <div className="px-6 py-4 border-b border-gray-200">
                 <div className="flex items-center justify-between">
@@ -645,8 +991,76 @@ export function PlanManagement() {
                 </div>
               </div>
 
-              <form onSubmit={handleSavePlan} className="px-6 py-4">
-                <div className="space-y-4">
+              <div className="px-6 py-4">
+                {/* Excel Upload Section - Only show when adding new plan, not editing */}
+                {!editingPlan && (
+                  <div className="mb-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-medium text-gray-900">Bulk Upload Plans</h4>
+                      <button
+                        type="button"
+                        onClick={downloadTemplate}
+                        className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 rounded-md hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                      >
+                        <Download className="h-3 w-3 mr-1.5" />
+                        Download Template
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-600 mb-3">
+                      Upload an Excel file (.xlsx or .xls) to import multiple plans at once.
+                    </p>
+                    <div className="mt-2">
+                      <label className="block text-xs font-medium text-gray-700 mb-2">
+                        Upload Excel File
+                      </label>
+                      <div className="flex items-center space-x-3">
+                        <label
+                          htmlFor="excel-upload"
+                          className="flex-1 flex items-center justify-center px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                        >
+                          <Upload className="h-4 w-4 mr-2" />
+                          <span>Choose File</span>
+                          <input
+                            id="excel-upload"
+                            type="file"
+                            accept=".xlsx,.xls"
+                            className="sr-only"
+                            onChange={handleExcelUpload}
+                            disabled={uploadingPlans}
+                          />
+                        </label>
+                      </div>
+                      {uploadingPlans && (
+                        <div className="mt-3">
+                          <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
+                            <span>Uploading plans...</span>
+                            <span>{uploadProgress.current} / {uploadProgress.total}</span>
+                          </div>
+                          <div className="w-full bg-gray-200 rounded-full h-2">
+                            <div
+                              className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+                              style={{ width: `${uploadProgress.total > 0 ? (uploadProgress.current / uploadProgress.total) * 100 : 0}%` }}
+                            />
+                          </div>
+                          <div className="mt-2 flex items-center justify-between text-xs">
+                            <span className="text-green-600">✓ {uploadProgress.success} successful</span>
+                            {uploadProgress.failed > 0 && (
+                              <span className="text-red-600">✗ {uploadProgress.failed} failed</span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="mb-4 flex items-center">
+                  <div className="flex-1 border-t border-gray-300"></div>
+                  <span className="px-3 text-sm text-gray-500">OR</span>
+                  <div className="flex-1 border-t border-gray-300"></div>
+                </div>
+
+              <form onSubmit={handleSavePlan} className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700">Plan Name *</label>
                     <input
@@ -743,7 +1157,6 @@ export function PlanManagement() {
                       Active
                     </label>
                   </div>
-                </div>
 
                 <div className="flex justify-end space-x-3 mt-6">
                   <button
@@ -753,18 +1166,21 @@ export function PlanManagement() {
                       resetForms();
                     }}
                     className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    disabled={uploadingPlans}
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                    disabled={uploadingPlans || categories.length === 0}
+                    className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Save className="h-4 w-4 mr-2 inline" />
                     {editingPlan ? 'Update' : 'Create'}
                   </button>
                 </div>
               </form>
+              </div>
             </motion.div>
           </div>
         )}

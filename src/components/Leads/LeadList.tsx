@@ -46,7 +46,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot, documentId } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, CoordinatorType, VerifierGroups } from '../../types';
@@ -503,7 +503,7 @@ export function LeadList() {
 
     // Get unique ids for batch processing
     const numberIds = [...new Set(leadsData.flatMap(lead => lead.plans?.map(plan => plan.numberId) || []))];
-    const agentIds = [...new Set(leadsData.map(lead => lead.agentId))];
+    const agentIds = [...new Set(leadsData.map(lead => lead.agentId).filter((id): id is string => !!id))];
 
     // ✅ PERFORMANCE: Batch fetch all data in parallel with optimized queries
     const [numberGroupsResult, agentInfoResult] = await Promise.all([
@@ -676,13 +676,29 @@ export function LeadList() {
     // ✅ PERFORMANCE: Batch fetch using 'in' queries
     const promises = chunks.map(async (chunk) => {
       try {
-        const q = query(collection(db, 'users'), where('__name__', 'in', chunk));
+        // Filter out any invalid IDs before querying
+        const validChunk = chunk.filter(id => id && typeof id === 'string' && id.trim() !== '');
+        if (validChunk.length === 0) {
+          return chunk.map(id => ({ id, name: 'Unknown Agent', teamId: undefined }));
+        }
+        const q = query(collection(db, 'users'), where(documentId(), 'in', validChunk));
         const snapshot = await getDocs(q);
-        return snapshot.docs.map(doc => ({
-          id: doc.id,
-          name: doc.data().name || doc.data().fullName || doc.data().displayName || doc.data().email || 'Unknown Agent',
-          teamId: doc.data().teamId
-        }));
+        // Create a map of fetched agents
+        const fetchedAgents = new Map<string, { id: string; name: string; teamId?: string }>();
+        snapshot.docs.forEach(doc => {
+          fetchedAgents.set(doc.id, {
+            id: doc.id,
+            name: doc.data().name || doc.data().fullName || doc.data().displayName || doc.data().email || 'Unknown Agent',
+            teamId: doc.data().teamId
+          });
+        });
+        // Return results for all requested IDs, using fetched data or 'Unknown Agent'
+        return chunk.map(id => {
+          if (fetchedAgents.has(id)) {
+            return fetchedAgents.get(id)!;
+          }
+          return { id, name: 'Unknown Agent', teamId: undefined };
+        });
         } catch (error) {
         console.error(`Error fetching agent batch:`, error);
         return chunk.map(id => ({ id, name: 'Unknown Agent', teamId: undefined }));
@@ -1437,7 +1453,7 @@ export function LeadList() {
                   onClick={() => handleSort('agentName')}
                   className="flex items-center text-sm font-semibold text-gray-900 tracking-wide hover:text-indigo-600 transition-colors duration-200"
                 >
-                  Agent & Team
+                  {isManager() ? 'Agent' : 'Agent & Team'}
                   <ArrowUpDown className="h-4 w-4 ml-1" />
                   {sortField === 'agentName' && (
                     sortDirection === 'asc' ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />

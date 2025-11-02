@@ -823,12 +823,32 @@ export function LeadDetails() {
       plans: 'Plans'
     };
 
-    const ignoreKeys = new Set(['updatedAt', 'updatedBy', 'agentId', 'teamId', 'managerId']);
+    const ignoreKeys = new Set(['updatedAt', 'updatedBy', 'agentId', 'teamId', 'managerId', 'verifierId', 'createdAt']);
     const changes: Array<{ field: string; original: string; edited: string }> = [];
     Object.keys(updates).forEach((key) => {
       if (ignoreKeys.has(key)) return;
       const edited = (updates as any)[key];
       const originalVal = (original as any)[key];
+      
+      // Special handling for plans: check if plans are actually the same
+      if (key === 'plans') {
+        const originalPlans = originalVal || [];
+        const editedPlans = edited || [];
+        
+        // Compare plans by numberId, number, and plan
+        const plansEqual = originalPlans.length === editedPlans.length &&
+          originalPlans.every((origPlan: any, index: number) => {
+            const editPlan = editedPlans[index];
+            return origPlan?.numberId === editPlan?.numberId &&
+                   origPlan?.number === editPlan?.number &&
+                   origPlan?.plan === editPlan?.plan;
+          });
+        
+        if (plansEqual) {
+          return; // Skip if plans are the same
+        }
+      }
+      
       const isEqual = JSON.stringify(edited) === JSON.stringify(originalVal);
       if (!isEqual) {
         const fieldName = displayNames[key] || key;

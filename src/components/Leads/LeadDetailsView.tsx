@@ -157,6 +157,36 @@ const VERIFY_CHECKLIST = [
   }
 ];
 
+// Plans that require the postpaid acquisition campaign checklist
+const POSTPAID_CAMPAIGN_PLANS = [
+  'New Freedom 250 Non-Stop Data - Flexi Minutes 12 months commitment',
+  'New Freedom 250 Non-Stop Data - Local Minutes 12 months commitment',
+  'New Freedom 275 Non-Stop Data - Local Minutes',
+  'New Freedom 275 Non-Stop Data - Flexi Minutes',
+  'New Freedom 325 Non-Stop data - Flexi minutes 12 months commitment',
+  'New Freedom 325 Non-Stop data - Local minutes 12 months commitment',
+  'New Freedom 375 Non-Stop data - Local minutes',
+  'New Freedom 375 Non-Stop data - Flexi minutes'
+];
+
+// Helper function to check if lead has any of the postpaid campaign plans
+const hasPostpaidCampaignPlan = (lead: Lead): boolean => {
+  if (!lead.plans || lead.plans.length === 0) return false;
+  return lead.plans.some(planItem => 
+    POSTPAID_CAMPAIGN_PLANS.some(campaignPlan => 
+      planItem.plan === campaignPlan || planItem.plan?.includes(campaignPlan)
+    )
+  );
+};
+
+// Additional checklist item for postpaid campaign plans
+const POSTPAID_CAMPAIGN_CHECKLIST = {
+  header: 'New Postpaid Acquisition Campaign',
+  details: [
+    'I have informed the customer about the New postpaid acquisition campaign - Up to 50% discount for 6 months.'
+  ]
+};
+
 type LeadMediaItem = Lead['verificationMedia'] extends Array<infer T> ? T : never;
 
 export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { lead: Lead; onEdit: () => void; onResubmit?: () => void; isResubmitting?: boolean }) {
@@ -181,7 +211,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [isCopied, setIsCopied] = useState(false);
   const [showSplitLead, setShowSplitLead] = useState(false);
   const [verificationMedia, setVerificationMedia] = useState<LeadMediaItem[]>([]);
-  const [verifyChecklist, setVerifyChecklist] = useState<boolean[]>(VERIFY_CHECKLIST.map(() => false));
   const [sharedWithNames, setSharedWithNames] = useState<string[]>([]);
   const [rejecting, setRejecting] = useState(false);
   const [showRejectDialog, setShowRejectDialog] = useState(false);
@@ -190,7 +219,26 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [isCoordinatorActionProcessing, setIsCoordinatorActionProcessing] = useState(false);
   const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
-  const [expandedSections, setExpandedSections] = useState<boolean[]>(VERIFY_CHECKLIST.map(() => false));
+  
+  // Determine if we need to show the postpaid campaign checklist
+  const showPostpaidCampaignChecklist = hasPostpaidCampaignPlan(lead);
+  
+  // Initialize verifyChecklist with base items + conditional campaign item
+  const [verifyChecklist, setVerifyChecklist] = useState<boolean[]>(() => {
+    const baseChecklist = VERIFY_CHECKLIST.map(() => false);
+    if (showPostpaidCampaignChecklist) {
+      return [...baseChecklist, false]; // Add one more for campaign checklist
+    }
+    return baseChecklist;
+  });
+  
+  const [expandedSections, setExpandedSections] = useState<boolean[]>(() => {
+    const baseExpanded = VERIFY_CHECKLIST.map(() => false);
+    if (showPostpaidCampaignChecklist) {
+      return [...baseExpanded, false]; // Add one more for campaign checklist
+    }
+    return baseExpanded;
+  });
   const [plans, setPlans] = useState<any[]>([]);
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
 
@@ -1239,7 +1287,12 @@ Language: ${lead.language || 'N/A'}`;
               <button
                 onClick={() => {
                   setShowMediaModal(false);
-                  setVerifyChecklist(VERIFY_CHECKLIST.map(() => false));
+                  const baseChecklist = VERIFY_CHECKLIST.map(() => false);
+                  if (showPostpaidCampaignChecklist) {
+                    setVerifyChecklist([...baseChecklist, false]);
+                  } else {
+                    setVerifyChecklist(baseChecklist);
+                  }
                 }}
                 className="text-gray-400 hover:text-gray-500 p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
@@ -1252,13 +1305,13 @@ Language: ${lead.language || 'N/A'}`;
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-medium text-gray-600">Progress</span>
                 <span className="text-xs font-bold text-indigo-600">
-                  {verifyChecklist.filter(Boolean).length}/{VERIFY_CHECKLIST.length}
+                  {verifyChecklist.filter(Boolean).length}/{verifyChecklist.length}
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-1.5 sm:h-1">
                 <div 
                   className="bg-gradient-to-r from-indigo-500 to-purple-600 h-1.5 sm:h-1 rounded-full transition-all duration-300"
-                  style={{ width: `${(verifyChecklist.filter(Boolean).length / VERIFY_CHECKLIST.length) * 100}%` }}
+                  style={{ width: `${(verifyChecklist.filter(Boolean).length / verifyChecklist.length) * 100}%` }}
                 ></div>
               </div>
             </div>
@@ -1355,6 +1408,98 @@ Language: ${lead.language || 'N/A'}`;
                     </div>
                   );
                 })}
+                
+                {/* Conditional Postpaid Campaign Checklist Item */}
+                {showPostpaidCampaignChecklist && (() => {
+                  const campaignIdx = VERIFY_CHECKLIST.length;
+                  const hasLongContent = POSTPAID_CAMPAIGN_CHECKLIST.details.length > 2 || 
+                    POSTPAID_CAMPAIGN_CHECKLIST.details.some(item => item.length > 50);
+                  const isExpanded = expandedSections[campaignIdx] || false;
+                  
+                  return (
+                    <div 
+                      key={POSTPAID_CAMPAIGN_CHECKLIST.header} 
+                      className={`p-2.5 sm:p-3 rounded-lg border transition-all duration-300 active:scale-95 ${
+                        verifyChecklist[campaignIdx] 
+                          ? 'border-green-300 bg-green-50/70 shadow-sm' 
+                          : 'border-gray-200 bg-white active:bg-gray-50'
+                      }`}
+                    >
+                      <label className="flex items-start space-x-2 sm:space-x-2.5 cursor-pointer select-none min-h-[44px]">
+                        <div className="relative flex-shrink-0 mt-0.5">
+                          <input
+                            type="checkbox"
+                            checked={verifyChecklist[campaignIdx] || false}
+                            onChange={e => {
+                              const updated = [...verifyChecklist];
+                              updated[campaignIdx] = e.target.checked;
+                              setVerifyChecklist(updated);
+                            }}
+                            className="sr-only"
+                          />
+                          <div className={`w-6 h-6 sm:w-5 sm:h-5 rounded-md border-2 flex items-center justify-center transition-all duration-200 ${
+                            verifyChecklist[campaignIdx]
+                              ? 'bg-green-500 border-green-500 shadow-sm'
+                              : 'bg-white border-gray-300'
+                          }`}>
+                            {verifyChecklist[campaignIdx] && (
+                              <Check className="w-4 h-4 sm:w-3 sm:h-3 text-white" />
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between mb-1 sm:mb-1.5">
+                            <span className={`font-semibold text-xs sm:text-xs ${
+                              verifyChecklist[campaignIdx] ? 'text-green-800' : 'text-gray-800'
+                            }`}>
+                              {POSTPAID_CAMPAIGN_CHECKLIST.header}
+                            </span>
+                            {verifyChecklist[campaignIdx] && (
+                              <div className="w-2 h-2 sm:w-1.5 sm:h-1.5 bg-green-500 rounded-full animate-pulse"></div>
+                            )}
+                          </div>
+                          
+                          <div className={`space-y-0.5 sm:space-y-1 transition-all duration-300 ${
+                            hasLongContent && !isExpanded ? 'max-h-10 sm:max-h-12 overflow-hidden' : ''
+                          }`}>
+                            {POSTPAID_CAMPAIGN_CHECKLIST.details.map((item, i) => (
+                              <div key={i} className="flex items-start space-x-1 sm:space-x-1.5">
+                                <div className={`w-1 h-1 rounded-full mt-1 flex-shrink-0 transition-colors ${
+                                  verifyChecklist[campaignIdx] ? 'bg-green-500' : 'bg-gray-400'
+                                }`}></div>
+                                <span className={`text-xs leading-tight ${
+                                  verifyChecklist[campaignIdx] ? 'text-green-700' : 'text-gray-600'
+                                }`}>
+                                  {item}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          
+                          {hasLongContent && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const newExpanded = [...expandedSections];
+                                newExpanded[campaignIdx] = !isExpanded;
+                                setExpandedSections(newExpanded);
+                              }}
+                              className={`mt-1 sm:mt-1.5 text-xs font-medium transition-colors py-1 px-2 rounded ${
+                                verifyChecklist[campaignIdx] 
+                                  ? 'text-green-600 hover:text-green-700 bg-green-50' 
+                                  : 'text-indigo-600 hover:text-indigo-700 bg-indigo-50'
+                              }`}
+                            >
+                              {isExpanded ? 'Show Less' : 'Read More'}
+                            </button>
+                          )}
+                        </div>
+                      </label>
+                    </div>
+                  );
+                })()}
                 
                 {/* Media Upload Card - Positioned next to Acknowledgement of Terms */}
                 <div className="p-2.5 sm:p-3 rounded-lg border border-blue-200 bg-blue-50/30">
