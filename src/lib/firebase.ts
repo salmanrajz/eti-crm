@@ -84,6 +84,78 @@ export const auth = getAuth(app);
 // Initialize Firestore with persistent cache and multi-tab manager
 // Uses singleton pattern to prevent multiple initializations
 let _db: any = null;
+let _cacheClearInProgress = false;
+
+// Function to clear corrupted Firestore IndexedDB cache
+async function clearFirestoreCache() {
+  if (_cacheClearInProgress) {
+    return false;
+  }
+  _cacheClearInProgress = true;
+  
+  try {
+    const projectId = firebaseConfig.projectId;
+    const dbNames = [
+      `firebaseLocalStorageDb`,
+      `firestore/${projectId}`,
+      `firebase-heartbeat-database`,
+      `firebaseLocalStorage`,
+      `firebaseLocalStorageDb-${projectId}`,
+      `firestore_${projectId}`,
+      `firestore_${projectId}_main`
+    ];
+
+    // Try to delete IndexedDB databases
+    for (const name of dbNames) {
+      try {
+        const deleteRequest = indexedDB.deleteDatabase(name);
+        await new Promise((resolve, reject) => {
+          deleteRequest.onsuccess = () => resolve(void 0);
+          deleteRequest.onerror = () => reject(deleteRequest.error);
+          deleteRequest.onblocked = () => {
+            console.warn(`Database ${name} deletion is blocked`);
+            resolve(void 0);
+          };
+        });
+      } catch (err) {
+        console.warn(`Failed to delete database ${name}:`, err);
+      }
+    }
+
+    // Clear localStorage entries related to Firestore
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.includes('firebase') || key.includes('firestore'))) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach(key => localStorage.removeItem(key));
+
+    console.log('Firestore cache cleared successfully');
+    _cacheClearInProgress = false;
+    return true;
+  } catch (error) {
+    console.error('Error clearing Firestore cache:', error);
+    _cacheClearInProgress = false;
+    return false;
+  }
+}
+
+// Function to detect if error is a cache corruption issue
+function isCacheCorruptionError(error: any): boolean {
+  if (!error) return false;
+  const errorMessage = error.message || error.toString() || '';
+  const errorCode = error.code || '';
+  
+  return (
+    errorMessage.includes('Cannot read properties of null') ||
+    errorMessage.includes('INTERNAL ASSERTION FAILED') ||
+    errorMessage.includes('Unexpected state') ||
+    errorMessage.includes('canonifyTarget') ||
+    errorCode.includes('INTERNAL')
+  );
+}
 
 export const db = (() => {
   if (!_db) {
@@ -94,13 +166,81 @@ export const db = (() => {
           tabManager: persistentMultipleTabManager()
         })
       });
-    } catch (error) {
-      // If initialization fails (already initialized), get existing instance
-      _db = getFirestore(app);
+      
+      // Add global error handler for Firestore cache corruption (only once)
+      if (!(window as any).__firestoreErrorHandlerAdded) {
+        (window as any).__firestoreErrorHandlerAdded = true;
+        
+        window.addEventListener('unhandledrejection', async (event) => {
+          const error = event.reason;
+          if (isCacheCorruptionError(error) && !_cacheClearInProgress) {
+            console.error('Detected Firestore cache corruption, attempting to clear cache...', error);
+            event.preventDefault(); // Prevent the error from bubbling
+            
+            // Clear cache and reload
+            const cleared = await clearFirestoreCache();
+            if (cleared) {
+              // Reload the page after a short delay to reinitialize
+              setTimeout(() => {
+                window.location.reload();
+              }, 1000);
+            } else {
+              _cacheClearInProgress = false;
+            }
+          }
+        });
+      }
+
+      // Also catch synchronous errors (only once)
+      if (!(window as any).__firestoreSyncErrorHandlerAdded) {
+        (window as any).__firestoreSyncErrorHandlerAdded = true;
+        
+        const originalErrorHandler = window.onerror;
+        window.onerror = function(message, source, lineno, colno, error) {
+          if (isCacheCorruptionError(error) && !_cacheClearInProgress) {
+            console.error('Detected Firestore cache corruption in error handler, clearing cache...', error);
+            clearFirestoreCache().then((cleared) => {
+              if (cleared) {
+                setTimeout(() => {
+                  window.location.reload();
+                }, 1000);
+              } else {
+                _cacheClearInProgress = false;
+              }
+            });
+            return true; // Suppress default error handling
+          }
+          if (originalErrorHandler) {
+            return originalErrorHandler.call(this, message, source, lineno, colno, error);
+          }
+          return false;
+        };
+      }
+    } catch (error: any) {
+      // Check if it's a cache corruption error
+      if (isCacheCorruptionError(error)) {
+        console.error('Firestore initialization failed due to cache corruption, clearing cache...', error);
+        clearFirestoreCache().then(() => {
+          setTimeout(() => {
+            window.location.reload();
+          }, 1000);
+        });
+        // Return a temporary instance, will be reinitialized after reload
+        _db = getFirestore(app);
+      } else {
+        // If initialization fails (already initialized), get existing instance
+        _db = getFirestore(app);
+      }
     }
   }
   return _db;
 })();
+
+// Export function to manually clear cache if needed
+export async function clearFirestoreCacheManually() {
+  await clearFirestoreCache();
+  window.location.reload();
+}
 
 // Initialize Firebase Storage for file uploads
 export const storage = getStorage(app);

@@ -59,6 +59,7 @@ export interface PlanOption {
 
 export interface PlanCategoryGroup {
   label: string;
+  categoryName: string; // The actual category name from Firebase
   options: PlanOption[];
 }
 
@@ -136,6 +137,7 @@ export async function getPlanCategoriesWithPlans(): Promise<PlanCategoryGroup[]>
 
     return categories.map(category => ({
       label: `✅ ${category.name} Plans`,
+      categoryName: category.name, // Include the actual category name
       options: plans
         .filter(plan => plan.category === category.name)
         .map(plan => ({
