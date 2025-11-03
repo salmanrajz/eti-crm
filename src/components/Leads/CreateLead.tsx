@@ -344,6 +344,16 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [loadingPlans, setLoadingPlans] = useState(true);
   const [allPlans, setAllPlans] = useState<Plan[]>([]);
 
+  // Helper to normalize category names for comparison
+  const normalizeCategory = useCallback((cat?: string): string => {
+    if (!cat) return '';
+    let normalized = cat.toLowerCase().trim();
+    if (normalized.includes('sillver') || normalized.includes('siver')) {
+      normalized = 'silver';
+    }
+    return normalized;
+  }, []);
+
   // Load all plans separately to access their category field
   useEffect(() => {
     async function loadAllPlans() {
@@ -356,6 +366,13 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     }
     loadAllPlans();
   }, []);
+
+  // Keep selectedPlans in sync when editing and initialData changes
+  useEffect(() => {
+    if (isEditing && initialData?.plans) {
+      setSelectedPlans(initialData.plans as unknown as PlanSelection[]);
+    }
+  }, [isEditing, initialData?.plans]);
 
   // Filter and group plans based on their category field from Firebase
   // The plan's `category` field stores the number category (e.g., "Standard", "Silver", "Gold", "Platinum")
@@ -648,6 +665,16 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
   const handleRemovePlan = useCallback((numberId: string) => {
     setSelectedPlans(prev => prev.filter(p => p.numberId !== numberId));
+    setFormErrors(prev => {
+      const { plans, ...rest } = prev;
+      return rest;
+    });
+  }, []);
+
+  const handleChangePlanFor = useCallback((numberId: string, planValue: string) => {
+    
+    const planName = planValue.includes('|') ? planValue.split('|')[1] : planValue;
+    setSelectedPlans(prev => prev.map(p => p.numberId === numberId ? { ...p, plan: planName } : p));
     setFormErrors(prev => {
       const { plans, ...rest } = prev;
       return rest;
@@ -1476,8 +1503,40 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                               <p className="text-sm font-medium text-gray-900">{plan.number}</p>
                               <p className="text-sm text-gray-500">{plan.category}</p>
                             </div>
-                            <div className="px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                              {plan.plan}
+                            <div className="min-w-[260px]">
+                              <label htmlFor={`plan-select-${plan.numberId}`} className="sr-only">Change Plan</label>
+                              <select
+                                id={`plan-select-${plan.numberId}`}
+                                className="block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                                value={(() => {
+                                  // Determine current value by matching id|name when possible
+                                  const catNorm = normalizeCategory(plan.category);
+                                  const matching = allPlans.find(p => normalizeCategory(p.category) === catNorm && p.name === plan.plan);
+                                  if (matching && matching.id) return `${matching.id}|${matching.name}`;
+                                  // Fallback to plain name if no exact match found yet
+                                  return plan.plan || '';
+                                })()}
+                                onChange={(e) => handleChangePlanFor(plan.numberId, e.target.value)}
+                              >
+                                {allPlans.length === 0 && (
+                                  <option value="" disabled>Loading plans…</option>
+                                )}
+                                {allPlans.length > 0 && (
+                                  <>
+                                    <option value="" disabled>Select plan…</option>
+                                    {(() => {
+                                      const catNorm = normalizeCategory(plan.category);
+                                      const byCategory = allPlans.filter(p => normalizeCategory(p.category) === catNorm);
+                                      const source = byCategory.length > 0 ? byCategory : allPlans; // fallback when no matches
+                                      return source.map((p, idx) => (
+                                        <option key={p.id || `${plan.category}-${p.name}-${idx}`} value={p.id ? `${p.id}|${p.name}` : p.name}>
+                                          {p.name}
+                                        </option>
+                                      ));
+                                    })()}
+                                  </>
+                                )}
+                              </select>
                             </div>
                           </div>
                         </div>
