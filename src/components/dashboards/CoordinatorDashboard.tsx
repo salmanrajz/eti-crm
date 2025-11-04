@@ -168,11 +168,12 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     activated: 0,
     followUp: 0,
     rejected: 0,
+    later: 0,
     yesterday: 0
   });
   const [showActionDialog, setShowActionDialog] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
-  const [actionType, setActionType] = useState<'assign' | 'activate' | 'followup' | 'assign_verifier' | null>(null);
+  const [actionType, setActionType] = useState<'assign' | 'activate' | 'followup' | 'later' | 'assign_verifier' | null>(null);
   const [actionNote, setActionNote] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -262,7 +263,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       const now = new Date();
       const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
       const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
-      matchesStatus = !!(lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd);
+      matchesStatus = !!(lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification');
     }
     
     return matchesSearch && matchesStatus;
@@ -307,6 +308,14 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       color: 'bg-orange-500',
       textColor: 'text-orange-600',
       status: 'follow_up'
+    },
+    {
+      name: 'Later Leads',
+      value: metrics.later,
+      icon: Clock,
+      color: 'bg-yellow-500',
+      textColor: 'text-yellow-600',
+      status: 'later'
     },
     {
       name: 'Rejected Leads',
@@ -404,8 +413,9 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Only actual assigned leads
         activated: totalActivations, // Use the total number of activations
         followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
+        later: filteredCoordinatorLeads.filter(l => l.status === 'later').length,
         rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
-        yesterday: filteredCoordinatorLeads.filter(l => l.createdAt && l.createdAt >= yesterdayStart && l.createdAt <= yesterdayEnd).length
+        yesterday: filteredCoordinatorLeads.filter(l => l.createdAt && l.createdAt >= yesterdayStart && l.createdAt <= yesterdayEnd && l.status !== 'pending_verification').length
       };
 
       setMetrics(metrics);
@@ -415,7 +425,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       let filteredLeads: Lead[] = filteredCoordinatorLeads;
       if (currentStatus !== 'all') {
         if (currentStatus === 'yesterday') {
-          filteredLeads = filteredCoordinatorLeads.filter(lead => lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd);
+          filteredLeads = filteredCoordinatorLeads.filter(lead => lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification');
         } else if (currentStatus === 'verified') {
           // Show manager-assigned verified and follow_up leads (these appear in "Unassigned Leads" for coordinators)
           filteredLeads = filteredCoordinatorLeads.filter(lead => 

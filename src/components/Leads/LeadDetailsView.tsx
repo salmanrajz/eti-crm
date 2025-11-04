@@ -59,7 +59,7 @@ import {
   FileText, CheckCircle, Building2, FileCheck,
   ChevronLeft, ChevronDown, AtSign, User2, CreditCard, Mail,
   MapPinned, FileSpreadsheet, Briefcase,
-  Clock as ClockIcon, CheckCircle2, AlertCircle, ThumbsDown,
+  Clock as ClockIcon, CheckCircle2, AlertCircle, AlertTriangle, ThumbsDown,
   MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
   MessageCircle, Check, Paperclip, RefreshCw
 } from 'lucide-react';
@@ -199,7 +199,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [verificationNote, setVerificationNote] = useState('');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
-  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | null>(null);
+  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | 'later' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
   const [showManagerAssignDialog, setShowManagerAssignDialog] = useState(false);
   const [managerNote, setManagerNote] = useState('');
@@ -210,6 +210,42 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [assignmentMessage, setAssignmentMessage] = useState('');
   const [isCopied, setIsCopied] = useState(false);
   const [showSplitLead, setShowSplitLead] = useState(false);
+  // Activation form fields for coordinator 'activate' action
+  const [activationDate, setActivationDate] = useState<string>('');
+  const [srNumber, setSrNumber] = useState<string>('');
+  const [serviceOrderNumber, setServiceOrderNumber] = useState<string>('');
+  const [selectedGroup, setSelectedGroup] = useState<string>('');
+  const [srImageFile, setSrImageFile] = useState<File | null>(null);
+  const [editablePasscode, setEditablePasscode] = useState<string>('');
+  const [editableCategory, setEditableCategory] = useState<string>('');
+
+  // Prefill passcode, category, and group when opening Activate dialog
+  useEffect(() => {
+    const prefill = async () => {
+      if (!showCoordinatorDialog || coordinatorAction !== 'activate') return;
+      try {
+        const firstPlan = lead.plans?.[0];
+        setEditableCategory(firstPlan?.category || '');
+        // Prefill group from existing plan
+        setSelectedGroup(firstPlan?.group || '');
+        if (firstPlan?.numberId && !firstPlan.numberId.startsWith('virtual-')) {
+          const numberRef = doc(db, 'numberPool', firstPlan.numberId);
+          const numberDoc = await getDoc(numberRef);
+          if (numberDoc.exists()) {
+            const numberData = numberDoc.data();
+            setEditablePasscode(numberData?.passcode || '');
+          } else {
+            setEditablePasscode('');
+          }
+        } else {
+          setEditablePasscode('');
+        }
+      } catch (_) {
+        setEditablePasscode('');
+      }
+    };
+    prefill();
+  }, [showCoordinatorDialog, coordinatorAction, lead]);
   const [verificationMedia, setVerificationMedia] = useState<LeadMediaItem[]>([]);
   const [sharedWithNames, setSharedWithNames] = useState<string[]>([]);
   const [rejecting, setRejecting] = useState(false);
@@ -305,7 +341,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const generateAssignmentMessage = async (lead: Lead, etisalatId: string, emirate: string) => {
     // Get the actual passcode from number pool
     let passcode = 'N/A';
-    if (lead.plans?.[0]?.numberId) {
+    if (lead.plans?.[0]?.numberId && !lead.plans[0].numberId.startsWith('virtual-')) {
       try {
         const numberRef = doc(db, 'numberPool', lead.plans[0].numberId);
         const numberDoc = await getDoc(numberRef);
@@ -452,9 +488,13 @@ Language: ${lead.language || 'N/A'}`;
 
       // Update all numbers in the lead's plans
       if (lead.plans && lead.plans.length > 0) {
-        const updatePromises = lead.plans.map(async plan => {
+        const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+        const updatePromises = realPlans.map(async plan => {
           const numberRef = doc(db, 'numberPool', plan.numberId);
           const numberDoc = await getDoc(numberRef);
+          if (!numberDoc.exists()) {
+            return;
+          }
           const numberData = numberDoc.data();
 
           if (leadStatus === 'rejected') {
@@ -691,6 +731,22 @@ Language: ${lead.language || 'N/A'}`;
         }
       }
 
+      // Add verification note as a chat message if it exists
+      if (verificationNote && verificationNote.trim() !== '') {
+        try {
+          await addDoc(collection(db, 'chatMessages'), {
+            leadId: lead.id,
+            userId: user?.id || '',
+            userRole: user?.role || 'verifier',
+            message: verificationNote.trim(),
+            createdAt: new Date()
+          });
+        } catch (chatError) {
+          console.error('Error creating verification chat message:', chatError);
+          // Don't fail verification action if chat message fails
+        }
+      }
+
       toast.success(`Lead ${verifyAction === 'verify' ? 'verified' : verifyAction === 'reject' ? 'rejected' : 'updated'} successfully`);
       setShowVerifyDialog(false);
       setVerificationNote('');
@@ -717,6 +773,22 @@ Language: ${lead.language || 'N/A'}`;
 
       // Note: Coordinators will see this lead in their unassigned list via filtering
       // No need to send notification as coordinators check for verified leads with managerAssigned: true
+
+      // Add manager note as a chat message if it exists
+      if (managerNote && managerNote.trim() !== '') {
+        try {
+          await addDoc(collection(db, 'chatMessages'), {
+            leadId: lead.id,
+            userId: user?.id || '',
+            userRole: user?.role || 'manager',
+            message: managerNote.trim(),
+            createdAt: new Date()
+          });
+        } catch (chatError) {
+          console.error('Error creating manager chat message:', chatError);
+          // Don't fail manager action if chat message fails
+        }
+      }
 
       toast.success('Lead assigned to coordinator successfully');
       setShowManagerAssignDialog(false);
@@ -752,13 +824,32 @@ Language: ${lead.language || 'N/A'}`;
         return;
       }
     }
+    if (coordinatorAction === 'activate') {
+      if (!activationDate) {
+        toast.error('Activation Date is required');
+        return;
+      }
+      if (!srNumber.trim()) {
+        toast.error('SR No. is required');
+        return;
+      }
+      if (!serviceOrderNumber.trim()) {
+        toast.error('Service Order number is required');
+        return;
+      }
+      if (!selectedGroup) {
+        toast.error('Please select a Group');
+        return;
+      }
+    }
 
     setIsCoordinatorActionProcessing(true);
     try {
       const leadRef = doc(db, 'leads', lead.id);
       const updateData: Partial<Lead> = {
         status: coordinatorAction === 'assign' ? 'assigned' : 
-                coordinatorAction === 'activate' ? 'activated' : 'follow_up',
+                coordinatorAction === 'activate' ? 'activated' : 
+                coordinatorAction === 'later' ? 'later' : 'follow_up',
         coordinatorNotes: coordinatorNote,
         updatedAt: new Date()
       };
@@ -769,24 +860,57 @@ Language: ${lead.language || 'N/A'}`;
         updateData.etisalatLeadId = etisalatLeadId;
         updateData.emirate = selectedEmirate;
       }
+      if (coordinatorAction === 'activate') {
+        (updateData as any).activationDate = new Date(activationDate);
+        (updateData as any).srNumber = srNumber.trim();
+        (updateData as any).serviceOrderNumber = serviceOrderNumber.trim();
+        // Update existing plan group attribute instead of creating a new field
+        if (selectedGroup) {
+          const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
+          (updateData as any).plans = currentPlans.map((p: any) => ({
+            ...p,
+            group: selectedGroup
+          }));
+        }
+        if (editablePasscode) (updateData as any).activationPasscode = editablePasscode.trim();
+        if (editableCategory) (updateData as any).activationCategory = editableCategory.trim();
+        if (srImageFile) {
+          const toDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve((reader.result as string) || '');
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+          try {
+            const dataUrl = await toDataUrl(srImageFile);
+            (updateData as any).srImageDataUrl = dataUrl;
+            (updateData as any).srImageName = srImageFile.name;
+          } catch (_) {}
+        }
+      }
       
-      // When marking as follow_up, reset managerAssigned to false so manager can see it in unassigned section
-      if (coordinatorAction === 'followup') {
+      // When marking as follow_up or later, reset managerAssigned to false so manager can see it in unassigned section
+      if (coordinatorAction === 'followup' || coordinatorAction === 'later') {
         updateData.managerAssigned = false;
       }
 
       await updateDoc(leadRef, updateData);
 
-      // Update all numbers in the lead's plans
+      // Update all numbers in the lead's plans (skip virtual entries like virtual-mnp)
       if (lead.plans && lead.plans.length > 0) {
-        const updatePromises = lead.plans.map(async (plan) => {
+        const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+        const updatePromises = realPlans.map(async (plan) => {
           const numberRef = doc(db, 'numberPool', plan.numberId);
           const numberDoc = await getDoc(numberRef);
+          if (!numberDoc.exists()) {
+            return;
+          }
           const numberData = numberDoc.data();
           await updateDoc(numberRef, {
             status: updateData.status,
             lastStatusChange: new Date(),
-            leadId: lead.id
+            leadId: lead.id,
+            ...(selectedGroup ? { group: selectedGroup } : {})
           });
 
           await logNumberAction(
@@ -811,11 +935,14 @@ Language: ${lead.language || 'N/A'}`;
           userId: lead.agentId,
           type: 'lead_update',
           title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
-                 coordinatorAction === 'activate' ? 'Lead Activated' : 'Lead Marked for Follow-up',
+                 coordinatorAction === 'activate' ? 'Lead Activated' : 
+                 coordinatorAction === 'later' ? 'Lead Marked for Later' : 'Lead Marked for Follow-up',
           message: coordinatorAction === 'assign' ? 
             'Your lead has been assigned by the coordinator' : 
             coordinatorAction === 'activate' ?
             'Your lead has been activated by the coordinator' :
+            coordinatorAction === 'later' ?
+            'Your lead has been marked for later by the coordinator' :
             'Your lead has been marked for follow-up by the coordinator',
           read: false,
           createdAt: new Date(),
@@ -832,11 +959,14 @@ Language: ${lead.language || 'N/A'}`;
             userId: lead.managerId,
             type: 'lead_update',
             title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
-                   coordinatorAction === 'activate' ? 'Lead Activated' : 'Lead Marked for Follow-up',
+                   coordinatorAction === 'activate' ? 'Lead Activated' : 
+                   coordinatorAction === 'later' ? 'Lead Marked for Later' : 'Lead Marked for Follow-up',
             message: coordinatorAction === 'assign' ? 
               'A lead has been assigned by the coordinator' : 
               coordinatorAction === 'activate' ?
               'A lead has been activated by the coordinator' :
+              coordinatorAction === 'later' ?
+              'A lead has been marked for later by the coordinator' :
               'A lead has been marked for follow-up by the coordinator',
             read: false,
             createdAt: new Date(),
@@ -908,6 +1038,7 @@ Language: ${lead.language || 'N/A'}`;
                                 type: "text",
                                 text: coordinatorAction === 'assign' ? 'Assigned' : 
                                       coordinatorAction === 'activate' ? 'Activated' : 
+                                      coordinatorAction === 'later' ? 'Marked for Later' :
                                       'Follow Up Required'
                               },
                               {
@@ -942,15 +1073,34 @@ Language: ${lead.language || 'N/A'}`;
       }
 
       // For assignment, show formatted message instead of navigating away
+      // Add coordinator note as a chat message if it exists
+      if (coordinatorNote && coordinatorNote.trim() !== '') {
+        try {
+          await addDoc(collection(db, 'chatMessages'), {
+            leadId: lead.id,
+            userId: user?.id || '',
+            userRole: user?.role || 'coordinator',
+            message: coordinatorNote.trim(),
+            createdAt: new Date()
+          });
+        } catch (chatError) {
+          console.error('Error creating coordinator chat message:', chatError);
+          // Don't fail coordinator action if chat message fails
+        }
+      }
+
       if (coordinatorAction === 'assign') {
         const message = await generateAssignmentMessage(lead, etisalatLeadId, selectedEmirate);
         setAssignmentMessage(message);
         setShowAssignmentMessage(true);
         setShowCoordinatorDialog(false);
+        setCoordinatorNote('');
+        setCoordinatorAction(null);
         toast.success('Lead assigned successfully');
       } else {
         toast.success(
           coordinatorAction === 'activate' ? 'Lead activated successfully' :
+          coordinatorAction === 'later' ? 'Lead marked for later' :
           'Lead marked for follow-up'
         );
         setShowCoordinatorDialog(false);
@@ -984,8 +1134,7 @@ Language: ${lead.language || 'N/A'}`;
         rejectionReason: 'Rejected by agent',
       });
       if (lead.plans && lead.plans.length > 0) {
-        const reservePromises = lead.plans.map(async plan => {
-          if (!plan.numberId) return;
+        const reservePromises = lead.plans.filter(p => p.numberId && !p.numberId.startsWith('virtual-')).map(async plan => {
           const numberRef = doc(db, 'numberPool', plan.numberId);
           await updateDoc(numberRef, {
             status: 'reserved',
@@ -1059,6 +1208,13 @@ Language: ${lead.language || 'N/A'}`;
                (lead.status === 'follow_up' && lead.managerAssigned === true) ? (
             <button
                   onClick={() => {
+                    // Prefill Etisalat Lead ID and Emirates if they exist
+                    if (lead.etisalatLeadId) {
+                      setEtisalatLeadId(lead.etisalatLeadId);
+                    }
+                    if (lead.emirate) {
+                      setSelectedEmirate(lead.emirate);
+                    }
                     setCoordinatorAction('assign');
                     setShowCoordinatorDialog(true);
                   }}
@@ -1069,6 +1225,40 @@ Language: ${lead.language || 'N/A'}`;
             </button>
           ) : null}
               {lead.status === 'assigned' && (
+                <>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('activate');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                  >
+                    <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Activate
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('followup');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                  >
+                    <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Follow-up
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('later');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+                  >
+                    <Clock className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Later
+                  </button>
+                </>
+              )}
+              {lead.status === 'later' && (
                 <>
                   <button
                     onClick={() => {
@@ -1102,6 +1292,13 @@ Language: ${lead.language || 'N/A'}`;
               {lead.status === 'follow_up' && !lead.managerAssigned && (
                 <button
                   onClick={() => {
+                    // Prefill Etisalat Lead ID and Emirates if they exist
+                    if (lead.etisalatLeadId) {
+                      setEtisalatLeadId(lead.etisalatLeadId);
+                    }
+                    if (lead.emirate) {
+                      setSelectedEmirate(lead.emirate);
+                    }
                     setCoordinatorAction('assign');
                     setShowCoordinatorDialog(true);
                   }}
@@ -1561,7 +1758,7 @@ Language: ${lead.language || 'N/A'}`;
 
       {showCoordinatorDialog && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-lg w-full mx-4 overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-3xl w-full mx-4 overflow-hidden">
             {/* Header */}
             <div className="bg-gradient-to-r from-indigo-500 to-purple-600 px-6 py-4">
               <div className="flex items-center space-x-3">
@@ -1570,18 +1767,22 @@ Language: ${lead.language || 'N/A'}`;
                     <User2 className="h-5 w-5 text-white" />
                   ) : coordinatorAction === 'activate' ? (
                     <CheckCircle className="h-5 w-5 text-white" />
-                  ) : (
+                  ) : coordinatorAction === 'later' ? (
                     <Clock className="h-5 w-5 text-white" />
+                  ) : (
+                    <AlertTriangle className="h-5 w-5 text-white" />
                   )}
                 </div>
                 <div>
                   <h3 className="text-lg font-semibold text-white">
                     {coordinatorAction === 'assign' ? 'Assign Lead' :
-                     coordinatorAction === 'activate' ? 'Activate Lead' : 'Mark for Follow-up'}
+                     coordinatorAction === 'activate' ? 'Activate Lead' : 
+                     coordinatorAction === 'later' ? 'Mark for Later' : 'Mark for Follow-up'}
                   </h3>
                   <p className="text-indigo-100 text-sm">
                     {coordinatorAction === 'assign' ? 'Assign this lead to Etisalat system' :
                      coordinatorAction === 'activate' ? 'Activate the lead and mark as complete' :
+                     coordinatorAction === 'later' ? 'Mark this lead for later action' :
                      'Mark this lead for follow-up action'}
                   </p>
                 </div>
@@ -1590,6 +1791,167 @@ Language: ${lead.language || 'N/A'}`;
 
             {/* Form Content */}
             <div className="p-6 space-y-6">
+              {coordinatorAction === 'activate' && (
+                <>
+                  {/* Number & Plan & Passcode & Category */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Number</label>
+                      <input
+                        type="text"
+                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={lead.plans?.[0]?.number || ''}
+                        readOnly
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Plan</label>
+                      <input
+                        type="text"
+                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={lead.plans?.[0]?.plan || ''}
+                        readOnly
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                      <input
+                        type="text"
+                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={editablePasscode}
+                        readOnly
+                        placeholder="Passcode from number pool"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Category</label>
+                      <input
+                        type="text"
+                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={editableCategory}
+                        readOnly
+                      />
+                    </div>
+                  </div>
+
+                  {/* Activation Details */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
+                      <input
+                        type="date"
+                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={activationDate}
+                        onChange={(e) => setActivationDate(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">SR No. <span className="text-red-500">*</span></label>
+                      <input
+                        type="text"
+                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={srNumber}
+                        onChange={(e) => setSrNumber(e.target.value)}
+                        placeholder="Enter SR number"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Service Order number <span className="text-red-500">*</span></label>
+                      <input
+                        type="text"
+                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={serviceOrderNumber}
+                        onChange={(e) => setServiceOrderNumber(e.target.value)}
+                        placeholder="Enter Service Order number"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-900">Select Activation Group <span className="text-red-500">*</span></label>
+                      <select
+                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                        value={selectedGroup}
+                        onChange={(e) => setSelectedGroup(e.target.value)}
+                        required
+                      >
+                        <option value="">Select group</option>
+                        {['G1','G2','G3','G4','G5'].map(g => (
+                          <option key={g} value={g}>{g}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* SR Image (optional) */}
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-900">SR Image (optional)</label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="mt-1 block w-full text-sm text-gray-900 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                      onChange={(e) => setSrImageFile(e.target.files?.[0] || null)}
+                    />
+                  </div>
+
+                  {/* Notes for Activate action */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Notes (Optional)
+                    </label>
+                    <div className="relative">
+                      <textarea
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-green-300 focus:ring-2 focus:ring-green-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                        rows={4}
+                        value={coordinatorNote}
+                        onChange={(e) => setCoordinatorNote(e.target.value)}
+                        placeholder="Add any additional notes or comments..."
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {coordinatorAction === 'followup' && (
+                <>
+                  {/* Notes for Follow-up action */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Notes (Optional)
+                    </label>
+                    <div className="relative">
+                      <textarea
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-orange-300 focus:ring-2 focus:ring-orange-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                        rows={4}
+                        value={coordinatorNote}
+                        onChange={(e) => setCoordinatorNote(e.target.value)}
+                        placeholder="Add any additional notes or comments..."
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {coordinatorAction === 'later' && (
+                <>
+                  {/* Notes for Later action */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Notes (Optional)
+                    </label>
+                    <div className="relative">
+                      <textarea
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-yellow-300 focus:ring-2 focus:ring-yellow-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                        rows={4}
+                        value={coordinatorNote}
+                        onChange={(e) => setCoordinatorNote(e.target.value)}
+                        placeholder="Add any additional notes or comments..."
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
               {coordinatorAction === 'assign' && (
                 <>
                   {/* Etisalat Lead ID */}
@@ -1639,28 +2001,26 @@ Language: ${lead.language || 'N/A'}`;
                     </div>
                     <p className="text-xs text-gray-500">Select the emirates where this lead is located</p>
                   </div>
+
+                  {/* Notes for Assign action */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Notes (Optional)
+                    </label>
+                    <div className="relative">
+                      <textarea
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                        rows={4}
+                        value={coordinatorNote}
+                        onChange={(e) => setCoordinatorNote(e.target.value)}
+                        placeholder="Add any additional notes or comments..."
+                      />
+                    </div>
+                  </div>
                 </>
               )}
               
-              {/* Notes */}
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-gray-900">
-                  Notes
-                </label>
-                <div className="relative">
-                  <div className="absolute top-3 left-3 pointer-events-none">
-                    <FileText className="h-4 w-4 text-gray-400" />
-                  </div>
-                  <textarea
-                    rows={4}
-                    className="w-full pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
-                    value={coordinatorNote}
-                    onChange={(e) => setCoordinatorNote(e.target.value)}
-                    placeholder="Enter any notes about this action..."
-                  />
-                </div>
-                <p className="text-xs text-gray-500">Add any additional information or instructions</p>
-              </div>
+              {/* Notes for other coordinator actions (activate, followup) removed as requested */}
             </div>
 
             {/* Footer Actions */}
@@ -1679,6 +2039,7 @@ Language: ${lead.language || 'N/A'}`;
                   className={`px-6 py-2.5 text-sm font-medium text-white rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm ${
                     coordinatorAction === 'assign' ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 focus:ring-indigo-100' :
                     coordinatorAction === 'activate' ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 focus:ring-green-100' :
+                    coordinatorAction === 'later' ? 'bg-gradient-to-r from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700 focus:ring-yellow-100' :
                     'bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-700 hover:to-amber-700 focus:ring-orange-100'
                   }`}
                 >
@@ -1701,6 +2062,11 @@ Language: ${lead.language || 'N/A'}`;
                         <>
                           <CheckCircle className="h-4 w-4 mr-2" />
                           Activate Lead
+                        </>
+                      ) : coordinatorAction === 'later' ? (
+                        <>
+                          <Clock className="h-4 w-4 mr-2" />
+                          Mark for Later
                         </>
                       ) : (
                         <>
@@ -2099,34 +2465,16 @@ Language: ${lead.language || 'N/A'}`;
             value={lead.language}
             readOnly
           />
-          <FormInput
-            label="Shared With"
-            icon={Users}
-            type="text"
-            value={sharedWithNames.join(', ') || 'None'}
-            readOnly
-          />
-        </FormSection>
-
-        <FormSection
-          icon={Calendar}
-          title="Scheduling & Timing"
-          description="Service start details"
-        >
-          <FormInput
-            label="Start Date"
-            icon={Calendar}
-            type="date"
-            value={lead.startDate && lead.startDate instanceof Date && !isNaN(lead.startDate.getTime()) ? format(lead.startDate, 'yyyy-MM-dd') : ''}
-            readOnly
-          />
-          <FormInput
-            label="Start Time"
-            icon={ClockIcon}
-            type="time"
-            value={lead.startTime}
-            readOnly
-          />
+          {/* Hide "Shared With" field from verifier and coordinator roles */}
+          {!isVerifier() && !isCoordinator() && (
+            <FormInput
+              label="Shared With"
+              icon={Users}
+              type="text"
+              value={sharedWithNames.join(', ') || 'None'}
+              readOnly
+            />
+          )}
         </FormSection>
 
         <FormSection

@@ -888,13 +888,18 @@ export function LeadDetails() {
       };
       await updateDoc(leadRef, updateData);
       if (pendingVerifierUpdates.plans && user.role === 'verifier') {
-        const updatePromises = pendingVerifierUpdates.plans.map(async plan => {
-          const numberRef = doc(db, 'numberPool', plan.numberId);
-          await updateDoc(numberRef, {
-            status: 'pending_verification',
-            lastStatusChange: new Date(),
-            leadId: id
-          });
+        const realPlans = pendingVerifierUpdates.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+        const updatePromises = realPlans.map(async plan => {
+          try {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            await updateDoc(numberRef, {
+              status: 'pending_verification',
+              lastStatusChange: new Date(),
+              leadId: id
+            });
+          } catch (err) {
+            console.error('Failed updating numberPool for plan', plan.numberId, err);
+          }
         });
         await Promise.all(updatePromises);
       }
@@ -969,13 +974,13 @@ export function LeadDetails() {
                       updatedBy: user.id
                     });
                     // Update numbers to pending_verification
-                    const plans = data.plans || [];
+                    const plans = (data.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
                     await Promise.all(
-                      plans.map((p: any) => p?.numberId ? updateDoc(doc(db, 'numberPool', p.numberId), {
+                      plans.map((p: any) => updateDoc(doc(db, 'numberPool', p.numberId), {
                         status: 'pending_verification',
                         lastStatusChange: new Date(),
                         leadId: id
-                      }) : Promise.resolve())
+                      }))
                     );
                     setLead(prev => prev ? { ...prev, status: 'pending_verification' } : prev);
                     toast.success('Lead resubmitted for verification');

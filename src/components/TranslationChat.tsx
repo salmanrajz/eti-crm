@@ -107,6 +107,11 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
       icon: '🔄',
       label: 'FOLLOW UP'
     },
+    later: {
+      color: 'bg-orange-50 text-orange-700 border-orange-200',
+      icon: '🕐',
+      label: 'LATER'
+    },
     not_found: {
       color: 'bg-gray-50 text-gray-700 border-gray-200',
       icon: '❓',

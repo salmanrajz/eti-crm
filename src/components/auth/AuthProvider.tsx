@@ -55,7 +55,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { setUser, setLoading } = useAuthStore();
 
   useEffect(() => {
+    // Add timeout to detect Firebase initialization failure
+    let authInitialized = false;
+    const timeout = setTimeout(() => {
+      if (!authInitialized) {
+        // Set a flag in sessionStorage to track reload attempts
+        const reloadCount = parseInt(sessionStorage.getItem('firebaseInitReloadCount') || '0');
+        
+        if (reloadCount < 2) {
+          // Try reloading up to 2 times
+          sessionStorage.setItem('firebaseInitReloadCount', (reloadCount + 1).toString());
+          window.location.reload();
+        } else {
+          // After 2 failed attempts, clear the counter and force initialization
+          sessionStorage.removeItem('firebaseInitReloadCount');
+          setUser(null);
+          setLoading(false);
+        }
+      }
+    }, 3000); // 3 second timeout
+    
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      authInitialized = true;
+      clearTimeout(timeout);
+      
+      // Clear reload counter on successful initialization
+      sessionStorage.removeItem('firebaseInitReloadCount');
       try {
         if (firebaseUser) {
           const userDocRef = doc(db, 'users', firebaseUser.uid);
@@ -94,7 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                   toast.success('Welcome back from trusted device!');
                 }
               } catch (trustError) {
-                console.log('Device trust check failed (non-blocking):', trustError);
+                // Device trust check failed (non-blocking)
               }
             } else {
               // Session restoration: Browser reopened, check device trust
@@ -124,13 +149,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                   toast.success('Welcome back from trusted device!');
                 } else {
                   // Device is not trusted or expired, force logout
-                  console.log('Device not trusted or expired, logging out...');
                   await auth.signOut();
                   setUser(null);
                   // Don't show error toast as this is expected behavior
                 }
               } catch (trustError) {
-                console.log('Device trust check failed, logging out for security:', trustError);
                 // If trust check fails, logout for security
                 await auth.signOut();
                 setUser(null);
@@ -145,7 +168,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(null);
         }
       } catch (error) {
-        console.error('Error fetching user data:', error);
+        console.error('Error in AuthProvider:', error);
         if (error instanceof Error) {
           if (error.message.includes('permission-denied')) {
             toast.error('Access denied. Please contact an administrator.');
@@ -160,7 +183,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(timeout);
+      unsubscribe();
+    };
   }, [setUser, setLoading]);
 
   return <>{children}</>;

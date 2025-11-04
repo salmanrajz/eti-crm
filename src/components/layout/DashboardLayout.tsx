@@ -65,6 +65,7 @@ import { MARStrip } from '../MARStrip';
 import NoticeBoard from '../NoticeBoard';
 import { DNCCheckModal } from '../modals/DNCCheckModal';
 import { DNCManagement } from '../admin/DNCManagement';
+import { clearAllStorage } from '../../utils/clearStorage';
 
 /**
  * ===============================================================================
@@ -427,6 +428,7 @@ export function DashboardLayout() {
   /**
    * Handles user logout with proper state cleanup and Firebase sign out
    * Prevents listener errors by clearing state before authentication change
+   * Clears all browser storage, cache, and IndexedDB for security
    */
   const handleLogout = async () => {
     try {
@@ -456,9 +458,18 @@ export function DashboardLayout() {
       // Add a small delay to allow Firebase listeners to clean up
       await new Promise(resolve => setTimeout(resolve, 100));
       
+      // Sign out from Firebase - this clears auth state
       await auth.signOut();
+      
+      // Clear only application data, NOT Firebase databases
+      // Firebase needs its IndexedDB to function properly
+      localStorage.clear();
+      sessionStorage.clear();
+      
       toast.success('Logged out successfully');
-      navigate('/login');
+      
+      // Full page reload to reset application state
+      window.location.href = '/login';
     } catch (error) {
       console.error('Error logging out:', error);
       toast.error('Failed to log out');
@@ -477,9 +488,6 @@ export function DashboardLayout() {
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Number Pool', href: '/dashboard/numbers', icon: PhoneCall },
     { name: 'Leads', href: '/dashboard/leads', icon: ClipboardList },
-    ...(user?.role === 'agent' ? [
-      { name: 'Team Performance', href: '/dashboard/team-performance', icon: Activity }
-    ] : []),
     ...(isAdmin() ? [
       { name: 'User Management', href: '/dashboard/admin/users', icon: UserCog },
       { name: 'Team Management', href: '/dashboard/admin/teams', icon: Building2 },
@@ -488,7 +496,9 @@ export function DashboardLayout() {
     ...(isManager() ? [
       { name: 'Bonus Management', href: '/dashboard/bonus-management', icon: Star }
     ] : []),
-    { name: 'Settings', href: '/dashboard/settings', icon: Settings },
+    ...(user?.role !== 'agent' && user?.role !== 'freelancer' ? [
+      { name: 'Settings', href: '/dashboard/settings', icon: Settings }
+    ] : []),
   ];
 
   // ===============================================================================
@@ -646,6 +656,8 @@ export function DashboardLayout() {
                 </Link>
                 <Link
                   to="/dashboard/numbers"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className={clsx(
                     "group relative px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ease-out touch-manipulation",
                     "active:scale-95 active:transition-transform active:duration-100"
@@ -1085,6 +1097,8 @@ export function DashboardLayout() {
           
           <Link
             to="/dashboard/numbers"
+            target="_blank"
+            rel="noopener noreferrer"
             className={clsx(
               "group relative flex flex-col items-center justify-center w-full h-full mx-1 rounded-2xl transition-all duration-300 ease-out touch-manipulation",
               "active:scale-95 active:transition-transform active:duration-100",

@@ -244,21 +244,25 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
           splitLeadIds: [firstLeadRef.id, secondLeadRef.id]
         });
 
-        // Update number statuses and group names in number pool
-        await Promise.all([
-          updateDoc(doc(db, 'numberPool', firstPlan.numberId), {
+        // Update number statuses and group names in number pool (skip virtual entries)
+        const updates: Promise<any>[] = [];
+        if (!firstPlan.numberId.startsWith('virtual-')) {
+          updates.push(updateDoc(doc(db, 'numberPool', firstPlan.numberId), {
             status: 'pending_verification',
             lastStatusChange: new Date(),
             leadId: firstLeadRef.id,
-            group: firstLeadGroup // Update the group name in number pool
-          }),
-          updateDoc(doc(db, 'numberPool', secondPlan.numberId), {
+            group: firstLeadGroup
+          }));
+        }
+        if (!secondPlan.numberId.startsWith('virtual-')) {
+          updates.push(updateDoc(doc(db, 'numberPool', secondPlan.numberId), {
             status: 'pending_verification',
             lastStatusChange: new Date(),
             leadId: secondLeadRef.id,
-            group: secondLeadGroup // Update the group name in number pool
-          })
-        ]);
+            group: secondLeadGroup
+          }));
+        }
+        await Promise.all(updates);
 
         toast.success(`Lead split and assigned to groups ${firstLeadGroup} and ${secondLeadGroup}`);
       }
@@ -281,15 +285,17 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
         updatedAt: new Date()
       });
 
-      // Update all numbers in the lead's plans
-      const updatePromises = lead.plans.map(plan => {
-        const numberRef = doc(db, 'numberPool', plan.numberId);
-        return updateDoc(numberRef, {
-          status: 'reserved',
-          lastStatusChange: new Date(),
-          leadId: lead.id
+      // Update all numbers in the lead's plans (skip virtual entries)
+      const updatePromises = lead.plans
+        .filter(plan => !plan.numberId.startsWith('virtual-'))
+        .map(plan => {
+          const numberRef = doc(db, 'numberPool', plan.numberId);
+          return updateDoc(numberRef, {
+            status: 'reserved',
+            lastStatusChange: new Date(),
+            leadId: lead.id
+          });
         });
-      });
 
       await Promise.all(updatePromises);
 

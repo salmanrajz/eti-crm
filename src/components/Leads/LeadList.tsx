@@ -652,14 +652,26 @@ export function LeadList() {
       // Normalize legacy string values to objects on the fly
       const normalized = new Map<string, { name: string; teamId?: string }>();
       cachedMap.forEach((value: any, key: string) => {
-        if (typeof value === 'string') {
+        // Handle nested Map case (corrupted serialization)
+        if (value instanceof Map) {
+          const mapObj: any = {};
+          value.forEach((v: any, k: string) => {
+            mapObj[k] = v;
+          });
+          const name = mapObj.name || mapObj.fullName || mapObj.displayName || mapObj.email || 'Unknown Agent';
+          const teamId = mapObj.teamId as string | undefined;
+          normalized.set(key, { name, teamId });
+        } else if (typeof value === 'string') {
           normalized.set(key, { name: value });
         } else if (value && typeof value === 'object') {
           const name = value.name || value.fullName || value.displayName || value.email || 'Unknown Agent';
           const teamId = value.teamId as string | undefined;
           normalized.set(key, { name, teamId });
+        } else {
+          normalized.set(key, { name: 'Unknown Agent' });
         }
       });
+      
       agentInfoCache.set(cacheKey, normalized as any);
       return normalized as any;
     }
@@ -1558,14 +1570,15 @@ export function LeadList() {
                           <div key={planIndex} className="flex items-center">
                             <span className={clsx(
                               "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full",
-                              plan.group === 'Group A' ? 'bg-blue-100 text-blue-800' :
-                              plan.group === 'Group B' ? 'bg-green-100 text-green-800' :
-                              plan.group === 'Group C' ? 'bg-purple-100 text-purple-800' :
-                              plan.group === 'Group D' ? 'bg-yellow-100 text-yellow-800' :
+                              plan.group === 'G1' ? 'bg-blue-100 text-blue-800' :
+                              plan.group === 'G2' ? 'bg-green-100 text-green-800' :
+                              plan.group === 'G3' ? 'bg-purple-100 text-purple-800' :
+                              plan.group === 'G4' ? 'bg-yellow-100 text-yellow-800' :
+                              plan.group === 'G5' ? 'bg-red-100 text-red-800' :
                               'bg-gray-100 text-gray-800'
                             )}>
-                              {plan.group}
-                        </span>
+                              {plan.group || 'Unassigned'}
+                            </span>
                           </div>
                         ))}
                       </div>

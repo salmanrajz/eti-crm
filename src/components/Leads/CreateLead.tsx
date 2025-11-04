@@ -135,7 +135,7 @@ const languages = ['Arabic', 'English', 'Hindi', 'Urdu', 'Malayalam', 'Filipino'
  * Product types for lead categorization
  * Distinguishes between new activations and port-in requests
  */
-const productTypes = ['New', 'Port In'];
+const productTypes = ['New', 'MNP', 'Prepaid to postpaid'];
 // const numberTypes = ['Gold', 'Gold Plus', 'Platinum', 'Silver', 'Silver Plus', 'Standard'];
 // const numberCategories = ['Standard', 'Silver', 'Silver Plus', 'Gold', 'Gold Plus', 'Platinum'] as const;
 
@@ -486,8 +486,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     startDate: initialData?.startDate ? format(initialData.startDate, 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd'),
     startTime: initialData?.startTime || format(new Date(), 'HH:mm'),
     numberType: initialData?.numberType || 'Standard',
-    remarks: initialData?.remarks || 'Please Verify'
+    remarks: (initialData?.remarks && initialData.remarks.trim() !== '') ? initialData.remarks : 'Please Verify'
   });
+
+  const isNoNumberProduct = useMemo(() => {
+    return formData.productType === 'MNP' || formData.productType === 'Prepaid to postpaid';
+  }, [formData.productType]);
 
   useEffect(() => {
     if (!isEditing && !user?.teamId) {
@@ -594,6 +598,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         ...prev,
         plans: 'Please select a plan'
       }));
+      
       return;
     }
 
@@ -601,6 +606,34 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     const planName = currentPlan.includes('|') 
       ? currentPlan.split('|')[1] 
       : currentPlan;
+
+    // If product type does not require number, add a virtual entry
+    if (isNoNumberProduct) {
+      const label = formData.productType === 'Prepaid to postpaid' ? 'P2P' : 'MNP';
+      const virtualId = `virtual-${label.toLowerCase()}`;
+      const existingIndex = selectedPlans.findIndex(p => p.numberId === virtualId);
+      if (existingIndex !== -1) {
+        setSelectedPlans(prev => prev.map((p, idx) => idx === existingIndex ? { ...p, plan: planName, category: selectedCategory } : p));
+        toast.success('Plan updated successfully');
+        
+      } else {
+        setSelectedPlans(prev => [...prev, {
+          numberId: virtualId,
+          number: label,
+          plan: planName,
+          category: selectedCategory,
+          group: undefined
+        } as any]);
+        
+      }
+      setCurrentPlan('');
+      setFormErrors(prev => {
+        const { plans, ...rest } = prev;
+        return rest;
+      });
+      
+      return;
+    }
 
     // If a number is selected, check if it's already in selectedPlans
     if (currentNumber && currentNumberData) {
@@ -614,6 +647,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             : plan
         ));
         toast.success('Plan updated successfully');
+        
       } else {
         // Add new number with plan
         setSelectedPlans(prev => [...prev, {
@@ -623,6 +657,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           category: currentNumberData.category,
           group: currentNumberData.group
         }]);
+        
       }
 
       setCurrentNumber('');
@@ -640,6 +675,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             : plan
         ));
         toast.success('Plan updated successfully');
+        
         setCurrentPlan('');
         setFormErrors(prev => {
           const { plans, ...rest } = prev;
@@ -653,6 +689,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           selectedNumber: 'Please select a number.',
           plans: undefined // Clear plan error if there was one
         }));
+        
         return;
       }
     }
@@ -661,6 +698,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       const { plans, ...rest } = prev;
       return rest;
     });
+    
   }, [currentNumber, currentNumberData, currentPlan, selectedPlans]);
 
   const handleRemovePlan = useCallback((numberId: string) => {
@@ -672,7 +710,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   }, []);
 
   const handleChangePlanFor = useCallback((numberId: string, planValue: string) => {
-    
+    // planValue may be in the format "planId|planName" or a plain name
     const planName = planValue.includes('|') ? planValue.split('|')[1] : planValue;
     setSelectedPlans(prev => prev.map(p => p.numberId === numberId ? { ...p, plan: planName } : p));
     setFormErrors(prev => {
@@ -683,6 +721,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
   const handleSubmit = async (e: React.FormEvent, isWhatsAppVerification = false) => {
     e.preventDefault();
+    
     
     // Validate form data
     const errors: FormErrors = {};
@@ -728,6 +767,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     // Plans
     if (!selectedPlans.length) {
       errors.plans = 'At least one plan must be selected';
+      console.warn('[CreateLead] Validation failed: no plans selected');
     }
 
     if (Object.keys(errors).length > 0) {
@@ -747,6 +787,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     }
 
     setLoading(true);
+    
     try {
       // Check if numbers are from different groups
       
@@ -807,21 +848,26 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         ...cleanedFormData,
         customerAddress: formData.customerAddress,
         customerAge: parseInt(formData.customerAge),
-        plans: selectedPlans.map(plan => ({
-          numberId: plan.numberId,
-          number: plan.number,
-          plan: plan.plan,
-          category: plan.category,
-          group: plan.group || 'Standard',
-          type: plan.type || 'standard',
-          status: 'pending_verification'
-        })),
+        plans: selectedPlans.map((plan) => {
+          const p: any = {
+            numberId: plan.numberId,
+            number: plan.number,
+            plan: plan.plan,
+            group: plan.group || 'Standard',
+            type: plan.type || 'standard',
+            status: 'pending_verification'
+          };
+          if (plan.category !== undefined && plan.category !== null && plan.category !== '') {
+            p.category = plan.category;
+          }
+          return p;
+        }),
         status: 'pending_verification', // Temporarily disabled coordination check
-          agentId: user!.id,
-          teamId: user!.teamId,
+        agentId: user!.id,
+        teamId: user!.teamId,
         managerId: teamManagerId || null,
         ...(assignedVerifierId && { verifierId: assignedVerifierId }),
-          createdAt: new Date(),
+        ...(isEditing ? {} : { createdAt: new Date() }),
         updatedAt: new Date(),
         startDate: new Date(formData.startDate),
         sharedWith: formData.sharedWith ? [formData.sharedWith] : [],
@@ -832,13 +878,15 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       const finalLeadData = Object.fromEntries(
         Object.entries(leadData).filter(([_, value]) => value !== undefined)
       ) as Partial<Lead>;
-
-
+      
 
       if (isEditing && onSave) {
+        
         await onSave(finalLeadData);
-                } else {
+      } else {
+        
         const docRef = await addDoc(collection(db, 'leads'), finalLeadData);
+        
 
         // Update all numbers in the lead's plans
         const plans = finalLeadData.plans as Array<{
@@ -852,31 +900,57 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         }>;
 
         if (plans && plans.length > 0) {
-          const updatePromises = plans.map(async (plan) => {
-            const numberRef = doc(db, 'numberPool', plan.numberId);
-            
-            // Get old data for logging
-            const numberDoc = await getDoc(numberRef);
-            const oldData = numberDoc.exists() ? numberDoc.data() : null;
-            
-            await updateDoc(numberRef, {
-              status: 'pending_verification',
-              lastStatusChange: new Date(),
-              leadId: docRef.id
-            });
-            
-            // Log the lead creation action
-            await logNumberAction(
-              plan.numberId,
-              plan.number,
-              'lead_created',
-              oldData,
-              { status: 'pending_verification', leadId: docRef.id },
-              `Lead created with plan: ${plan.plan}`
-            );
+          
+          // Only update numberPool for real numbers; skip virtual entries for MNP/P2P
+          const realPlans = plans.filter(p => !p.numberId?.startsWith('virtual-'));
+          
+          const updatePromises = realPlans.map(async (plan) => {
+            try {
+              
+              const numberRef = doc(db, 'numberPool', plan.numberId);
+              
+              // Get old data for logging
+              const numberDoc = await getDoc(numberRef);
+              const oldData = numberDoc.exists() ? numberDoc.data() : null;
+              
+              await updateDoc(numberRef, {
+                status: 'pending_verification',
+                lastStatusChange: new Date(),
+                leadId: docRef.id
+              });
+              
+              // Log the lead creation action
+              await logNumberAction(
+                plan.numberId,
+                plan.number,
+                'lead_created',
+                oldData,
+                { status: 'pending_verification', leadId: docRef.id },
+                `Lead created with plan: ${plan.plan}`
+              );
+              
+            } catch (err) {
+              
+            }
           });
           
           await Promise.all(updatePromises);
+        }
+
+        // Add initial remarks as a chat message if remarks exist
+        if (formData.remarks && formData.remarks.trim() !== '') {
+          try {
+            await addDoc(collection(db, 'chatMessages'), {
+              leadId: docRef.id,
+              userId: user?.id || '',
+              userRole: user?.role || 'agent',
+              message: formData.remarks.trim(),
+              createdAt: new Date()
+            });
+          } catch (chatError) {
+            console.error('Error creating initial chat message:', chatError);
+            // Don't fail lead creation if chat message fails
+          }
         }
 
         // Show success popup
@@ -887,6 +961,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         
         // Navigate to the lead details page after popup
         setTimeout(() => {
+          
           navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
         }, 2000);
 
@@ -910,8 +985,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           } catch (error) {
           }
         }
-
-
 
         // Send WhatsApp notification to manager
         if (managerPhoneNumbers.length > 0) {
@@ -1162,9 +1235,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         }
       }
     } catch (error) {
-      toast.error('Failed to create lead');
+      // Error handling
+      
+      toast.error('Failed to save lead. Please try again.');
     } finally {
       setLoading(false);
+      
     }
   };
 
@@ -1285,7 +1361,19 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               icon={Package}
               options={productTypes.map(type => ({ value: type, label: type }))}
               value={formData.productType}
-              onChange={(e) => setFormData(prev => ({ ...prev, productType: e.target.value }))}
+              onChange={(e) => {
+                const newType = e.target.value;
+                setFormData(prev => ({ ...prev, productType: newType }));
+                // Reset current selections when toggling type to avoid mismatches
+                setCurrentNumber('');
+                setCurrentPlan('');
+                setCurrentNumberData(null);
+                setSelectedCategory('Standard');
+                // For MNP/P2P, clear selected plans to re-add plan-only entries
+                if (newType === 'MNP' || newType === 'Prepaid to postpaid') {
+                  setSelectedPlans([]);
+                }
+              }}
             />
 
             <FormSelect
@@ -1401,25 +1489,48 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             description="Select numbers and assign plans"
           >
             <div className="col-span-2 space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="col-span-3">
-                  {showNumberPool ? (
-                      <QuickNumberSelect 
-                        onSelect={handleNumberSelect}
-                      selectedCategory={selectedCategory}
-                      onCategoryChange={(category) => setSelectedCategory(category)}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setShowNumberPool(true)}
-                      className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                    >
-                      Select Another Number
-                    </button>
-                  )}
+              {!isNoNumberProduct && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="col-span-3">
+                    {showNumberPool ? (
+                        <QuickNumberSelect 
+                          onSelect={handleNumberSelect}
+                        selectedCategory={selectedCategory}
+                        onCategoryChange={(category) => setSelectedCategory(category)}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowNumberPool(true)}
+                        className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                      >
+                        Select Another Number
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
+              {isNoNumberProduct && (
+                <div className="space-y-3">
+                  <div className="p-3 rounded-md bg-yellow-50 text-yellow-800 text-sm border border-yellow-200">
+                    Number attachment is not required for {formData.productType}. Please choose a category and then select a plan.
+                  </div>
+                  <FormSelect
+                    label="Category"
+                    icon={Package}
+                    options={[
+                      { value: 'Standard', label: 'Standard' },
+                      { value: 'Silver', label: 'Silver' },
+                      { value: 'Silver Plus', label: 'Silver Plus' },
+                      { value: 'Gold', label: 'Gold' },
+                      { value: 'Gold Plus', label: 'Gold Plus' },
+                      { value: 'Platinum', label: 'Platinum' },
+                    ]}
+                    value={selectedCategory}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                  />
+                </div>
+              )}
               {formErrors.selectedNumber && (
                 <div className="mt-1 text-sm text-red-600">
                   {formErrors.selectedNumber}
@@ -1452,6 +1563,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               <FormSelect
                 label="Plan"
                 icon={Package}
+                id="planSelect"
                 options={[
                   { value: '', label: 'Select a plan' },
                   ...filteredPlanCategories.flatMap((category, categoryIndex) => [
@@ -1485,7 +1597,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 onClick={handleAddPlan}
                 className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
               >
-                Add Number with Plan
+                {isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}
               </button>
 
               {selectedPlans.length > 0 && (
@@ -1511,7 +1623,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                                 value={(() => {
                                   // Determine current value by matching id|name when possible
                                   const catNorm = normalizeCategory(plan.category);
-                                  const matching = allPlans.find(p => normalizeCategory(p.category) === catNorm && p.name === plan.plan);
+                                  const matching = allPlans.find(p => (!catNorm || normalizeCategory(p.category) === catNorm) && p.name === plan.plan);
                                   if (matching && matching.id) return `${matching.id}|${matching.name}`;
                                   // Fallback to plain name if no exact match found yet
                                   return plan.plan || '';
@@ -1526,7 +1638,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                                     <option value="" disabled>Select plan…</option>
                                     {(() => {
                                       const catNorm = normalizeCategory(plan.category);
-                                      const byCategory = allPlans.filter(p => normalizeCategory(p.category) === catNorm);
+                                      const byCategory = catNorm ? allPlans.filter(p => normalizeCategory(p.category) === catNorm) : [];
                                       const source = byCategory.length > 0 ? byCategory : allPlans; // fallback when no matches
                                       return source.map((p, idx) => (
                                         <option key={p.id || `${plan.category}-${p.name}-${idx}`} value={p.id ? `${p.id}|${p.name}` : p.name}>
