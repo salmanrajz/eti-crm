@@ -87,6 +87,7 @@ export type NumberStatus =
   | 'assigned'              // Assigned to a customer/lead
   | 'activated'             // Active and in use
   | 'follow_up'             // Requires follow-up action
+  | 'later'                 // Marked for later action
   | 'rejected'              // Rejected during verification
   | 'claimed'               // Claimed by an agent
   | 'follow_verification';   // Requires follow-up verification

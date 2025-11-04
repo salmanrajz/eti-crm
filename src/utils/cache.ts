@@ -41,7 +41,7 @@
 import { dashboardPerf } from './performance';
 
 // ✅ ENHANCED: Date and Map restoration utility for localStorage data
-const restoreDates = (obj: any): any => {
+const restoreDates = (obj: any, isTopLevel: boolean = true): any => {
   if (obj === null || obj === undefined) return obj;
   
   if (typeof obj === 'string') {
@@ -53,16 +53,17 @@ const restoreDates = (obj: any): any => {
   }
   
   if (Array.isArray(obj)) {
-    return obj.map(restoreDates);
+    return obj.map(item => restoreDates(item, false));
   }
   
   if (typeof obj === 'object') {
-    // ✅ ENHANCED: Check if this object should be restored as a Map
-    // Maps serialized to localStorage have numeric or string keys with simple values
-    if (isSerializedMap(obj)) {
+    // ✅ ENHANCED: Only check for Map restoration at top level
+    // This prevents nested objects like { name: "...", teamId: "..." } from being converted to Maps
+    if (isTopLevel && isSerializedMap(obj)) {
       const map = new Map();
       for (const [key, value] of Object.entries(obj)) {
-        map.set(key, restoreDates(value));
+        // Don't recursively convert nested objects to Maps
+        map.set(key, restoreDates(value, false));
       }
       return map;
     }
@@ -73,7 +74,7 @@ const restoreDates = (obj: any): any => {
       if (['createdAt', 'updatedAt', 'timestamp'].includes(key) && typeof value === 'string') {
         restored[key] = new Date(value);
       } else {
-        restored[key] = restoreDates(value);
+        restored[key] = restoreDates(value, false);
       }
     }
     return restored;
@@ -89,10 +90,24 @@ const isSerializedMap = (obj: any): boolean => {
   const entries = Object.entries(obj);
   if (entries.length === 0) return false;
   
-  // Check if all values are primitive types (string, number, boolean)
-  // which is typical for our Map caches (numberId -> group, agentId -> name)
+  // Check if all values are primitives OR simple objects (typical Map cache patterns)
+  // Examples:
+  // - numberId -> group (string)
+  // - agentId -> { name: string, teamId?: string } (object with name/teamId)
+  // - teamId -> teamName (string)
   return entries.every(([key, value]) => {
-    return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+    // Allow primitives
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return true;
+    }
+    // Allow simple objects with expected agent/team properties
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const keys = Object.keys(value);
+      // Check if it looks like our agent/team cache objects
+      const hasExpectedKeys = keys.some(k => ['name', 'teamId', 'fullName', 'displayName', 'email'].includes(k));
+      return hasExpectedKeys && keys.length <= 5; // Small objects only
+    }
+    return false;
   });
 };
 
@@ -177,7 +192,12 @@ class PerformanceCache<T> {
     if (!this.persistent) return;
     
     try {
-      localStorage.setItem(`${this.prefix}_${key}`, JSON.stringify(item));
+      // Ensure Maps and other non-serializable structures are converted
+      const storageSafe: CacheItem<any> = {
+        ...item,
+        data: this.serializeForStorage(item.data)
+      };
+      localStorage.setItem(`${this.prefix}_${key}`, JSON.stringify(storageSafe));
       
       // Track persistence
       if (this.trackPerformance) {
@@ -187,7 +207,11 @@ class PerformanceCache<T> {
       // localStorage quota exceeded - clear old items
       this.clearExpiredFromStorage();
       try {
-        localStorage.setItem(`${this.prefix}_${key}`, JSON.stringify(item));
+        const storageSafe: CacheItem<any> = {
+          ...item,
+          data: this.serializeForStorage(item.data)
+        };
+        localStorage.setItem(`${this.prefix}_${key}`, JSON.stringify(storageSafe));
         if (this.trackPerformance) {
           dashboardPerf.measureCache('persisted', this.cacheName, key, 'localStorage');
         }
@@ -371,6 +395,61 @@ class PerformanceCache<T> {
     const fresh = await factory();
     this.set(key, fresh);
     return fresh;
+  }
+
+  // Convert non-serializable data structures to JSON-safe objects (cycle-safe, depth-limited)
+  private serializeForStorage(data: any, depth: number = 0, seen: WeakSet<object> = new WeakSet()): any {
+    // Depth guard to prevent deep recursion
+    if (depth > 4) {
+      return undefined;
+    }
+    // Primitives
+    if (data === null || data === undefined) return data;
+    const t = typeof data;
+    if (t === 'string' || t === 'number' || t === 'boolean') return data;
+    if (t === 'bigint') return data.toString();
+    if (t === 'function' || t === 'symbol') return undefined;
+
+    // Dates
+    if (data instanceof Date) return data.toISOString();
+
+    // Cycle detection
+    if (t === 'object') {
+      if (seen.has(data)) return undefined;
+      seen.add(data);
+    }
+
+    // Maps -> plain object
+    if (data instanceof Map) {
+      const obj: any = {};
+      for (const [k, v] of data.entries()) {
+        const key = String(k);
+        obj[key] = this.serializeForStorage(v, depth + 1, seen);
+      }
+      return obj;
+    }
+
+    // Arrays
+    if (Array.isArray(data)) {
+      return data.map(d => this.serializeForStorage(d, depth + 1, seen));
+    }
+
+    // Generic objects
+    if (t === 'object') {
+      const out: any = {};
+      for (const [k, v] of Object.entries(data)) {
+        out[k] = this.serializeForStorage(v, depth + 1, seen);
+      }
+      return out;
+    }
+
+    // Fallback
+    try {
+      JSON.stringify(data);
+      return data;
+    } catch {
+      return undefined;
+    }
   }
 }
 

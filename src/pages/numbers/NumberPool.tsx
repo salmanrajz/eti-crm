@@ -297,6 +297,12 @@ const STATUS_STYLES = {
     icon: AlertTriangle,
     gradient: 'from-orange-50 to-orange-100'
   },
+  later: {
+    bg: 'bg-orange-100',
+    text: 'text-orange-800',
+    icon: Clock,
+    gradient: 'from-orange-50 to-orange-100'
+  },
   rejected: {
     bg: 'bg-red-100',
     text: 'text-red-800',

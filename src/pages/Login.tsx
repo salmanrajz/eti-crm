@@ -158,22 +158,19 @@ export function Login() {
     setErrors({});
 
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const user = userCredential.user;
-      
-      // Mark this as a fresh login so AuthProvider knows to allow it
+      // Mark this as a fresh login BEFORE signing in so AuthProvider can detect it immediately
       sessionStorage.setItem('freshLogin', 'true');
       
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
       
       // Handle trusted device (only if location permission was granted)
       if (trustDevice && user && allowLocation) {
         try {
           const deviceFingerprint = generateDeviceFingerprint();
           await trustDeviceService(user.uid, deviceFingerprint, undefined, true);
-          // Device marked as trusted silently
         } catch (trustError) {
           console.error('Error trusting device:', trustError);
-          // Show modal when Firebase operation fails
           setShowLocationModal(true);
         }
       } else if (trustDevice && user && !allowLocation) {
@@ -184,6 +181,10 @@ export function Login() {
       toast.success('Welcome back!');
     } catch (error) {
       console.error('Auth error:', error);
+      
+      // Clear the freshLogin flag since login failed
+      sessionStorage.removeItem('freshLogin');
+      
       const errorCode = (error as { code?: string })?.code;
       
       let errorMessage = 'Login failed. Please try again.';

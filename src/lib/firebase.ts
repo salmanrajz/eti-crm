@@ -62,7 +62,7 @@ import {
   onSnapshot
 } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-import { getMessaging } from 'firebase/messaging';
+// Messaging is imported dynamically to avoid errors in unsupported browsers
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import type { UserRole, CoordinatorType } from '../types';
 import { getSecureConfig } from './firebaseConfig';
@@ -254,14 +254,10 @@ export const functions = (() => {
   return _functions;
 })();
 
-// Initialize Firebase Messaging with error handling for unsupported environments
-let messaging;
-try {
-  messaging = getMessaging(app);
-} catch (error) {
-  console.warn('Firebase messaging not supported in this environment');
-}
-export { messaging };
+// Firebase Cloud Messaging is not currently used in this application
+// Removed to prevent "unsupported browser" errors that were blocking login
+// If push notifications are needed in the future, messaging can be re-enabled
+// with proper browser compatibility checks
 
 // ===============================================================================
 // PRE-CONFIGURED CLOUD FUNCTIONS

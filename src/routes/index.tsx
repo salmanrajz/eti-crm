@@ -28,7 +28,8 @@ import { Reports } from '../components/admin/Reports';
 
 export function AppRoutes() {
   const { user, loading } = useAuthStore();
-  const showLoading = useMinimumLoading(loading, 3000); // 3 seconds minimum
+  // Reduce minimum loading time to 800ms to prevent issues with Firebase init delays
+  const showLoading = useMinimumLoading(loading, 800);
 
   if (showLoading) {
     return <ModernLoading />;

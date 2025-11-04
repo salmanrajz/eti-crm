@@ -6,6 +6,7 @@
  * This page provides functionality for bulk number pool management via Excel file
  * upload. It handles number validation, batch upload to Firestore, and provides
  * comprehensive progress tracking and error handling for large number datasets.
+ * Updated: Nov 4, 2025
  * 
  * FEATURES:
  * 
@@ -36,12 +37,11 @@
  * ===============================================================================
  */
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { collection, writeBatch, doc, getDocs, query } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
-import { Upload, Plus, FileSpreadsheet, FileUp, Download } from 'lucide-react';
-import type { NumberPool } from '../../types';
+import { Upload, FileSpreadsheet, FileUp, Download } from 'lucide-react';
 import { read, utils, writeFile } from 'xlsx';
 
 // ===============================================================================
@@ -53,8 +53,6 @@ import { read, utils, writeFile } from 'xlsx';
  * Optimized for maximum performance while respecting Firestore limits
  */
 const BATCH_SIZE = 500; // Firestore max batch size for optimal performance
-const MAX_RETRIES = 0; // No retries for maximum speed - failures will be logged
-const INITIAL_RETRY_DELAY = 100; // Minimal delay
 
 /**
  * Valid number categories for the number pool
@@ -76,7 +74,7 @@ export function NumberPoolUpload() {
   const [excelFile, setExcelFile] = useState<File | null>(null);
   const [excelErrors, setExcelErrors] = useState<string[]>([]);
   const [parsedExcelData, setParsedExcelData] = useState<ExcelRow[]>([]);
-  const [lastValidatedData, setLastValidatedData] = useState<string>('');
+  const [parsedDataCount, setParsedDataCount] = useState(0);
   const [visibleToFreelancers, setVisibleToFreelancers] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({
     total: 0,
@@ -85,10 +83,51 @@ export function NumberPoolUpload() {
     failed: 0,
     retries: 0
   });
+  const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false);
+  const [duplicateCheckResult, setDuplicateCheckResult] = useState<{
+    duplicatesInFileCount: number;
+    duplicatesInDatabaseCount: number;
+    duplicateInFileSample: string[]; // Only store first 20 for display
+    duplicateInDbSample: string[]; // Only store first 20 for display
+    uniqueRecords: ExcelRow[];
+    totalRecords: number;
+  } | null>(null);
+  const [readyToUpload, setReadyToUpload] = useState(false);
+  const [skipDuplicateCheck, setSkipDuplicateCheck] = useState(false);
+  const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
+  const [uploadElapsedTime, setUploadElapsedTime] = useState<number>(0);
+
+  // Ref to reset file input after upload
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const validateNumber = useCallback((number: string) => {
     return /^\d{10}$/.test(number);
   }, []);
+
+  // Reset stuck states when they become invalid
+  useEffect(() => {
+    if (loading && !uploadStartTime) {
+      setLoading(false);
+    }
+  }, [loading, uploadStartTime]);
+  
+  useEffect(() => {
+    if (isCheckingDuplicates && !excelFile) {
+      setIsCheckingDuplicates(false);
+    }
+  }, [isCheckingDuplicates, excelFile]);
+  
+  // Timer effect - updates every second while uploading
+  useEffect(() => {
+    if (!uploadStartTime || !loading) return;
+
+    const interval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - uploadStartTime) / 1000);
+      setUploadElapsedTime(elapsed);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [uploadStartTime, loading]);
 
   const downloadSampleExcel = useCallback(() => {
     const sampleData = [
@@ -165,12 +204,46 @@ export function NumberPoolUpload() {
     return errors;
   }, [validateNumber]);
 
+  // Auto-prepare data for upload after parsing (checks in-file duplicates only)
+  const handleSkipDuplicateCheckAuto = useCallback((jsonData: ExcelRow[]) => {
+    // Check for duplicates within file only
+    const seenInFile = new Set<string>();
+    const duplicatesInFile: string[] = [];
+    const uniqueInFile = jsonData.filter(row => {
+      if (seenInFile.has(row.Number)) {
+        duplicatesInFile.push(row.Number);
+        return false;
+      }
+      seenInFile.add(row.Number);
+      return true;
+    });
+
+    // Set duplicate check result with in-file duplicates only
+    setDuplicateCheckResult({
+      duplicatesInFileCount: duplicatesInFile.length,
+      duplicatesInDatabaseCount: 0, // Not checking database
+      duplicateInFileSample: duplicatesInFile.slice(0, 20),
+      duplicateInDbSample: [],
+      uniqueRecords: uniqueInFile,
+      totalRecords: jsonData.length
+    });
+
+    setSkipDuplicateCheck(true); // Mark as skipped database check
+    setReadyToUpload(true);
+  }, []);
+
   const handleExcelUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
+    
+    if (!file) {
+      return;
+    }
 
     setExcelErrors([]);
     setParsedExcelData([]);
+    setParsedDataCount(0);
+    setDuplicateCheckResult(null);
+    setReadyToUpload(false);
 
     // Accept any Excel file format
     if (!file.name.match(/\.(xlsx|xls|xlsm|xlsb)$/i)) {
@@ -181,7 +254,20 @@ export function NumberPoolUpload() {
     setExcelFile(file);
 
     try {
-      const data = await file.arrayBuffer();
+      // Use FileReader for better browser compatibility (works on older devices)
+      const data = await new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          if (e.target?.result instanceof ArrayBuffer) {
+            resolve(e.target.result);
+          } else {
+            reject(new Error('Failed to read file as ArrayBuffer'));
+          }
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(file);
+      });
+      
       const workbook = read(data);
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
       const jsonData = utils.sheet_to_json<ExcelRow>(worksheet);
@@ -189,6 +275,7 @@ export function NumberPoolUpload() {
       // Validate headers
       const requiredHeaders = ['Number', 'Category', 'Code', 'Group', 'Passcode'];
       const headers = Object.keys(jsonData[0] || {});
+      
       const missingHeaders = requiredHeaders.filter(
         header => !headers.includes(header)
       );
@@ -200,66 +287,259 @@ export function NumberPoolUpload() {
       }
 
       const validationErrors = validateExcelData(jsonData);
+      
       if (validationErrors.length > 0) {
         setExcelErrors(validationErrors);
         toast.error('Excel validation failed. Please check the errors below.');
       } else {
         setParsedExcelData(jsonData);
+        setParsedDataCount(jsonData.length);
         toast.success(`Successfully parsed ${jsonData.length} numbers`);
+        
+        // Auto-prepare for upload (check for in-file duplicates only)
+        setTimeout(() => {
+          handleSkipDuplicateCheckAuto(jsonData);
+        }, 100);
       }
     } catch (error) {
       console.error('Error parsing Excel:', error);
       toast.error('Failed to parse Excel file');
     }
-  }, [validateExcelData]);
+  }, [validateExcelData, handleSkipDuplicateCheckAuto]);
 
-  const sleep = useCallback((ms: number) => new Promise(resolve => setTimeout(resolve, ms)), []);
+  const handleSkipDuplicateCheck = () => {
+    if (parsedExcelData.length === 0) {
+      toast.error('Please upload an Excel file first');
+      return;
+    }
+    
+    // Check for duplicates within file only
+    const seenInFile = new Set<string>();
+    const duplicatesInFile: string[] = [];
+    const uniqueInFile = parsedExcelData.filter(row => {
+      if (seenInFile.has(row.Number)) {
+        duplicatesInFile.push(row.Number);
+        return false;
+      }
+      seenInFile.add(row.Number);
+      return true;
+    });
 
-  const handleUpload = async () => {
+    setDuplicateCheckResult({
+      duplicatesInFileCount: duplicatesInFile.length,
+      duplicatesInDatabaseCount: 0, // Skipped
+      duplicateInFileSample: duplicatesInFile.slice(0, 20),
+      duplicateInDbSample: [],
+      uniqueRecords: uniqueInFile,
+      totalRecords: parsedExcelData.length
+    });
+
+    setReadyToUpload(true);
+    setSkipDuplicateCheck(true);
+    toast.success(`Ready to upload ${uniqueInFile.length} numbers (${duplicatesInFile.length} duplicates in file removed, database check skipped)`);
+  };
+
+  const handleCheckDuplicates = async () => {
     if (parsedExcelData.length === 0) {
       toast.error('Please upload an Excel file first');
       return;
     }
 
+    setIsCheckingDuplicates(true);
+    setDuplicateCheckResult(null);
+    setReadyToUpload(false);
+    setSkipDuplicateCheck(false);
+
+    const loadingToast = toast.loading('Checking for duplicates...');
+
+    try {
+      // Step 1: Check for duplicates within the upload file itself
+      const seenInFile = new Set<string>();
+      const duplicatesInFile: string[] = [];
+      const uniqueInFile = parsedExcelData.filter(row => {
+        if (seenInFile.has(row.Number)) {
+          duplicatesInFile.push(row.Number);
+          return false;
+        }
+        seenInFile.add(row.Number);
+        return true;
+      });
+
+      // Step 2: Fetch existing numbers from database (with timeout protection)
+      toast.loading('Fetching existing numbers from database...', { id: loadingToast });
+      
+      // Add timeout to prevent infinite hang
+      const fetchWithTimeout = async () => {
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Query timed out after 30 seconds. Please try again or contact support.')), 30000)
+        );
+        
+        const numberPoolQuery = query(collection(db, 'numberPool'));
+        const queryPromise = getDocs(numberPoolQuery);
+        
+        return await Promise.race([queryPromise, timeoutPromise]) as any;
+      };
+      
+      const snapshot = await fetchWithTimeout();
+      
+      // Build set of existing numbers (optimized - only extract number field)
+      toast.loading('Building comparison index...', { id: loadingToast });
+      const existingNumbersSet = new Set<string>();
+      
+      for (const doc of snapshot.docs) {
+        const data = doc.data();
+        if (data?.number) {
+          existingNumbersSet.add(data.number);
+        }
+      }
+
+      // Step 3: Check for duplicates against database
+      toast.loading('Comparing against existing numbers...', { id: loadingToast });
+      
+      const duplicateNumbers: string[] = [];
+      const uniqueNumbersToUpload: ExcelRow[] = [];
+      
+      uniqueInFile.forEach(row => {
+        if (existingNumbersSet.has(row.Number)) {
+          duplicateNumbers.push(row.Number);
+        } else {
+          uniqueNumbersToUpload.push(row);
+        }
+      });
+      
+      toast.dismiss(loadingToast);
+
+      // Store duplicate check results - only keep samples to avoid memory issues
+      setDuplicateCheckResult({
+        duplicatesInFileCount: duplicatesInFile.length,
+        duplicatesInDatabaseCount: duplicateNumbers.length,
+        duplicateInFileSample: duplicatesInFile.slice(0, 20),
+        duplicateInDbSample: duplicateNumbers.slice(0, 20),
+        uniqueRecords: uniqueNumbersToUpload,
+        totalRecords: parsedExcelData.length
+      });
+
+      setReadyToUpload(uniqueNumbersToUpload.length > 0);
+
+      if (uniqueNumbersToUpload.length === 0) {
+        toast.error('All numbers are duplicates. Cannot upload.');
+      } else {
+        const totalDuplicates = duplicatesInFile.length + duplicateNumbers.length;
+        if (totalDuplicates > 0) {
+          toast.success(`Duplicate check complete. ${uniqueNumbersToUpload.length} unique records ready to upload. ${totalDuplicates} duplicates found.`);
+        } else {
+          toast.success(`Duplicate check complete. All ${uniqueNumbersToUpload.length} records are unique and ready to upload.`);
+        }
+      }
+    } catch (error) {
+      console.error('[Duplicate Check] Error:', error);
+      toast.dismiss(loadingToast);
+      toast.error(`Failed to check for duplicates: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsCheckingDuplicates(false);
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!duplicateCheckResult || !readyToUpload) {
+      toast.error('Please check for duplicates first');
+      return;
+    }
+
+    if (duplicateCheckResult.uniqueRecords.length === 0) {
+      toast.error('No unique records to upload');
+      return;
+    }
+
     setLoading(true);
     
-    // Load teams once at the start
-    const teamsSnap = await getDocs(query(collection(db, 'teams')));
+    // Start timer
+    const startTime = Date.now();
+    setUploadStartTime(startTime);
+    setUploadElapsedTime(0);
+
+    try {
+    
+    // Set initial progress immediately with toast
+    const totalDuplicates = duplicateCheckResult.duplicatesInFileCount + duplicateCheckResult.duplicatesInDatabaseCount;
+    const uploadToast = toast.loading('Preparing upload...');
+    
+    setUploadProgress({
+      total: duplicateCheckResult.totalRecords,
+      current: 0,
+      success: 0,
+      failed: totalDuplicates,
+      retries: 0
+    });
+    
+    const dataToUpload = duplicateCheckResult.uniqueRecords;
+    
+    toast.loading('Starting upload...', { id: uploadToast });
+    
+    // Check if ANY numbers have TeamVisibility - if not, skip teams query!
+    const needsTeams = dataToUpload.some(row => row.TeamVisibility && row.TeamVisibility.trim());
+    
     const teamIdByName = new Map<string, string>();
     const validTeamIds = new Set<string>();
+    
+    let teamsPromise: Promise<any>;
+    
+    if (needsTeams) {
+      // Load teams IN PARALLEL - 
+      teamsPromise = getDocs(query(collection(db, 'teams'))).then(teamsSnap => {
     teamsSnap.docs.forEach(t => {
       const data = t.data() as any;
       const name = (data?.name || data?.teamName || '').toString();
       if (name) teamIdByName.set(name.toLowerCase(), t.id);
       validTeamIds.add(t.id);
     });
+        return { teamIdByName, validTeamIds };
+      });
+    } else {
+      teamsPromise = Promise.resolve({ teamIdByName, validTeamIds });
+    }
+    let successCount = 0;
+    let errorCount = 0;
+    const failedNumbers: { number: string; error: string }[] = [];
+    
+    // Track last progress update to show responsive UI
+    let lastProgressUpdate = Date.now();
+    let lastProgressCount = 0;
 
+    // OPTIMIZED: Conservative concurrency to avoid overwhelming Firestore
+    const CONCURRENT_LIMIT = 3; // 3 batches in parallel (prevents 60s+ commits)
+    
+    // Track promises with completion status
+    const activePromises = new Map<number, { promise: Promise<void>, completed: boolean }>();
+    
+    toast.loading(`Uploading ${dataToUpload.length} numbers in batches...`, { id: uploadToast });
+    
+    // Update progress immediately to show activity
     setUploadProgress({
-      total: parsedExcelData.length,
+      total: duplicateCheckResult?.totalRecords || 0,
       current: 0,
       success: 0,
-      failed: 0,
+      failed: totalDuplicates,
       retries: 0
     });
-
-    // Pre-process all data and prepare batches upfront
-    const batches: Array<{ batch: any; numbers: ExcelRow[]; startIndex: number }> = [];
-    let currentBatch = writeBatch(db);
-    let operationsInCurrentBatch = 0;
-    let batchStartIndex = 0;
-
-    // Prepare all batches first (no I/O, just data preparation)
-    for (let i = 0; i < parsedExcelData.length; i++) {
-      const row = parsedExcelData[i];
+    
+    // Wait for teams to load before processing (should be fast since it started early)
+    await teamsPromise;
+    
+    // Process batches with IMMEDIATE start - don't prepare all upfront!
+    const processBatch = async (startIdx: number, endIdx: number) => {
+      const batchData = dataToUpload.slice(startIdx, endIdx);
+      
+      const batch = writeBatch(db);
+      
+      // Add all numbers in this batch
+      for (let i = 0; i < batchData.length; i++) {
+        const row = batchData[i];
       const numberRef = doc(collection(db, 'numberPool'));
       
-      // Resolve team visibility once during preprocessing
       let teamVisibility: string | undefined = (row.TeamVisibility || '').trim() || undefined;
-      if (teamVisibility) {
-        if (!validTeamIds.has(teamVisibility)) {
-          const resolved = teamIdByName.get(teamVisibility.toLowerCase());
-          teamVisibility = resolved || undefined;
-        }
+        if (teamVisibility && !validTeamIds.has(teamVisibility)) {
+          teamVisibility = teamIdByName.get(teamVisibility.toLowerCase());
       }
 
       const numberData: any = {
@@ -271,138 +551,158 @@ export function NumberPoolUpload() {
         visibleToFreelancers: visibleToFreelancers,
         passcode: row.Passcode.trim(),
         lastStatusChange: new Date()
+          // No bulkUpload flag - triggers run in parallel for immediate visibility
       };
 
-      // Only add teamVisibility if it's not undefined (Firestore doesn't allow undefined)
-      if (teamVisibility !== undefined) {
+        if (teamVisibility) {
         numberData.teamVisibility = teamVisibility;
       }
 
-      currentBatch.set(numberRef, numberData);
-      operationsInCurrentBatch++;
-
-      // Create batch when full or at the end
-      if (operationsInCurrentBatch === BATCH_SIZE || i === parsedExcelData.length - 1) {
-        batches.push({
-          batch: currentBatch,
-          numbers: parsedExcelData.slice(batchStartIndex, i + 1),
-          startIndex: batchStartIndex
-        });
-        currentBatch = writeBatch(db);
-        batchStartIndex = i + 1;
-        operationsInCurrentBatch = 0;
+        batch.set(numberRef, numberData);
       }
-    }
-
-    // Process ALL batches with true parallel concurrency
-    const CONCURRENT_LIMIT = 15; // Process 15 batches simultaneously (increased for speed)
-    let successCount = 0;
-    let errorCount = 0;
-    let completedCount = 0;
-    const failedNumbers: { number: string; error: string }[] = [];
-
-    // Proper concurrency limiter: continuously processes batches as they complete
-    const processWithConcurrency = async () => {
-      const executing: Promise<void>[] = [];
-      let batchIndex = 0;
-
-      while (batchIndex < batches.length || executing.length > 0) {
-        // Start new batches up to the limit
-        while (executing.length < CONCURRENT_LIMIT && batchIndex < batches.length) {
-          const { batch, numbers } = batches[batchIndex++];
-          
-          // Create a promise that removes itself when done
-          const promise = (async () => {
-            try {
-              const success = await commitBatchWithRetry(batch, numbers);
-              completedCount += numbers.length;
-              if (success) {
-                successCount += numbers.length;
-              } else {
-                errorCount += numbers.length;
-                numbers.forEach(n => {
+      
+      // Commit batch
+      try {
+        await batch.commit();
+        successCount += batchData.length;
+      } catch (error) {
+        errorCount += batchData.length;
+        batchData.forEach(n => {
                   failedNumbers.push({ number: n.Number, error: 'Batch commit failed' });
                 });
               }
 
-              // Update progress every 5000 items or on completion
-              if (completedCount % 5000 < numbers.length || completedCount === parsedExcelData.length) {
-                setUploadProgress({
-                  total: parsedExcelData.length,
-                  current: completedCount,
-                  success: successCount,
-                  failed: errorCount,
-                  retries: 0
-                });
-              }
-            } catch (error) {
-              errorCount += numbers.length;
-              numbers.forEach(n => {
-                failedNumbers.push({ number: n.Number, error: 'Batch commit failed' });
+      // Update progress FREQUENTLY (every 500 numbers OR every 1 second)
+      const now = Date.now();
+      const totalProcessed = successCount + errorCount;
+      const timeSinceLastUpdate = now - lastProgressUpdate;
+      const numbersSinceLastUpdate = totalProcessed - lastProgressCount;
+      
+      if (numbersSinceLastUpdate >= 500 || timeSinceLastUpdate >= 1000 || totalProcessed === dataToUpload.length) {
+        const percentage = Math.round((totalProcessed / dataToUpload.length) * 100);
+        
+              setUploadProgress({
+          total: duplicateCheckResult?.totalRecords || 0,
+          current: totalProcessed,
+                success: successCount,
+          failed: errorCount + totalDuplicates,
+                retries: 0
               });
-            } finally {
-              // Remove from executing when done
-              const index = executing.indexOf(promise);
-              if (index > -1) {
-                executing.splice(index, 1);
-              }
-            }
-          })();
-
-          executing.push(promise);
-        }
-
-        // Wait for at least one batch to complete before starting more
-        if (executing.length > 0) {
-          await Promise.race(executing);
-        }
+        
+        // Update toast with progress
+        toast.loading(`Uploading... ${totalProcessed}/${dataToUpload.length} (${percentage}%)`, { id: uploadToast });
+        
+        lastProgressUpdate = now;
+        lastProgressCount = totalProcessed;
       }
     };
 
-    try {
-      await processWithConcurrency();
+    // Stream batches: Create and process on-the-fly for INSTANT start
+    for (let startIdx = 0; startIdx < dataToUpload.length; startIdx += BATCH_SIZE) {
+      const endIdx = Math.min(startIdx + BATCH_SIZE, dataToUpload.length);
+      const batchNum = Math.floor(startIdx / BATCH_SIZE) + 1;
+      
+      // Start processing this batch immediately
+      const batchPromise = processBatch(startIdx, endIdx);
+      const tracked = { promise: batchPromise, completed: false };
+      
+      // Mark as completed when done
+      batchPromise
+        .then(() => { tracked.completed = true; })
+        .catch(() => { tracked.completed = true; });
+      
+      activePromises.set(batchNum, tracked);
+      
+      // Wait if we hit the concurrency limit
+      if (activePromises.size >= CONCURRENT_LIMIT) {
+        // Wait for at least one to complete
+        await Promise.race(Array.from(activePromises.values()).map(t => t.promise));
+        
+        // Remove ALL completed promises
+        for (const [key, tracked] of activePromises.entries()) {
+          if (tracked.completed) {
+            activePromises.delete(key);
+          }
+        }
+      }
+    }
+    
+    // Wait for all remaining batches
+    toast.loading('Finalizing batch uploads...', { id: uploadToast });
+    await Promise.all(Array.from(activePromises.values()).map(t => t.promise));
+    
+    toast.dismiss(uploadToast);
 
       // Final progress update
       setUploadProgress({
-        total: parsedExcelData.length,
-        current: parsedExcelData.length,
+        total: duplicateCheckResult?.totalRecords || 0,
+      current: successCount + errorCount,
         success: successCount,
-        failed: errorCount,
+      failed: errorCount + totalDuplicates,
         retries: 0
       });
 
       if (successCount > 0) {
-        toast.success(`Successfully uploaded ${successCount} numbers`);
+      // Calculate total time taken
+      const endTime = Date.now();
+      const totalTimeSeconds = Math.floor((endTime - startTime) / 1000);
+      const minutes = Math.floor(totalTimeSeconds / 60);
+      const seconds = totalTimeSeconds % 60;
+      const timeString = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+      
+      // Calculate upload speed
+      const numbersPerSecond = totalTimeSeconds > 0 ? (successCount / totalTimeSeconds).toFixed(1) : '0';
+      
+      // Show comprehensive success message that stays until manually dismissed
+      toast.dismiss();
+      toast.success(
+        `🎉 Upload Complete!\n\n` +
+        `✅ ${successCount} numbers uploaded\n` +
+        `⏱️ Time: ${timeString}\n` +
+        `🚀 Speed: ${numbersPerSecond} numbers/sec\n` +
+        `${errorCount > 0 ? `❌ ${errorCount} failed\n` : ''}` +
+        `${totalDuplicates > 0 ? `⚠️ ${totalDuplicates} duplicates skipped\n` : ''}\n` +
+        `📊 Stats updating in background...\n\n` +
+        `Click to dismiss`,
+        { duration: Infinity, style: { whiteSpace: 'pre-line' } }
+      );
+      
+      // Reset state to allow new upload
         setParsedExcelData([]);
+      setParsedDataCount(0);
         setExcelFile(null);
+      setDuplicateCheckResult(null);
+      setReadyToUpload(false);
+      setUploadStartTime(null);
+      setUploadElapsedTime(0);
+      
+      // Reset file input to allow selecting the same or new file
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
       }
-      if (errorCount > 0) {
-        toast.error(`Failed to add ${errorCount} numbers`);
+    }
+    
+      if (errorCount > 0 || totalDuplicates > 0) {
+        const totalErrors = errorCount + totalDuplicates;
+        toast.error(`Failed to add ${totalErrors} numbers (${errorCount} errors, ${totalDuplicates} duplicates)`);
         console.error('Failed numbers:', failedNumbers);
         localStorage.setItem('failedNumbers', JSON.stringify(failedNumbers));
+      localStorage.setItem('duplicateCountsInfo', JSON.stringify({
+        inFile: duplicateCheckResult?.duplicatesInFileCount || 0,
+        inDatabase: duplicateCheckResult?.duplicatesInDatabaseCount || 0
+      }));
       }
     } catch (error) {
-      console.error('Error in bulk upload:', error);
-      toast.error('Failed to complete the upload process');
+      console.error('[Upload] Unexpected error during upload:', error);
+      toast.dismiss();
+      toast.error(`Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const commitBatchWithRetry = useCallback(async (batch: any, numbers: ExcelRow[]) => {
-    try {
-      await batch.commit();
-      return true;
-    } catch (error: any) {
-      // Fast fail - no retries for maximum speed
-      if (error.code === 'permission-denied') {
-        console.error(`Batch commit failed (permission denied):`, error);
-      } else {
-        console.error(`Batch commit failed:`, error);
-      }
-      return false;
-    }
-  }, []);
+
+  // No cleanup needed - triggers run in parallel for immediate visibility
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -430,6 +730,7 @@ export function NumberPoolUpload() {
                   >
                     <span>Upload an Excel file</span>
                     <input
+                      ref={fileInputRef}
                       id="excel-upload"
                       name="excel-upload"
                       type="file"
@@ -472,17 +773,19 @@ export function NumberPoolUpload() {
           )}
 
           {/* Numbers Preview */}
-          {parsedExcelData.length > 0 && (
+          {parsedDataCount > 0 && (
             <div className="mb-6">
               <div className="flex justify-between items-center mb-2">
                 <h4 className="text-sm font-medium text-gray-700">
-                  Excel Data Preview ({parsedExcelData.length} numbers)
+                  Excel Data Preview ({parsedDataCount} numbers loaded)
                 </h4>
                 <button
                   onClick={() => {
                     setParsedExcelData([]);
+                    setParsedDataCount(0);
                     setExcelFile(null);
-                    setLastValidatedData('');
+                    setDuplicateCheckResult(null);
+                    setReadyToUpload(false);
                   }}
                   className="text-sm text-red-600 hover:text-red-700"
                 >
@@ -490,6 +793,7 @@ export function NumberPoolUpload() {
                 </button>
               </div>
               <div className="bg-gray-50 rounded-md p-3 max-h-60 overflow-y-auto">
+                <p className="text-xs text-gray-500 mb-2">Showing first 50 records (out of {parsedDataCount} total)</p>
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
@@ -501,7 +805,7 @@ export function NumberPoolUpload() {
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {parsedExcelData.map((row, index) => (
+                    {parsedExcelData.slice(0, 50).map((row, index) => (
                       <tr key={index}>
                         <td className="px-3 py-2 text-sm text-gray-500">{row.Number}</td>
                         <td className="px-3 py-2 text-sm text-gray-500">{row.Category}</td>
@@ -517,7 +821,7 @@ export function NumberPoolUpload() {
           )}
 
           {/* Visibility Control */}
-          {parsedExcelData.length > 0 && (
+          {parsedDataCount > 0 && (
             <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
               <div className="flex items-center">
                 <input
@@ -538,12 +842,96 @@ export function NumberPoolUpload() {
           )}
 
 
-          {/* Upload Button */}
-          <div className="flex justify-end">
+          {/* Duplicate Check Results */}
+          {duplicateCheckResult && (
+            <div className="mb-6 p-4 bg-blue-50 border-blue-200 border rounded-lg">
+              <h4 className="text-sm font-medium text-blue-900 mb-3">
+                Upload Summary
+              </h4>
+              
+              <div className="grid grid-cols-3 gap-4 mb-4">
+                <div className="text-center">
+                  <p className="text-2xl font-bold text-gray-900">{duplicateCheckResult.totalRecords}</p>
+                  <p className="text-xs text-gray-600">Total Records</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-2xl font-bold text-green-600">{duplicateCheckResult.uniqueRecords.length}</p>
+                  <p className="text-xs text-gray-600">Unique Records</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-2xl font-bold text-red-600">
+                    {duplicateCheckResult.duplicatesInFileCount + duplicateCheckResult.duplicatesInDatabaseCount}
+                  </p>
+                  <p className="text-xs text-gray-600">Duplicates Found</p>
+                </div>
+              </div>
+              
+              {duplicateCheckResult.duplicatesInFileCount > 0 && (
+                <div className="mb-3">
+                  <p className="text-xs font-medium text-red-700 mb-1">
+                    Duplicates in file ({duplicateCheckResult.duplicatesInFileCount}):
+                  </p>
+                  <p className="text-xs text-red-600 break-words">
+                    {duplicateCheckResult.duplicateInFileSample.join(', ')}
+                    {duplicateCheckResult.duplicatesInFileCount > 20 && '... (showing first 20)'}
+                  </p>
+                </div>
+              )}
+              
+              {duplicateCheckResult.duplicatesInDatabaseCount > 0 && (
+                <div className="mb-3">
+                  <p className="text-xs font-medium text-orange-700 mb-1">
+                    Already in database ({duplicateCheckResult.duplicatesInDatabaseCount}):
+                  </p>
+                  <p className="text-xs text-orange-600 break-words">
+                    {duplicateCheckResult.duplicateInDbSample.join(', ')}
+                    {duplicateCheckResult.duplicatesInDatabaseCount > 20 && '... (showing first 20)'}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div className="flex justify-end gap-3">
+            {/* HIDDEN: Check Duplicates and Skip Check buttons */}
+            {/* {parsedDataCount > 0 && !duplicateCheckResult && (
+              <>
+              <button
+                type="button"
+                onClick={handleCheckDuplicates}
+                disabled={isCheckingDuplicates || loading}
+                className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+              >
+                {isCheckingDuplicates ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-700 mr-2" />
+                    Checking Duplicates...
+                  </>
+                ) : (
+                  <>
+                    <FileSpreadsheet className="h-4 w-4 mr-2" />
+                    Check Duplicates
+                  </>
+                )}
+              </button>
+                <button
+                  type="button"
+                  onClick={handleSkipDuplicateCheck}
+                  disabled={isCheckingDuplicates || loading}
+                  className="inline-flex items-center px-4 py-2 border border-yellow-400 text-sm font-medium rounded-md shadow-sm text-yellow-700 bg-yellow-50 hover:bg-yellow-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 disabled:opacity-50"
+                  title="Skip database check (faster but may upload duplicates)"
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  Skip Check & Upload
+                </button>
+              </>
+            )} */}
+            
             <button
               type="button"
               onClick={handleUpload}
-              disabled={loading || parsedExcelData.length === 0}
+              disabled={loading || !readyToUpload || !duplicateCheckResult}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               {loading ? (
@@ -554,7 +942,7 @@ export function NumberPoolUpload() {
               ) : (
                 <>
                   <Upload className="h-4 w-4 mr-2" />
-                  Upload Numbers
+                  Upload Unique Records
                 </>
               )}
             </button>
@@ -568,17 +956,21 @@ export function NumberPoolUpload() {
               <span className="text-sm font-medium text-gray-700">
                 Uploading... ({uploadProgress.current} / {uploadProgress.total})
               </span>
-              <div className="flex space-x-4">
-                <span className="text-sm text-green-600">Success: {uploadProgress.success}</span>
-                <span className="text-sm text-red-600">Failed: {uploadProgress.failed}</span>
-                <span className="text-sm text-yellow-600">Retries: {uploadProgress.retries}</span>
-              </div>
+                <div className="flex space-x-4">
+                  <span className="text-sm text-green-600">Success: {uploadProgress.success}</span>
+                  <span className="text-sm text-red-600">Failed: {uploadProgress.failed}</span>
+                </div>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-2">
+            <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
               <div
-                className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+                className="h-2 rounded-full transition-all duration-300 bg-indigo-600"
                 style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}
               />
+            </div>
+            {/* Timer Display */}
+            <div className="flex justify-between items-center text-xs text-gray-600">
+              <span>Elapsed Time: {Math.floor(uploadElapsedTime / 60)}m {uploadElapsedTime % 60}s</span>
+              <span>Speed: {uploadElapsedTime > 0 ? (uploadProgress.success / uploadElapsedTime).toFixed(1) : '0'} numbers/sec</span>
             </div>
           </div>
         )}
