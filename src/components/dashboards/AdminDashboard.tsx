@@ -252,6 +252,23 @@ const clearAdminCache = (): void => {
 
 export function AdminDashboard({ user }: AdminDashboardProps) {
   const [searchParams, setSearchParams] = useSearchParams();
+  
+  // Glassmorphism helper - returns different gradient styles for specific cards
+  const getGlassmorphismClass = (cardName: string) => {
+    const glassmorph = {
+      'Number Logs': 'bg-gradient-to-br from-cyan-400/20 via-blue-400/20 to-purple-400/20 backdrop-blur-sm border-2 border-cyan-200/50',
+      'Reports': 'bg-gradient-to-br from-pink-400/20 via-rose-400/20 to-red-400/20 backdrop-blur-sm border-2 border-pink-200/50',
+      'Number Visibility': 'bg-gradient-to-br from-purple-400/20 via-indigo-400/20 to-blue-400/20 backdrop-blur-sm border-2 border-purple-200/50',
+      'Manager WhatsApp': 'bg-gradient-to-br from-green-400/20 via-emerald-400/20 to-teal-400/20 backdrop-blur-sm border-2 border-green-200/50',
+      'Plan Management': 'bg-gradient-to-br from-amber-400/20 via-orange-400/20 to-red-400/20 backdrop-blur-sm border-2 border-amber-200/50',
+      'DNC Management': 'bg-gradient-to-br from-red-400/20 via-rose-400/20 to-pink-400/20 backdrop-blur-sm border-2 border-red-200/50',
+      'Bulk DNC Import': 'bg-gradient-to-br from-blue-400/20 via-cyan-400/20 to-sky-400/20 backdrop-blur-sm border-2 border-blue-200/50',
+      'Trusted Devices': 'bg-gradient-to-br from-slate-400/20 via-gray-400/20 to-zinc-400/20 backdrop-blur-sm border-2 border-slate-200/50',
+      'WhatsApp Settings': 'bg-gradient-to-br from-lime-400/20 via-green-400/20 to-emerald-400/20 backdrop-blur-sm border-2 border-lime-200/50',
+    };
+    return glassmorph[cardName as keyof typeof glassmorph] || '';
+  };
+  
   const [metrics, setMetrics] = useState({
     totalLeads: 0,
     pendingVerification: 0,
@@ -306,7 +323,10 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
   const [savingGroupTargets, setSavingGroupTargets] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupAlias, setNewGroupAlias] = useState('');
+  const [showAliasInput, setShowAliasInput] = useState(false);
   const [editingGroups, setEditingGroups] = useState(false);
+  const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
   const navigate = useNavigate();
 
   // ✅ PERFORMANCE: Performance optimization refs
@@ -323,6 +343,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     loadAdminData();
     loadOpenRequests();
     loadGroupTargetsForMonth(selectedMonth);
+    loadGroupAliases();
   }, [user]);
 
   // Load numbers that are hidden from freelancers
@@ -1064,41 +1085,11 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       const ref = doc(db, 'groupTargets', monthId);
       const snap = await getDoc(ref);
       
-      // Load all groups from all months to get persistent group names (not values)
-      const allGroupsQuery = query(collection(db, 'groupTargets'));
-      const allGroupsSnapshot = await getDocs(allGroupsQuery);
-      
-      // Collect all unique group names from all months (for persistence)
-      const persistentGroups: Set<string> = new Set();
-      allGroupsSnapshot.docs.forEach(doc => {
-        const data: any = doc.data();
-        if (data.groups && typeof data.groups === 'object') {
-          Object.keys(data.groups).forEach(k => {
-            if (k) persistentGroups.add(String(k).toUpperCase());
-          });
-        } else {
-          // Backward compatibility: old fields g1,g2,g3
-          ['G1', 'G2', 'G3'].forEach(g => {
-            const value = Number(data[g.toLowerCase()] || 0);
-            if (value > 0) persistentGroups.add(g);
-          });
-        }
-      });
-      
-      // Initialize with persistent groups (0 targets by default)
-      const currentGroups: Record<string, number> = {};
-      persistentGroups.forEach(group => {
-        currentGroups[group] = 0;
-      });
-      
-      // Ensure at least default groups exist
-      ['G1','G2','G3'].forEach(base => { 
-        currentGroups[base] = 0; 
-      });
-      
       let visibleToCoordinators = false;
+      const currentGroups: Record<string, number> = {};
       
-      // Load current month's specific targets (month-specific values)
+      // Only load groups that exist in the current month's document
+      // This ensures deleted groups stay deleted and don't reappear from other months
       if (snap.exists()) {
         const currentMonthData: any = snap.data();
         if (currentMonthData.groups && typeof currentMonthData.groups === 'object') {
@@ -1117,6 +1108,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         // Use current month's visibility setting
         visibleToCoordinators = Boolean(currentMonthData.visibleToCoordinators === true);
       }
+      // No default groups - only groups from Firestore data
       
       setGroupTargets({
         groups: currentGroups,
@@ -1126,6 +1118,83 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       // Silent; UI remains usable
     }
   }
+
+  async function loadGroupAliases() {
+    try {
+      // Load aliases from all groupTargets documents and merge them
+      // This ensures we get aliases from all months
+      const allGroupsQuery = query(collection(db, 'groupTargets'));
+      const allGroupsSnapshot = await getDocs(allGroupsQuery);
+      
+      const mergedAliases: Record<string, string> = {};
+      
+      // Only load aliases from Firestore - no hardcoded defaults
+      allGroupsSnapshot.docs.forEach(doc => {
+        const data: any = doc.data();
+        if (data.aliases && typeof data.aliases === 'object') {
+          Object.assign(mergedAliases, data.aliases);
+        }
+      });
+      
+      setGroupAliases(mergedAliases);
+    } catch (e) {
+      console.error('Error loading group aliases:', e);
+      // No fallback - empty object if no data
+      setGroupAliases({});
+    }
+  }
+
+  async function saveGroupAliases(aliases: Record<string, string>) {
+    try {
+      // Save aliases to the current month's groupTargets document
+      const monthId = format(selectedMonth, 'yyyy-MM');
+      const ref = doc(db, 'groupTargets', monthId);
+      await setDoc(ref, { aliases, updatedAt: serverTimestamp() }, { merge: true });
+      setGroupAliases(aliases);
+      toast.success('Group alias saved');
+    } catch (e) {
+      toast.error('Failed to save group alias');
+    }
+  }
+
+
+
+  const handleAddGroupWithAlias = async () => {
+    const key = newGroupName.trim().toUpperCase();
+    const alias = newGroupAlias.trim();
+    
+    if (!key) {
+      toast.error('Please enter a group name');
+      return;
+    }
+    
+    if (!alias) {
+      toast.error('Please enter an alias name');
+      return;
+    }
+    
+    try {
+      // Add group to targets and aliases
+      const updatedGroups = { ...groupTargets.groups, [key]: groupTargets.groups[key] ?? 0 };
+      const updatedAliases = { ...groupAliases, [key]: alias };
+      
+      // Update local state
+      setGroupTargets(prev => ({ ...prev, groups: updatedGroups }));
+      setGroupAliases(updatedAliases);
+      
+      // Save both groups and aliases to groupTargets document
+      await saveGroupTargets({ ...groupTargets, groups: updatedGroups });
+      
+      // Reset form
+      setNewGroupName('');
+      setNewGroupAlias('');
+      setShowAliasInput(false);
+      
+      toast.success(`Group ${key} added with alias "${alias}"`);
+    } catch (e) {
+      toast.error('Failed to add group');
+    }
+  };
 
   async function saveGroupTargets(override?: { groups: Record<string, number>; visibleToCoordinators: boolean }) {
     try {
@@ -1141,6 +1210,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       });
       const payload: any = {
         groups,
+        aliases: groupAliases, // Include aliases in groupTargets document
         visibleToCoordinators: !!source.visibleToCoordinators,
         updatedAt: serverTimestamp()
       };
@@ -1438,7 +1508,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     },
     {
       name: 'WhatsApp Settings',
-      description: 'Configure WhatsApp verification',
+      description: 'WhatsApp verification',
       value: 'Configure',
       href: '#whatsapp-settings',
       icon: MessageSquare,
@@ -1980,7 +2050,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 setNumberVisibilityOpen(true);
                 loadHiddenNumbers();
               }}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2007,7 +2077,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setManagerPhoneModalOpen(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2034,7 +2104,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setPlanManagementModalOpen(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2061,7 +2131,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setDncManagementOpen(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2088,7 +2158,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setBulkImportOpen(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2115,7 +2185,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setTrustedDevicesModalOpen(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2142,7 +2212,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setWhatsappSettingsModalOpen(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
               <div className="p-6">
@@ -2169,7 +2239,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <Link
               to={stat.href}
               key={stat.name}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group"
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group ${getGlassmorphismClass(stat.name) || 'bg-white'}`}
             >
               <div className="p-6">
                 <div className="flex items-center justify-between mb-4">
@@ -2441,6 +2511,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                   .sort()
                   .map((key) => {
                     const label = key.toUpperCase();
+                    const alias = groupAliases[label] || label;
                     const target = groupTargets.groups[label] ?? 0;
                     const achieved = groupActivations[label] ?? 0;
                     const achievement = target > 0 ? Math.min((achieved / target) * 100, 100) : 0;
@@ -2460,31 +2531,55 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                             <div className={`p-2 rounded-lg bg-white/70 ${theme.accent}`}>
                               <Target className="w-4 h-4" />
                             </div>
-                            <div className={`text-sm font-semibold ${theme.accent}`}>{label} Activation</div>
+                            <div className={`text-sm font-semibold ${theme.accent}`}>{alias} Activation</div>
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-gray-500">Target vs Achieved</span>
                             {editingGroups && (
                             <button
                               type="button"
-                              onClick={() => {
+                              onClick={async () => {
                                 const monthId = format(selectedMonth, 'yyyy-MM');
-                                const ref = doc(db, 'groupTargets', monthId);
-                                // Persist removal at source first
+                                const groupTargetsRef = doc(db, 'groupTargets', monthId);
+                                
                                 setSavingGroupTargets(true);
-                                updateDoc(ref, { [`groups.${label}`]: deleteField(), updatedAt: serverTimestamp() })
-                                  .then(() => {
+                                try {
+                                  // Capture alias name before deletion
+                                  const aliasName = groupAliases[label] || label;
+                                  
+                                  // Delete group from current month's targets and aliases
+                                  const updatedAliases = { ...groupAliases };
+                                  delete updatedAliases[label];
+                                  
+                                  // Build update object with deleteField for both group and alias
+                                  const updateData: any = {
+                                    [`groups.${label}`]: deleteField(),
+                                    [`aliases.${label}`]: deleteField(),
+                                    updatedAt: serverTimestamp()
+                                  };
+                                  
+                                  await updateDoc(groupTargetsRef, updateData);
+                                  
+                                  // Update local state
                                     setGroupTargets(prev => {
                                       const copy = { ...prev.groups } as Record<string, number>;
                                       delete copy[label];
                                       return { ...prev, groups: copy };
                                     });
-                                  })
-                                  .catch(() => {})
-                                  .finally(() => setSavingGroupTargets(false));
+                                  
+                                  // Update local aliases state
+                                  setGroupAliases(updatedAliases);
+                                  
+                                  toast.success(`Group ${aliasName} and its alias deleted from ${format(selectedMonth, 'MMM yyyy')}`);
+                                } catch (error) {
+                                  console.error('Error deleting group:', error);
+                                  toast.error('Failed to delete group');
+                                } finally {
+                                  setSavingGroupTargets(false);
+                                }
                               }}
                               className="p-1 rounded hover:bg-gray-200 text-gray-500 hover:text-gray-700"
-                              title={`Delete ${label}`}
+                              title={`Delete ${groupAliases[label] || label}`}
                             >
                               <X className="w-4 h-4" />
                             </button> )}
@@ -2532,31 +2627,75 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
 
               {editingGroups && (
-                <div className="mt-4 flex items-center gap-2">
+                <div className="mt-4 space-y-3">
+                  {!showAliasInput ? (
+                    <div className="flex items-center gap-2">
                   <input
                     type="text"
                     value={newGroupName}
                     onChange={(e) => setNewGroupName(e.target.value)}
                     placeholder="Add group (e.g., G4, G5, VIP)"
                     className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter' && newGroupName.trim()) {
+                            const key = newGroupName.trim().toUpperCase();
+                            if (key) {
+                              setShowAliasInput(true);
+                            }
+                          }
+                        }}
                   />
                   <button
                     type="button"
                     onClick={() => {
                       const key = newGroupName.trim().toUpperCase();
                       if (!key) return;
-                      setGroupTargets(prev => {
-                        const updated = { ...prev, groups: { ...prev.groups, [key]: prev.groups[key] ?? 0 } };
-                        // Auto-persist new group
-                        saveGroupTargets(updated);
-                        return updated;
-                      });
-                      setNewGroupName('');
-                    }}
+                          setShowAliasInput(true);
+                        }}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 p-4 bg-indigo-50 rounded-lg border border-indigo-200">
+                      <div className="text-sm font-semibold text-gray-700">
+                        Group: <span className="text-indigo-700">{newGroupName.trim().toUpperCase()}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={newGroupAlias}
+                          onChange={(e) => setNewGroupAlias(e.target.value)}
+                          placeholder={`Enter alias name (e.g., ${groupAliases['G1'] || 'Connect'})`}
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                          autoFocus
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter' && newGroupAlias.trim()) {
+                              handleAddGroupWithAlias();
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAddGroupWithAlias}
                     className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
                   >
-                    Add Group
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAliasInput(false);
+                            setNewGroupAlias('');
+                          }}
+                          className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                        >
+                          Cancel
                   </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
