@@ -4,8 +4,8 @@
  * ===============================================================================
  * 
  * This component provides comprehensive reporting with daily and monthly metrics,
- * organized by groups (G1, G2, G3, G4 for others) and teams, with category-wise
- * breakdowns. Shows all teams, groups, and categories by default even with 0 values.
+ * organized by groups and teams, with category-wise breakdowns. 
+ * All groups come from Firestore data - no hardcoded groups.
  * 
  * FEATURES:
  * 
@@ -26,7 +26,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, getDocs, where, doc, getDoc } from 'firebase/firestore';
+import { collection, query, getDocs, where, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { Lead, Team, User } from '../../types';
 import { format, startOfDay, endOfDay, startOfMonth, endOfMonth, subMonths } from 'date-fns';
@@ -44,7 +44,6 @@ import {
   Calendar,
   Activity,
   Table,
-  Grid,
   X,
   ArrowLeft,
   User2
@@ -52,14 +51,17 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 
-const GROUPS = ['G1', 'G2', 'G3', 'G4'] as const;
 const CATEGORIES = ['Standard', 'Silver', 'Silver Plus', 'Gold', 'Gold Plus', 'Platinum'] as const;
 
-const GROUP_NAMES: Record<string, string> = {
-  'G1': 'Connect',
-  'G2': 'Express Dial',
-  'G3': 'Telecon',
-  'G4': 'G4 (Others)'
+// No hardcoded groups - all groups come from Firestore data
+
+const CATEGORY_SHORT_NAMES: Record<string, string> = {
+  'Standard': 'Std',
+  'Silver': 'Sil',
+  'Silver Plus': 'Sil+',
+  'Gold': 'Gld',
+  'Gold Plus': 'Gld+',
+  'Platinum': 'Plat'
 };
 
 const GROUP_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -85,11 +87,24 @@ interface GroupCategoryMetrics {
   };
 }
 
+interface GroupStatusMetrics {
+  [group: string]: {
+    activated: number;
+    verified: number;
+    followup: number;
+    nonVerified: number;
+    assignedForActivation: number;
+    pendingVerification: number;
+    total: number;
+  };
+}
+
 interface TeamMetrics {
   teamName: string;
   teamId: string;
   total: number;
   groups: GroupCategoryMetrics;
+  groupStatus: GroupStatusMetrics;
 }
 
 interface DailyMetrics {
@@ -97,6 +112,8 @@ interface DailyMetrics {
   followup: number;
   activated: number;
   assignedForActivation: number;
+  nonVerified: number;
+  pendingVerification: number;
   teamWise: {
     [teamId: string]: TeamMetrics;
   };
@@ -109,12 +126,11 @@ interface MonthlyMetrics {
   };
 }
 
-function normalizeGroup(group?: string): 'G1' | 'G2' | 'G3' | 'G4' {
+function normalizeGroup(group?: string): string {
+  // Return the group as-is, or 'UNKNOWN' if not provided
+  // No hardcoded defaults - groups come from Firestore data
   const g = (group || '').toUpperCase().trim();
-  if (g === 'G1') return 'G1';
-  if (g === 'G2') return 'G2';
-  if (g === 'G3') return 'G3';
-  return 'G4';
+  return g || 'UNKNOWN';
 }
 
 function normalizeCategory(category?: string): string {
@@ -163,7 +179,6 @@ interface AgentDetailsData {
 
 export function Reports() {
   const [view, setView] = useState<'daily' | 'monthly'>('daily');
-  const [displayMode, setDisplayMode] = useState<'cards' | 'table'>('cards');
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [selectedMonth, setSelectedMonth] = useState(new Date());
   const [loading, setLoading] = useState(true);
@@ -178,19 +193,34 @@ export function Reports() {
   const [selectedAgentDetails, setSelectedAgentDetails] = useState<AgentDetailsData | null>(null);
   const [isLoadingAgentDetails, setIsLoadingAgentDetails] = useState(false);
   const [teamLeadsForPerformance, setTeamLeadsForPerformance] = useState<Lead[]>([]);
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+  const [groupTargets, setGroupTargets] = useState<Record<string, number>>({});
+  const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
+  const [categoryTargets, setCategoryTargets] = useState<Record<string, number>>({});
+  const [categoryActivations, setCategoryActivations] = useState<Record<string, number>>({});
+  const [monthlyCategoryActivations, setMonthlyCategoryActivations] = useState<Record<string, number>>({});
+  const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
 
   useEffect(() => {
     loadTeams();
   }, []);
 
   useEffect(() => {
+    loadGroupAliases();
+  }, []);
+
+  useEffect(() => {
     if (teams.length > 0) {
       if (view === 'daily') {
         loadDailyMetrics(selectedDate);
+        loadMonthlyCategoryActivations(selectedDate); // Load monthly category activations for daily report
       } else {
         loadMonthlyMetrics(selectedMonth);
+        loadGroupTargets(selectedMonth);
       }
     }
+    // Reset expanded group when switching views
+    setExpandedGroup(null);
   }, [view, selectedDate, selectedMonth, teams]);
 
   const loadTeams = async () => {
@@ -202,11 +232,12 @@ export function Reports() {
         ...doc.data()
       })) as Team[];
       
-      // Sort teams alphabetically
+      // Sort teams with natural numeric sorting
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
       teamsData.sort((a, b) => {
-        const nameA = (a.name || 'Unknown Team').toLowerCase();
-        const nameB = (b.name || 'Unknown Team').toLowerCase();
-        return nameA.localeCompare(nameB);
+        const nameA = a.name || 'Unknown Team';
+        const nameB = b.name || 'Unknown Team';
+        return collator.compare(nameA, nameB);
       });
       
       setTeams(teamsData);
@@ -216,11 +247,35 @@ export function Reports() {
     }
   };
 
+  // Helper function to get all groups that should be initialized
+  // No hardcoded groups - only groups from Firestore data
+  const getAllGroupsToInitialize = (): string[] => {
+    const groupsSet = new Set<string>();
+    
+    // Only add groups from groupTargets (no hardcoded defaults)
+    Object.keys(groupTargets).forEach(g => {
+      if (g.toUpperCase() !== 'STANDARD') {
+        groupsSet.add(g.toUpperCase());
+      }
+    });
+    
+    // Add groups from groupAliases
+    Object.keys(groupAliases).forEach(g => {
+      if (g.toUpperCase() !== 'STANDARD') {
+        groupsSet.add(g.toUpperCase());
+      }
+    });
+    
+    return Array.from(groupsSet);
+  };
+
   const initializeTeamMetrics = (teamId: string, teamName: string): TeamMetrics => {
     const groups: GroupCategoryMetrics = {};
+    const groupStatus: GroupStatusMetrics = {};
     
-    // Initialize all groups
-    GROUPS.forEach(group => {
+    // Initialize all groups (including dynamically added ones)
+    const groupsToInit = getAllGroupsToInitialize();
+    groupsToInit.forEach(group => {
       groups[group] = {
         total: 0,
       };
@@ -229,6 +284,17 @@ export function Reports() {
       CATEGORIES.forEach(category => {
         groups[group][category] = 0;
       });
+
+      // Initialize group status metrics
+      groupStatus[group] = {
+        activated: 0,
+        verified: 0,
+        followup: 0,
+        nonVerified: 0,
+        assignedForActivation: 0,
+        pendingVerification: 0,
+        total: 0,
+      };
     });
 
     return {
@@ -236,6 +302,7 @@ export function Reports() {
       teamName,
       total: 0,
       groups,
+      groupStatus,
     };
   };
 
@@ -264,6 +331,8 @@ export function Reports() {
         followup: 0,
         activated: 0,
         assignedForActivation: 0,
+        nonVerified: 0,
+        pendingVerification: 0,
         teamWise: {}
       };
 
@@ -272,11 +341,12 @@ export function Reports() {
         metrics.teamWise[team.id] = initializeTeamMetrics(team.id, team.name || 'Unknown Team');
       });
 
-      // Process leads
+      // Process leads - match AdminDashboard logic
       filteredLeads.forEach(lead => {
         const plans = lead.plans || [];
         const teamId = lead.teamId || 'unknown';
         const team = teams.find(t => t.id === teamId);
+        const status = lead.status;
         
         // Initialize team if not exists
         if (!metrics.teamWise[teamId]) {
@@ -285,6 +355,14 @@ export function Reports() {
             team?.name || 'Unknown Team'
           );
         }
+
+        // Count leads (not plans) for most statuses, but count plans for activated
+        // Group-wise: distribute across groups based on plans
+        if (status === 'activated') {
+          // For activated: count plans (like AdminDashboard)
+          const planCount = plans.length || 0;
+          metrics.activated += planCount;
+          metrics.teamWise[teamId].total += planCount;
 
         plans.forEach(plan => {
           const group = normalizeGroup(plan.group);
@@ -297,33 +375,87 @@ export function Reports() {
               metrics.teamWise[teamId].groups[group][cat] = 0;
             });
           }
-          if (!metrics.teamWise[teamId].groups[group][category]) {
-            metrics.teamWise[teamId].groups[group][category] = 0;
+            if (!metrics.teamWise[teamId].groupStatus[group]) {
+              metrics.teamWise[teamId].groupStatus[group] = {
+                activated: 0,
+                verified: 0,
+                followup: 0,
+                nonVerified: 0,
+                assignedForActivation: 0,
+                pendingVerification: 0,
+                total: 0,
+              };
+            }
+
+            metrics.teamWise[teamId].groupStatus[group].activated++;
+            metrics.teamWise[teamId].groups[group].total++;
+            metrics.teamWise[teamId].groups[group][category]++;
+            metrics.teamWise[teamId].groupStatus[group].total++;
+          });
+        } else {
+          // For other statuses: count leads (1 per lead), but distribute across groups
+          if (status === 'verified') {
+            metrics.verified++;
+          } else if (status === 'follow_verification') {
+            metrics.followup++;
+          } else if (status === 'assigned') {
+            metrics.assignedForActivation++;
+          } else if (status === 'activated_non_verified') {
+            metrics.nonVerified++;
+          } else if (status === 'pending_verification') {
+            metrics.pendingVerification++;
           }
 
-          // Update metrics based on status
-          if (lead.status === 'verified') {
-            metrics.verified++;
             metrics.teamWise[teamId].total++;
+
+          // Distribute lead across groups based on plans
+          if (plans.length > 0) {
+            plans.forEach(plan => {
+              const group = normalizeGroup(plan.group);
+              const category = normalizeCategory(plan.category);
+
+              // Ensure group and category exist
+              if (!metrics.teamWise[teamId].groups[group]) {
+                metrics.teamWise[teamId].groups[group] = { total: 0 };
+                CATEGORIES.forEach(cat => {
+                  metrics.teamWise[teamId].groups[group][cat] = 0;
+                });
+              }
+              if (!metrics.teamWise[teamId].groupStatus[group]) {
+                metrics.teamWise[teamId].groupStatus[group] = {
+                  activated: 0,
+                  verified: 0,
+                  followup: 0,
+                  nonVerified: 0,
+                  assignedForActivation: 0,
+                  pendingVerification: 0,
+                  total: 0,
+                };
+              }
+
+              // Count lead per group (distribute evenly or count once per group)
+              // For simplicity, count 1 per group (if lead has multiple plans, it appears in multiple groups)
+              if (status === 'verified') {
+                metrics.teamWise[teamId].groupStatus[group].verified++;
+              } else if (status === 'follow_verification') {
+                metrics.teamWise[teamId].groupStatus[group].followup++;
+              } else if (status === 'assigned') {
+                metrics.teamWise[teamId].groupStatus[group].assignedForActivation++;
+              } else if (status === 'activated_non_verified') {
+                metrics.teamWise[teamId].groupStatus[group].nonVerified++;
+              } else if (status === 'pending_verification') {
+                metrics.teamWise[teamId].groupStatus[group].pendingVerification++;
+              }
+
             metrics.teamWise[teamId].groups[group].total++;
             metrics.teamWise[teamId].groups[group][category]++;
-          } else if (lead.status === 'follow_verification') {
-            metrics.followup++;
-            metrics.teamWise[teamId].total++;
-            metrics.teamWise[teamId].groups[group].total++;
-            metrics.teamWise[teamId].groups[group][category]++;
-          } else if (lead.status === 'activated') {
-            metrics.activated++;
-            metrics.teamWise[teamId].total++;
-            metrics.teamWise[teamId].groups[group].total++;
-            metrics.teamWise[teamId].groups[group][category]++;
-          } else if (lead.status === 'assigned') {
-            metrics.assignedForActivation++;
-            metrics.teamWise[teamId].total++;
-            metrics.teamWise[teamId].groups[group].total++;
-            metrics.teamWise[teamId].groups[group][category]++;
-          }
+              metrics.teamWise[teamId].groupStatus[group].total++;
         });
+          } else {
+            // If no plans, skip group assignment - no hardcoded default group
+            // Groups must be explicitly defined in Firestore
+          }
+        }
       });
 
       setDailyMetrics(metrics);
@@ -332,6 +464,149 @@ export function Reports() {
       toast.error('Failed to load daily metrics');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadGroupAliases = async () => {
+    try {
+      // Load aliases from all groupTargets documents and merge them
+      // This ensures we get aliases from all months
+      const allGroupsQuery = query(collection(db, 'groupTargets'));
+      const allGroupsSnapshot = await getDocs(allGroupsQuery);
+      
+      const mergedAliases: Record<string, string> = {};
+      
+      // Only load aliases from Firestore - no hardcoded defaults
+      allGroupsSnapshot.docs.forEach(doc => {
+        const data: any = doc.data();
+        if (data.aliases && typeof data.aliases === 'object') {
+          Object.assign(mergedAliases, data.aliases);
+        }
+      });
+      
+      setGroupAliases(mergedAliases);
+    } catch (error) {
+      console.error('Error loading group aliases:', error);
+      // No fallback - empty object if no data
+      setGroupAliases({});
+    }
+  };
+
+  const loadGroupTargets = async (month: Date) => {
+    try {
+      const monthId = format(month, 'yyyy-MM');
+      const ref = doc(db, 'groupTargets', monthId);
+      const snap = await getDoc(ref);
+      
+      const groups: Record<string, number> = {};
+      
+      if (snap.exists()) {
+        const data: any = snap.data();
+        if (data.groups && typeof data.groups === 'object') {
+          Object.entries(data.groups).forEach(([k, v]: any) => {
+            if (k) {
+              groups[String(k).toUpperCase()] = Number(v || 0);
+            }
+          });
+        }
+      }
+      
+      setGroupTargets(groups);
+      
+      // Also check for category targets (like STANDARD)
+      // Check if there's a categoryTargets collection or if STANDARD is stored in groupTargets
+      const categoryTargetsData: Record<string, number> = {};
+      if (snap.exists()) {
+        const data: any = snap.data();
+        // Check if categories are stored separately
+        if (data.categories && typeof data.categories === 'object') {
+          Object.entries(data.categories).forEach(([k, v]: any) => {
+            if (k) {
+              categoryTargetsData[String(k)] = Number(v || 0);
+            }
+          });
+        }
+        // Also check if STANDARD is in groups (some systems might store it there)
+        if (data.groups && data.groups['STANDARD']) {
+          categoryTargetsData['STANDARD'] = Number(data.groups['STANDARD'] || 0);
+        }
+      }
+      
+      setCategoryTargets(categoryTargetsData);
+    } catch (error) {
+      console.error('Error loading group targets:', error);
+    }
+  };
+
+  const computeGroupActivations = (allLeads: Lead[], month: Date) => {
+    const start = startOfMonth(month);
+    const end = endOfMonth(month);
+    const gCounts: Record<string, number> = {};
+    const cCounts: Record<string, number> = {};
+    
+    const monthActivated = allLeads.filter(lead => {
+      if (lead.status !== 'activated') return false;
+      const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
+      return updated >= start && updated <= end;
+    });
+    
+    monthActivated.forEach(lead => {
+      (lead.plans || []).forEach(plan => {
+        const grp = normalizeGroup(plan.group);
+        const cat = normalizeCategory(plan.category);
+        
+        // Count group activations
+        gCounts[grp] = (gCounts[grp] || 0) + 1;
+        
+        // Count category activations
+        cCounts[cat] = (cCounts[cat] || 0) + 1;
+      });
+    });
+    
+    setGroupActivations(gCounts);
+    setCategoryActivations(cCounts);
+  };
+
+  const loadMonthlyCategoryActivations = async (date: Date) => {
+    try {
+      // Get the current month from the date
+      const month = startOfMonth(date);
+      const start = startOfMonth(month);
+      const end = endOfMonth(month);
+      
+      const leadsQuery = query(collection(db, 'leads'));
+      const leadsSnapshot = await getDocs(leadsQuery);
+      const allLeads = leadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
+      })) as Lead[];
+
+      const categoryCounts: Record<string, number> = {};
+      
+      // Initialize all categories to 0
+      CATEGORIES.forEach(cat => {
+        categoryCounts[cat] = 0;
+      });
+
+      // Filter activated leads for the current month
+      const monthActivated = allLeads.filter(lead => {
+        if (lead.status !== 'activated') return false;
+        const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
+        return updated >= start && updated <= end;
+      });
+
+      // Count activations per category
+      monthActivated.forEach(lead => {
+        (lead.plans || []).forEach(plan => {
+          const cat = normalizeCategory(plan.category);
+          categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+        });
+      });
+
+      setMonthlyCategoryActivations(categoryCounts);
+    } catch (error) {
+      console.error('Error loading monthly category activations:', error);
     }
   };
 
@@ -354,6 +629,9 @@ export function Reports() {
         const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
         return updated >= start && updated <= end;
       });
+
+      // Calculate group and category activations
+      computeGroupActivations(allLeads, month);
 
       const metrics: MonthlyMetrics = {
         total: 0,
@@ -414,10 +692,13 @@ export function Reports() {
 
   const handleRefresh = async () => {
     setRefreshing(true);
+    await loadGroupAliases(); // Reload aliases in case they were updated
     if (view === 'daily') {
       await loadDailyMetrics(selectedDate);
+      await loadMonthlyCategoryActivations(selectedDate); // Reload monthly category activations
     } else {
       await loadMonthlyMetrics(selectedMonth);
+      await loadGroupTargets(selectedMonth);
     }
     setRefreshing(false);
     toast.success('Report refreshed');
@@ -624,14 +905,42 @@ export function Reports() {
     const metrics = view === 'daily' ? dailyMetrics : monthlyMetrics;
     if (!metrics) return [];
     
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
     return Object.entries(metrics.teamWise)
       .map(([teamId, data]) => ({ teamId, ...data }))
       .sort((a, b) => {
-        // First sort by total descending, then by team name
+        // First sort by total descending, then by team name with natural numeric sorting
         if (b.total !== a.total) return b.total - a.total;
-        return a.teamName.localeCompare(b.teamName);
+        return collator.compare(a.teamName, b.teamName);
       });
   }, [dailyMetrics, monthlyMetrics, view]);
+
+  // Get all available groups dynamically - only from Firestore data
+  // IMPORTANT: This hook must be called before any early returns to maintain hook order
+  // No hardcoded groups - all groups come from groupTargets and groupAliases
+  const allAvailableGroups = useMemo(() => {
+    const groupsSet = new Set<string>();
+    
+    // Only add groups from groupTargets (no hardcoded defaults)
+    Object.keys(groupTargets).forEach(g => {
+      if (g.toUpperCase() !== 'STANDARD') {
+        groupsSet.add(g.toUpperCase());
+      }
+    });
+    
+    // Add groups from groupAliases
+    Object.keys(groupAliases).forEach(g => {
+      if (g.toUpperCase() !== 'STANDARD') {
+        groupsSet.add(g.toUpperCase());
+      }
+    });
+    
+    // Sort naturally (G1, G2, G3, G4, G5, etc.)
+    return Array.from(groupsSet).sort((a, b) => {
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+      return collator.compare(a, b);
+    });
+  }, [groupTargets, groupAliases]);
 
   if (loading && !dailyMetrics && !monthlyMetrics) {
     return (
@@ -648,264 +957,365 @@ export function Reports() {
     const metrics = view === 'daily' ? dailyMetrics : monthlyMetrics;
     if (!metrics) return null;
 
+    // Monthly view: Groups as columns, Teams as rows
+    if (view === 'monthly') {
     return (
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gradient-to-r from-indigo-600 to-purple-600">
               <tr>
-                <th rowSpan={2} className="px-6 py-4 text-left text-xs font-bold text-white uppercase tracking-wider sticky left-0 bg-gradient-to-r from-indigo-600 to-purple-600 z-10 border-r border-indigo-400">
+                  <th 
+                    rowSpan={expandedGroup ? 2 : 1}
+                    className="px-6 py-4 text-left text-xs font-bold text-white uppercase tracking-wider sticky left-0 bg-gradient-to-r from-indigo-600 to-purple-600 z-10 border-r border-indigo-400"
+                  >
                   Team
                 </th>
-                <th rowSpan={2} className="px-4 py-4 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
-                  Group
+                  {allAvailableGroups.map((group) => {
+                    const groupColor = GROUP_COLORS[group] || { bg: 'bg-gray-50', text: 'text-gray-700', border: 'border-gray-200' };
+                    const isExpanded = expandedGroup === group;
+                    return (
+                      <th
+                        key={group}
+                        colSpan={isExpanded ? CATEGORIES.length : 1}
+                        className={`px-4 py-4 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400 cursor-pointer hover:bg-indigo-700 transition-colors ${isExpanded ? 'bg-indigo-700' : ''}`}
+                        onClick={() => setExpandedGroup(isExpanded ? null : group)}
+                      >
+                        <div className="flex flex-col items-center gap-1">
+                          <div className="flex items-center gap-2">
+                            <span>{groupAliases[group] || group}</span>
+                            <motion.div
+                              animate={{ rotate: isExpanded ? 180 : 0 }}
+                              transition={{ duration: 0.2 }}
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                              </svg>
+                            </motion.div>
+                          </div>
+                          <div className="text-xs font-normal opacity-90">
+                            {sortedTeams.reduce((sum, team) => {
+                              const groupData = team.groups[group] || { total: 0 };
+                              return sum + (groupData.total || 0);
+                            }, 0)}
+                          </div>
+                        </div>
                 </th>
-                {CATEGORIES.map((category) => (
-                  <th key={category} className="px-4 py-3 text-center text-xs font-medium text-white uppercase tracking-wider border-r border-indigo-400">
-                    {category}
+                    );
+                  })}
+                  <th 
+                    rowSpan={expandedGroup ? 2 : 1}
+                    className="px-4 py-4 text-center text-xs font-bold text-white uppercase tracking-wider border-l-2 border-indigo-300"
+                  >
+                    Total
+                  </th>
+                </tr>
+                {/* Category header row - only show when a group is expanded */}
+                {expandedGroup && (
+                  <tr className="bg-indigo-700">
+                    {allAvailableGroups.map((group) => {
+                      const isExpanded = expandedGroup === group;
+                      if (isExpanded) {
+                        // Show category labels for expanded group
+                        return (
+                          <React.Fragment key={group}>
+                            {CATEGORIES.map((category, catIdx) => (
+                              <th
+                                key={`${group}-${category}`}
+                                className="px-1 py-2 text-center border-r border-indigo-400 min-w-[50px]"
+                                title={category}
+                              >
+                                <span className="px-1 py-0.5 bg-white/20 rounded text-[10px] font-medium text-white uppercase block whitespace-nowrap">
+                                  {CATEGORY_SHORT_NAMES[category] || category}
+                                </span>
                   </th>
                 ))}
-                <th rowSpan={2} className="px-4 py-4 text-center text-xs font-bold text-white uppercase tracking-wider border-l-2 border-indigo-300">
-                  Group Total
+                          </React.Fragment>
+                        );
+                      } else {
+                        // Regular header cell for non-expanded groups
+                        return (
+                          <th
+                            key={group}
+                            className="px-4 py-2 text-center text-xs font-medium text-white uppercase tracking-wider border-r border-indigo-400"
+                          >
+                            {/* Empty cell - group name already shown in row above */}
                 </th>
+                        );
+                      }
+                    })}
               </tr>
+                )}
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {sortedTeams.map((teamData, teamIdx) => {
-                const teamGroups = teamData.groups;
                 const hasData = teamData.total > 0;
-                let isFirstGroupForTeam = true;
-                
-                return GROUPS.map((group, groupIdx) => {
-                  const groupData = teamGroups[group] || { total: 0 };
-                  const groupTotal = groupData.total || 0;
-                  const groupColor = GROUP_COLORS[group];
-                  const showTeamName = isFirstGroupForTeam;
-                  if (isFirstGroupForTeam) isFirstGroupForTeam = false;
-                  
                   return (
+                    <React.Fragment key={teamData.teamId}>
+                      {/* Main row with group totals */}
                     <motion.tr
-                      key={`${teamData.teamId}-${group}`}
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      transition={{ delay: (teamIdx * GROUPS.length + groupIdx) * 0.01 }}
-                      className={`hover:bg-gray-50 transition-colors ${!hasData ? 'opacity-70' : ''} ${groupIdx === 0 ? 'border-t-2 border-gray-300' : ''}`}
+                        transition={{ delay: teamIdx * 0.01 }}
+                        className={`hover:bg-gray-50 transition-colors ${!hasData ? 'opacity-70' : ''} border-t border-gray-200`}
                     >
-                      {/* Team Name - only show on first row */}
-                      {showTeamName && (
-                        <td
-                          rowSpan={GROUPS.length}
-                          className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white z-10 border-r border-gray-200 align-middle text-center"
-                        >
+                        {/* Team Name */}
+                        <td className="px-4 py-2 whitespace-nowrap sticky left-0 bg-white z-10 border-r border-gray-200 align-middle">
                           <div 
                             onClick={() => handleTeamClick(teamData.teamId)}
-                            className="flex flex-col items-center justify-center gap-1 cursor-pointer hover:bg-indigo-50 rounded-lg p-2 transition-colors group"
+                            className="flex flex-col items-start gap-0.5 cursor-pointer hover:bg-indigo-50 rounded-lg px-2 py-1 transition-colors group"
                           >
-                            <div className={`w-3 h-3 rounded-full ${hasData ? 'bg-indigo-500' : 'bg-gray-300'}`} />
-                            <div className="text-center">
+                            <div className="flex items-center gap-2">
+                              <div className={`w-2.5 h-2.5 rounded-full ${hasData ? 'bg-indigo-500' : 'bg-gray-300'}`} />
                               <span className={`text-sm font-semibold group-hover:text-indigo-600 transition-colors ${hasData ? 'text-gray-900' : 'text-gray-500'}`}>
                                 {teamData.teamName}
                               </span>
-                              <div className="text-xs text-gray-500 mt-1">
+                            </div>
+                            <div className="text-xs text-gray-500">
                                 Total: <span className={`font-bold ${hasData ? 'text-indigo-600' : 'text-gray-400'}`}>{teamData.total}</span>
-                              </div>
                             </div>
                           </div>
                         </td>
-                      )}
-                      
-                      {/* Group */}
-                      <td className={`px-4 py-4 whitespace-nowrap text-center border-r border-gray-200 font-semibold ${groupColor.text} ${groupColor.bg}`}>
-                        <div className="flex items-center justify-center gap-1">
-                          <span>{GROUP_NAMES[group] || group}</span>
-                        </div>
-                      </td>
-                      
-                      {/* Categories */}
+                        
+                        {/* Group columns */}
+                        {allAvailableGroups.map((group) => {
+                          const groupData = teamData.groups[group] || { total: 0 };
+                          const groupTotal = groupData.total || 0;
+                          const groupColor = GROUP_COLORS[group] || { bg: 'bg-gray-50', text: 'text-gray-700', border: 'border-gray-200' };
+                          const isExpanded = expandedGroup === group;
+                          
+                          if (isExpanded) {
+                            // Show category breakdown - each category as its own td
+                            return (
+                              <React.Fragment key={group}>
                       {CATEGORIES.map((category) => {
                         const count = groupData[category] || 0;
                         const catColor = CATEGORY_COLORS[category] || CATEGORY_COLORS['Standard'];
                         const hasCount = count > 0;
-                        
                         return (
                           <td
                             key={`${group}-${category}`}
-                            className={`px-4 py-4 whitespace-nowrap text-center border-r border-gray-200 ${
+                                      className={`px-1 py-2 text-center border-r border-gray-200 min-w-[50px] ${
                               hasCount ? catColor.bg : 'bg-gray-50'
                             }`}
+                                      title={`${category}: ${count}`}
                           >
-                            <span className={`text-sm font-semibold ${hasCount ? catColor.text : 'text-gray-400'}`}>
+                                      <span className={`text-xs font-semibold ${hasCount ? catColor.text : 'text-gray-400'}`}>
                               {count}
                             </span>
                           </td>
                         );
                       })}
-                      
-                      {/* Group Total */}
-                      <td className={`px-4 py-4 whitespace-nowrap text-center border-l-2 border-gray-300 font-bold ${groupColor.bg} ${groupColor.text}`}>
+                              </React.Fragment>
+                            );
+                          } else {
+                            // Show group total
+                            return (
+                              <td
+                                key={group}
+                                className={`px-3 py-2 whitespace-nowrap text-center border-r border-gray-200 font-bold ${groupColor.bg} ${groupColor.text} cursor-pointer hover:opacity-80 transition-opacity`}
+                                onClick={() => setExpandedGroup(group)}
+                              >
                         {groupTotal}
+                              </td>
+                            );
+                          }
+                        })}
+                        
+                        {/* Team Total */}
+                        <td className="px-3 py-2 whitespace-nowrap text-center border-l-2 border-gray-300 font-bold bg-gray-100 text-gray-900">
+                          {teamData.total}
                       </td>
                     </motion.tr>
+                    </React.Fragment>
                   );
-                });
               })}
             </tbody>
             {/* Summary Row */}
             <tfoot className="bg-gradient-to-r from-gray-50 to-gray-100 border-t-2 border-gray-300">
-              {GROUPS.map((group, groupIdx) => {
-                const groupColor = GROUP_COLORS[group];
+                <tr>
+                  <td className="px-4 py-2 whitespace-nowrap sticky left-0 bg-gradient-to-r from-gray-50 to-gray-100 z-10 border-r border-gray-200 align-middle text-center">
+                    <div className="flex flex-col items-center justify-center gap-0.5">
+                      <span className="text-sm font-bold text-gray-900">TOTAL</span>
+                      <div className="text-xs text-gray-600">
+                        <span className="font-bold text-indigo-600">
+                          {sortedTeams.reduce((sum, team) => sum + team.total, 0)}
+                        </span>
+                      </div>
+                    </div>
+                  </td>
+                  {allAvailableGroups.map((group) => {
+                    const groupColor = GROUP_COLORS[group] || { bg: 'bg-gray-50', text: 'text-gray-700', border: 'border-gray-200' };
                 const groupTotal = sortedTeams.reduce((sum, team) => {
                   const groupData = team.groups[group] || { total: 0 };
                   return sum + (groupData.total || 0);
                 }, 0);
+                    const isExpanded = expandedGroup === group;
+                    
+                    if (isExpanded) {
+                      // Show category totals - each category as its own td
                 const categoryTotals = CATEGORIES.map(category => 
                   sortedTeams.reduce((sum, team) => {
                     const groupData = team.groups[group] || {};
                     return sum + (groupData[category] || 0);
                   }, 0)
                 );
-                
                 return (
-                  <tr key={group}>
-                    {groupIdx === 0 && (
-                      <td
-                        rowSpan={GROUPS.length}
-                        className="px-6 py-4 whitespace-nowrap sticky left-0 bg-gradient-to-r from-gray-50 to-gray-100 z-10 border-r border-gray-200 align-middle text-center"
-                      >
-                        <div className="flex flex-col items-center justify-center gap-1">
-                          <span className="text-sm font-bold text-gray-900">TOTAL</span>
-                          <div className="text-xs text-gray-600">
-                            <span className="font-bold text-indigo-600">
-                              {sortedTeams.reduce((sum, team) => sum + team.total, 0)}
-                            </span>
-                          </div>
-                        </div>
-                      </td>
-                    )}
-                    <td className={`px-4 py-4 whitespace-nowrap text-center border-r border-gray-200 font-semibold ${groupColor.text} ${groupColor.bg}`}>
-                      <div className="flex items-center justify-center gap-1">
-                        <span>{GROUP_NAMES[group] || group}</span>
-                      </div>
-                    </td>
+                        <React.Fragment key={group}>
                     {categoryTotals.map((total, catIdx) => (
-                      <td key={`${group}-${CATEGORIES[catIdx]}-total`} className="px-4 py-4 whitespace-nowrap text-center border-r border-gray-200 bg-gray-100">
-                        <span className="text-sm font-bold text-gray-700">{total}</span>
+                            <td
+                              key={`${group}-${CATEGORIES[catIdx]}-total`}
+                              className="px-1 py-2 text-center border-r border-gray-200 bg-gray-100 min-w-[50px]"
+                              title={`${CATEGORIES[catIdx]}: ${total}`}
+                            >
+                              <span className="text-xs font-bold text-gray-700">{total}</span>
                       </td>
                     ))}
-                    <td className={`px-4 py-4 whitespace-nowrap text-center border-l-2 border-gray-300 font-bold ${groupColor.bg} ${groupColor.text}`}>
+                        </React.Fragment>
+                      );
+                    } else {
+                      return (
+                      <td
+                        key={group}
+                        className={`px-3 py-2 whitespace-nowrap text-center border-r border-gray-200 font-bold ${groupColor.bg} ${groupColor.text}`}
+                      >
                       {groupTotal}
                     </td>
-                  </tr>
                 );
+                    }
               })}
+                  <td className="px-3 py-2 whitespace-nowrap text-center border-l-2 border-gray-300 font-bold bg-gray-200 text-gray-900">
+                    {sortedTeams.reduce((sum, team) => sum + team.total, 0)}
+                  </td>
+                </tr>
             </tfoot>
           </table>
         </div>
       </div>
     );
-  };
+    }
 
-  const renderTeamCard = (teamData: TeamMetrics, index: number) => {
-    const hasData = teamData.total > 0;
+    // Daily view: Show group-wise status counts (simple view)
+    const STATUSES = [
+      { key: 'activated', label: 'Activated', color: 'bg-green-50 text-green-700' },
+      { key: 'verified', label: 'Verified', color: 'bg-blue-50 text-blue-700' },
+      { key: 'followup', label: 'Follow-up', color: 'bg-amber-50 text-amber-700' },
+      { key: 'nonVerified', label: 'Non-verified', color: 'bg-orange-50 text-orange-700' },
+      { key: 'assignedForActivation', label: 'Assigned', color: 'bg-indigo-50 text-indigo-700' },
+      { key: 'pendingVerification', label: 'Pending for verification', color: 'bg-yellow-50 text-yellow-700' },
+    ];
+
+    // Calculate group-wise totals across all teams
+    // Note: For non-activated statuses, leads with multiple plans appear in multiple groups
+    // So group totals may sum to more than actual totals
+    const groupWiseTotals = allAvailableGroups.map(group => {
+      const totals = STATUSES.map(status => 
+        sortedTeams.reduce((sum, team) => {
+          const groupStatusData = team.groupStatus?.[group] || {};
+          return sum + (groupStatusData[status.key as keyof typeof groupStatusData] as number || 0);
+        }, 0)
+      );
+      const groupTotal = totals.reduce((sum, val) => sum + val, 0);
+      return { group, totals, total: groupTotal };
+    });
+
+    // Calculate actual totals (not sum of groups) to avoid double-counting
+    // For activated: sum of plans
+    // For others: count of unique leads
+    const actualTotals = {
+      activated: dailyMetrics.activated, // Already counts plans
+      verified: dailyMetrics.verified, // Already counts leads
+      followup: dailyMetrics.followup,
+      nonVerified: dailyMetrics.nonVerified,
+      assignedForActivation: dailyMetrics.assignedForActivation,
+      pendingVerification: dailyMetrics.pendingVerification,
+    };
 
     return (
-      <motion.div
-        key={teamData.teamId}
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: index * 0.05 }}
-        className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden hover:shadow-2xl transition-all duration-300"
-      >
-        {/* Team Header */}
-        <div 
-          onClick={() => handleTeamClick(teamData.teamId)}
-          className={`bg-gradient-to-r ${hasData ? 'from-indigo-600 to-purple-600' : 'from-gray-400 to-gray-500'} px-6 py-5 cursor-pointer hover:opacity-90 transition-opacity`}
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className={`p-2 ${hasData ? 'bg-white/20' : 'bg-white/10'} rounded-lg`}>
-                <Users className={`h-6 w-6 ${hasData ? 'text-white' : 'text-gray-200'}`} />
-              </div>
-              <div>
-                <h3 className="text-2xl font-bold text-white hover:underline">{teamData.teamName}</h3>
-                <p className="text-sm text-white/90 mt-1">Team Performance Metrics - Click to view details</p>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-3xl font-bold text-white">{teamData.total}</div>
-              <div className="text-sm text-white/90">Total {view === 'daily' ? 'Leads' : 'Activated'}</div>
-            </div>
-          </div>
-        </div>
-        
-        {/* Groups Grid */}
-        <div className="p-6 space-y-6">
-          <AnimatePresence>
-            {GROUPS.map((group) => {
-              const groupData = teamData.groups[group] || { total: 0 };
-              const groupTotal = groupData.total || 0;
-              const groupColor = GROUP_COLORS[group];
+      <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gradient-to-r from-indigo-600 to-purple-600">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-bold text-white uppercase tracking-wider sticky left-0 bg-gradient-to-r from-indigo-600 to-purple-600 z-10 border-r border-indigo-400">
+                  Group
+                </th>
+                {STATUSES.map((status) => (
+                  <th
+                    key={status.key}
+                    className="px-3 py-3 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400"
+                    title={status.label}
+                  >
+                    {status.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {groupWiseTotals.map((groupData, groupIdx) => {
+                const group = groupData.group;
+                const groupColor = GROUP_COLORS[group] || GROUP_COLORS['G4'];
+                const hasData = groupData.total > 0;
 
               return (
-                <motion.div
+                  <motion.tr
                   key={group}
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ delay: index * 0.05 + 0.1 }}
-                  className={`border-2 ${groupColor.border} ${groupColor.bg} rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow`}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: groupIdx * 0.05 }}
+                    className={`hover:bg-gray-50 transition-colors ${!hasData ? 'opacity-70' : ''} border-t border-gray-200`}
                 >
-                  {/* Group Header */}
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <div className={`p-2 ${groupColor.bg} ${groupColor.border} border rounded-lg`}>
-                        <Hash className={`h-5 w-5 ${groupColor.text}`} />
+                    {/* Group Name */}
+                    <td className={`px-4 py-3 whitespace-nowrap sticky left-0 bg-white z-10 border-r border-gray-200 font-semibold ${groupColor.text} ${groupColor.bg}`}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold">{groupAliases[group] || group}</span>
                       </div>
-                      <div>
-                        <h4 className={`text-lg font-bold ${groupColor.text}`}>
-                          {GROUP_NAMES[group] || group}
-                        </h4>
-                        <p className="text-xs text-gray-600 mt-0.5">Group Performance</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className={`text-2xl font-bold ${groupColor.text}`}>{groupTotal}</div>
-                      <div className="text-xs text-gray-600">Total</div>
-                    </div>
-                  </div>
-                  
-                  {/* Categories Grid */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
-                    {CATEGORIES.map((category) => {
-                      const count = groupData[category] || 0;
-                      const catColor = CATEGORY_COLORS[category] || CATEGORY_COLORS['Standard'];
+                    </td>
+                    
+                    {/* Status Columns */}
+                    {STATUSES.map((status) => {
+                      const count = groupData.totals[STATUSES.indexOf(status)];
                       const hasCount = count > 0;
-
                       return (
-                        <motion.div
-                          key={`${group}-${category}`}
-                          initial={{ opacity: 0, scale: 0.9 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          transition={{ delay: index * 0.05 + 0.2 }}
-                          className={`${hasCount ? catColor.bg : 'bg-gray-50'} ${catColor.border} border rounded-lg p-3 text-center transition-all hover:scale-105 hover:shadow-md ${
-                            !hasCount ? 'opacity-60' : ''
+                        <td
+                          key={`${group}-${status.key}`}
+                          className={`px-3 py-3 text-center border-r border-gray-200 ${
+                            hasCount ? status.color : 'bg-gray-50'
                           }`}
                         >
-                          <div className={`text-xs font-medium ${hasCount ? catColor.text : 'text-gray-400'} mb-1 truncate`}>
-                            {category}
-                          </div>
-                          <div className={`text-xl font-bold ${hasCount ? catColor.text : 'text-gray-300'}`}>
+                          <span className={`text-sm font-semibold ${hasCount ? '' : 'text-gray-400'}`}>
                             {count}
-                          </div>
-                        </motion.div>
+                          </span>
+                        </td>
                       );
                     })}
-                  </div>
-                </motion.div>
+                  </motion.tr>
               );
             })}
-          </AnimatePresence>
+            </tbody>
+            {/* Summary Row */}
+            <tfoot className="bg-gradient-to-r from-gray-50 to-gray-100 border-t-2 border-gray-300">
+              <tr>
+                <td className="px-4 py-3 whitespace-nowrap sticky left-0 bg-gradient-to-r from-gray-50 to-gray-100 z-10 border-r border-gray-200 font-bold text-gray-900">
+                  TOTAL
+                </td>
+                {STATUSES.map((status) => {
+                  // Use actual totals to avoid double-counting leads that appear in multiple groups
+                  const statusTotal = actualTotals[status.key as keyof typeof actualTotals] || 0;
+                  return (
+                    <td
+                      key={`total-${status.key}`}
+                      className="px-3 py-3 text-center border-r border-gray-200 bg-gray-100 font-bold text-gray-700"
+                    >
+                      {statusTotal}
+                    </td>
+                  );
+                })}
+              </tr>
+            </tfoot>
+          </table>
         </div>
-      </motion.div>
+      </div>
     );
   };
 
@@ -928,33 +1338,27 @@ export function Reports() {
               </h1>
               <p className="text-gray-600 mt-2 text-lg">Comprehensive daily and monthly performance metrics</p>
             </div>
-            <div className="flex items-center gap-3">
-              {/* Display Mode Toggle */}
-              <div className="flex gap-2 bg-gray-100 rounded-xl p-1">
-                <button
-                  onClick={() => setDisplayMode('cards')}
-                  className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
-                    displayMode === 'cards'
-                      ? 'bg-white text-indigo-600 shadow-md'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                  title="Card View"
-                >
-                  <Grid className="h-4 w-4" />
-                  <span className="hidden sm:inline">Cards</span>
-                </button>
-                <button
-                  onClick={() => setDisplayMode('table')}
-                  className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
-                    displayMode === 'table'
-                      ? 'bg-white text-indigo-600 shadow-md'
-                      : 'text-gray-600 hover:text-gray-900'
-                  }`}
-                  title="Table View"
-                >
-                  <Table className="h-4 w-4" />
-                  <span className="hidden sm:inline">Table</span>
-                </button>
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* Date/Month Selector */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
+                  {view === 'daily' ? 'Select Date:' : 'Select Month:'}
+                </label>
+                {view === 'daily' ? (
+                  <input
+                    type="date"
+                    value={format(selectedDate, 'yyyy-MM-dd')}
+                    onChange={(e) => setSelectedDate(new Date(e.target.value))}
+                    className="px-4 py-2.5 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-lg"
+                  />
+                ) : (
+                  <input
+                    type="month"
+                    value={format(selectedMonth, 'yyyy-MM')}
+                    onChange={(e) => setSelectedMonth(new Date(e.target.value + '-01'))}
+                    className="px-4 py-2.5 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-lg"
+                  />
+                )}
               </div>
               <button
                 onClick={handleRefresh}
@@ -996,113 +1400,79 @@ export function Reports() {
               </div>
             </button>
           </div>
-
-          {/* Date/Month Selector */}
-          <div className="mt-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              {view === 'daily' ? 'Select Date' : 'Select Month'}
-            </label>
-            {view === 'daily' ? (
-              <input
-                type="date"
-                value={format(selectedDate, 'yyyy-MM-dd')}
-                onChange={(e) => setSelectedDate(new Date(e.target.value))}
-                className="px-4 py-2.5 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-lg"
-              />
-            ) : (
-              <input
-                type="month"
-                value={format(selectedMonth, 'yyyy-MM')}
-                onChange={(e) => setSelectedMonth(new Date(e.target.value + '-01'))}
-                className="px-4 py-2.5 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-lg"
-              />
-            )}
-          </div>
         </motion.div>
 
         {/* Daily Report */}
         {view === 'daily' && dailyMetrics && (
           <div className="space-y-6">
-            {/* Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl p-6 text-white shadow-xl hover:shadow-2xl transition-shadow"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <CheckCircle className="h-10 w-10 opacity-90" />
-                  <Activity className="h-5 w-5 opacity-80" />
-                </div>
-                <div className="text-4xl font-bold mb-1">{dailyMetrics.verified}</div>
-                <div className="text-sm opacity-90">Total Verified Leads</div>
-              </motion.div>
-
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
-                className="bg-gradient-to-br from-amber-500 to-amber-600 rounded-2xl p-6 text-white shadow-xl hover:shadow-2xl transition-shadow"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <Clock className="h-10 w-10 opacity-90" />
-                  <Activity className="h-5 w-5 opacity-80" />
-                </div>
-                <div className="text-4xl font-bold mb-1">{dailyMetrics.followup}</div>
-                <div className="text-sm opacity-90">Total Follow-up Leads</div>
-              </motion.div>
-
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-                className="bg-gradient-to-br from-green-500 to-green-600 rounded-2xl p-6 text-white shadow-xl hover:shadow-2xl transition-shadow"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <Zap className="h-10 w-10 opacity-90" />
-                  <Activity className="h-5 w-5 opacity-80" />
-                </div>
-                <div className="text-4xl font-bold mb-1">{dailyMetrics.activated}</div>
-                <div className="text-sm opacity-90">Total Activated Leads</div>
-              </motion.div>
-
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3 }}
-                className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-2xl p-6 text-white shadow-xl hover:shadow-2xl transition-shadow"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <Target className="h-10 w-10 opacity-90" />
-                  <Activity className="h-5 w-5 opacity-80" />
-                </div>
-                <div className="text-4xl font-bold mb-1">{dailyMetrics.assignedForActivation}</div>
-                <div className="text-sm opacity-90">Assigned for Activation</div>
-              </motion.div>
-            </div>
-
-            {/* Team-wise Data */}
+            {/* Group-wise Data */}
             <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
               <h2 className="text-3xl font-bold text-gray-900 mb-6 flex items-center gap-3">
                 <div className="p-2 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg">
-                  <Users className="h-6 w-6 text-white" />
+                  <Hash className="h-6 w-6 text-white" />
                 </div>
-                Team-wise Performance Breakdown
+                Group-wise Performance Breakdown
               </h2>
-              {displayMode === 'table' ? (
-                renderTableView()
-              ) : (
-                <div className="space-y-6">
-                  {sortedTeams.length > 0 ? (
-                    sortedTeams.map((team, index) => renderTeamCard(team, index))
-                  ) : (
-                    <div className="text-center py-12 text-gray-500">
-                      <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                      <p className="text-lg">No team data available</p>
-                    </div>
-                  )}
+              {renderTableView()}
                 </div>
-              )}
+
+            {/* Category-wise Activations (Monthly Data) */}
+            <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
+              <h2 className="text-3xl font-bold text-gray-900 mb-6 flex items-center gap-3">
+                <div className="p-2 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg">
+                  <Package className="h-6 w-6 text-white" />
+                </div>
+                Category-wise Activations ({format(startOfMonth(selectedDate), 'MMM yyyy')})
+              </h2>
+              
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gradient-to-r from-indigo-600 to-purple-600">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-white uppercase tracking-wider sticky left-0 bg-gradient-to-r from-indigo-600 to-purple-600 z-10 border-r border-indigo-400">
+                        Category
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-bold text-white uppercase tracking-wider">
+                        Activations
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {CATEGORIES.map((category) => {
+                      const count = monthlyCategoryActivations[category] || 0;
+                      const hasData = count > 0;
+                      
+                      return (
+                        <motion.tr
+                          key={`category-${category}`}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          className={`hover:bg-gray-50 transition-colors ${!hasData ? 'opacity-70' : ''}`}
+                        >
+                          <td className="px-4 py-3 whitespace-nowrap sticky left-0 bg-white z-10 border-r border-gray-200 font-semibold text-gray-900 bg-gray-50">
+                            {category}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <span className={`text-lg font-bold ${hasData ? 'text-gray-900' : 'text-gray-400'}`}>
+                              {count}
+                            </span>
+                          </td>
+                        </motion.tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className="bg-gradient-to-r from-gray-50 to-gray-100 border-t-2 border-gray-300">
+                    <tr>
+                      <td className="px-4 py-3 whitespace-nowrap sticky left-0 bg-gradient-to-r from-gray-50 to-gray-100 z-10 border-r border-gray-200 font-bold text-gray-900">
+                        TOTAL
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-center font-bold text-gray-900">
+                        {Object.values(monthlyCategoryActivations).reduce((sum, val) => sum + val, 0)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+                </div>
             </div>
           </div>
         )}
@@ -1110,26 +1480,151 @@ export function Reports() {
         {/* Monthly Report */}
         {view === 'monthly' && monthlyMetrics && (
           <div className="space-y-6">
-            {/* Summary Card */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 rounded-2xl p-10 text-white shadow-2xl"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="flex items-center gap-3 mb-2">
-                    <Activity className="h-8 w-8" />
-                    <h2 className="text-3xl font-bold">Total Activated This Month</h2>
-                  </div>
-                  <p className="text-indigo-100 text-lg">{format(selectedMonth, 'MMMM yyyy')}</p>
+            {/* Group Targets & Activations Table */}
+            <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
+              <h2 className="text-3xl font-bold text-gray-900 mb-6 flex items-center gap-3">
+                <div className="p-2 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg">
+                  <Target className="h-6 w-6 text-white" />
                 </div>
-                <div className="text-right">
-                  <div className="text-7xl font-bold">{monthlyMetrics.total}</div>
-                  <div className="text-xl opacity-90 mt-2">Activated Leads</div>
+                Group Targets & Activations ({format(selectedMonth, 'MMM yyyy')})
+              </h2>
+              
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gradient-to-r from-indigo-600 to-purple-600">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-white uppercase tracking-wider sticky left-0 bg-gradient-to-r from-indigo-600 to-purple-600 z-10 border-r border-indigo-400">
+                        Group/Category
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
+                        Target
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
+                        Achieved
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
+                        Percentage
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-bold text-white uppercase tracking-wider">
+                        Pending
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {/* Group rows */}
+                    {allAvailableGroups.map((group) => {
+                      const groupName = groupAliases[group] || group;
+                      const target = groupTargets[group] || 0;
+                      const achieved = groupActivations[group] || 0;
+                      const percentage = target > 0 ? Math.min((achieved / target) * 100, 100) : 0;
+                      const pending = Math.max(target - achieved, 0);
+                      const groupColor = GROUP_COLORS[group] || { bg: 'bg-gray-50', text: 'text-gray-700', border: 'border-gray-200' };
+                      const hasData = target > 0 || achieved > 0;
+                      
+                      return (
+                        <motion.tr
+                          key={`group-${group}`}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          className={`hover:bg-gray-50 transition-colors ${!hasData ? 'opacity-70' : ''}`}
+                        >
+                          <td className={`px-4 py-3 whitespace-nowrap sticky left-0 bg-white z-10 border-r border-gray-200 font-semibold ${groupColor.text} ${groupColor.bg}`}>
+                            {groupName}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center border-r border-gray-200">
+                            <span className="text-sm font-semibold text-gray-900">{target}</span>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center border-r border-gray-200">
+                            <span className="text-sm font-semibold text-gray-900">{achieved}</span>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center border-r border-gray-200">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-24 bg-gray-200 rounded-full h-2">
+                                <div
+                                  className={`h-2 rounded-full transition-all ${
+                                    percentage >= 100 ? 'bg-green-500' :
+                                    percentage >= 80 ? 'bg-blue-500' :
+                                    percentage >= 60 ? 'bg-amber-500' : 'bg-red-500'
+                                  }`}
+                                  style={{ width: `${Math.min(percentage, 100)}%` }}
+                                />
+                    </div>
+                              <span className={`text-sm font-semibold ${
+                                percentage >= 100 ? 'text-green-700' :
+                                percentage >= 80 ? 'text-blue-700' :
+                                percentage >= 60 ? 'text-amber-700' : 'text-red-700'
+                              }`}>
+                                {percentage.toFixed(1)}%
+                              </span>
+                </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <span className={`text-sm font-semibold ${pending > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
+                              {pending}
+                            </span>
+                          </td>
+                        </motion.tr>
+                      );
+                    })}
+
+                    {/* Category rows (STANDARD, etc.) */}
+                    {Object.keys(categoryTargets).sort().map((category) => {
+                      const target = categoryTargets[category] || 0;
+                      const achieved = categoryActivations[category] || 0;
+                      const percentage = target > 0 ? Math.min((achieved / target) * 100, 100) : 0;
+                      const pending = Math.max(target - achieved, 0);
+                      const catColor = CATEGORY_COLORS[category] || CATEGORY_COLORS['Standard'];
+                      const hasData = target > 0 || achieved > 0;
+                      
+                      return (
+                        <motion.tr
+                          key={`category-${category}`}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          className={`hover:bg-gray-50 transition-colors ${!hasData ? 'opacity-70' : ''}`}
+                        >
+                          <td className={`px-4 py-3 whitespace-nowrap sticky left-0 bg-white z-10 border-r border-gray-200 font-semibold ${catColor.text} ${catColor.bg}`}>
+                            {category.toUpperCase()} Activation
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center border-r border-gray-200">
+                            <span className="text-sm font-semibold text-gray-900">{target}</span>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center border-r border-gray-200">
+                            <span className="text-sm font-semibold text-gray-900">{achieved}</span>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center border-r border-gray-200">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-24 bg-gray-200 rounded-full h-2">
+                                <div
+                                  className={`h-2 rounded-full transition-all ${
+                                    percentage >= 100 ? 'bg-green-500' :
+                                    percentage >= 80 ? 'bg-blue-500' :
+                                    percentage >= 60 ? 'bg-amber-500' : 'bg-red-500'
+                                  }`}
+                                  style={{ width: `${Math.min(percentage, 100)}%` }}
+                                />
+                  </div>
+                              <span className={`text-sm font-semibold ${
+                                percentage >= 100 ? 'text-green-700' :
+                                percentage >= 80 ? 'text-blue-700' :
+                                percentage >= 60 ? 'text-amber-700' : 'text-red-700'
+                              }`}>
+                                {percentage.toFixed(1)}%
+                              </span>
+                </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <span className={`text-sm font-semibold ${pending > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
+                              {pending}
+                            </span>
+                          </td>
+                        </motion.tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
                 </div>
               </div>
-            </motion.div>
 
             {/* Team-wise Data */}
             <div className="bg-white rounded-2xl shadow-xl p-6 border border-gray-100">
@@ -1139,20 +1634,7 @@ export function Reports() {
                 </div>
                 Team-wise Activation Breakdown
               </h2>
-              {displayMode === 'table' ? (
-                renderTableView()
-              ) : (
-                <div className="space-y-6">
-                  {sortedTeams.length > 0 ? (
-                    sortedTeams.map((team, index) => renderTeamCard(team, index))
-                  ) : (
-                    <div className="text-center py-12 text-gray-500">
-                      <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                      <p className="text-lg">No team data available</p>
-                    </div>
-                  )}
-                </div>
-              )}
+              {renderTableView()}
             </div>
           </div>
         )}
