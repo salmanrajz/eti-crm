@@ -46,13 +46,12 @@ export interface WhatsAppVerificationLog {
 }
 
 const CUSTOMER_TEMPLATE =
-  'My name is {{1}} from {{2}}.\n\n' +
-  'Thank you for choosing your number with us! We’re excited to have you on board.\n' +
+  'Thank you for choosing your number with us! We\'re excited to have you on board.\n' +
   'Here are the details of your selected plan:\n' +
-  '📞 Number: {{3}}\n\n' +
-  '💳 Monthly Plan: {{4}}\n\n' +
-  '📶 Benefits: {{5}}\n\n' +
-  '📅 Contract Duration: {{6}}\n\n' +
+  '📞 Number: {{1}}\n\n' +
+  '💳 Monthly Plan: {{2}}\n\n' +
+  '📶 Benefits: {{3}}\n\n' +
+  '📅 Contract Duration: {{4}}\n\n' +
   '🔽 Please tap Continue to read the full Terms & Conditions.';
 
 export function renderVerificationTemplate(parameters: string[]): string {

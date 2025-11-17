@@ -70,6 +70,7 @@ import { unifiedSearch } from '../../utils/unifiedSearch';
 
 // Authentication and state management
 import { useAuthStore } from '../../store/authStore';
+import { numberPoolStatsService } from '../../services/numberPoolStatsService';
 
 // Type definitions for number pool and status
 import { NumberPool as NumberPoolType, NumberStatus } from '../../types';
@@ -255,6 +256,8 @@ export function NumberPoolPaginated({ onNumberSelect, selectedCategory: propSele
   const [pageSize, setPageSize] = useState(paginationUtils.calculateOptimalPageSize());
   const [totalPages, setTotalPages] = useState(0);
   const [totalItems, setTotalItems] = useState(0);
+  const [statsTotalPages, setStatsTotalPages] = useState<number>(0);
+  const [statsTotalItems, setStatsTotalItems] = useState<number>(0);
   const [hasNextPage, setHasNextPage] = useState(false);
   const [hasPreviousPage, setHasPreviousPage] = useState(false);
   
@@ -326,6 +329,49 @@ export function NumberPoolPaginated({ onNumberSelect, selectedCategory: propSele
       }
     };
   }, [pageSize, selectedCategory, selectedStatus, sortBy, sortOrder]);
+
+  // Live stats for total pages/items to avoid stale cache and hard refreshes
+  useEffect(() => {
+    let isMounted = true;
+    let unsub: (() => void) | undefined;
+
+    const hydrate = async () => {
+      try {
+        const pages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined);
+        const items = await numberPoolStatsService.getTotalItems(selectedCategory || undefined);
+        if (!isMounted) return;
+        setStatsTotalPages(pages || 0);
+        setStatsTotalItems(items || 0);
+      } catch {}
+    };
+
+    hydrate();
+    unsub = numberPoolStatsService.subscribeToStats(async () => {
+      if (!isMounted) return;
+      await hydrate();
+    });
+
+    const onFocus = () => {
+      numberPoolStatsService.clearCache();
+      hydrate();
+    };
+    const visHandler = () => { if (document.visibilityState === 'visible') onFocus(); };
+    const storageHandler = (e: StorageEvent) => {
+      if (e.key === 'npInvalidate') {
+        numberPoolStatsService.clearCache();
+        hydrate();
+      }
+    };
+    window.addEventListener('visibilitychange', visHandler);
+    window.addEventListener('storage', storageHandler);
+
+    return () => {
+      isMounted = false;
+      if (unsub) unsub();
+      window.removeEventListener('visibilitychange', visHandler);
+      window.removeEventListener('storage', storageHandler);
+    };
+  }, [pageSize, selectedCategory]);
 
   /**
    * Load initial page data with caching optimization
@@ -751,7 +797,7 @@ export function NumberPoolPaginated({ onNumberSelect, selectedCategory: propSele
       <div className="flex items-center justify-between px-4 py-3 bg-white border-t border-gray-200">
         <div className="flex items-center space-x-2">
           <span className="text-sm text-gray-700">
-            Page {currentPage} of {totalPages} ({totalItems} total)
+            Page {currentPage} of {statsTotalPages > 0 ? statsTotalPages : totalPages} ({statsTotalItems > 0 ? statsTotalItems : totalItems} total)
           </span>
         </div>
         

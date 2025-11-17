@@ -1,3 +1,5 @@
+import { getWhatsAppVerificationGroups } from './configService';
+
 type GroupKey = 'G1' | 'G2' | 'G3' | 'OTHER';
 
 interface TemplateConfig {
@@ -23,52 +25,136 @@ function normalizeGroup(group?: string): GroupKey {
   return 'OTHER';
 }
 
-// IMPORTANT: you can later move these to env or Firestore settings
-const ROUTES: Record<GroupKey, RoutingConfig> = {
-  G1: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_G1_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_G1_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_G1_TEMPLATE || 'verification_g1',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  },
-  G2: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_G2_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_G2_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_G2_TEMPLATE || 'verification_g2',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  },
-  G3: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_G3_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_G3_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_G3_TEMPLATE || 'verification_g3',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  },
-  OTHER: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_DEF_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_DEF_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_DEF_TEMPLATE || 'verification_default',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  }
-};
+// Cache for verification groups to avoid repeated Firebase calls
+let cachedRoutes: Record<GroupKey, RoutingConfig> | null = null;
+let cacheTimestamp: number = 0;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
-export function resolveWhatsAppRoute(group?: string): RoutingConfig {
-  return ROUTES[normalizeGroup(group)];
+/**
+ * Get routes from Firebase with caching
+ */
+async function getRoutesFromFirebase(): Promise<Record<GroupKey, RoutingConfig>> {
+  const now = Date.now();
+  
+  // Return cached routes if still valid
+  if (cachedRoutes && (now - cacheTimestamp) < CACHE_DURATION) {
+    return cachedRoutes;
+  }
+  
+  try {
+    const groups = await getWhatsAppVerificationGroups();
+    
+    // Convert to RoutingConfig format
+    const routes: Record<GroupKey, RoutingConfig> = {
+      G1: {
+        meta: {
+          businessPhoneId: groups.G1.businessPhoneId,
+          accessToken: groups.G1.accessToken
+        },
+        template: {
+          templateName: groups.G1.templateName,
+          languageCode: groups.G1.languageCode
+        }
+      },
+      G2: {
+        meta: {
+          businessPhoneId: groups.G2.businessPhoneId,
+          accessToken: groups.G2.accessToken
+        },
+        template: {
+          templateName: groups.G2.templateName,
+          languageCode: groups.G2.languageCode
+        }
+      },
+      G3: {
+        meta: {
+          businessPhoneId: groups.G3.businessPhoneId,
+          accessToken: groups.G3.accessToken
+        },
+        template: {
+          templateName: groups.G3.templateName,
+          languageCode: groups.G3.languageCode
+        }
+      },
+      OTHER: {
+        meta: {
+          businessPhoneId: groups.OTHER.businessPhoneId,
+          accessToken: groups.OTHER.accessToken
+        },
+        template: {
+          templateName: groups.OTHER.templateName,
+          languageCode: groups.OTHER.languageCode
+        }
+      }
+    };
+    
+    // Update cache
+    cachedRoutes = routes;
+    cacheTimestamp = now;
+    
+    return routes;
+  } catch (error) {
+    console.error('Error fetching verification groups from Firebase:', error);
+    
+    // Fallback to environment variables if Firebase fails
+    const fallbackRoutes: Record<GroupKey, RoutingConfig> = {
+      G1: {
+        meta: {
+          businessPhoneId: import.meta.env.VITE_WA_G1_PHONE_ID || '',
+          accessToken: import.meta.env.VITE_WA_G1_TOKEN || ''
+        },
+        template: {
+          templateName: import.meta.env.VITE_WA_G1_TEMPLATE || 'verification_g1',
+          languageCode: import.meta.env.VITE_WA_LANG || 'en'
+        }
+      },
+      G2: {
+        meta: {
+          businessPhoneId: import.meta.env.VITE_WA_G2_PHONE_ID || '',
+          accessToken: import.meta.env.VITE_WA_G2_TOKEN || ''
+        },
+        template: {
+          templateName: import.meta.env.VITE_WA_G2_TEMPLATE || 'verification_g2',
+          languageCode: import.meta.env.VITE_WA_LANG || 'en'
+        }
+      },
+      G3: {
+        meta: {
+          businessPhoneId: import.meta.env.VITE_WA_G3_PHONE_ID || '',
+          accessToken: import.meta.env.VITE_WA_G3_TOKEN || ''
+        },
+        template: {
+          templateName: import.meta.env.VITE_WA_G3_TEMPLATE || 'verification_g3',
+          languageCode: import.meta.env.VITE_WA_LANG || 'en'
+        }
+      },
+      OTHER: {
+        meta: {
+          businessPhoneId: import.meta.env.VITE_WA_DEF_PHONE_ID || '',
+          accessToken: import.meta.env.VITE_WA_DEF_TOKEN || ''
+        },
+        template: {
+          templateName: import.meta.env.VITE_WA_DEF_TEMPLATE || 'verification_default',
+          languageCode: import.meta.env.VITE_WA_LANG || 'en'
+        }
+      }
+    };
+    
+    return fallbackRoutes;
+  }
+}
+
+/**
+ * Clear the routes cache (useful after updates)
+ */
+export function clearRoutesCache(): void {
+  cachedRoutes = null;
+  cacheTimestamp = 0;
+}
+
+export async function resolveWhatsAppRoute(group?: string): Promise<RoutingConfig> {
+  const routes = await getRoutesFromFirebase();
+  return routes[normalizeGroup(group)];
 }
 
 export function getPartnerLabel(group?: string): string {
@@ -86,7 +172,7 @@ export async function sendWhatsAppTemplateByGroup(options: {
   templateOverride?: TemplateConfig; // optional override
 }) {
   const { to, group, bodyParameters = [], templateOverride } = options;
-  const { meta, template } = resolveWhatsAppRoute(group);
+  const { meta, template } = await resolveWhatsAppRoute(group);
   const tpl = templateOverride || template;
   if (!meta.businessPhoneId || !meta.accessToken) {
     throw new Error('WhatsApp meta account is not configured for this route');
@@ -127,11 +213,15 @@ export async function sendWhatsAppWithComponentsByGroup(options: {
   components: any[]; // raw WhatsApp components (e.g., body + button flow)
 }) {
   const { to, group, templateName, components } = options;
-  const lang = options.languageCode || (ROUTES[normalizeGroup(group)].template.languageCode);
-  const { meta } = resolveWhatsAppRoute(group);
+  const routes = await getRoutesFromFirebase();
+  const lang = options.languageCode || routes[normalizeGroup(group)].template.languageCode;
+  const { meta } = await resolveWhatsAppRoute(group);
+  
   if (!meta.businessPhoneId || !meta.accessToken) {
-    throw new Error('WhatsApp meta account is not configured for this route');
+    const errorMsg = `WhatsApp meta account is not configured for this route. Group: ${group}, BusinessPhoneId: ${meta.businessPhoneId ? 'SET' : 'MISSING'}, AccessToken: ${meta.accessToken ? 'SET' : 'MISSING'}`;
+    throw new Error(errorMsg);
   }
+  
   const url = `https://graph.facebook.com/v19.0/${meta.businessPhoneId}/messages`;
   const payload: any = {
     messaging_product: 'whatsapp',
@@ -143,19 +233,41 @@ export async function sendWhatsAppWithComponentsByGroup(options: {
       components
     }
   };
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${meta.accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => '');
-    throw new Error(`WhatsApp send failed: ${res.status} ${res.statusText} ${err}`);
+  
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${meta.accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    const responseText = await res.text();
+    
+    if (!res.ok) {
+      let parsedError;
+      try {
+        parsedError = JSON.parse(responseText);
+      } catch {
+        parsedError = responseText;
+      }
+      
+      throw new Error(`WhatsApp send failed: ${res.status} ${res.statusText} ${JSON.stringify(parsedError)}`);
+    }
+    
+    let responseJson;
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch {
+      responseJson = {};
+    }
+    
+    return responseJson;
+  } catch (error: any) {
+    throw error;
   }
-  return res.json().catch(() => ({}));
 }
 
 

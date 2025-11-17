@@ -165,7 +165,6 @@ export async function isDeviceTrusted(
     }
     
     // Update last seen
-    console.log('Updating last seen for trusted device:', trustedDevice.id);
     await updateDeviceLastSeen(trustedDevice.id);
     
     return trustedDevice;
@@ -226,7 +225,6 @@ async function findTrustedDeviceByFingerprint(
       };
       
       if (compareDeviceFingerprints(deviceFingerprint, storedFingerprint)) {
-        console.log('Found matching trusted device:', device.id, device.deviceName);
         return device;
       }
     }

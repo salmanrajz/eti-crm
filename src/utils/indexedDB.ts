@@ -86,6 +86,16 @@ async function clearCategoryNumbers(db: IDBDatabase, category: string): Promise<
   });
 }
 
+// Exported helper to clear cache for a specific category
+export async function clearCategoryCache(category: string): Promise<void> {
+  const db = await openDB();
+  try {
+    await clearCategoryNumbers(db, category);
+  } finally {
+    db.close();
+  }
+}
+
 export async function cacheNumbers(numbers: NumberPool[], category: string): Promise<void> {
   const db = await openDB();
   

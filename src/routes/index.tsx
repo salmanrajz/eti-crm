@@ -12,8 +12,6 @@ import { UserManagement } from '../pages/admin/UserManagement';
 import { NumberPoolUpload } from '../pages/admin/NumberPoolUpload';
 import { TeamManagement } from '../pages/admin/TeamManagement';
 import { BulkUserUpload } from '../pages/admin/BulkUserUpload';
-import { CreateFirstAdmin } from '../pages/admin/CreateFirstAdmin';
-import { AdminDashboard } from '../pages/admin/AdminDashboard';
 import { Unauthorized } from '../pages/Unauthorized';
 import { ProtectedRoute } from './ProtectedRoute';
 import { RoleBasedRoute } from '../components/auth/RoleBasedRoute';
@@ -37,7 +35,6 @@ export function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/setup/admin" element={<CreateFirstAdmin />} />
       <Route 
         path="/login" 
         element={user ? <Navigate to="/dashboard" replace /> : <Login />} 
@@ -90,11 +87,7 @@ export function AppRoutes() {
         />
         <Route 
           path="admin" 
-          element={
-            <RoleBasedRoute allowedRoles={['admin']}>
-              <AdminDashboard />
-            </RoleBasedRoute>
-          } 
+          element={<Navigate to="/dashboard" replace />} 
         />
         <Route 
           path="admin/users" 
@@ -147,6 +140,8 @@ export function AppRoutes() {
       </Route>
       <Route path="/unauthorized" element={<Unauthorized />} />
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      {/* Catch-all route: redirect any unmatched paths to dashboard */}
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }

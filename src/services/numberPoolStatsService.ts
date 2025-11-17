@@ -1,4 +1,4 @@
-import { doc, getDoc, onSnapshot, Unsubscribe } from 'firebase/firestore';
+import { doc, getDoc, getDocFromServer, onSnapshot, Unsubscribe } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 
 export interface NumberPoolStats {
@@ -44,7 +44,14 @@ class NumberPoolStatsService {
     }
 
     try {
-      const statsDoc = await getDoc(doc(db, STATS_DOC_PATH));
+      // Always attempt a fresh server read to avoid stale persistent cache
+      let statsDoc;
+      try {
+        statsDoc = await getDocFromServer(doc(db, STATS_DOC_PATH));
+      } catch (serverErr) {
+        // Fallback to cached doc if offline or server fetch fails
+        statsDoc = await getDoc(doc(db, STATS_DOC_PATH));
+      }
       if (statsDoc.exists()) {
         const data = statsDoc.data();
         this.statsCache = {
@@ -103,10 +110,30 @@ class NumberPoolStatsService {
    * Listen to stats changes (for real-time updates)
    */
   subscribeToStats(callback: (stats: NumberPoolStats | null) => void): Unsubscribe {
+    const ref = doc(db, STATS_DOC_PATH);
     const unsubscribe = onSnapshot(
-      doc(db, STATS_DOC_PATH),
-      (snapshot) => {
+      ref,
+      { includeMetadataChanges: true },
+      async (snapshot) => {
         if (snapshot.exists()) {
+          // If we received a cached snapshot and we are online, force a fresh server read once
+          if (snapshot.metadata.fromCache && navigator.onLine) {
+            try {
+              const fresh = await getDocFromServer(ref);
+              if (fresh.exists()) {
+                const freshData = fresh.data();
+                const stats: NumberPoolStats = {
+                  ...freshData,
+                  lastUpdated: freshData.lastUpdated?.toDate() || new Date()
+                } as NumberPoolStats;
+                this.statsCache = stats;
+                this.cacheTimestamp = Date.now();
+                callback(stats);
+                return;
+              }
+            } catch {}
+          }
+
           const data = snapshot.data();
           const stats: NumberPoolStats = {
             ...data,

@@ -1,9 +1,10 @@
 // Global NumberPool manager to persist pagination state and minimize reads
 import { SmartPagination } from './smartPagination';
 import { NumberPool } from '../types';
-import { getCachedPaginatedNumbers, cachePaginatedNumbers, searchCachedNumbersFast, searchCachedNumbersByTokens, buildSearchIndex } from './indexedDB';
+// IndexedDB caching removed - using memory-only cache for simplicity
 import { onSnapshot, doc, collection, query, where, getDocs, orderBy, startAt, endAt, limit as fbLimit } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { numberPoolStatsService } from '../services/numberPoolStatsService';
 
 interface NumberPoolState {
   numbers: NumberPool[];
@@ -74,9 +75,14 @@ class NumberPoolManager {
 
 
   // Check if we need to reload data
-  private needsReload(category: string | null, pageSize: number): boolean {
+  private needsReload(category: string | null, pageSize: number, userId?: string, userRole?: string): boolean {
     const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
     const now = Date.now();
+    
+    // Always reload if user changed
+    if (this.checkUserChange(userId, userRole)) {
+      return true;
+    }
     
     return (
       !this.isInitialized ||
@@ -87,8 +93,36 @@ class NumberPoolManager {
     );
   }
 
-  // Store current user role for filtering
+  // Store current user role and ID for filtering and change detection
   private currentUserRole: string | undefined;
+  private currentUserId: string | undefined;
+
+  private handleSnapshotError(error: any, context: string) {
+    if (error?.code === 'permission-denied') {
+      // Silent cleanup on permission denied (user logged out or lost permissions)
+      try {
+        this.destroy();
+        this.updateState({
+          numbers: [],
+          currentPage: 1,
+          pageSize: this.state.pageSize,
+          totalPages: 0,
+          totalItems: 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+          selectedCategory: null,
+          lastLoadTime: 0,
+          isLoading: false
+        });
+      } catch (cleanupError) {
+        // Silent cleanup error handling
+      }
+      return;
+    }
+
+    // Log non-permission errors as they might indicate real issues
+    console.error(`[NumberPoolManager] Snapshot error (${context}):`, error);
+  }
 
   // Set current user role
   setUserRole(role: string | undefined) {
@@ -98,6 +132,77 @@ class NumberPoolManager {
   // Get current user role
   private getCurrentUserRole(): string | undefined {
     return this.currentUserRole;
+  }
+
+  // Check if user has changed and force reset if needed
+  private checkUserChange(userId?: string, userRole?: string): boolean {
+    // Don't treat undefined -> userId as a change (initial load)
+    // Only treat it as a change if we had a previous user
+    const hadPreviousUser = this.currentUserId !== undefined;
+    const userChanged = hadPreviousUser && (this.currentUserId !== userId || this.currentUserRole !== userRole);
+    
+    if (userChanged) {
+      console.log('[NumberPoolManager] User changed, forcing reset', {
+        oldUserId: this.currentUserId,
+        newUserId: userId,
+        oldRole: this.currentUserRole,
+        newRole: userRole
+      });
+      // Force reset all state when user changes
+      this.currentUserId = userId;
+      this.currentUserRole = userRole;
+      this.isInitialized = false;
+      // Clear all listeners safely
+      try {
+        if (this.pageListener) {
+          this.pageListener();
+          this.pageListener = null;
+        }
+        this.visibleListeners.forEach(unsub => {
+          try {
+            unsub();
+          } catch (e) {
+            console.warn('[NumberPoolManager] Error unsubscribing visible listener:', e);
+          }
+        });
+        this.visibleListeners.clear();
+        this.userListeners.forEach(unsub => {
+          try {
+            unsub();
+          } catch (e) {
+            console.warn('[NumberPoolManager] Error unsubscribing user listener:', e);
+          }
+        });
+        this.userListeners = [];
+        this.clearAllSearchListeners();
+        // Reset pagination
+        if (this.pagination) {
+          this.pagination.clearCache();
+          this.pagination = null;
+        }
+      } catch (error) {
+        console.error('[NumberPoolManager] Error during user change cleanup:', error);
+      }
+      // Reset state
+      this.updateState({
+        numbers: [],
+        currentPage: 1,
+        pageSize: this.state.pageSize,
+        totalPages: 0,
+        totalItems: 0,
+        hasNextPage: false,
+        hasPreviousPage: false,
+        selectedCategory: null,
+        lastLoadTime: 0,
+        isLoading: false
+      });
+      return true;
+    } else if (!hadPreviousUser && userId) {
+      // First time setting user (initial load) - just update tracking
+      this.currentUserId = userId;
+      this.currentUserRole = userRole;
+    }
+    return false;
   }
 
   // Filter numbers based on user role and visibility settings
@@ -120,12 +225,28 @@ class NumberPoolManager {
     return numbers;
   }
 
+  /**
+   * Validate if IndexedDB cache is still fresh by comparing with Firestore stats timestamp
+   * Returns true if cache is valid, false if it should be invalidated
+   */
+  private async validateCacheTimestamp(category: string): Promise<boolean> {
+    // No cache with memory-only mode - always return false
+    return false;
+  }
+
   // Initialize or get existing data
   async initialize(category: string | null = null, pageSize: number = 50, userId?: string, userRole?: string): Promise<void> {
     
-    if (!this.needsReload(category, pageSize)) {
+    // Check user change first - this will force reset if user changed
+    const userChanged = this.checkUserChange(userId, userRole);
+    
+    if (!userChanged && !this.needsReload(category, pageSize, userId, userRole)) {
       return;
     }
+
+    // Update user tracking
+    this.currentUserId = userId;
+    this.currentUserRole = userRole;
 
     this.updateState({ isLoading: true });
 
@@ -136,8 +257,11 @@ class NumberPoolManager {
     }, 30000); // 30 second timeout
 
     try {
+      // Track if category changed to skip cache
+      const categoryChanged = this.state.selectedCategory !== category;
+      
       // Update pagination instance if needed
-      if (!this.pagination || this.state.selectedCategory !== category || this.state.pageSize !== pageSize) {
+      if (!this.pagination || categoryChanged || this.state.pageSize !== pageSize) {
         if (this.pagination) {
           this.pagination.clearCache();
         }
@@ -151,34 +275,14 @@ class NumberPoolManager {
         this.pagination = new SmartPagination<NumberPool>('numberPool', {
           pageSize,
           orderBy: 'lastStatusChange',
-          orderDirection: 'asc',
+          orderDirection: 'asc', // ASC to show untouched numbers (baseline date) first
           filters
         });
+        
+        // No cache to clear with memory-only mode
       }
 
-      // Try cache first
-      const cachedNumbers = await getCachedPaginatedNumbers(category || 'all', 1, pageSize);
-      if (cachedNumbers && cachedNumbers.length > 0) {
-        const filteredNumbers = this.filterNumbersByRole(cachedNumbers, userRole);
-        this.updateState({
-          numbers: filteredNumbers,
-          currentPage: 1,
-          pageSize,
-          selectedCategory: category,
-          lastLoadTime: Date.now(),
-          isLoading: false
-        });
-
-        // Ensure listeners are set up for the visible cached data
-        this.setupPageListener();
-
-        // Rebuild search index proactively so token search works on cached data
-        await buildSearchIndex(category || 'all');
-
-        // Mark as initialized and exit early to avoid re-reading
-        this.isInitialized = true;
-        return;
-      }
+      // No cache with memory-only mode - always fetch fresh data from Firestore
 
       // Load from Firebase
       let result: { data: NumberPool[]; hasNextPage: boolean; hasPreviousPage: boolean } | null = null;
@@ -219,12 +323,7 @@ class NumberPoolManager {
         isLoading: false
       });
 
-      // Cache the results
-      if (result.data.length > 0) {
-        await cachePaginatedNumbers(result.data as NumberPool[], category || 'all', 1, pageSize);
-        // Rebuild search index for this category so token searches work
-        await buildSearchIndex(category || 'all');
-      }
+      // No caching with memory-only mode
 
       // Set up page-specific real-time listener
       this.setupPageListener();
@@ -237,7 +336,9 @@ class NumberPoolManager {
       this.isInitialized = true;
 
     } catch (error) {
-      console.error('Error initializing NumberPool:', error);
+      console.error('[NumberPoolManager] Error initializing NumberPool:', error);
+      // Mark as not initialized so next attempt will retry
+      this.isInitialized = false;
       this.updateState({ 
         isLoading: false,
         numbers: [],
@@ -245,8 +346,20 @@ class NumberPoolManager {
         totalPages: 0,
         totalItems: 0,
         hasNextPage: false,
-        hasPreviousPage: false
+        hasPreviousPage: false,
+        selectedCategory: category
       });
+      
+      // Auto-retry after a delay if initialization failed
+      setTimeout(() => {
+        // Only retry if still not initialized, user unchanged, and user still present
+        if (!this.isInitialized && userId && this.currentUserId === userId) {
+          console.log('[NumberPoolManager] Auto-retrying initialization after error');
+          this.initialize(category, pageSize, userId, userRole).catch(err => {
+            console.error('[NumberPoolManager] Retry initialization failed:', err);
+          });
+        }
+      }, 2000);
     } finally {
       // Always clear the timeout
       clearTimeout(timeoutId);
@@ -266,26 +379,7 @@ class NumberPoolManager {
     }, 15000); // 15 second timeout
 
     try {
-      // Try cache first for the target page
-      const targetPage = this.pagination.getCurrentPage() + 1;
-      const cached = await getCachedPaginatedNumbers(this.state.selectedCategory || 'all', targetPage, this.state.pageSize);
-      if (cached && cached.length > 0) {
-        const filteredNumbers = this.filterNumbersByRole(cached, this.getCurrentUserRole());
-        this.updateState({
-          numbers: filteredNumbers,
-          currentPage: targetPage,
-          hasNextPage: true, // conservative; real value updated when Firebase read happens later
-          hasPreviousPage: true,
-          lastLoadTime: Date.now(),
-          isLoading: false
-        });
-        // OPTIMIZATION: Only set up listeners for first few pages to reduce Firebase allows
-        if (targetPage <= 3) {
-          this.setupVisibleListeners(cached);
-        }
-        return;
-      }
-
+      // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.nextPage();
       const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
       
@@ -303,11 +397,7 @@ class NumberPoolManager {
       this.setupVisibleListeners(result.data);
       }
 
-      // Persist page to IndexedDB for future visits
-      if (result.data.length > 0) {
-        await cachePaginatedNumbers(result.data as NumberPool[], this.state.selectedCategory || 'all', this.state.currentPage, this.state.pageSize);
-        await buildSearchIndex(this.state.selectedCategory || 'all');
-      }
+      // No caching with memory-only mode
 
     } catch (error) {
       console.error('Error loading next page:', error);
@@ -324,26 +414,7 @@ class NumberPoolManager {
     this.updateState({ isLoading: true });
 
     try {
-      // Try cache first for the target page
-      const targetPage = Math.max(1, this.pagination.getCurrentPage() - 1);
-      const cached = await getCachedPaginatedNumbers(this.state.selectedCategory || 'all', targetPage, this.state.pageSize);
-      if (cached && cached.length > 0) {
-        const filteredNumbers = this.filterNumbersByRole(cached, this.getCurrentUserRole());
-        this.updateState({
-          numbers: filteredNumbers,
-          currentPage: targetPage,
-          hasNextPage: true,
-          hasPreviousPage: targetPage > 1,
-          lastLoadTime: Date.now(),
-          isLoading: false
-        });
-        // OPTIMIZATION: Only set up listeners for first few pages to reduce Firebase allows
-        if (targetPage <= 3) {
-          this.setupVisibleListeners(cached);
-        }
-        return;
-      }
-
+      // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.previousPage();
       const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
       
@@ -361,11 +432,7 @@ class NumberPoolManager {
       this.setupVisibleListeners(result.data);
       }
 
-      // Persist page to IndexedDB for future visits
-      if (result.data.length > 0) {
-        await cachePaginatedNumbers(result.data as NumberPool[], this.state.selectedCategory || 'all', this.state.currentPage, this.state.pageSize);
-        await buildSearchIndex(this.state.selectedCategory || 'all');
-      }
+      // No caching with memory-only mode
 
     } catch (error) {
       this.updateState({ isLoading: false });
@@ -379,27 +446,7 @@ class NumberPoolManager {
     this.updateState({ isLoading: true });
 
     try {
-      // Try cache first for requested page
-      const cached = await getCachedPaginatedNumbers(this.state.selectedCategory || 'all', page, this.state.pageSize);
-      if (cached && cached.length > 0) {
-        const filteredNumbers = this.filterNumbersByRole(cached, this.getCurrentUserRole());
-        this.updateState({
-          numbers: filteredNumbers,
-          currentPage: page,
-          // totalPages/totalItems remain as is; they will be corrected when a fresh load happens
-          hasNextPage: true,
-          hasPreviousPage: page > 1,
-          lastLoadTime: Date.now(),
-          isLoading: false
-        });
-        // OPTIMIZATION: Only set up listeners for first few pages to reduce Firebase allows
-        if (page <= 3) {
-          this.setupVisibleListeners(cached);
-          this.setupPageListener(); // Set up listeners for new page
-        }
-        return;
-      }
-
+      // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.loadPage(page);
       const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
       
@@ -421,11 +468,7 @@ class NumberPoolManager {
       } else {
       }
 
-      // Persist page to IndexedDB for future visits
-      if (result.data.length > 0) {
-        await cachePaginatedNumbers(result.data as NumberPool[], this.state.selectedCategory || 'all', this.state.currentPage, this.state.pageSize);
-        await buildSearchIndex(this.state.selectedCategory || 'all');
-      }
+      // No caching with memory-only mode
 
     } catch (error) {
       this.updateState({ isLoading: false });
@@ -835,7 +878,7 @@ class NumberPoolManager {
         this.updateState({
           numbers: this.state.numbers.map(n => n.id === updated.id ? updated : n)
         });
-      });
+      }, (error) => this.handleSnapshotError(error, `page-document:${number.id}`));
 
       listeners.push(unsub);
     });
@@ -890,7 +933,7 @@ class NumberPoolManager {
         this.updateState({
           numbers: this.state.numbers.map(n => n.id === updated.id ? updated : n)
         });
-      });
+      }, (error) => this.handleSnapshotError(error, `visible-document:${number.id}`));
 
       this.visibleListeners.set(number.id, unsub);
     });
@@ -975,87 +1018,12 @@ class NumberPoolManager {
     }, 1000); // 1 second debounce to reduce rapid listener creation
   }
   
-  // Immediate listener setup (internal) - OPTIMIZED with limited listeners
+  // DISABLED: Search listeners - unifiedSearch already provides fresh data
+  // This prevents "400 Bad Request" errors from too many concurrent Firebase connections
   private setupSearchListenerImmediate(searchTerm: string, category: string, pageSize: number) {
-    const cacheKey = `${searchTerm}_${category}_${pageSize}`;
-    
-    // Only set up listener if this is still the current search term
-    if (searchTerm !== this.currentSearchTerm) {
-      return;
-    }
-    
-    // Clean up ALL existing search listeners to avoid multiple listeners
+    // Clean up any existing search listeners
     this.clearAllSearchListeners();
-
-    // Set up new listener based on search type (OPTIMIZED - only for exact matches)
-    const term = searchTerm.trim();
-    const lower = term.toLowerCase();
-    
-    // Only set up listeners for exact matches to reduce Firebase allows
-    // Category search listener (exact match only)
-    const categories = ['standard', 'silver', 'silver plus', 'gold', 'gold plus', 'platinum'];
-    if (categories.includes(lower)) {
-      const categoryValue = categories.find(c => c === lower)!.replace(/\b\w/g, (m) => m.toUpperCase());
-      const listener = onSnapshot(
-        query(collection(db, 'numberPool'), where('category', '==', categoryValue)),
-        (snapshot) => {
-          const updatedResults = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
-          this.updateSearchCache(cacheKey, updatedResults, searchTerm);
-        },
-        (error) => {}
-      );
-      this.searchListeners.set(cacheKey, listener);
-      return;
-    }
-
-    // Status search listener (exact match only)
-    const statuses = ['open', 'reserved', 'pending_verification', 'verified', 'assigned', 'activated', 'follow_up', 'rejected', 'claimed', 'follow_verification'];
-    if (statuses.includes(lower)) {
-      const listener = onSnapshot(
-        query(collection(db, 'numberPool'), where('status', '==', lower)),
-        (snapshot) => {
-          const updatedResults = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
-          this.updateSearchCache(cacheKey, updatedResults, searchTerm);
-        },
-        (error) => {}
-      );
-      this.searchListeners.set(cacheKey, listener);
-      return;
-    }
-
-    // Number search listener (exact match only)
-    if (/^\d+$/.test(term)) {
-      const listener = onSnapshot(
-        query(collection(db, 'numberPool'), where('number', '==', term)),
-        (snapshot) => {
-          const updatedResults = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
-          this.updateSearchCache(cacheKey, updatedResults, searchTerm);
-        },
-        (error) => {}
-      );
-      this.searchListeners.set(cacheKey, listener);
-      return;
-    }
-
-    // Code search listener (exact match only)
-    if (/^[a-z0-9]+$/i.test(term)) {
-      const variants = [term, term.toUpperCase(), term.toLowerCase()];
-      
-      for (const variant of variants) {
-        const listener = onSnapshot(
-          query(collection(db, 'numberPool'), where('code', '==', variant)),
-          (snapshot) => {
-            if (!snapshot.empty) {
-              const updatedResults = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
-              this.updateSearchCache(cacheKey, updatedResults, searchTerm);
-            }
-          },
-          (error) => {}
-        );
-        this.searchListeners.set(cacheKey, listener);
-        break; // Use first successful listener
-      }
-    }
+    // No new listeners created - search is handled by unifiedSearch with fresh queries
   }
 
   // Update search cache with new results and notify subscribers
@@ -1137,26 +1105,96 @@ class NumberPoolManager {
 
   // Force reset loading state - useful when loading gets stuck
   forceResetLoading(): void {
-    console.warn('Force resetting NumberPool loading state');
+    console.warn('[NumberPoolManager] Force resetting loading state and attempting recovery');
     this.updateState({ isLoading: false });
+    
+    // If we're stuck with no numbers but should have them, force re-initialization
+    if (this.state.numbers.length === 0 && this.isInitialized && this.currentUserId) {
+      console.warn('[NumberPoolManager] Stuck state detected - forcing re-initialization');
+      this.isInitialized = false;
+      // Try to re-initialize with current parameters
+      const category = this.state.selectedCategory;
+      const pageSize = this.state.pageSize;
+      const userId = this.currentUserId;
+      const userRole = this.currentUserRole;
+      
+      // Delay slightly to avoid immediate re-trigger
+      setTimeout(() => {
+        if (userId) {
+          this.initialize(category, pageSize, userId, userRole).catch(error => {
+            console.error('[NumberPoolManager] Recovery initialization failed:', error);
+          });
+        }
+      }, 1000);
+    }
+  }
+  
+  // Force complete reset - use when user changes or critical errors occur
+  forceReset(): void {
+    console.warn('[NumberPoolManager] Force reset - clearing all state');
+    try {
+      this.destroy();
+    } catch (error) {
+      console.error('[NumberPoolManager] Error during destroy in forceReset:', error);
+      // Continue with reset even if destroy fails
+    }
+    
+    try {
+      this.updateState({
+        numbers: [],
+        currentPage: 1,
+        pageSize: 50,
+        totalPages: 0,
+        totalItems: 0,
+        hasNextPage: false,
+        hasPreviousPage: false,
+        selectedCategory: null,
+        lastLoadTime: 0,
+        isLoading: false
+      });
+    } catch (error) {
+      console.error('[NumberPoolManager] Error updating state in forceReset:', error);
+    }
   }
 
   // Cleanup
   destroy() {
+    try {
     if (this.pagination) {
+        try {
       this.pagination.clearCache();
+        } catch (e) {
+          console.warn('[NumberPoolManager] Error clearing pagination cache:', e);
+        }
       this.pagination = null;
     }
     if (this.pageListener) {
+        try {
       this.pageListener();
+        } catch (e) {
+          console.warn('[NumberPoolManager] Error unsubscribing page listener:', e);
+        }
       this.pageListener = null;
     }
-    this.visibleListeners.forEach(unsub => unsub());
+      this.visibleListeners.forEach(unsub => {
+        try {
+          unsub();
+        } catch (e) {
+          console.warn('[NumberPoolManager] Error unsubscribing visible listener:', e);
+        }
+      });
     this.visibleListeners.clear();
-    this.userListeners.forEach(unsub => unsub());
+      this.userListeners.forEach(unsub => {
+        try {
+          unsub();
+        } catch (e) {
+          console.warn('[NumberPoolManager] Error unsubscribing user listener:', e);
+        }
+      });
     this.userListeners = [];
     this.clearAllSearchListeners();
-    this.subscribers.clear();
+      // Don't clear subscribers - they should remain to receive updates
+      // this.subscribers.clear();
     this.searchCache.clear();
     if (this.listenerSetupTimeout) {
       clearTimeout(this.listenerSetupTimeout);
@@ -1164,6 +1202,15 @@ class NumberPoolManager {
     }
     this.currentSearchTerm = '';
     this.isInitialized = false;
+      this.currentUserId = undefined;
+      this.currentUserRole = undefined;
+    } catch (error) {
+      console.error('[NumberPoolManager] Error in destroy:', error);
+      // Ensure critical state is reset even if cleanup fails
+      this.isInitialized = false;
+      this.currentUserId = undefined;
+      this.currentUserRole = undefined;
+    }
   }
 }
 

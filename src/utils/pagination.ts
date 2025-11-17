@@ -473,7 +473,7 @@ export class NumberPoolPagination extends FirebasePagination<NumberPool> {
   constructor(options: PaginationOptions = {}) {
     super('numberPool', {
       orderBy: 'lastStatusChange',
-      orderDirection: 'desc',
+      orderDirection: 'asc',
       pageSize: options.pageSize || 50,
       ...options
     });

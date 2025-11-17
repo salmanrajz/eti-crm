@@ -49,9 +49,28 @@ import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { Team, User, UserRole } from '../../types';
-import { Users, Plus, Pencil, Trash2, UserPlus, Building2, Upload, DollarSign } from 'lucide-react';
+import { 
+  Users, 
+  Plus, 
+  Pencil, 
+  Trash2, 
+  UserPlus, 
+  Building2, 
+  Upload, 
+  DollarSign,
+  ChevronDown,
+  ChevronRight,
+  Save,
+  X,
+  Crown,
+  Shield,
+  UserCheck,
+  Sparkles
+} from 'lucide-react';
 import { TeamBulkUpload } from '../../components/teams/TeamBulkUpload';
 import { CommissionConfig } from '../../components/CommissionConfig';
+import { motion, AnimatePresence } from 'framer-motion';
+import { clsx } from 'clsx';
 
 /**
  * ===============================================================================
@@ -77,6 +96,8 @@ export function TeamManagement() {
   const [showCommissionConfigModal, setShowCommissionConfigModal] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
   const [selectedUsers, setSelectedUsers] = useState<string[]>([]);
+  const [expandedTeams, setExpandedTeams] = useState<Set<string>>(new Set());
+  const [showCreateForm, setShowCreateForm] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     managerId: '',
@@ -86,70 +107,102 @@ export function TeamManagement() {
   });
 
   useEffect(() => {
-    Promise.all([loadTeams(), loadManagers(), loadUnassignedUsers()]);
+    loadAllData();
   }, []);
 
-  async function loadTeams() {
+  // Load all data in a single optimized batch
+  async function loadAllData() {
     try {
-      const teamsQuery = query(collection(db, 'teams'));
-      const snapshot = await getDocs(teamsQuery);
-      const teamsData = snapshot.docs.map((doc) => ({
+      // Load teams and users in parallel (only 2 queries total!)
+      const [teamsSnapshot, usersSnapshot] = await Promise.all([
+        getDocs(query(collection(db, 'teams'))),
+        getDocs(query(collection(db, 'users')))
+      ]);
+      
+      // Build users map and categorize users
+      const usersMap = new Map<string, User>();
+      const usersByTeam = new Map<string, User[]>();
+      const managersList: User[] = [];
+      const unassignedUsersList: User[] = [];
+      
+      usersSnapshot.docs.forEach(doc => {
+        const user = {
         id: doc.id,
         ...doc.data(),
-        managerName: '',
-        commissionBased: doc.data().commissionBased || false,
-        createdAt: doc.data().createdAt?.toDate() || new Date(),
-        updatedAt: doc.data().updatedAt?.toDate() || new Date()
-      })) as Team[];
+          createdAt: doc.data().createdAt?.toDate(),
+          updatedAt: doc.data().updatedAt?.toDate()
+        } as User;
+        
+        usersMap.set(doc.id, user);
       
-      // Get manager names and team members for each team
-      for (const team of teamsData) {
-        if (team.managerId) {
-          const managerDoc = await getDoc(doc(db, 'users', team.managerId));
-          if (managerDoc.exists()) {
-            team.managerName = managerDoc.data().name;
-          }
+        // Categorize managers
+        if (user.role === 'manager' || user.role === null) {
+          managersList.push(user);
+        }
+        
+        // Categorize unassigned users
+        if (['agent', 'freelancer'].includes(user.role) && !user.teamId) {
+          unassignedUsersList.push(user);
         }
 
-        // Get team members
-        const membersQuery = query(
-          collection(db, 'users'),
-          where('teamId', '==', team.id),
-          where('role', 'in', ['agent', 'freelancer'])
-        );
-        const membersSnapshot = await getDocs(membersQuery);
-        team.members = membersSnapshot.docs.map(doc => ({
+        // Group team members by team
+        if (user.teamId && ['agent', 'freelancer'].includes(user.role)) {
+          if (!usersByTeam.has(user.teamId)) {
+            usersByTeam.set(user.teamId, []);
+          }
+          usersByTeam.get(user.teamId)!.push(user);
+        }
+      });
+      
+      // Build teams with manager names and members
+      const teamsData = teamsSnapshot.docs.map((doc) => {
+        const teamData = doc.data();
+        const team: Team = {
           id: doc.id,
-          ...doc.data()
-        })) as User[];
+          ...teamData,
+          managerName: '',
+          commissionBased: teamData.commissionBased || false,
+          createdAt: teamData.createdAt?.toDate() || new Date(),
+          updatedAt: teamData.updatedAt?.toDate() || new Date(),
+          members: usersByTeam.get(doc.id) || []
+        } as Team;
+        
+        // Get manager name from users map (instant lookup)
+        if (team.managerId && usersMap.has(team.managerId)) {
+          team.managerName = usersMap.get(team.managerId)!.name || '';
       }
       
+        return team;
+      });
+      
+      // Sort teams alphabetically with numeric sorting (ETS-1, ETS-2, ETS-11)
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+      teamsData.sort((a, b) => collator.compare(a.name || '', b.name || ''));
+      
+      // Update all state at once
       setTeams(teamsData);
+      setManagers(managersList);
+      setUnassignedUsers(unassignedUsersList);
+      
+      // Expand all teams by default
+      setExpandedTeams(new Set(teamsData.map(t => t.id)));
     } catch (error) {
-      console.error('Error loading teams:', error);
-      toast.error('Failed to load teams');
+      console.error('Error loading data:', error);
+      toast.error('Failed to load teams and users');
     } finally {
       setLoading(false);
     }
   }
 
-  async function loadManagers() {
-    try {
-      const managersQuery = query(
-        collection(db, 'users'),
-        where('role', 'in', ['manager', null])
-      );
-      const snapshot = await getDocs(managersQuery);
-      
-      let availableManagers = snapshot.docs
-        .map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-          createdAt: doc.data().createdAt?.toDate(),
-          updatedAt: doc.data().updatedAt?.toDate()
-        })) as User[];
+  // Simplified reload functions that can be called when needed
+  async function loadTeams() {
+    await loadAllData();
+  }
 
+  async function loadManagers() {
+    // Data is already loaded in loadAllData, but keeping this for compatibility
       if (isEditing && editingTeam?.managerId) {
+      try {
         const currentManagerDoc = await getDoc(doc(db, 'users', editingTeam.managerId));
         if (currentManagerDoc.exists()) {
           const currentManager = {
@@ -159,38 +212,22 @@ export function TeamManagement() {
             updatedAt: currentManagerDoc.data().updatedAt?.toDate()
           } as User;
           
-          if (!availableManagers.find(m => m.id === currentManager.id)) {
-            availableManagers.push(currentManager);
+          setManagers(prev => {
+            if (!prev.find(m => m.id === currentManager.id)) {
+              return [...prev, currentManager];
           }
+            return prev;
+          });
         }
-      }
-
-      setManagers(availableManagers);
     } catch (error) {
-      console.error('Error loading managers:', error);
-      toast.error('Failed to load managers');
+        console.error('Error loading current manager:', error);
+      }
     }
   }
 
   async function loadUnassignedUsers() {
-    try {
-      const usersQuery = query(
-        collection(db, 'users'),
-        where('role', 'in', ['agent', 'freelancer']),
-        where('teamId', '==', null)
-      );
-      const snapshot = await getDocs(usersQuery);
-      const users = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate(),
-        updatedAt: doc.data().updatedAt?.toDate()
-      })) as User[];
-      setUnassignedUsers(users);
-    } catch (error) {
-      console.error('Error loading unassigned users:', error);
-      toast.error('Failed to load unassigned users');
-    }
+    // Data is already loaded in loadAllData
+    // This function kept for compatibility with existing code
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -201,23 +238,22 @@ export function TeamManagement() {
       return;
     }
 
+    try {
     const manager = managers.find(m => m.id === formData.managerId);
     if (!manager) {
       toast.error('Selected manager not found');
       return;
     }
 
-    try {
       if (isEditing && editingTeam) {
-        const teamData = {
+        await updateDoc(doc(db, 'teams', editingTeam.id), {
           name: formData.name,
           managerId: formData.managerId,
           managerName: manager.name,
           commissionBased: formData.commissionBased,
           isFreelancerTeam: formData.isFreelancerTeam,
           updatedAt: new Date()
-        };
-        await updateDoc(doc(db, 'teams', editingTeam.id), teamData);
+        });
         
         if (editingTeam.managerId && editingTeam.managerId !== formData.managerId) {
           await updateDoc(doc(db, 'users', editingTeam.managerId), {
@@ -266,9 +302,8 @@ export function TeamManagement() {
       setFormData({ name: '', managerId: '', managerName: '', commissionBased: false, isFreelancerTeam: false });
       setIsEditing(false);
       setEditingTeam(null);
+      setShowCreateForm(false);
       loadTeams();
-      loadManagers();
-      loadUnassignedUsers();
     } catch (error) {
       console.error('Error saving team:', error);
       toast.error('Failed to save team');
@@ -295,7 +330,6 @@ export function TeamManagement() {
       setShowAssignModal(false);
       setSelectedUsers([]);
       loadTeams();
-      loadUnassignedUsers();
     } catch (error) {
       console.error('Error assigning users:', error);
       toast.error('Failed to assign users to team');
@@ -311,7 +345,6 @@ export function TeamManagement() {
       });
       toast.success('User removed from team');
       loadTeams();
-      loadUnassignedUsers();
     } catch (error) {
       console.error('Error removing user from team:', error);
       toast.error('Failed to remove user from team');
@@ -328,10 +361,11 @@ export function TeamManagement() {
       commissionBased: team.commissionBased || false,
       isFreelancerTeam: team.isFreelancerTeam || false
     });
+    setShowCreateForm(true);
   }
 
   async function handleDelete(teamId: string) {
-    if (!window.confirm('Are you sure you want to delete this team?')) {
+    if (!window.confirm('Are you sure you want to delete this team? All team members will be unassigned.')) {
       return;
     }
 
@@ -363,58 +397,141 @@ export function TeamManagement() {
       
       toast.success('Team deleted successfully');
       loadTeams();
-      loadUnassignedUsers();
     } catch (error) {
       console.error('Error deleting team:', error);
       toast.error('Failed to delete team');
     }
   }
 
+  const toggleTeam = (teamId: string) => {
+    setExpandedTeams(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(teamId)) {
+        newSet.delete(teamId);
+      } else {
+        newSet.add(teamId);
+      }
+      return newSet;
+    });
+  };
+
+  const expandAllTeams = () => {
+    setExpandedTeams(new Set(teams.map(t => t.id)));
+  };
+
+  const collapseAllTeams = () => {
+    setExpandedTeams(new Set());
+  };
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-indigo-600 mx-auto mb-4" />
+          <p className="text-gray-600 font-medium">Loading teams...</p>
+        </div>
       </div>
     );
   }
 
   return (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="sm:flex sm:items-center">
-        <div className="sm:flex-auto">
-          <h1 className="text-2xl font-semibold text-gray-900">Team Management</h1>
-          <p className="mt-2 text-sm text-gray-700">
-            Create and manage teams and their members.
+        {/* Modern Header */}
+        <motion.div
+          className="mb-8"
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <div className="p-3 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl shadow-lg">
+                <Building2 className="h-8 w-8 text-white" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+                  Team Management
+                </h1>
+                <p className="mt-1 text-sm text-gray-600">
+                  Create and manage teams, assign managers, and organize your workforce
           </p>
         </div>
       </div>
+            <div className="flex items-center space-x-3">
+              <motion.button
+                onClick={() => {
+                  setIsEditing(false);
+                  setEditingTeam(null);
+                  setFormData({ name: '', managerId: '', managerName: '', commissionBased: false, isFreelancerTeam: false });
+                  setShowCreateForm(!showCreateForm);
+                }}
+                className={clsx(
+                  "inline-flex items-center px-6 py-3 border border-transparent text-sm font-medium rounded-xl shadow-lg transition-all duration-200",
+                  showCreateForm
+                    ? "bg-red-600 hover:bg-red-700 text-white"
+                    : "bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white"
+                )}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {showCreateForm ? (
+                  <>
+                    <X className="h-5 w-5 mr-2" />
+                    Cancel
+                  </>
+                ) : (
+                  <>
+                    <Plus className="h-5 w-5 mr-2" />
+                    Create Team
+                  </>
+                )}
+              </motion.button>
+            </div>
+          </div>
+        </motion.div>
 
       {/* Create/Edit Team Form */}
-      <div className="mt-8 bg-white shadow rounded-lg p-6">
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="grid grid-cols-1 gap-y-6 gap-x-4 sm:grid-cols-2">
+        <AnimatePresence>
+          {showCreateForm && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-8"
+            >
+              <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
+                <div className="px-6 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border-b border-indigo-100">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                    <Sparkles className="h-5 w-5 mr-2 text-indigo-600" />
+                    {isEditing ? 'Edit Team' : 'Create New Team'}
+                  </h3>
+                </div>
+                <form onSubmit={handleSubmit} className="p-6 space-y-6">
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
             <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-                Team Name *
+                      <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
+                        Team Name <span className="text-red-500">*</span>
               </label>
               <input
                 type="text"
                 id="name"
                 required
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                        placeholder="Enter team name (e.g., ETS-1)"
                 value={formData.name}
                 onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
               />
             </div>
 
             <div>
-              <label htmlFor="managerId" className="block text-sm font-medium text-gray-700">
-                Team Manager *
+                      <label htmlFor="managerId" className="block text-sm font-medium text-gray-700 mb-2">
+                        Team Manager <span className="text-red-500">*</span>
               </label>
               <select
                 id="managerId"
                 required
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
                 value={formData.managerId}
                 onChange={(e) => setFormData(prev => ({ ...prev, managerId: e.target.value }))}
               >
@@ -426,78 +543,162 @@ export function TeamManagement() {
                 ))}
               </select>
             </div>
-            <div className="sm:col-span-2 flex items-center mt-2">
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="flex items-center p-4 bg-green-50 border border-green-200 rounded-xl cursor-pointer hover:bg-green-100 transition-colors">
               <input
                 type="checkbox"
                 id="commissionBased"
                 checked={formData.commissionBased}
                 onChange={e => setFormData(prev => ({ ...prev, commissionBased: e.target.checked }))}
-                className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                        className="h-5 w-5 text-green-600 border-gray-300 rounded focus:ring-green-500"
               />
-              <label htmlFor="commissionBased" className="ml-2 block text-sm text-gray-700">
-                Commission-based team
-              </label>
+                      <div className="ml-3">
+                        <span className="text-sm font-medium text-gray-900">Commission-based team</span>
+                        <p className="text-xs text-gray-600">Enable commission tracking for this team</p>
             </div>
-            <div className="sm:col-span-2 flex items-center mt-2">
+                    </label>
+
+                    <label className="flex items-center p-4 bg-blue-50 border border-blue-200 rounded-xl cursor-pointer hover:bg-blue-100 transition-colors">
               <input
                 type="checkbox"
                 id="isFreelancerTeam"
                 checked={formData.isFreelancerTeam}
                 onChange={e => setFormData(prev => ({ ...prev, isFreelancerTeam: e.target.checked }))}
-                className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                        className="h-5 w-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
               />
-              <label htmlFor="isFreelancerTeam" className="ml-2 block text-sm text-gray-700">
-                Freelancer team (members become freelancers with restricted number pool)
+                      <div className="ml-3">
+                        <span className="text-sm font-medium text-gray-900">Freelancer team</span>
+                        <p className="text-xs text-gray-600">Members become freelancers with restricted number pool access</p>
+                      </div>
               </label>
-            </div>
           </div>
 
-          <div className="flex justify-end">
-            {isEditing && (
+                  <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
               <button
                 type="button"
                 onClick={() => {
+                        setShowCreateForm(false);
                   setIsEditing(false);
                   setEditingTeam(null);
                   setFormData({ name: '', managerId: '', managerName: '', commissionBased: false, isFreelancerTeam: false });
                 }}
-                className="mr-3 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50"
+                      className="px-6 py-3 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-xl hover:bg-gray-50 transition-all"
               >
                 Cancel
               </button>
-            )}
             <button
               type="submit"
-              className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 border border-transparent rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                      className="inline-flex items-center px-6 py-3 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-xl hover:from-indigo-700 hover:to-purple-700 shadow-lg transition-all"
             >
+                      <Save className="h-4 w-4 mr-2" />
               {isEditing ? 'Update Team' : 'Create Team'}
             </button>
           </div>
         </form>
       </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Teams List Header */}
+        <motion.div
+          className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden mb-6 p-6"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.2 }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <Users className="h-5 w-5 text-indigo-600" />
+              <span className="text-lg font-semibold text-gray-900">
+                {teams.length} {teams.length === 1 ? 'Team' : 'Teams'}
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={expandAllTeams}
+                className="px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+              >
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllTeams}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Collapse All
+              </button>
+            </div>
+          </div>
+        </motion.div>
 
       {/* Teams List */}
-      <div className="mt-8">
-        {teams.map((team) => (
-          <div key={team.id} className="mb-8 bg-white shadow rounded-lg overflow-hidden">
-            <div className="px-4 py-5 sm:px-6 flex justify-between items-center">
-              <div>
-                <h3 className="text-lg leading-6 font-medium text-gray-900">{team.name}</h3>
-                <p className="mt-1 max-w-2xl text-sm text-gray-500">
-                  Manager: {team.managerName}
+        <div className="space-y-4">
+          {teams.map((team, index) => {
+            const isExpanded = expandedTeams.has(team.id);
+            const memberCount = team.members?.length || 0;
+            
+            return (
+              <motion.div
+                key={team.id}
+                className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.3, delay: index * 0.05 }}
+              >
+                {/* Team Header */}
+                <div className="px-6 py-5 bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-200">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4 flex-1">
+                      <button
+                        onClick={() => toggleTeam(team.id)}
+                        className="p-2 hover:bg-white/50 rounded-lg transition-colors"
+                      >
+                        {isExpanded ? (
+                          <ChevronDown className="h-5 w-5 text-indigo-600" />
+                        ) : (
+                          <ChevronRight className="h-5 w-5 text-indigo-600" />
+                        )}
+                      </button>
+                      <div className="p-2 bg-blue-500 rounded-lg">
+                        <Building2 className="h-6 w-6 text-white" />
+                      </div>
+                      <div className="flex-1">
+                        <h3 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
+                          <span>{team.name}</span>
+                          {team.isFreelancerTeam && (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                              Freelancer
+                            </span>
+                          )}
+                          {team.commissionBased && (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                              Commission
+                            </span>
+                          )}
+                        </h3>
+                        <p className="mt-1 text-sm text-gray-600 flex items-center">
+                          <Crown className="h-4 w-4 mr-1 text-yellow-500" />
+                          Manager: <span className="font-medium ml-1">{team.managerName}</span>
+                          <span className="mx-2">•</span>
+                          <Users className="h-4 w-4 mr-1 text-blue-500" />
+                          {memberCount} {memberCount === 1 ? 'member' : 'members'}
                 </p>
               </div>
-              <div className="flex space-x-4">
+                    </div>
+
+                    <div className="flex items-center space-x-2">
                 {team.commissionBased && (
                   <button
                     onClick={() => {
                       setSelectedTeam(team);
                       setShowCommissionConfigModal(true);
                     }}
-                    className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700"
+                          className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-all shadow-md"
                   >
-                    <DollarSign className="h-4 w-4 mr-2" />
-                    Configure Commission
+                          <DollarSign className="h-4 w-4 mr-1" />
+                          Commission
                   </button>
                 )}
                 <button
@@ -505,9 +706,9 @@ export function TeamManagement() {
                     setSelectedTeam(team);
                     setShowBulkUploadModal(true);
                   }}
-                  className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700"
+                        className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg transition-all shadow-md"
                 >
-                  <Upload className="h-4 w-4 mr-2" />
+                        <Upload className="h-4 w-4 mr-1" />
                   Bulk Upload
                 </button>
                 <button
@@ -515,26 +716,37 @@ export function TeamManagement() {
                     setSelectedTeam(team);
                     setShowAssignModal(true);
                   }}
-                  className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700"
+                        className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-all shadow-md"
                 >
-                  <UserPlus className="h-4 w-4 mr-2" />
+                        <UserPlus className="h-4 w-4 mr-1" />
                   Add Members
                 </button>
                 <button
                   onClick={() => handleEdit(team)}
-                  className="text-indigo-600 hover:text-indigo-900"
+                        className="p-2 text-indigo-600 hover:bg-indigo-100 rounded-lg transition-all"
                 >
-                  <Pencil className="h-4 w-4" />
+                        <Pencil className="h-5 w-5" />
                 </button>
                 <button
                   onClick={() => handleDelete(team.id)}
-                  className="text-red-600 hover:text-red-900"
+                        className="p-2 text-red-600 hover:bg-red-100 rounded-lg transition-all"
                 >
-                  <Trash2 className="h-4 w-4" />
+                        <Trash2 className="h-5 w-5" />
                 </button>
               </div>
             </div>
-            <div className="border-t border-gray-200">
+                </div>
+
+                {/* Team Members Table */}
+                <AnimatePresence>
+                  {isExpanded && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={{ duration: 0.2 }}
+                    >
+                      <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
@@ -554,22 +766,34 @@ export function TeamManagement() {
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {team.members?.map((member) => (
-                    <tr key={member.id}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                        {member.name}
+                              <tr key={member.id} className="hover:bg-gray-50 transition-colors">
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <div className="flex items-center">
+                                    <div className="flex-shrink-0 h-10 w-10 bg-gradient-to-br from-indigo-500 to-purple-500 rounded-full flex items-center justify-center">
+                                      <span className="text-white font-bold text-sm">
+                                        {member.name?.charAt(0).toUpperCase()}
+                                      </span>
+                                    </div>
+                                    <div className="ml-4">
+                                      <div className="text-sm font-medium text-gray-900">{member.name}</div>
+                                    </div>
+                                  </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         {member.email}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800">
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <span className={clsx(
+                                    "px-3 py-1 text-xs font-medium rounded-full",
+                                    member.role === 'agent' ? "bg-blue-100 text-blue-800" : "bg-purple-100 text-purple-800"
+                                  )}>
                           {member.role}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <button
                           onClick={() => handleRemoveFromTeam(member.id, team.id)}
-                          className="text-red-600 hover:text-red-900"
+                                    className="text-red-600 hover:text-red-900 font-medium"
                         >
                           Remove
                         </button>
@@ -578,79 +802,92 @@ export function TeamManagement() {
                   ))}
                   {(!team.members || team.members.length === 0) && (
                     <tr>
-                      <td colSpan={4} className="px-6 py-4 text-center text-sm text-gray-500">
-                        No team members yet
+                                <td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-500">
+                                  <Users className="h-12 w-12 mx-auto text-gray-400 mb-2" />
+                                  <p className="font-medium">No team members yet</p>
+                                  <p className="text-xs mt-1">Click "Add Members" to assign users to this team</p>
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            );
+          })}
+
+          {teams.length === 0 && (
+            <motion.div
+              className="bg-white rounded-2xl shadow-xl border border-gray-100 p-12 text-center"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+            >
+              <Building2 className="h-16 w-16 mx-auto text-gray-400 mb-4" />
+              <h3 className="text-lg font-medium text-gray-900 mb-2">No teams yet</h3>
+              <p className="text-sm text-gray-600 mb-6">Get started by creating your first team</p>
+              <button
+                onClick={() => setShowCreateForm(true)}
+                className="inline-flex items-center px-6 py-3 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-xl hover:from-indigo-700 hover:to-purple-700 shadow-lg transition-all"
+              >
+                <Plus className="h-5 w-5 mr-2" />
+                Create Your First Team
+              </button>
+            </motion.div>
+          )}
           </div>
-        ))}
       </div>
 
       {/* Assign Users Modal */}
-      {showAssignModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-medium text-gray-900">
-                Add Members to {selectedTeam?.name}
+      {showAssignModal && selectedTeam && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <motion.div
+            className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[80vh] overflow-hidden"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+          >
+            <div className="px-6 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border-b border-indigo-100">
+              <div className="flex justify-between items-center">
+                <h3 className="text-xl font-semibold text-gray-900 flex items-center">
+                  <UserPlus className="h-6 w-6 mr-2 text-indigo-600" />
+                  Add Members to {selectedTeam.name}
               </h3>
               <button
                 onClick={() => {
                   setShowAssignModal(false);
                   setSelectedUsers([]);
                 }}
-                className="text-gray-400 hover:text-gray-500"
+                  className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-lg transition-colors"
               >
-                <span className="sr-only">Close</span>
-                ×
+                  <X className="h-6 w-6" />
               </button>
+              </div>
             </div>
             
-            <div className="max-h-96 overflow-y-auto">
+            <div className="p-6 max-h-96 overflow-y-auto">
               {unassignedUsers.length === 0 ? (
-                <p className="text-center text-gray-500 py-4">
-                  No unassigned users available
-                </p>
+                <div className="text-center py-12">
+                  <Users className="h-16 w-16 mx-auto text-gray-400 mb-4" />
+                  <p className="text-gray-600 font-medium">No unassigned users available</p>
+                  <p className="text-sm text-gray-500 mt-2">All users are already assigned to teams</p>
+                </div>
               ) : (
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        <input
-                          type="checkbox"
-                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                          checked={selectedUsers.length === unassignedUsers.length}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedUsers(unassignedUsers.map(u => u.id));
-                            } else {
-                              setSelectedUsers([]);
-                            }
-                          }}
-                        />
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Name
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Email
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Role
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                <div className="space-y-2">
                     {unassignedUsers.map((user) => (
-                      <tr key={user.id}>
-                        <td className="px-6 py-4 whitespace-nowrap">
+                    <label
+                      key={user.id}
+                      className={clsx(
+                        "flex items-center p-4 rounded-xl border-2 cursor-pointer transition-all",
+                        selectedUsers.includes(user.id)
+                          ? "border-indigo-500 bg-indigo-50"
+                          : "border-gray-200 hover:border-indigo-300 hover:bg-gray-50"
+                      )}
+                    >
                           <input
                             type="checkbox"
-                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                             checked={selectedUsers.includes(user.id)}
                             onChange={(e) => {
                               if (e.target.checked) {
@@ -659,76 +896,71 @@ export function TeamManagement() {
                                 setSelectedUsers(selectedUsers.filter(id => id !== user.id));
                               }
                             }}
-                          />
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                          {user.name}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {user.email}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800">
+                        className="h-5 w-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                      />
+                      <div className="ml-4 flex-1">
+                        <div className="text-sm font-medium text-gray-900">{user.name}</div>
+                        <div className="text-sm text-gray-500">{user.email}</div>
+                      </div>
+                      <span className={clsx(
+                        "px-3 py-1 text-xs font-medium rounded-full",
+                        user.role === 'agent' ? "bg-blue-100 text-blue-800" : "bg-purple-100 text-purple-800"
+                      )}>
                             {user.role}
                           </span>
-                        </td>
-                      </tr>
+                    </label>
                     ))}
-                  </tbody>
-                </table>
+                </div>
               )}
             </div>
 
-            <div className="mt-6 flex justify-end space-x-3">
+            <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-between items-center">
+              <span className="text-sm text-gray-600">
+                {selectedUsers.length} user{selectedUsers.length !== 1 ? 's' : ''} selected
+              </span>
+              <div className="flex space-x-3">
               <button
                 onClick={() => {
                   setShowAssignModal(false);
                   setSelectedUsers([]);
                 }}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50"
+                  className="px-6 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-xl hover:bg-gray-50 transition-all"
               >
                 Cancel
               </button>
               <button
                 onClick={handleAssignUsers}
                 disabled={selectedUsers.length === 0}
-                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 border border-transparent rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                  className="inline-flex items-center px-6 py-2 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-xl hover:from-indigo-700 hover:to-purple-700 shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Assign Selected Users
+                  <UserCheck className="h-4 w-4 mr-2" />
+                  Assign to Team
               </button>
             </div>
           </div>
+          </motion.div>
         </div>
       )}
 
       {/* Bulk Upload Modal */}
       {showBulkUploadModal && selectedTeam && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <TeamBulkUpload
-              team={selectedTeam}
-              onComplete={() => {
+          teamId={selectedTeam.id}
+          onClose={() => {
                 setShowBulkUploadModal(false);
                 loadTeams();
               }}
             />
-          </div>
-        </div>
       )}
 
       {/* Commission Config Modal */}
       {showCommissionConfigModal && selectedTeam && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <CommissionConfig
               teamId={selectedTeam.id}
               onClose={() => {
                 setShowCommissionConfigModal(false);
-                setSelectedTeam(null);
               }}
             />
-          </div>
-        </div>
       )}
     </div>
   );

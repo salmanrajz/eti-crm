@@ -38,10 +38,12 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { collection, writeBatch, doc, getDocs, query } from 'firebase/firestore';
+import { collection, writeBatch, doc, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
 import { Upload, FileSpreadsheet, FileUp, Download } from 'lucide-react';
+import { numberPoolStatsService } from '../../services/numberPoolStatsService';
+import { clearCategoryCache } from '../../utils/indexedDB';
 import { read, utils, writeFile } from 'xlsx';
 
 // ===============================================================================
@@ -84,6 +86,11 @@ export function NumberPoolUpload() {
     retries: 0
   });
   const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false);
+  const [duplicateCheckProgress, setDuplicateCheckProgress] = useState({
+    current: 0,
+    total: 4,
+    step: ''
+  });
   const [duplicateCheckResult, setDuplicateCheckResult] = useState<{
     duplicatesInFileCount: number;
     duplicatesInDatabaseCount: number;
@@ -96,6 +103,11 @@ export function NumberPoolUpload() {
   const [skipDuplicateCheck, setSkipDuplicateCheck] = useState(false);
   const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
   const [uploadElapsedTime, setUploadElapsedTime] = useState<number>(0);
+  const [uploadSummary, setUploadSummary] = useState<{
+    uploaded: number;
+    failed: number;
+    duplicated: number;
+  } | null>(null);
 
   // Ref to reset file input after upload
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -116,7 +128,7 @@ export function NumberPoolUpload() {
       setIsCheckingDuplicates(false);
     }
   }, [isCheckingDuplicates, excelFile]);
-  
+
   // Timer effect - updates every second while uploading
   useEffect(() => {
     if (!uploadStartTime || !loading) return;
@@ -244,6 +256,9 @@ export function NumberPoolUpload() {
     setParsedDataCount(0);
     setDuplicateCheckResult(null);
     setReadyToUpload(false);
+    setUploadSummary(null);
+    setSkipDuplicateCheck(false);
+    setDuplicateCheckProgress({ current: 0, total: 4, step: '' });
 
     // Accept any Excel file format
     if (!file.name.match(/\.(xlsx|xls|xlsm|xlsb)$/i)) {
@@ -296,16 +311,17 @@ export function NumberPoolUpload() {
         setParsedDataCount(jsonData.length);
         toast.success(`Successfully parsed ${jsonData.length} numbers`);
         
-        // Auto-prepare for upload (check for in-file duplicates only)
+        // Automatically check for duplicates (including database check)
+        // Pass jsonData directly to avoid state timing issues
         setTimeout(() => {
-          handleSkipDuplicateCheckAuto(jsonData);
+          handleCheckDuplicates(jsonData);
         }, 100);
       }
     } catch (error) {
       console.error('Error parsing Excel:', error);
       toast.error('Failed to parse Excel file');
     }
-  }, [validateExcelData, handleSkipDuplicateCheckAuto]);
+  }, [validateExcelData]);
 
   const handleSkipDuplicateCheck = () => {
     if (parsedExcelData.length === 0) {
@@ -339,8 +355,9 @@ export function NumberPoolUpload() {
     toast.success(`Ready to upload ${uniqueInFile.length} numbers (${duplicatesInFile.length} duplicates in file removed, database check skipped)`);
   };
 
-  const handleCheckDuplicates = async () => {
-    if (parsedExcelData.length === 0) {
+  const handleCheckDuplicates = async (dataToCheck?: ExcelRow[]) => {
+    const data = dataToCheck || parsedExcelData;
+    if (data.length === 0) {
       toast.error('Please upload an Excel file first');
       return;
     }
@@ -349,14 +366,16 @@ export function NumberPoolUpload() {
     setDuplicateCheckResult(null);
     setReadyToUpload(false);
     setSkipDuplicateCheck(false);
+    setDuplicateCheckProgress({ current: 0, total: 4, step: 'Starting duplicate check...' });
 
     const loadingToast = toast.loading('Checking for duplicates...');
 
     try {
       // Step 1: Check for duplicates within the upload file itself
+      setDuplicateCheckProgress({ current: 1, total: 4, step: 'Checking for duplicates within file...' });
       const seenInFile = new Set<string>();
       const duplicatesInFile: string[] = [];
-      const uniqueInFile = parsedExcelData.filter(row => {
+      const uniqueInFile = data.filter(row => {
         if (seenInFile.has(row.Number)) {
           duplicatesInFile.push(row.Number);
           return false;
@@ -365,36 +384,74 @@ export function NumberPoolUpload() {
         return true;
       });
 
-      // Step 2: Fetch existing numbers from database (with timeout protection)
-      toast.loading('Fetching existing numbers from database...', { id: loadingToast });
+      // Step 2: Check for duplicates in database using batch queries (memory-efficient)
+      setDuplicateCheckProgress({ current: 2, total: 4, step: 'Checking database for duplicates...' });
+      toast.loading('Checking database for duplicates in batches...', { id: loadingToast });
       
-      // Add timeout to prevent infinite hang
-      const fetchWithTimeout = async () => {
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Query timed out after 30 seconds. Please try again or contact support.')), 30000)
-        );
-        
-        const numberPoolQuery = query(collection(db, 'numberPool'));
-        const queryPromise = getDocs(numberPoolQuery);
-        
-        return await Promise.race([queryPromise, timeoutPromise]) as any;
-      };
+      // Extract unique numbers to check
+      const numbersToCheck = uniqueInFile.map(row => row.Number);
       
-      const snapshot = await fetchWithTimeout();
-      
-      // Build set of existing numbers (optimized - only extract number field)
-      toast.loading('Building comparison index...', { id: loadingToast });
+      // Batch query approach - Firestore 'in' operator supports up to 30 values per query
+      // We'll use 30 for maximum efficiency
+      const BATCH_SIZE = 30;
+      const PARALLEL_BATCHES = 5; // Process 5 batches in parallel for speed
       const existingNumbersSet = new Set<string>();
+      const totalBatches = Math.ceil(numbersToCheck.length / BATCH_SIZE);
       
-      for (const doc of snapshot.docs) {
-        const data = doc.data();
-        if (data?.number) {
-          existingNumbersSet.add(data.number);
+      // Process batches in parallel groups for maximum speed
+      for (let i = 0; i < totalBatches; i += PARALLEL_BATCHES) {
+        const parallelBatchPromises = [];
+        
+        // Create parallel batch queries
+        for (let j = 0; j < PARALLEL_BATCHES && (i + j) < totalBatches; j++) {
+          const batchIndex = i + j;
+          const startIdx = batchIndex * BATCH_SIZE;
+          const batchNumbers = numbersToCheck.slice(startIdx, startIdx + BATCH_SIZE);
+          
+          // Update progress for the first batch in the parallel group
+          if (j === 0) {
+            const progress = Math.floor((batchIndex / totalBatches) * 100);
+            setDuplicateCheckProgress({ 
+              current: 2, 
+              total: 4, 
+              step: `Checking batches ${batchIndex + 1}-${Math.min(batchIndex + PARALLEL_BATCHES, totalBatches)}/${totalBatches} (${progress}%)` 
+            });
+          }
+          
+          // Create query promise
+          const batchPromise = getDocs(
+            query(
+              collection(db, 'numberPool'),
+              where('number', 'in', batchNumbers)
+            )
+          ).then(snapshot => {
+            return snapshot;
+          }).catch(error => {
+            return null;
+          });
+          
+          parallelBatchPromises.push(batchPromise);
         }
+        
+        // Wait for all parallel batches to complete
+        const results = await Promise.all(parallelBatchPromises);
+        
+        // Process results and add to set
+        results.forEach(snapshot => {
+          if (snapshot) {
+            snapshot.docs.forEach(doc => {
+              const data = doc.data();
+              if (data?.number) {
+                existingNumbersSet.add(data.number);
+              }
+            });
+          }
+        });
       }
 
-      // Step 3: Check for duplicates against database
-      toast.loading('Comparing against existing numbers...', { id: loadingToast });
+      // Step 3: Separate duplicates from unique numbers
+      setDuplicateCheckProgress({ current: 3, total: 4, step: 'Finalizing results...' });
+      toast.loading('Finalizing duplicate check results...', { id: loadingToast });
       
       const duplicateNumbers: string[] = [];
       const uniqueNumbersToUpload: ExcelRow[] = [];
@@ -408,6 +465,7 @@ export function NumberPoolUpload() {
       });
       
       toast.dismiss(loadingToast);
+      setDuplicateCheckProgress({ current: 4, total: 4, step: 'Complete!' });
 
       // Store duplicate check results - only keep samples to avoid memory issues
       setDuplicateCheckResult({
@@ -416,7 +474,7 @@ export function NumberPoolUpload() {
         duplicateInFileSample: duplicatesInFile.slice(0, 20),
         duplicateInDbSample: duplicateNumbers.slice(0, 20),
         uniqueRecords: uniqueNumbersToUpload,
-        totalRecords: parsedExcelData.length
+        totalRecords: data.length
       });
 
       setReadyToUpload(uniqueNumbersToUpload.length > 0);
@@ -435,23 +493,36 @@ export function NumberPoolUpload() {
       console.error('[Duplicate Check] Error:', error);
       toast.dismiss(loadingToast);
       toast.error(`Failed to check for duplicates: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setDuplicateCheckProgress({ current: 0, total: 4, step: '' });
     } finally {
       setIsCheckingDuplicates(false);
+      // Clear progress after a short delay to show completion
+      setTimeout(() => {
+        setDuplicateCheckProgress({ current: 0, total: 4, step: '' });
+      }, 1000);
     }
   };
 
   const handleUpload = async () => {
-    if (!duplicateCheckResult || !readyToUpload) {
-      toast.error('Please check for duplicates first');
+    if ((!duplicateCheckResult && !skipDuplicateCheck) || !readyToUpload) {
+      toast.error('Please check for duplicates first or skip the check');
       return;
     }
 
-    if (duplicateCheckResult.uniqueRecords.length === 0) {
-      toast.error('No unique records to upload');
+    // When skipping duplicate check, use parsedExcelData directly
+    const dataToUpload = skipDuplicateCheck && duplicateCheckResult 
+      ? duplicateCheckResult.uniqueRecords 
+      : duplicateCheckResult?.uniqueRecords || parsedExcelData;
+
+    if (dataToUpload.length === 0) {
+      toast.error('No records to upload');
       return;
     }
 
     setLoading(true);
+    setUploadSummary(null); // Clear previous summary
+    // Mark upload in progress for crash-safe recovery
+    try { sessionStorage.setItem('npUploadInProgress', '1'); } catch {}
     
     // Start timer
     const startTime = Date.now();
@@ -461,18 +532,19 @@ export function NumberPoolUpload() {
     try {
     
     // Set initial progress immediately with toast
-    const totalDuplicates = duplicateCheckResult.duplicatesInFileCount + duplicateCheckResult.duplicatesInDatabaseCount;
+    const totalDuplicates = skipDuplicateCheck 
+      ? (duplicateCheckResult?.duplicatesInFileCount || 0)
+      : (duplicateCheckResult?.duplicatesInFileCount || 0) + (duplicateCheckResult?.duplicatesInDatabaseCount || 0);
+    const totalRecords = duplicateCheckResult?.totalRecords || parsedExcelData.length;
     const uploadToast = toast.loading('Preparing upload...');
     
     setUploadProgress({
-      total: duplicateCheckResult.totalRecords,
+      total: totalRecords,
       current: 0,
       success: 0,
       failed: totalDuplicates,
       retries: 0
     });
-    
-    const dataToUpload = duplicateCheckResult.uniqueRecords;
     
     toast.loading('Starting upload...', { id: uploadToast });
     
@@ -500,14 +572,15 @@ export function NumberPoolUpload() {
     }
     let successCount = 0;
     let errorCount = 0;
+    let duplicateCount = 0;
     const failedNumbers: { number: string; error: string }[] = [];
     
     // Track last progress update to show responsive UI
     let lastProgressUpdate = Date.now();
     let lastProgressCount = 0;
 
-    // OPTIMIZED: Conservative concurrency to avoid overwhelming Firestore
-    const CONCURRENT_LIMIT = 3; // 3 batches in parallel (prevents 60s+ commits)
+    // OPTIMIZED: Increase concurrency for faster commits while staying safe
+    const CONCURRENT_LIMIT = 6; // 6 batches in parallel for higher throughput
     
     // Track promises with completion status
     const activePromises = new Map<number, { promise: Promise<void>, completed: boolean }>();
@@ -530,11 +603,62 @@ export function NumberPoolUpload() {
     const processBatch = async (startIdx: number, endIdx: number) => {
       const batchData = dataToUpload.slice(startIdx, endIdx);
       
+      let numbersToAdd = batchData;
+      
+      // Only check for Firebase duplicates if we DID NOT previously run a full database duplicate check
+      // When duplicateCheckResult exists (from "Check Duplicates"), it already filtered DB duplicates
+      // And when skipping the check, we intentionally do NOT filter DB duplicates
+      if (!skipDuplicateCheck && (!duplicateCheckResult || (duplicateCheckResult as any).duplicatesInDatabaseCount === undefined)) {
+        // Use Firestore native query to check for existing numbers
+        // Query for numbers that already exist in this batch
+        const numbersToCheck = batchData.map(row => row.Number);
+        
+        // Handle batches larger than 10 by splitting into chunks (Firestore 'in' query limit is 10)
+        const existingNumbersSet = new Set<string>();
+        
+        // Process in chunks of 10 (Firestore 'in' query limit)
+        for (let chunkStart = 0; chunkStart < numbersToCheck.length; chunkStart += 10) {
+          const chunk = numbersToCheck.slice(chunkStart, chunkStart + 10);
+          if (chunk.length > 0) {
+            try {
+              const existingQuery = query(
+                collection(db, 'numberPool'),
+                where('number', 'in', chunk)
+              );
+              const existingSnapshot = await getDocs(existingQuery);
+              existingSnapshot.docs.forEach(doc => {
+                const data = doc.data();
+                if (data.number) {
+                  existingNumbersSet.add(data.number);
+                }
+              });
+            } catch (error) {
+              console.error('Error checking existing numbers:', error);
+            }
+          }
+        }
+        
+        // Filter out numbers that already exist
+        numbersToAdd = batchData.filter(row => !existingNumbersSet.has(row.Number));
+        const skippedNumbers = batchData.filter(row => existingNumbersSet.has(row.Number));
+        
+        // Track skipped numbers as duplicates
+        skippedNumbers.forEach(row => {
+          failedNumbers.push({ number: row.Number, error: 'Number already exists in database' });
+          duplicateCount++;
+        });
+        
+        // If no numbers to add, skip batch commit
+        if (numbersToAdd.length === 0) {
+          return;
+        }
+      }
+      
       const batch = writeBatch(db);
       
-      // Add all numbers in this batch
-      for (let i = 0; i < batchData.length; i++) {
-        const row = batchData[i];
+      // Add only numbers that don't exist
+      for (let i = 0; i < numbersToAdd.length; i++) {
+        const row = numbersToAdd[i];
       const numberRef = doc(collection(db, 'numberPool'));
       
       let teamVisibility: string | undefined = (row.TeamVisibility || '').trim() || undefined;
@@ -550,7 +674,8 @@ export function NumberPoolUpload() {
         status: 'open',
         visibleToFreelancers: visibleToFreelancers,
         passcode: row.Passcode.trim(),
-        lastStatusChange: new Date()
+        lastStatusChange: new Date('2025-07-05'), // Baseline for "never touched" numbers
+        createdAt: new Date()
           // No bulkUpload flag - triggers run in parallel for immediate visibility
       };
 
@@ -564,10 +689,10 @@ export function NumberPoolUpload() {
       // Commit batch
       try {
         await batch.commit();
-        successCount += batchData.length;
+        successCount += numbersToAdd.length;
       } catch (error) {
-        errorCount += batchData.length;
-        batchData.forEach(n => {
+        errorCount += numbersToAdd.length;
+        numbersToAdd.forEach(n => {
                   failedNumbers.push({ number: n.Number, error: 'Batch commit failed' });
                 });
               }
@@ -582,10 +707,10 @@ export function NumberPoolUpload() {
         const percentage = Math.round((totalProcessed / dataToUpload.length) * 100);
         
               setUploadProgress({
-          total: duplicateCheckResult?.totalRecords || 0,
+          total: totalRecords,
           current: totalProcessed,
                 success: successCount,
-          failed: errorCount + totalDuplicates,
+          failed: errorCount + (skipDuplicateCheck ? 0 : duplicateCount) + totalDuplicates,
                 retries: 0
               });
         
@@ -635,11 +760,18 @@ export function NumberPoolUpload() {
 
       // Final progress update
       setUploadProgress({
-        total: duplicateCheckResult?.totalRecords || 0,
-      current: successCount + errorCount,
+        total: totalRecords,
+      current: successCount + errorCount + (skipDuplicateCheck ? 0 : duplicateCount),
         success: successCount,
-      failed: errorCount + totalDuplicates,
+      failed: errorCount + (skipDuplicateCheck ? 0 : duplicateCount),
         retries: 0
+      });
+
+      // Store upload summary
+      setUploadSummary({
+        uploaded: successCount,
+        failed: errorCount,
+        duplicated: skipDuplicateCheck ? 0 : duplicateCount
       });
 
       if (successCount > 0) {
@@ -680,12 +812,24 @@ export function NumberPoolUpload() {
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
+
+      // Invalidate caches and notify other tabs/pages
+      try {
+        // Identify affected categories in this upload batch
+        const affectedCategories = Array.from(new Set(dataToUpload.map(r => r.Category?.trim()).filter(Boolean)));
+        for (const cat of affectedCategories) {
+          await clearCategoryCache(cat as string);
+        }
+        numberPoolStatsService.clearCache();
+        // Broadcast invalidation to other tabs
+        localStorage.setItem('npInvalidate', String(Date.now()));
+      } catch {}
     }
     
-      if (errorCount > 0 || totalDuplicates > 0) {
-        const totalErrors = errorCount + totalDuplicates;
-        toast.error(`Failed to add ${totalErrors} numbers (${errorCount} errors, ${totalDuplicates} duplicates)`);
-        console.error('Failed numbers:', failedNumbers);
+      if (errorCount > 0 || (!skipDuplicateCheck && duplicateCount > 0)) {
+        const totalErrors = errorCount + (skipDuplicateCheck ? 0 : duplicateCount);
+        const duplicateMsg = skipDuplicateCheck ? '' : `, ${duplicateCount} duplicates`;
+        toast.error(`Failed to add ${totalErrors} numbers (${errorCount} errors${duplicateMsg})`);
         localStorage.setItem('failedNumbers', JSON.stringify(failedNumbers));
       localStorage.setItem('duplicateCountsInfo', JSON.stringify({
         inFile: duplicateCheckResult?.duplicatesInFileCount || 0,
@@ -698,6 +842,7 @@ export function NumberPoolUpload() {
       toast.error(`Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
+      try { sessionStorage.removeItem('npUploadInProgress'); } catch {}
     }
   };
 
@@ -894,9 +1039,8 @@ export function NumberPoolUpload() {
 
           {/* Action Buttons */}
           <div className="flex justify-end gap-3">
-            {/* HIDDEN: Check Duplicates and Skip Check buttons */}
-            {/* {parsedDataCount > 0 && !duplicateCheckResult && (
-              <>
+            {/* Check Duplicates Button - Shows when data is parsed but full Firebase duplicate check not done */}
+            {parsedDataCount > 0 && skipDuplicateCheck && duplicateCheckResult && !loading && !isCheckingDuplicates && (
               <button
                 type="button"
                 onClick={handleCheckDuplicates}
@@ -915,23 +1059,28 @@ export function NumberPoolUpload() {
                   </>
                 )}
               </button>
+            )}
+            
+            {/* Skip Check & Upload Directly Button - Shows only after duplicate check is completed */}
+            {parsedDataCount > 0 && duplicateCheckResult && !skipDuplicateCheck && !loading && isCheckingDuplicates === false && (
                 <button
                   type="button"
                   onClick={handleSkipDuplicateCheck}
-                  disabled={isCheckingDuplicates || loading}
+                disabled={loading || isCheckingDuplicates}
                   className="inline-flex items-center px-4 py-2 border border-yellow-400 text-sm font-medium rounded-md shadow-sm text-yellow-700 bg-yellow-50 hover:bg-yellow-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 disabled:opacity-50"
-                  title="Skip database check (faster but may upload duplicates)"
+                title="Skip Firebase duplicate check and upload directly (faster but may upload duplicates)"
                 >
                   <Upload className="h-4 w-4 mr-2" />
-                  Skip Check & Upload
+                Skip Check & Upload Directly
                 </button>
-              </>
-            )} */}
+            )}
             
+            {/* Regular Upload Button - Shows after duplicate check or when skip is enabled */}
+            {(duplicateCheckResult || skipDuplicateCheck) && readyToUpload && (
             <button
               type="button"
               onClick={handleUpload}
-              disabled={loading || !readyToUpload || !duplicateCheckResult}
+                disabled={loading || !readyToUpload}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               {loading ? (
@@ -942,12 +1091,33 @@ export function NumberPoolUpload() {
               ) : (
                 <>
                   <Upload className="h-4 w-4 mr-2" />
-                  Upload Unique Records
+                    {skipDuplicateCheck ? 'Upload All Records' : 'Upload Unique Records'}
                 </>
               )}
             </button>
+            )}
           </div>
         </div>
+
+        {/* Duplicate Check Progress */}
+        {isCheckingDuplicates && (
+          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex justify-between mb-2">
+              <span className="text-sm font-medium text-blue-900">
+                {duplicateCheckProgress.step || 'Checking for duplicates...'}
+              </span>
+              <span className="text-sm text-blue-700">
+                Step {duplicateCheckProgress.current} / {duplicateCheckProgress.total}
+              </span>
+            </div>
+            <div className="w-full bg-blue-200 rounded-full h-2">
+              <div
+                className="h-2 rounded-full transition-all duration-300 bg-blue-600"
+                style={{ width: `${(duplicateCheckProgress.current / duplicateCheckProgress.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Upload Progress */}
         {loading && (
@@ -971,6 +1141,29 @@ export function NumberPoolUpload() {
             <div className="flex justify-between items-center text-xs text-gray-600">
               <span>Elapsed Time: {Math.floor(uploadElapsedTime / 60)}m {uploadElapsedTime % 60}s</span>
               <span>Speed: {uploadElapsedTime > 0 ? (uploadProgress.success / uploadElapsedTime).toFixed(1) : '0'} numbers/sec</span>
+            </div>
+          </div>
+        )}
+
+        {/* Upload Summary */}
+        {uploadSummary && !loading && (
+          <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-lg">
+            <h4 className="text-sm font-medium text-gray-900 mb-3">
+              Upload Summary
+            </h4>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center">
+                <p className="text-2xl font-bold text-green-600">{uploadSummary.uploaded}</p>
+                <p className="text-xs text-gray-600 mt-1">Uploaded</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold text-red-600">{uploadSummary.failed}</p>
+                <p className="text-xs text-gray-600 mt-1">Failed</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-bold text-orange-600">{uploadSummary.duplicated}</p>
+                <p className="text-xs text-gray-600 mt-1">Duplicated</p>
+              </div>
             </div>
           </div>
         )}

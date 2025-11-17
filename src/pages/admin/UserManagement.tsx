@@ -214,8 +214,9 @@ export function UserManagement() {
         return (a.name || '').localeCompare(b.name || '');
       }
       
-      // For regular teams, sort alphabetically
-      const teamDiff = aTeamName.localeCompare(bTeamName);
+      // For regular teams, sort alphabetically with numeric sorting (ETS-1, ETS-2, ETS-11)
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+      const teamDiff = collator.compare(aTeamName, bTeamName);
       if (teamDiff !== 0) return teamDiff;
       
       // Within the same team, put managers first
@@ -295,6 +296,20 @@ export function UserManagement() {
         id: doc.id,
         ...doc.data()
       })) as Team[];
+      
+      // Sort teams alphabetically by name with proper numeric sorting (ETS-1, ETS-2, ETS-11, etc.)
+      // Using Intl.Collator for proper natural sorting
+      const collator = new Intl.Collator(undefined, { 
+        numeric: true, 
+        sensitivity: 'base' 
+      });
+      
+      teamsData.sort((a, b) => {
+        const nameA = (a.name || '').trim();
+        const nameB = (b.name || '').trim();
+        return collator.compare(nameA, nameB);
+      });
+      
       setTeams(teamsData);
     } catch (error) {
       console.error('Error loading teams:', error);
@@ -1007,10 +1022,11 @@ export function UserManagement() {
           {Object.entries(groupedUsers)
             .filter(([teamId]) => teamId !== 'no-team') // Filter out unassigned team first
             .sort(([aId, aUsers], [bId, bUsers]) => {
-              // Sort teams alphabetically by name
+              // Sort teams alphabetically by name with numeric sorting (ETS-1, ETS-2, ETS-11)
               const aTeamName = getTeamName(aId);
               const bTeamName = getTeamName(bId);
-              return aTeamName.localeCompare(bTeamName);
+              const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+              return collator.compare(aTeamName, bTeamName);
             })
             .map(([teamId, teamUsers]) => {
               if (teamUsers.length === 0 || teamId === 'special-users') return null;

@@ -97,22 +97,28 @@ export class SmartPagination<T> {
   }
 
   private async updateTotalCount() {
-    // Try to get count from stats service first (much faster)
+    // Extract category from filters if present
+    const categoryFilter = this.options.filters.find(f => f.field === 'category');
+    const category = categoryFilter?.value;
+
+    // Try stats service first (fast, pre-calculated)
     try {
-      const stats = await numberPoolStatsService.getStats();
-      if (stats) {
-        this.totalItems = stats.totalItems;
-        this.totalPages = Math.ceil(this.totalItems / this.options.pageSize);
+      const totalItems = await numberPoolStatsService.getTotalItems(category);
+      const totalPages = await numberPoolStatsService.getTotalPages(this.options.pageSize, category);
+      
+      if (totalItems > 0 && totalPages > 0) {
+        this.totalItems = totalItems;
+        this.totalPages = totalPages;
         return;
       }
     } catch (error) {
       // swallow and fallback
     }
 
-    // Fallback to count query if stats service fails
+    // Fallback to count query if stats service fails or returns zero
     const countSnap = await getCountFromServer(this.buildBaseQuery());
     this.totalItems = Number(countSnap.data().count || 0);
-    this.totalPages = Math.ceil(this.totalItems / this.options.pageSize);
+    this.totalPages = Math.ceil(this.totalItems / this.options.pageSize) || 1; // At least 1 page
     // no-op
   }
 
@@ -145,8 +151,16 @@ export class SmartPagination<T> {
 
     await this.updateTotalCount();
 
+    // Allow navigation to any positive page number - Firebase will handle empty results
+    // This prevents issues with cached/stale totalPages values
+    if (pageNumber > this.totalPages && this.totalPages > 0) {
+      // Re-fetch total count in case it's stale
+      await this.updateTotalCount();
+      
+      // If still invalid after refresh, throw error
     if (pageNumber > this.totalPages) {
       throw new Error('Page does not exist');
+      }
     }
 
     this.currentPage = pageNumber;

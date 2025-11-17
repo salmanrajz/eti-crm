@@ -390,6 +390,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   const [searchResults, setSearchResults] = useState<NumberPoolType[]>([]);
+  // Store full filtered search results to avoid re-searching when only pageSize changes
+  const fullSearchResultsRef = useRef<NumberPoolType[]>([]);
+  const recoveryAttemptedRef = useRef(false);
   const [isSearching, setIsSearching] = useState(false);
   const [searchCurrentPage, setSearchCurrentPage] = useState(1);
   const [searchTotalPages, setSearchTotalPages] = useState(0);
@@ -407,6 +410,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(propSelectedCategory || null);
   const [statsTotalPages, setStatsTotalPages] = useState<number>(0);
+  const [statsTotalItems, setStatsTotalItems] = useState<number>(0);
   const [sortConfig, setSortConfig] = useState<{ field: SortField; direction: SortDirection }>({
     field: 'number',
     direction: 'asc'
@@ -473,9 +477,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [teams, setTeams] = useState<Array<{ id: string; name: string }>>([]);
   const [showDuplicateNumberDialog, setShowDuplicateNumberDialog] = useState(false);
   const [duplicateNumberData, setDuplicateNumberData] = useState<{ existingNumber: string; newNumber: string } | null>(null);
-  const [showSetOpenDialog, setShowSetOpenDialog] = useState(false);
-  const [numberToSetOpen, setNumberToSetOpen] = useState<NumberPoolType | null>(null);
-  const [isSettingOpen, setIsSettingOpen] = useState(false);
   
   // Bulk delete functionality states
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -486,7 +487,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   // Debounced search term for performance optimization
-  const debouncedSearchTerm = useDebounce(searchTerm, 300);
+  // Optimized debounce: 200ms for faster search feel (reduced from 300ms)
+  const debouncedSearchTerm = useDebounce(searchTerm, 200);
 
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
@@ -515,9 +517,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
    * Handles persistent state management across navigation and loading timeout protection
    */
   useEffect(() => {
+    if (!user?.id) {
+      // User not logged in, clear state and listeners
+      recoveryAttemptedRef.current = false;
+      numberPoolManager.destroy();
+      setNumbers([]);
+      setCurrentPage(1);
+      setTotalPages(0);
+      setTotalItems(0);
+      setHasNextPage(false);
+      setHasPreviousPage(false);
+      setAllNumbersForReserved([]);
+      setLoading(false);
+      return;
+    }
+    
+    let isMounted = true;
+    let loadingCheckInterval: NodeJS.Timeout | null = null;
+    let stuckStateTimeout: NodeJS.Timeout | null = null;
     
     // Subscribe to manager state
     const unsubscribe = numberPoolManager.subscribe((state) => {
+      if (!isMounted) return;
+      
       setNumbers(state.numbers);
       setCurrentPage(state.currentPage);
       setTotalPages(state.totalPages);
@@ -534,22 +556,118 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     });
 
     // Initialize manager (will use cache if available)
+    // The manager will detect user changes and force reset internally
     numberPoolManager.setUserRole(user?.role);
-    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role);
-
-    // Add timeout protection for stuck loading states
-    const loadingTimeout = setTimeout(() => {
-      if (loading) {
-        console.warn('NumberPool loading timeout detected - forcing reset');
-        numberPoolManager.forceResetLoading();
+    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role).catch(error => {
+      console.error('[NumberPool] Initialization error:', error);
+      if (isMounted) {
+        setLoading(false);
       }
-    }, 35000); // 35 second timeout
+    });
+
+    // Watchdog: Check for stuck loading state every 10 seconds
+    let stuckCheckCount = 0;
+    let loadingStartTime: number | null = null;
+    
+    loadingCheckInterval = setInterval(() => {
+      if (!isMounted) return;
+      
+      // Get current state from manager directly
+      const currentState = numberPoolManager.getState();
+      const currentLoading = currentState?.isLoading ?? false;
+      
+      // Track when loading starts
+      if (currentLoading && loadingStartTime === null) {
+        loadingStartTime = Date.now();
+      } else if (!currentLoading && loadingStartTime !== null) {
+        // Loading stopped, reset tracking
+        loadingStartTime = null;
+        stuckCheckCount = 0;
+        return;
+      }
+      
+      // If loading has been true for more than 30 seconds, force reset
+      if (currentLoading && loadingStartTime !== null) {
+        const loadingDuration = Date.now() - loadingStartTime;
+        stuckCheckCount++;
+        
+        if (stuckCheckCount >= 3 || loadingDuration > 30000) { // 3 checks = 30 seconds OR if duration > 30s
+        numberPoolManager.forceResetLoading();
+          stuckCheckCount = 0;
+          loadingStartTime = null; // Reset to allow new cycle
+        }
+      }
+    }, 10000); // Check every 10 seconds
+
+    // Fallback timeout: If still loading after 40 seconds, force reset
+    stuckStateTimeout = setTimeout(() => {
+      if (isMounted) {
+        const currentState = numberPoolManager.getState();
+        if (currentState?.isLoading) {
+          if (!user?.id) {
+            numberPoolManager.destroy();
+            setLoading(false);
+            return;
+          }
+          numberPoolManager.forceReset();
+          // Re-initialize after reset
+          setTimeout(() => {
+            if (isMounted && user?.id) {
+              numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role).catch(() => {
+                // Silent error handling
+              });
+            }
+          }, 1000);
+        }
+      }
+    }, 40000); // 40 second hard timeout
 
     return () => {
+      isMounted = false;
       unsubscribe();
-      clearTimeout(loadingTimeout);
+      if (loadingCheckInterval) {
+        clearInterval(loadingCheckInterval);
+      }
+      if (stuckStateTimeout) {
+        clearTimeout(stuckStateTimeout);
+      }
     };
-  }, [selectedCategory, pageSize, user?.id, loading]);
+  }, [selectedCategory, pageSize, user?.id, user?.role]); // Removed 'loading' to prevent circular dependency
+
+  /**
+   * Helper function to refresh a specific number's data after an action
+   * Fetches fresh data from Firestore and updates both numbers and search results
+   */
+  const refreshNumberData = useCallback(async (numberId: string) => {
+    try {
+      const numberDoc = await getDoc(doc(db, 'numberPool', numberId));
+      if (numberDoc.exists()) {
+        const data = numberDoc.data();
+        const refreshedNumber: NumberPoolType = {
+          id: numberDoc.id,
+          ...data,
+          lastStatusChange: data.lastStatusChange?.toDate?.() || data.lastStatusChange,
+          reservedAt: data.reservedAt?.toDate?.() || data.reservedAt,
+          expiresAt: data.expiresAt?.toDate?.() || data.expiresAt,
+          claimingStartedAt: data.claimingStartedAt?.toDate?.() || data.claimingStartedAt,
+          claimingExpiresAt: data.claimingExpiresAt?.toDate?.() || data.claimingExpiresAt
+        } as NumberPoolType;
+        
+        // Update both numbers and search results
+        setNumbers(prev => prev.map(n => n.id === numberId ? refreshedNumber : n));
+        setSearchResults(prev => prev.map(n => n.id === numberId ? refreshedNumber : n));
+        
+        // Also update full search results cache
+        if (fullSearchResultsRef.current.length > 0) {
+          fullSearchResultsRef.current = fullSearchResultsRef.current.map(n => 
+            n.id === numberId ? refreshedNumber : n
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Error refreshing number data:', error);
+    }
+  }, []);
 
   /**
    * Component cleanup effect - handles cleanup of listeners and timers
@@ -578,6 +696,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     if (!debouncedSearchTerm.trim()) {
       setSearchResults([]);
       setIsSearching(false);
+      fullSearchResultsRef.current = [];
       // Reset search pagination state
       setSearchCurrentPage(1);
       setSearchTotalPages(0);
@@ -594,21 +713,53 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return;
     }
 
+    // Check if we have cached results and only pageSize/page changed (not search term or category)
+    // This allows fast re-pagination without re-searching
+    const hasCachedResults = fullSearchResultsRef.current.length > 0;
+    const lastSearchTerm = (fullSearchResultsRef.current as any).lastSearchTerm;
+    const lastCategory = (fullSearchResultsRef.current as any).lastCategory;
+    const searchTermChanged = hasCachedResults && debouncedSearchTerm !== lastSearchTerm;
+    const categoryChanged = hasCachedResults && lastCategory !== selectedCategory;
+
+    if (hasCachedResults && !searchTermChanged && !categoryChanged) {
+      // Use cached results - just re-slice for new pageSize/page
+      const filteredResults = fullSearchResultsRef.current;
+      const startIndex = (searchCurrentPage - 1) * pageSize;
+      const endIndex = startIndex + pageSize;
+      const paginatedResults = filteredResults.slice(startIndex, endIndex);
+      
+      setSearchResults(paginatedResults);
+      setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
+      setSearchTotalItems(filteredResults.length);
+      setSearchHasNextPage(endIndex < filteredResults.length);
+      setSearchHasPreviousPage(searchCurrentPage > 1);
+      setIsSearching(false);
+      return;
+    }
+
     const performSearch = async () => {
       setIsSearching(true);
       const termAtStart = debouncedSearchTerm;
       
       try {
         // Use unified search for consistent results
+        // Always fetch 200 results regardless of page size for comprehensive search
+        const searchLimit = 200;
+        
         const result = await unifiedSearch.search(debouncedSearchTerm, {
           category: selectedCategory || 'all',
-          limit: pageSize * 2, // Get more results for pagination
+          limit: searchLimit,
           includeStale: false
         });
         
         // Avoid race conditions: only apply if term hasn't changed
         if (termAtStart === debouncedSearchTerm) {
           const filteredResults = filterByVisibility(result.data);
+          
+          // Store full filtered results for fast re-pagination
+          fullSearchResultsRef.current = filteredResults;
+          (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+          (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           
           // Calculate pagination for current page
           const startIndex = (searchCurrentPage - 1) * pageSize;
@@ -621,8 +772,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           setSearchHasNextPage(endIndex < filteredResults.length);
           setSearchHasPreviousPage(searchCurrentPage > 1);
           
-          // Log search performance
-          console.log(`Search "${debouncedSearchTerm}": ${result.source} source, ${result.data.length} results, complete: ${result.isComplete}`);
+          // Search complete - results ready for display
         }
       } catch (error) {
         console.error('Search error:', error);
@@ -637,78 +787,25 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     performSearch();
   }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize]);
 
-  // Realtime listeners for search results (keep visible searched items live) - OPTIMIZED
+  // DISABLED: Real-time listeners for search results
+  // Search already fetches fresh data, no need for additional real-time listeners
+  // This prevents "400 Bad Request" errors from too many concurrent Firebase connections
   useEffect(() => {
+    // Cleanup any existing search listeners
     const unsubs = searchVisibleUnsubsRef.current;
-
-    if (!debouncedSearchTerm.trim()) {
-      // Clear any existing search listeners when search is cleared
       for (const fn of unsubs.values()) fn();
       unsubs.clear();
-      return;
-    }
-
-    // OPTIMIZATION: Limit search listeners to prevent performance issues on mobile
-    if (searchResults.length > 10) { // Reduced from 20 for mobile performance
-      console.log('Too many search results, limiting listeners for mobile performance');
-      return;
-    }
-
-    const ids = new Set(searchResults.map(n => n.id));
-
-    // Remove listeners for docs no longer in search results
-    for (const [id, fn] of unsubs.entries()) {
-      if (!ids.has(id)) {
-        fn();
-        unsubs.delete(id);
-      }
-    }
-
-    // Attach listeners for newly visible search docs
-    searchResults.forEach(n => {
-      if (unsubs.has(n.id)) return;
-      const unsub = onSnapshot(doc(db, 'numberPool', n.id), (snap) => {
-        if (!snap.exists()) {
-          setSearchResults(prev => prev.filter(x => x.id !== n.id));
-          // Also reflect in numbers if present
-          setNumbers(prev => prev.filter(x => x.id !== n.id));
-          return;
-        }
-        const d = snap.data();
-        const updated: NumberPoolType = {
-          id: snap.id,
-          ...d,
-          lastStatusChange: d.lastStatusChange?.toDate?.() || d.lastStatusChange,
-          reservedAt: d.reservedAt?.toDate?.() || d.reservedAt,
-          expiresAt: d.expiresAt?.toDate?.() || d.expiresAt,
-          claimingStartedAt: d.claimingStartedAt?.toDate?.() || d.claimingStartedAt,
-          claimingExpiresAt: d.claimingExpiresAt?.toDate?.() || d.claimingExpiresAt
-        } as NumberPoolType;
-        setSearchResults(prev => prev.map(x => (x.id === updated.id ? updated : x)));
-        // Optionally keep base numbers in sync too
-        setNumbers(prev => prev.map(x => (x.id === updated.id ? updated : x)));
-      }, (error) => {
-        // ✅ FIX: Handle permission errors gracefully during logout
-        if (error.code === 'permission-denied') {
-          // User logged out or lost permissions - cleanup silently
-          return;
-        }
-        
-        console.error('Error in NumberPool search listener:', error);
-      });
-      unsubs.set(n.id, unsub);
-    });
-
-    // Cleanup on unmount
+    
     return () => {
       for (const fn of unsubs.values()) fn();
       unsubs.clear();
     };
-  }, [debouncedSearchTerm, searchResults]);
+  }, []); // Run once on mount/unmount only
 
   // Load stats for total pages (OPTIMIZED) - Mobile performance
   useEffect(() => {
     let isMounted = true;
+    let unsubStats: (() => void) | undefined;
     
     const loadStats = async () => {
       try {
@@ -722,9 +819,37 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     };
 
     loadStats();
+    // Subscribe to live updates and hydrate when stats change
+    unsubStats = numberPoolStatsService.subscribeToStats(async (stats) => {
+      if (!isMounted) return;
+      const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined);
+      const totalItems = await numberPoolStatsService.getTotalItems(selectedCategory || undefined);
+      if (isMounted) {
+        setStatsTotalPages(totalPages);
+        setStatsTotalItems(totalItems || 0);
+      }
+    });
+
+    // Refresh on tab focus and on upload invalidation to bypass stale cache
+    const onFocus = () => {
+      numberPoolStatsService.clearCache();
+      loadStats();
+    };
+    const onVis = () => { if (document.visibilityState === 'visible') onFocus(); };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'npInvalidate') {
+        numberPoolStatsService.clearCache();
+        loadStats();
+      }
+    };
+    window.addEventListener('visibilitychange', onVis);
+    window.addEventListener('storage', onStorage);
     
     return () => {
       isMounted = false;
+      if (unsubStats) unsubStats();
+      window.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('storage', onStorage);
     };
   }, [pageSize, selectedCategory]);
 
@@ -868,14 +993,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         hasPreviousPage: searchHasPreviousPage
       };
     }
+    // When a category is selected, use actual pagination totalPages (from count query)
+    // Stats service doesn't have category-specific page counts
+    if (selectedCategory) {
     return {
       currentPage,
-      totalPages: statsTotalPages > 0 ? statsTotalPages : totalPages,
+        totalPages,
       totalItems,
       hasNextPage,
       hasPreviousPage
     };
-  }, [debouncedSearchTerm, searchCurrentPage, searchTotalPages, searchTotalItems, searchHasNextPage, searchHasPreviousPage, currentPage, totalPages, totalItems, hasNextPage, hasPreviousPage, statsTotalPages]);
+    }
+    // For "all categories" view, prefer stats service (faster)
+    return {
+      currentPage,
+      totalPages: statsTotalPages > 0 ? statsTotalPages : totalPages,
+      totalItems: statsTotalItems > 0 ? statsTotalItems : totalItems,
+      hasNextPage,
+      hasPreviousPage
+    };
+  }, [debouncedSearchTerm, searchCurrentPage, searchTotalPages, searchTotalItems, searchHasNextPage, searchHasPreviousPage, currentPage, totalPages, totalItems, hasNextPage, hasPreviousPage, statsTotalPages, statsTotalItems, selectedCategory]);
 
   // Compute reservation cap state from the dedicated reservedNumbers listener
   useEffect(() => {
@@ -1255,16 +1392,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       if (number.status === 'activated') return false;
     }
 
-    // Category filter
-    if (selectedCategory && number.category !== selectedCategory) return false;
+    // Category filter is handled server-side by numberPoolManager
+    // No need to filter client-side as manager already returns filtered results
 
     // Team visibility for agents
     if (user?.role === 'agent' && user.teamId) {
       if (number.teamVisibility && number.teamVisibility !== user.teamId) return false;
     }
 
-    // Search filter
-    if (searchTerm) {
+    // Search filter (only when actively searching, not for category changes)
+    if (searchTerm && debouncedSearchTerm) {
       const searchLower = searchTerm.toLowerCase();
       const matches =
         number.number.toLowerCase().includes(searchLower) ||
@@ -1274,7 +1411,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
 
     return true;
-  }, [isAdmin, user?.role, user?.teamId, selectedCategory, searchTerm]);
+  }, [isAdmin, user?.role, user?.teamId, searchTerm, debouncedSearchTerm]);
 
   const computeSorted = useCallback((list: NumberPoolType[]) => {
     const result = [...list];
@@ -1365,6 +1502,54 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
     return orderedNumbers; // Use orderedNumbers instead of numbers
   }, [debouncedSearchTerm, searchResults, orderedNumbers]);
+
+  // Auto-recovery: if nothing is visible but stats indicate there are items, attempt a re-initialize
+  // Only trigger if we're not currently loading and haven't just initialized
+  useEffect(() => {
+    // Only attempt recovery if:
+    // 1. Not currently loading
+    // 2. Display is empty
+    // 3. Stats show items exist
+    // 4. User is logged in
+    // 5. Haven't already attempted recovery for this state
+    if (!user?.id) {
+      recoveryAttemptedRef.current = false;
+      return;
+    }
+
+    if (!loading && displayNumbers.length === 0 && (statsTotalItems > 0)) {
+      const currentState = numberPoolManager.getState();
+      // Don't recover if we just reset or are initializing
+      if (currentState?.isLoading) {
+        return;
+      }
+      
+      // Prevent multiple recovery attempts
+      if (recoveryAttemptedRef.current) {
+        return;
+      }
+      
+      recoveryAttemptedRef.current = true;
+      
+      // Use a gentler approach - just re-initialize instead of force reset
+      setTimeout(() => {
+        if (user?.id) {
+          // Mark as not initialized so it will reload
+          numberPoolManager.initialize(selectedCategory, pageSize, user.id, user.role).catch(() => {
+            recoveryAttemptedRef.current = false; // Allow retry on error
+          }).finally(() => {
+            // Reset recovery flag after a delay to allow future recoveries if needed
+            setTimeout(() => {
+              recoveryAttemptedRef.current = false;
+            }, 5000);
+          });
+        }
+      }, 1000);
+    } else {
+      // Reset recovery flag if conditions change
+      recoveryAttemptedRef.current = false;
+    }
+  }, [loading, displayNumbers.length, statsTotalItems, selectedCategory, pageSize, user?.id, user?.role]);
 
   // Use displayNumbers instead of paginatedNumbers for the new pagination system
   const paginatedNumbers = displayNumbers;
@@ -1523,6 +1708,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           `Reserved number for 24 hours`
         );
         
+        // Refresh with latest data from Firestore
+        await refreshNumberData(numberToReserve.id);
+        
         toast.success('Number reserved successfully');
       }
       
@@ -1556,103 +1744,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     setShowReleaseDialog(true);
   }
 
-  function handleSetOpen(number: NumberPoolType) {
-    if (!isCoordinator) return;
-    
-    setNumberToSetOpen(number);
-    setShowSetOpenDialog(true);
-  }
-
-  async function confirmSetOpen() {
-    if (!numberToSetOpen) return;
-    
-    setIsSettingOpen(true);
-    try {
-      // Show loading state
-      const numberRef = doc(db, 'numberPool', numberToSetOpen.id);
-      
-      // Get old data for logging
-      const oldData = {
-        status: numberToSetOpen.status,
-        reservedBy: numberToSetOpen.reservedBy,
-        reservedAt: numberToSetOpen.reservedAt,
-        expiresAt: numberToSetOpen.expiresAt,
-        claimingAgentId: numberToSetOpen.claimingAgentId,
-        claimingStartedAt: numberToSetOpen.claimingStartedAt,
-        claimingExpiresAt: numberToSetOpen.claimingExpiresAt,
-        originalAgentId: numberToSetOpen.originalAgentId,
-        originalReservedAt: numberToSetOpen.originalReservedAt,
-        originalExpiresAt: numberToSetOpen.originalExpiresAt,
-        claimQueue: numberToSetOpen.claimQueue,
-        claimCount: numberToSetOpen.claimCount
-      };
-      
-      // Update the number status to open
-      await updateDoc(numberRef, {
-        status: 'open' as NumberStatus,
-        reservedBy: null,
-        reservedAt: null,
-        expiresAt: null,
-        lastStatusChange: serverTimestamp(),
-        claimingAgentId: null,
-        claimingStartedAt: null,
-        claimingExpiresAt: null,
-        originalAgentId: null,
-        originalReservedAt: null,
-        originalExpiresAt: null,
-        claimQueue: [],
-        claimCount: 0
-      });
-
-      // Log the set open action
-      await logNumberAction(
-        numberToSetOpen.id,
-        numberToSetOpen.number || '',
-        'opened',
-        oldData,
-        { status: 'open' },
-        `Set number to open (cleared all reservations and claims)`
-      );
-
-      // Update local state
-      const updatedNumber: NumberPoolType = {
-        ...numberToSetOpen,
-        status: 'open' as NumberStatus,
-        reservedBy: undefined,
-        reservedAt: undefined,
-        expiresAt: undefined,
-        lastStatusChange: new Date(),
-        claimingAgentId: undefined,
-        claimingStartedAt: undefined,
-        claimingExpiresAt: undefined,
-        originalAgentId: undefined,
-        originalReservedAt: undefined,
-        originalExpiresAt: undefined,
-        claimQueue: [],
-        claimCount: 0
-      };
-
-      setNumbers(prev => prev.map(n => 
-        n.id === numberToSetOpen.id ? updatedNumber : n
-      ));
-
-      // Remove from reserved numbers if it was there
-      setReservedNumbers(prev => prev.filter(n => n.id !== numberToSetOpen.id));
-      setAllNumbersForReserved(prev => 
-        prev.map(n => n.id === numberToSetOpen.id ? updatedNumber : n)
-      );
-
-      toast.success('Number set to open successfully');
-      
-      // Close dialog and reset state
-      setShowSetOpenDialog(false);
-      setNumberToSetOpen(null);
-    } catch (error) {
-      toast.error('Failed to set number to open');
-    } finally {
-      setIsSettingOpen(false);
-    }
-  }
 
   async function confirmRelease() {
     if (!selectedNumber) return;
@@ -1686,7 +1777,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       );
       setHasReservation(false);
       setShowReleaseDialog(false);
-      toast.success('Number released successfully');
 
       // If there's a claiming agent, transfer ownership to them immediately
       if (selectedNumber.claimingAgentId) {
@@ -1848,6 +1938,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           `Released number (no claiming agent)`
         );
       }
+
+      // Refresh with latest data from Firestore after all updates complete
+      await refreshNumberData(selectedNumber.id);
+      
+      toast.success('Number released successfully');
+      
     } catch (error) {
       // Revert local state if backend update fails
       setNumbers(prev => prev.map(n => 
@@ -2150,6 +2246,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
       // Success - close dialog and show success message
       setShowClaimDialog(false);
+      
+      // Refresh with latest data from Firestore
+      await refreshNumberData(numberToClaim.id);
+      
       toast.success(['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) 
         ? 'Number Striked successfully' 
         : 'Number claimed successfully');
@@ -2196,6 +2296,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         });
         
         console.log(`Claim timeout triggered for number ${number.id} - Real-time function will process immediately`);
+        
+        // Refresh with latest data from Firestore
+        await refreshNumberData(number.id);
         
         // Show user feedback
         toast.success('Claim expiry processed - number will transfer automatically');
@@ -2572,34 +2675,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     );
   };
 
-  // Add new function to handle changing status to open
-  const handleChangeToOpen = async (number: NumberPoolType) => {
-    if (!isAdmin()) return;
-
-    try {
-      const numberRef = doc(db, 'numberPool', number.id);
-      const now = new Date();
-
-      const updateData = {
-        status: 'open' as NumberStatus,
-        reservedBy: null,
-        reservedAt: null,
-        expiresAt: null,
-        lastStatusChange: now,
-        claimingAgentId: null,
-        claimingStartedAt: null,
-        claimingExpiresAt: null,
-        originalAgentId: null,
-        originalReservedAt: null,
-        originalExpiresAt: null
-      };
-
-      await updateDoc(numberRef, updateData);
-      toast.success('Number status changed to open');
-    } catch (error) {
-      toast.error('Failed to change number status');
-    }
-  };
 
   if (loading) {
     return (
@@ -2899,17 +2974,40 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               )}
               {/* Manual Refresh Button */}
               <button
-                onClick={() => numberPoolManager.manualRefresh()}
-                className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-400 hover:text-indigo-500 transition-colors"
+                onClick={async () => {
+                  try {
+                    // If there's active search, clear it first to avoid conflicts
+                    if (debouncedSearchTerm.trim()) {
+                      setSearchTerm('');
+                      setSearchResults([]);
+                      setIsSearching(false);
+                      fullSearchResultsRef.current = [];
+                      // Small delay to let search clear before refreshing
+                      await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    // Then refresh the number pool with timeout protection
+                    const refreshPromise = numberPoolManager.manualRefresh();
+                    const timeoutPromise = new Promise((_, reject) => 
+                      setTimeout(() => reject(new Error('Refresh timeout')), 10000)
+                    );
+                    await Promise.race([refreshPromise, timeoutPromise]);
+                  } catch (error) {
+                    // If refresh fails or times out, ensure loading state is cleared
+                    numberPoolManager.forceResetLoading();
+                    toast.error('Refresh failed or timed out');
+                  }
+                }}
+                className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Refresh data (real-time updates active)"
+                disabled={loading && !debouncedSearchTerm.trim()}
               >
-                <RefreshCw className="h-4 w-4" />
+                <RefreshCw className={`h-4 w-4 ${loading && !debouncedSearchTerm.trim() ? 'animate-spin' : ''}`} />
               </button>
               {debouncedSearchTerm.trim() && (
                 <div className="mt-1 text-xs text-gray-500 pl-12">
                   {isSearching ? 'Searching…' : (
                     <>
-                      Found {searchResults.length} result{searchResults.length === 1 ? '' : 's'}
+                      Found {fullSearchResultsRef.current.length} result{fullSearchResultsRef.current.length === 1 ? '' : 's'}
                       {numberPoolManager.getPreSearchPage() > 1 && (
                         <span className="ml-2 text-blue-600">
                           (Will return to page {numberPoolManager.getPreSearchPage()})
@@ -3286,7 +3384,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             group: group.trim(),
                             status: 'open',
                             visibleToFreelancers: true, // Default to visible for single number additions
-                            lastStatusChange: serverTimestamp(),
+                            lastStatusChange: new Date('2025-07-05'), // Baseline for "never touched" numbers
+                            createdAt: serverTimestamp(),
                             reservationCount: 0,
                             claimCount: 0
                           };
@@ -4089,14 +4188,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                               {reservingNumbers.has(number.id) ? 'Reserving...' : checkingReserveId === number.id ? 'Checking...' : 'Reserve'}
             </motion.button>
           )}
-          {(number.status === 'pending_verification' || 
+          {/* Strike button - Only visible to agents */}
+          {user?.role === 'agent' && (number.status === 'pending_verification' || 
             number.status === 'assigned' || 
             number.status === 'verified' || 
             number.status === 'follow_up') && 
                             number.reservedBy !== user?.id && 
                             !((number as any).claims || []).some((claim: any) => claim.userId === user?.id && claim.status === 'pending') &&
-                            !agentLeadNumberIds.has(number.id) &&
-                            (
+                            !agentLeadNumberIds.has(number.id) && (
             <motion.button
                               whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
                               whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
@@ -4117,7 +4216,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                               {claimingNumbers.has(number.id) ? 'Striking...' : 'Strike'}
             </motion.button>
           )}
-          {(number.status === 'pending_verification' || 
+          {/* Striked status - Only visible to agents */}
+          {user?.role === 'agent' && (number.status === 'pending_verification' || 
             number.status === 'assigned' || 
             number.status === 'verified' || 
             number.status === 'follow_up') && 
@@ -4129,7 +4229,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               Striked
             </motion.span>
           )}
-          {number.status === 'reserved' && 
+          {/* Claim button - Only visible to agents */}
+          {user?.role === 'agent' && number.status === 'reserved' && 
                            number.reservedBy !== user?.id && 
                            number.claimingAgentId !== user?.id && (
             <motion.button
@@ -4169,18 +4270,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               Release
             </motion.button>
           )}
-          {/* Coordinator can set any number to open */}
-                          {isCoordinator && number.status !== 'open' && (
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-                              onClick={() => handleSetOpen(number)}
-              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-green-50 to-emerald-100 text-emerald-600 rounded-lg hover:from-green-100 hover:to-emerald-200 transition-all duration-200 group ring-1 ring-emerald-100 relative z-20"
-            >
-              <CheckCircle2 className="h-4 w-4 mr-1.5" />
-              Set Open
-            </motion.button>
-          )}
                           {(isAdmin() || (number.claimingAgentId && (user?.id === number.claimingAgentId || user?.id === number.reservedBy))) && (
             <motion.button
                               whileHover={{ scale: chattingNumbers.has(number.id) ? 1 : 1.05 }}
@@ -4210,19 +4299,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                               {renderStatusCheck(number)}
             </>
           )}
-                          {isAdmin() && number.status !== 'open' && (
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-                              onClick={() => handleChangeToOpen(number)}
-              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-emerald-50 to-green-50 text-emerald-600 rounded-lg hover:from-emerald-100 hover:to-green-100 transition-all duration-200 group ring-1 ring-emerald-100 relative z-20"
-            >
-              <CheckCircle2 className="h-4 w-4 mr-1.5" />
-              Set Open
-            </motion.button>
-          )}
           {/* Edit button for coordinators and admins */}
-                        {(isAdmin() || isCoordinator) && (
+          {/* Edit is only available for: rejected, pending_verification, follow_verification, open, reserved */}
+          {/* Edit is NOT available for: verified, activated, assigned, later */}
+                        {(isAdmin() || isCoordinator) && 
+            ['rejected', 'pending_verification', 'follow_verification', 'open', 'reserved'].includes(number.status) && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
@@ -4249,7 +4330,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             <div className="flex items-center space-x-4">
               <div className="text-sm text-gray-700">
                 {debouncedSearchTerm.trim() ? (
-                  `Showing ${searchResults.length} search results`
+                  `Showing ${searchResults.length} of ${fullSearchResultsRef.current.length} search results`
+                ) : selectedCategory ? (
+                  `${selectedCategory}: Page ${displayPagination.currentPage} of ${displayPagination.totalPages} (${displayPagination.totalItems} total)`
                 ) : (
                   `Page ${displayPagination.currentPage} of ${displayPagination.totalPages} (${displayPagination.totalItems} total)`
                 )}
@@ -4606,112 +4689,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 setSelectedNumberForChat(null);
               }}
             />
-          )}
-        </AnimatePresence>
-
-        {/* Set Open Confirmation Dialog */}
-        <AnimatePresence>
-          {showSetOpenDialog && numberToSetOpen && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            >
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0, y: 20 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.9, opacity: 0, y: 20 }}
-                transition={{ type: 'spring', duration: 0.5, bounce: 0.3 }}
-                className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-auto overflow-hidden border border-gray-100"
-              >
-                {/* Header */}
-                <div className="bg-gradient-to-r from-orange-500 to-red-500 px-6 py-4 text-white">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-xl font-bold tracking-tight">Set Number to Open</h2>
-                      <p className="text-orange-100 text-sm">This action will clear all reservations and claims</p>
-                    </div>
-                    <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
-                      <AlertTriangle className="h-6 w-6" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Content */}
-                <div className="px-6 py-6">
-                  <div className="text-center">
-                    <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-orange-100 mb-4">
-                      <AlertTriangle className="h-6 w-6 text-orange-600" />
-                    </div>
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                      Warning: This action cannot be undone
-                    </h3>
-                    <p className="text-gray-600 mb-4">
-                      Setting number <span className="font-semibold text-gray-900">{numberToSetOpen.number}</span> to open will:
-                    </p>
-                    <ul className="text-left text-sm text-gray-600 space-y-2 mb-6">
-                      <li className="flex items-center">
-                        <X className="h-4 w-4 text-red-500 mr-2 flex-shrink-0" />
-                        Clear all reservations and claims
-                      </li>
-                      <li className="flex items-center">
-                        <X className="h-4 w-4 text-red-500 mr-2 flex-shrink-0" />
-                        Remove the number from any agent's reserved list
-                      </li>
-                      <li className="flex items-center">
-                        <X className="h-4 w-4 text-red-500 mr-2 flex-shrink-0" />
-                        Reset all claiming timers and queues
-                      </li>
-                      <li className="flex items-center">
-                        <CheckCircle className="h-4 w-4 text-green-500 mr-2 flex-shrink-0" />
-                        Make the number available for new reservations
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="px-6 py-4 bg-gray-50 flex flex-col sm:flex-row justify-end gap-3">
-                  <motion.button
-                    whileHover={{ scale: isSettingOpen ? 1 : 1.02 }}
-                    whileTap={{ scale: isSettingOpen ? 1 : 0.98 }}
-                    onClick={() => {
-                      setShowSetOpenDialog(false);
-                      setNumberToSetOpen(null);
-                    }}
-                    disabled={isSettingOpen}
-                    className="px-4 py-2 text-sm font-semibold text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Cancel
-                  </motion.button>
-                  <motion.button
-                    whileHover={{ scale: isSettingOpen ? 1 : 1.02 }}
-                    whileTap={{ scale: isSettingOpen ? 1 : 0.98 }}
-                    onClick={confirmSetOpen}
-                    disabled={isSettingOpen}
-                    className="px-4 py-2 text-sm font-semibold text-white bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="flex items-center justify-center">
-                      {isSettingOpen ? (
-                        <>
-                          <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          Setting Open...
-                        </>
-                      ) : (
-                        <>
-                          <AlertTriangle className="h-4 w-4 mr-2" />
-                          Set to Open
-                        </>
-                      )}
-                    </div>
-                  </motion.button>
-                </div>
-              </motion.div>
-            </motion.div>
           )}
         </AnimatePresence>
         </motion.div>

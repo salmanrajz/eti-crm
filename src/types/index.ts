@@ -119,6 +119,7 @@ export interface NumberPool {
   reservedBy?: string;
   reservedAt?: Date;
   lastStatusChange: Date;
+  createdAt?: Date; // Timestamp when the number was added to the pool
   expiresAt?: Date; // For reserved numbers
   claimingAgentId?: string;
   claimingStartedAt?: Date;
@@ -245,6 +246,7 @@ export interface Lead {
   verificationMedia: (string | VerificationMedia)[];
   customerNumbers?: CustomerNumber[];
   etisalatLeadId?: string;
+  scheduledFor?: Date; // Date when lead should appear in unassigned for coordinator
 }
 
 export interface ChatMessage {
