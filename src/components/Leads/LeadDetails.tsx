@@ -81,9 +81,8 @@ export function LeadDetails() {
     return () => unsubscribe();
   }, [id]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  // Removed auto-scroll on message changes - only scroll on page refresh
+  // Auto-scroll on new messages removed per user request
 
   async function loadLead() {
     try {
@@ -245,159 +244,7 @@ export function LeadDetails() {
       setMessages(prev => [...prev, message]);
       setNewMessage('');
 
-      // Scroll to the bottom
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-
-      // Get the manager's phone numbers if the lead has a manager
-      let managerPhoneNumbers: string[] = [];
-      if (lead?.managerId) {
-        try {
-         // console.log('Attempting to fetch manager with ID:', lead.managerId);
-         // console.log('Current lead data:', lead);
-          
-          // First try to get the manager from the users collection
-          const managerRef = doc(db, 'users', lead.managerId);
-          const managerDoc = await getDoc(managerRef);
-          
-          if (managerDoc.exists()) {
-            const managerData = managerDoc.data();
-          //  console.log('Found manager in users collection:', {
-          //    id: managerDoc.id,
-          //    ...managerData
-          //  });
-            
-            // Check if phoneNumbers exists and is an array
-            if (Array.isArray(managerData.phoneNumbers)) {
-              managerPhoneNumbers = managerData.phoneNumbers;
-            } else if (typeof managerData.phoneNumbers === 'string') {
-              // If it's a single string, convert to array
-              managerPhoneNumbers = [managerData.phoneNumbers];
-            } else if (managerData.phoneNumber) {
-              // Fallback to phoneNumber if phoneNumbers doesn't exist
-              managerPhoneNumbers = [managerData.phoneNumber];
-            }
-
-            if (managerPhoneNumbers.length === 0) {
-              console.log('No phone number found for manager. WhatsApp notifications will not be sent.');
-            }
-
-           // console.log('Manager phone numbers:', managerPhoneNumbers);
-          } else {
-           // console.log('Manager not found in users collection with ID:', lead.managerId);
-            
-            // If not found in users collection, try to get from the lead's manager data
-            if (lead.manager) {
-            //  console.log('Found manager in lead data:', lead.manager);
-              
-              if (Array.isArray(lead.manager.phoneNumbers)) {
-                managerPhoneNumbers = lead.manager.phoneNumbers;
-              } else if (typeof lead.manager.phoneNumbers === 'string') {
-                managerPhoneNumbers = [lead.manager.phoneNumbers];
-              } else if (lead.manager.phoneNumber) {
-                managerPhoneNumbers = [lead.manager.phoneNumber];
-              }
-
-              if (managerPhoneNumbers.length === 0) {
-               // console.log('No phone number found for manager in lead data. WhatsApp notifications will not be sent.');
-              }
-
-             // console.log('Manager phone numbers from lead data:', managerPhoneNumbers);
-            } else {
-             // console.log('Manager not found in either users collection or lead data. Lead managerId:', lead.managerId);
-            }
-          }
-        } catch (error) {
-         // console.error('Error fetching manager data:', error);
-          // Continue with the rest of the function even if manager data fetch fails
-        }
-      } else {
-      //  console.log('No manager ID found for lead');
-      }
-
-      // Only proceed with WhatsApp notifications if we have manager phone numbers
-      if (managerPhoneNumbers.length > 0) {
-        try {
-          // Send WhatsApp message to all manager's phone numbers
-      const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-      const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
-
-          // Send notifications to all manager's phone numbers
-          const notificationPromises = managerPhoneNumbers.map(async (phoneNumber) => {
-            //console.log('Sending WhatsApp to:', phoneNumber); // Debug log
-            try {
-              const response = await fetch(WHATSAPP_API_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-                  to: phoneNumber,
-          type: "template",
-          template: {
-            name: "leadupdate",
-            language: {
-              code: "en"
-            },
-            components: [
-              {
-                type: "body",
-                parameters: [
-                  {
-                    type: "text",
-                    text: lead?.customerName || "N/A"
-                  },
-                  {
-                    type: "text",
-                    text: lead?.customerNumber || "N/A"
-                  },
-                  {
-                    type: "text",
-                    text: lead?.plans?.[0]?.number || "N/A"
-                  },
-                  {
-                    type: "text",
-                            text: `${newMessage.trim()}`
-                  },
-                  {
-                    type: "text",
-                    text: user?.name || "N/A"
-                  },
-                  {
-                    type: "text",
-                    text: `${window.location.origin}/dashboard/leads/${id}`
-                  }
-                ]
-              }
-            ]
-          }
-        })
-      });
-
-              if (!response.ok) {
-                const errorData = await response.json();
-                console.error('WhatsApp API error:', {
-                  status: response.status,
-                  statusText: response.statusText,
-                  error: errorData
-                });
-                throw new Error(`WhatsApp API error: ${response.status} ${response.statusText}`);
-              }
-
-              await response.json();
-            } catch (error) {
-              console.error('Error sending WhatsApp message:', error);
-              throw error;
-            }
-          });
-
-          await Promise.all(notificationPromises);
-        } catch (error) {
-          console.error('Error in WhatsApp notification process:', error);
-          // Continue with the rest of the function even if WhatsApp fails
-        }
-      }
+      // Removed auto-scroll when sending message - only scroll on page refresh
 
       // Add the message to Firestore
       const docRef = await addDoc(collection(db, 'chatMessages'), {
@@ -408,6 +255,12 @@ export function LeadDetails() {
         createdAt: new Date(),
         readBy: [user.id]
       });
+
+      // Send WhatsApp notification to manager after message is added to chat
+      if (lead) {
+        const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
+        await sendChatMessageWhatsAppNotification(lead, newMessage.trim(), user.name || 'Unknown');
+      }
 
       // Update the local state with the real Firestore ID
       setMessages(prev => prev.map(msg => 
@@ -604,106 +457,6 @@ export function LeadDetails() {
         await Promise.all(updatePromises);
       }
 
-      // Get the manager's phone numbers if the lead has a manager
-      let managerPhoneNumbers: string[] = [];
-      if (lead?.managerId) {
-        try {
-          // First try to get the manager from the users collection
-          const managerRef = doc(db, 'users', lead.managerId);
-        const managerDoc = await getDoc(managerRef);
-          
-        if (managerDoc.exists()) {
-          const managerData = managerDoc.data();
-            if (Array.isArray(managerData.phoneNumbers)) {
-              managerPhoneNumbers = managerData.phoneNumbers;
-            } else if (typeof managerData.phoneNumbers === 'string') {
-              managerPhoneNumbers = [managerData.phoneNumbers];
-            } else if (managerData.phoneNumber) {
-              managerPhoneNumbers = [managerData.phoneNumber];
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching manager data:', error);
-          // Continue with the rest of the function even if manager data fetch fails
-        }
-      }
-
-      // Only proceed with WhatsApp notifications if we have manager phone numbers
-      if (managerPhoneNumbers.length > 0) {
-        try {
-        // Send WhatsApp message to all manager's phone numbers
-        const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-        const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
-
-        // Prepare update message based on what changed
-        let updateMessage = 'Lead updated';
-        if (updates.status) {
-          updateMessage = `Lead status changed to ${updates.status}`;
-        } else if (updates.notes) {
-          updateMessage = `Lead notes updated`;
-        } else if (updates.followUpDate) {
-          updateMessage = `Follow-up date updated to ${format(updates.followUpDate, 'MMM d, yyyy')}`;
-        }
-
-        // Send notifications to all manager's phone numbers
-          const notificationPromises = managerPhoneNumbers.map(phoneNumber => 
-            fetch(WHATSAPP_API_URL, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              messaging_product: "whatsapp",
-              to: phoneNumber,
-              type: "template",
-              template: {
-                name: "leadupdate",
-                language: {
-                  code: "en"
-                },
-                components: [
-                  {
-                    type: "body",
-                    parameters: [
-                      {
-                        type: "text",
-                        text: lead?.customerName || "N/A"
-                      },
-                      {
-                        type: "text",
-                        text: lead?.customerNumber || "N/A"
-                      },
-                      {
-                        type: "text",
-                        text: lead?.plans?.[0]?.number || "N/A"
-                      },
-                      {
-                        type: "text",
-                        text: `${updateMessage} by ${user.name}`
-                      },
-                      {
-                        type: "text",
-                        text: user?.name || "N/A"
-                      },
-                      {
-                        type: "text",
-                        text: `${window.location.origin}/dashboard/leads/${id}`
-                      }
-                    ]
-                  }
-                ]
-              }
-            })
-            })
-          );
-
-        await Promise.all(notificationPromises);
-        } catch (error) {
-          console.error('Error sending WhatsApp notifications:', error);
-          // Continue with the rest of the function even if WhatsApp fails
-        }
-      }
 
       // Send notification to verifiers when coordinator edits verified lead
       if (isCoordinatorEditingVerified) {
@@ -1056,7 +809,8 @@ export function LeadDetails() {
             </div>
           )}
 
-        {/* Chat Section */}
+        {/* Chat Section - Hide if lead is rejected or activated */}
+          {lead && lead.status !== 'rejected' && lead.status !== 'activated' && (
           <div className="bg-white rounded-lg shadow-lg overflow-hidden">
             <div className="px-3 sm:px-6 py-3 sm:py-4 border-b border-gray-200">
               <div className="flex items-center">
@@ -1077,7 +831,7 @@ export function LeadDetails() {
                     className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'}`}
                   >
                     <div
-                      className={`max-w-xs rounded-lg px-4 py-2 ${
+                      className={`max-w-[85%] rounded-lg px-4 py-2 ${
                         message.userId === user?.id
                           ? 'bg-indigo-600 text-white'
                           : 'bg-gray-100 text-gray-900'
@@ -1086,7 +840,7 @@ export function LeadDetails() {
                       <div className="text-xs font-medium mb-1">
                         {message.userId === user?.id ? 'You' : message.userRole}
                       </div>
-                      <div className="text-sm">{message.message}</div>
+                      <div className="text-sm whitespace-pre-wrap break-words">{message.message}</div>
                       <div className="text-xs mt-1 opacity-75">
                         {format(message.createdAt, 'MMM d, h:mm a')}
                       </div>
@@ -1115,6 +869,7 @@ export function LeadDetails() {
               </form>
             </div>
           </div>
+          )}
         </div>
       </div>
     </div>

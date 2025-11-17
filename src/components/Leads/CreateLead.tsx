@@ -13,7 +13,7 @@
  *    - Customer information collection (name, phone, address, demographics)
  *    - Number selection from available number pool with category filtering
  *    - Plan selection with dynamic benefits from Firebase configuration
- *    - Location-specific data (emirates, areas) for UAE market
+ *    - Location-specific data (emirates) for UAE market
  * 
  * 2. PHONE NUMBER VALIDATION
  *    - UAE-specific phone number validation (must start with "05")
@@ -42,6 +42,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { collection, addDoc, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
@@ -67,7 +68,9 @@ import {
   Users,
   Package,
   MessageSquare,
-  Building2
+  Building2,
+  XCircle,
+  Plus
 } from 'lucide-react';
 import { QuickNumberSelect } from './QuickNumberSelect';
 import { countryList } from '../../utils/countries';
@@ -83,11 +86,9 @@ import { getWhatsAppVerificationEnabled } from '../../utils/configService';
 
 /**
  * WhatsApp Business API configuration constants
- * Used for sending verification messages to customers
+ * These are now fetched from Firebase via configService
+ * Legacy constants removed - use getWhatsAppCredentials() from configService
  */
-const WHATSAPP_PHONE_NUMBER_ID = '176399048891733';
-const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
 
 // ===============================================================================
 // UAE LOCATION CONFIGURATION
@@ -107,19 +108,6 @@ const emirates = [
   'Fujairah'
 ];
 
-/**
- * Areas mapping for each emirate
- * Provides detailed location options within each emirate
- */
-const areas = {
-  'Abu Dhabi': ['Abu Dhabi City', 'Al Ain', 'Al Dhafra', 'Musaffah', 'Khalifa City'],
-  'Dubai': ['Deira', 'Bur Dubai', 'Dubai Marina', 'JLT', 'Downtown Dubai'],
-  'Sharjah': ['Al Majaz', 'Al Nahda', 'Al Qasimia', 'Al Taawun'],
-  'Ajman': ['Ajman City', 'Al Jurf', 'Al Rashidiya'],
-  'Umm Al Quwain': ['UAQ City', 'Al Salamah', 'Al Raas'],
-  'Ras Al Khaimah': ['RAK City', 'Al Hamra', 'Al Nakheel'],
-  'Fujairah': ['Fujairah City', 'Dibba', 'Al Faseel']
-};
 
 // ===============================================================================
 // FORM OPTIONS CONFIGURATION
@@ -129,7 +117,7 @@ const areas = {
  * Supported languages for customer communication
  * Reflects the multilingual nature of the UAE market
  */
-const languages = ['Arabic', 'English', 'Hindi', 'Urdu', 'Malayalam', 'Filipino', 'Bengali'];
+const languages = ['Arabic', 'English', 'Hindi/Urdu'];
 
 /**
  * Product types for lead categorization
@@ -264,6 +252,9 @@ interface PlanCategory {
 
 // Dynamic plan categories will be loaded from Firebase
 
+// LocalStorage key for saving form drafts
+const FORM_DRAFT_KEY = 'createLeadFormDraft';
+
 interface PlanSelection {
   numberId: string;
   number: string;
@@ -283,7 +274,6 @@ interface FormData {
   productType: string;
   gender: string;
   emirate: string;
-  area: string;
   hasEmirateId: boolean;
   advancePayment: boolean;
   language: string;
@@ -317,14 +307,31 @@ interface CreateLeadProps {
 // const INITIAL_LOAD_SIZE = 50;
 // const SEARCH_DEBOUNCE = 150;
 
+// Helper to load saved form draft from localStorage
+function loadFormDraft() {
+  try {
+    const saved = localStorage.getItem(FORM_DRAFT_KEY);
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (error) {
+    console.error('Error loading form draft:', error);
+  }
+  return null;
+}
+
 function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProps) {
   const navigate = useNavigate();
-  const { user } = useAuthStore();
+  const { user, isVerifier, isCoordinator } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [teamMembers, setTeamMembers] = useState<User[]>([]);
   const [formErrors, setFormErrors] = useState<FormErrors>({});
+  
+  // Load saved draft only if not editing
+  const savedDraft = !isEditing && !initialData ? loadFormDraft() : null;
+  
   const [selectedPlans, setSelectedPlans] = useState<PlanSelection[]>(
-    initialData?.plans || []
+    initialData?.plans || savedDraft?.selectedPlans || []
   );
   const [currentNumber, setCurrentNumber] = useState(
     initialData?.plans?.[0]?.number || ''
@@ -343,6 +350,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [planCategories, setPlanCategories] = useState<PlanCategoryGroup[]>([]);
   const [loadingPlans, setLoadingPlans] = useState(true);
   const [allPlans, setAllPlans] = useState<Plan[]>([]);
+  const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
+  const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
+  const [isCheckingNumber, setIsCheckingNumber] = useState(false);
 
   // Helper to normalize category names for comparison
   const normalizeCategory = useCallback((cat?: string): string => {
@@ -468,25 +478,24 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   }, [selectedCategory, allPlans]);
 
   const [formData, setFormData] = useState<FormData>({
-    customerName: initialData?.customerName || '',
-    customerNumber: initialData?.customerNumber || '',
-    customerAddress: initialData?.customerAddress || '',
-    country: initialData?.country || 'AE',
-    customerAge: initialData?.customerAge?.toString() || '',
-    productType: initialData?.productType || 'New',
-    gender: initialData?.gender || 'Male',
-    emirate: initialData?.emirate || 'Dubai',
-    area: initialData?.area || areas['Dubai'][0],
-    hasEmirateId: initialData?.hasEmirateId || false,
-    advancePayment: initialData?.advancePayment || false,
-    language: initialData?.language || 'English',
-    sharedWith: initialData?.sharedWith?.[0] || '',
-    locationUrl: initialData?.locationUrl || '',
-    confirmLocationUrl: initialData?.confirmLocationUrl || false,
-    startDate: initialData?.startDate ? format(initialData.startDate, 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd'),
-    startTime: initialData?.startTime || format(new Date(), 'HH:mm'),
-    numberType: initialData?.numberType || 'Standard',
-    remarks: (initialData?.remarks && initialData.remarks.trim() !== '') ? initialData.remarks : 'Please Verify'
+    customerName: initialData?.customerName || savedDraft?.formData?.customerName || '',
+    customerNumber: initialData?.customerNumber || savedDraft?.formData?.customerNumber || '',
+    customerAddress: initialData?.customerAddress || savedDraft?.formData?.customerAddress || '',
+    country: initialData?.country || savedDraft?.formData?.country || 'AE',
+    customerAge: initialData?.customerAge?.toString() || savedDraft?.formData?.customerAge || '',
+    productType: initialData?.productType || savedDraft?.formData?.productType || 'New',
+    gender: initialData?.gender || savedDraft?.formData?.gender || 'Male',
+    emirate: initialData?.emirate || savedDraft?.formData?.emirate || 'Dubai',
+    hasEmirateId: initialData?.hasEmirateId ?? savedDraft?.formData?.hasEmirateId ?? false,
+    advancePayment: initialData?.advancePayment ?? savedDraft?.formData?.advancePayment ?? false,
+    language: initialData?.language || savedDraft?.formData?.language || 'English',
+    sharedWith: initialData?.sharedWith?.[0] || savedDraft?.formData?.sharedWith || '',
+    locationUrl: initialData?.locationUrl || savedDraft?.formData?.locationUrl || '',
+    confirmLocationUrl: initialData?.confirmLocationUrl ?? savedDraft?.formData?.confirmLocationUrl ?? false,
+    startDate: initialData?.startDate ? format(initialData.startDate, 'yyyy-MM-dd') : (savedDraft?.formData?.startDate || format(new Date(), 'yyyy-MM-dd')),
+    startTime: initialData?.startTime || savedDraft?.formData?.startTime || format(new Date(), 'HH:mm'),
+    numberType: initialData?.numberType || savedDraft?.formData?.numberType || 'Standard',
+    remarks: (initialData?.remarks && initialData.remarks.trim() !== '') ? initialData.remarks : (savedDraft?.formData?.remarks || 'Please Verify')
   });
 
   const isNoNumberProduct = useMemo(() => {
@@ -503,7 +512,28 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     loadTeamMembers();
     loadPlanCategories();
     loadWhatsAppSetting();
+    
+    // Show notification if draft was loaded
+    if (savedDraft) {
+      toast.success('Draft form data restored', { duration: 3000 });
+    }
   }, [user, navigate, isEditing]);
+
+  // Auto-save form data to localStorage (only when creating new leads, not editing)
+  useEffect(() => {
+    if (isEditing) return; // Don't save when editing existing leads
+    
+    try {
+      const draftData = {
+        formData,
+        selectedPlans,
+        timestamp: new Date().toISOString()
+      };
+      localStorage.setItem(FORM_DRAFT_KEY, JSON.stringify(draftData));
+    } catch (error) {
+      console.error('Error saving form draft:', error);
+    }
+  }, [formData, selectedPlans, isEditing]);
 
   const loadWhatsAppSetting = async () => {
     try {
@@ -591,7 +621,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     });
   }, []);
 
-  const handleAddPlan = useCallback(() => {
+  const handleAddPlan = useCallback(async () => {
     if (!currentPlan || currentPlan === '') {
       toast.error('Please select a plan');
       setFormErrors(prev => ({
@@ -613,7 +643,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       const virtualId = `virtual-${label.toLowerCase()}`;
       const existingIndex = selectedPlans.findIndex(p => p.numberId === virtualId);
       if (existingIndex !== -1) {
-        setSelectedPlans(prev => prev.map((p, idx) => idx === existingIndex ? { ...p, plan: planName, category: selectedCategory } : p));
+        setSelectedPlans(prev => prev.map((p, idx) => idx === existingIndex ? { ...p, plan: planName, category: selectedCategory, group: 'G2' } : p));
         toast.success('Plan updated successfully');
         
       } else {
@@ -622,11 +652,13 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           number: label,
           plan: planName,
           category: selectedCategory,
-          group: undefined
+          group: 'G2' // Default to G2 for MNP and Prepaid to postpaid
         } as any]);
         
       }
       setCurrentPlan('');
+      // Reset number pool visibility so user can add more numbers
+      setShowNumberPool(true);
       setFormErrors(prev => {
         const { plans, ...rest } = prev;
         return rest;
@@ -649,6 +681,35 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         toast.success('Plan updated successfully');
         
       } else {
+        // Check number status before adding - verify it's not active
+        setIsCheckingNumber(true);
+        try {
+          toast.loading('Checking number status...', { id: 'number-check' });
+          const { NumberCheckService } = await import('../../services/numberCheckService');
+          const canReserve = await NumberCheckService.canReserveNumber(currentNumber);
+          toast.dismiss('number-check');
+          setIsCheckingNumber(false);
+          
+          if (!canReserve) {
+            // Number is active, show dialog
+            setActiveNumberInfo({
+              number: currentNumber,
+              etiStatus: 200, // ETI API returned 200 for active numbers
+              message: 'Number is active'
+            });
+            setShowNumberActiveDialog(true);
+            return;
+          }
+        } catch (error: any) {
+          console.error('Error checking number status:', error);
+          toast.dismiss('number-check');
+          setIsCheckingNumber(false);
+          toast.error('Failed to verify number status. Please try again.', {
+            duration: 3000
+          });
+          return;
+        }
+
         // Add new number with plan
         setSelectedPlans(prev => [...prev, {
           numberId: currentNumberData.id,
@@ -664,6 +725,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       setCurrentPlan('');
       setCurrentNumberData(null);
       setSelectedCategory('Standard');
+      // Reset number pool visibility so user can add more numbers
+      setShowNumberPool(true);
     } else {
       // If no number is selected, check if we have existing plans
       // Allow updating plan for the first existing plan if no number is selected
@@ -699,7 +762,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       return rest;
     });
     
-  }, [currentNumber, currentNumberData, currentPlan, selectedPlans]);
+  }, [currentNumber, currentNumberData, currentPlan, selectedPlans, selectedCategory, isNoNumberProduct, formData.productType]);
 
   const handleRemovePlan = useCallback((numberId: string) => {
     setSelectedPlans(prev => prev.filter(p => p.numberId !== numberId));
@@ -718,6 +781,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       return rest;
     });
   }, []);
+
+  const handleClearDraft = () => {
+    if (window.confirm('Are you sure you want to clear the saved draft and start fresh?')) {
+      try {
+        localStorage.removeItem(FORM_DRAFT_KEY);
+        toast.success('Draft cleared successfully');
+        // Reload the page to reset the form
+        window.location.reload();
+      } catch (error) {
+        console.error('Error clearing draft:', error);
+        toast.error('Failed to clear draft');
+      }
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent, isWhatsAppVerification = false) => {
     e.preventDefault();
@@ -751,6 +828,26 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     // Date & Time
     if (!formData.startDate) {
       errors.startDate = 'Date is required';
+    } else {
+      // Check if date is in the past
+      const selectedDate = new Date(formData.startDate);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      selectedDate.setHours(0, 0, 0, 0);
+      
+      if (selectedDate < today) {
+        errors.startDate = 'Date cannot be in the past';
+      } else if (selectedDate.getTime() === today.getTime() && formData.startTime) {
+        // If date is today, check if time is in the past
+        const [hours, minutes] = formData.startTime.split(':').map(Number);
+        const selectedDateTime = new Date();
+        selectedDateTime.setHours(hours, minutes, 0, 0);
+        const now = new Date();
+        
+        if (selectedDateTime < now) {
+          errors.startTime = 'Time cannot be in the past';
+        }
+      }
     }
     if (!formData.startTime) {
       errors.startTime = 'Time is required';
@@ -849,11 +946,16 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         customerAddress: formData.customerAddress,
         customerAge: parseInt(formData.customerAge),
         plans: selectedPlans.map((plan) => {
+          // Default to G2 for MNP and Prepaid to postpaid
+          const defaultGroup = (formData.productType === 'MNP' || formData.productType === 'Prepaid to postpaid') 
+            ? 'G2' 
+            : 'Standard';
+          
           const p: any = {
             numberId: plan.numberId,
             number: plan.number,
             plan: plan.plan,
-            group: plan.group || 'Standard',
+            group: plan.group || defaultGroup,
             type: plan.type || 'standard',
             status: 'pending_verification'
           };
@@ -887,6 +989,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         
         const docRef = await addDoc(collection(db, 'leads'), finalLeadData);
         
+        // Clear the form draft from localStorage on successful creation
+        try {
+          localStorage.removeItem(FORM_DRAFT_KEY);
+        } catch (error) {
+          console.error('Error clearing form draft:', error);
+        }
 
         // Update all numbers in the lead's plans
         const plans = finalLeadData.plans as Array<{
@@ -965,91 +1073,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
         }, 2000);
 
-        // Get manager's phone numbers for notification
-        let managerPhoneNumbers: string[] = [];
-        if (teamManagerId) {
-          try {
-            const managerRef = doc(db, 'users', teamManagerId);
-            const managerDoc = await getDoc(managerRef);
-            
-            if (managerDoc.exists()) {
-              const managerData = managerDoc.data();
-              if (Array.isArray(managerData.phoneNumbers)) {
-                managerPhoneNumbers = managerData.phoneNumbers;
-              } else if (typeof managerData.phoneNumbers === 'string') {
-                managerPhoneNumbers = [managerData.phoneNumbers];
-              } else if (managerData.phoneNumber) {
-                managerPhoneNumbers = [managerData.phoneNumber];
-              }
-            }
-          } catch (error) {
-          }
-        }
-
-        // Send WhatsApp notification to manager
-        if (managerPhoneNumbers.length > 0) {
-          for (const phoneNumber of managerPhoneNumbers) {
-            try {
-              const newleadResponse = await fetch(WHATSAPP_API_URL, {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  messaging_product: "whatsapp",
-                  to: phoneNumber,
-                  type: "template",
-                  template: {
-                    name: "newlead",
-                    language: {
-                      code: "en"
-                    },
-                    components: [
-                      {
-                        type: "body",
-                        parameters: [
-                          {
-                            type: "text",
-                            text: formData.customerName || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: formData.customerNumber || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: selectedPlans[0]?.number || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: "New Lead for verification"
-                          },
-                          {
-                            type: "text",
-                            text: user!.name || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: `${window.location.origin}/dashboard/leads/${docRef.id}`
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                })
-              });
-
-              if (!newleadResponse.ok) {
-              } else {
-                // Successfully sent notification
-              }
-            } catch (error) {
-            }
-          }
-        } else {
-        }
-
         // If WhatsApp verification is requested, mark method on lead and send the message
         if (isWhatsAppVerification) {
           try {
@@ -1058,7 +1081,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               whatsappInitiatedAt: new Date()
             });
           } catch (e) {
+            // Error updating lead with verification method
           }
+          
           // Format the phone number to ensure it has the country code
           let formattedNumber = formData.customerNumber;
           
@@ -1129,13 +1154,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           // Add the country code
           formattedNumber = `${countryCode}${formattedNumber}`;
           
-
-
           // Write routing map to ensure inbound replies map to this lead
           try {
             const routeDoc = fbDoc(db, 'whatsappRouting', formattedNumber.replace(/\D/g, ''));
             await setDoc(routeDoc, { leadId: docRef.id, sentAt: fbServerTimestamp() }, { merge: true });
           } catch (e) {
+            // Error creating WhatsApp routing map
           }
 
           // Get the selected plan details from Firebase
@@ -1143,47 +1167,45 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           let planDetails = null;
           
           if (selectedPlan) {
-            // Find the plan in our dynamic plans
-            const matchingPlan = planCategories
-              .flatMap(category => category.options)
-              .find(option => option.value === selectedPlan);
-            
-            if (matchingPlan) {
-              // Get the full plan details from Firebase
-              try {
-                const plansQuery = query(collection(db, 'plans'), where('name', '==', selectedPlan));
-                const plansSnapshot = await getDocs(plansQuery);
-                if (!plansSnapshot.empty) {
-                  const planDoc = plansSnapshot.docs[0];
-                  const planData = planDoc.data();
-                  planDetails = {
-                    amount: planData.amount || 'N/A',
-                    benefits: planData.benefits || 'N/A',
-                    duration: planData.duration || 'N/A'
-                  };
-                }
-              } catch (error) {
-                // Error fetching plan details
+            // Query Firebase directly using the plan name - don't require match in planCategories
+            try {
+              const plansQuery = query(collection(db, 'plans'), where('name', '==', selectedPlan));
+              const plansSnapshot = await getDocs(plansQuery);
+              
+              if (!plansSnapshot.empty) {
+                const planDoc = plansSnapshot.docs[0];
+                const planData = planDoc.data();
+                
+                planDetails = {
+                  amount: planData.amount || 'N/A',
+                  benefits: planData.benefits || 'N/A',
+                  duration: planData.duration || 'N/A'
+                };
               }
+            } catch (error) {
+              // Error fetching plan details from Firebase
             }
           }
           
           // If we have plan details, send WhatsApp message
           if (planDetails) {
-            // Log outbound verification message (rendered text with group-specific partner)
+            const group = selectedPlans?.[0]?.group || undefined;
+            
+            const { sendWhatsAppWithComponentsByGroup, resolveWhatsAppRoute } = await import('../../utils/whatsappRouter');
+            const routeConfig = await resolveWhatsAppRoute(group);
+            const { template } = routeConfig;
+            const dynamicTemplateName = template.templateName;
+            
+            // Log outbound verification message
             try {
-              const group = selectedPlans?.[0]?.group || undefined;
-              const { getPartnerLabel } = await import('../../utils/whatsappRouter');
-              const partnerLabel = getPartnerLabel(group);
               const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
               const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
+              
               await logOutboundVerificationMessage(
                 docRef.id,
                 formattedNumber,
-                'flow_template_temp',
+                dynamicTemplateName,
                 [
-                  user?.name || 'N/A',
-                  partnerLabel,
                   selectedPlans[0]?.number || 'N/A',
                   monthlyLabel,
                   planDetails.benefits,
@@ -1191,23 +1213,18 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 ]
               );
             } catch (e) {
+              // Error logging outbound message
             }
 
             try {
-              const group = selectedPlans?.[0]?.group || undefined;
-              const { sendWhatsAppWithComponentsByGroup, getPartnerLabel } = await import('../../utils/whatsappRouter');
-              const partnerLabel = getPartnerLabel(group);
-              // Preserve Flow-style template usage with button sub_type: 'flow'
-              await sendWhatsAppWithComponentsByGroup({
+              const payload = {
                 to: formattedNumber,
                 group,
-                templateName: 'flow_template_temp',
+                templateName: dynamicTemplateName,
                 components: [
                   {
                     type: 'body',
                     parameters: [
-                      { type: 'text', text: user?.name || 'N/A' },
-                      { type: 'text', text: partnerLabel },
                       { type: 'text', text: selectedPlans[0]?.number || 'N/A' },
                       { type: 'text', text: planDetails.amount },
                       { type: 'text', text: planDetails.benefits },
@@ -1220,7 +1237,11 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     index: 0
                   }
                 ]
-              });
+              };
+              
+              // Preserve Flow-style template usage with button sub_type: 'flow'
+              await sendWhatsAppWithComponentsByGroup(payload);
+              
               setSuccessMessage('Lead created and verification message sent to customer');
               setShowSuccessPopup(true);
               
@@ -1228,7 +1249,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               setTimeout(() => {
                 navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
               }, 2000);
-            } catch (e) {
+            } catch (e: any) {
               toast.error('Failed to send verification message to customer');
             }
           }
@@ -1318,7 +1339,53 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   onChange={(e) => {
                     // Only allow numeric input and max 8 digits (after "05")
                     const value = e.target.value.replace(/\D/g, '').slice(0, 8);
-                    setFormData(prev => ({ ...prev, customerNumber: '05' + value }));
+                    const fullNumber = '05' + value;
+                    setFormData(prev => ({ ...prev, customerNumber: fullNumber }));
+                    
+                    // Real-time validation: show error if user has entered something but less than 10 digits
+                    if (value.length > 0 && fullNumber.length < 10) {
+                      setFormErrors(prev => ({
+                        ...prev,
+                        customerNumber: 'Phone number must be at least 10 digits'
+                      }));
+                    } else if (value.length === 8 && !/^05\d{8}$/.test(fullNumber)) {
+                      setFormErrors(prev => ({
+                        ...prev,
+                        customerNumber: 'Phone number must be exactly 10 digits starting with 05'
+                      }));
+                    } else if (fullNumber.length === 10 && /^05\d{8}$/.test(fullNumber)) {
+                      // Clear error if valid (exactly 10 digits and matches pattern)
+                      setFormErrors(prev => {
+                        const { customerNumber, ...rest } = prev;
+                        return rest;
+                      });
+                    } else if (value.length === 0) {
+                      // Clear error if field is empty (let onBlur handle required validation)
+                      setFormErrors(prev => {
+                        const { customerNumber, ...rest } = prev;
+                        return rest;
+                      });
+                    }
+                  }}
+                  onBlur={(e) => {
+                    // Validate on blur as well
+                    const fullNumber = formData.customerNumber;
+                    if (!fullNumber || fullNumber.trim().length === 0) {
+                      setFormErrors(prev => ({
+                        ...prev,
+                        customerNumber: 'Customer number is required'
+                      }));
+                    } else if (fullNumber.length < 10) {
+                      setFormErrors(prev => ({
+                        ...prev,
+                        customerNumber: 'Phone number must be at least 10 digits'
+                      }));
+                    } else if (!/^05\d{8}$/.test(fullNumber.trim())) {
+                      setFormErrors(prev => ({
+                        ...prev,
+                        customerNumber: 'Phone number must be exactly 10 digits starting with 05'
+                      }));
+                    }
                   }}
                   className={`
                     block w-full pl-16 pr-3 py-2.5 sm:py-2 border rounded-lg shadow-sm focus:ring-2 focus:ring-offset-0 focus:outline-none transition-colors text-sm sm:text-base
@@ -1348,11 +1415,28 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             <FormInput
               label="Age"
               icon={User2}
-              type="number"
+              type="text"
               required
-              min="21"
+              maxLength={2}
+              inputMode="numeric"
               value={formData.customerAge}
-              onChange={(e) => setFormData(prev => ({ ...prev, customerAge: e.target.value }))}
+              onChange={(e) => {
+                // Allow only digits and limit to 2 characters
+                const digitsOnly = (e.target.value || '').replace(/\D/g, '').slice(0, 2);
+                setFormData(prev => ({ ...prev, customerAge: digitsOnly }));
+                // Live validate age and show error below the field
+                const parsed = parseInt(digitsOnly, 10);
+                setFormErrors(prev => ({
+                  ...prev,
+                  customerAge: !digitsOnly || digitsOnly.trim().length === 0
+                    ? 'Customer age is required'
+                    : Number.isNaN(parsed)
+                      ? 'Please enter a valid age'
+                      : parsed < 21
+                        ? 'Age must be 21 or above'
+                        : undefined
+                }));
+              }}
               error={formErrors.customerAge}
             />
 
@@ -1361,7 +1445,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               icon={Package}
               options={productTypes.map(type => ({ value: type, label: type }))}
               value={formData.productType}
+              disabled={!!isEditing}
               onChange={(e) => {
+                if (isEditing) return; // Lock product type when editing existing lead
                 const newType = e.target.value;
                 setFormData(prev => ({ ...prev, productType: newType }));
                 // Reset current selections when toggling type to avoid mismatches
@@ -1403,21 +1489,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 const newEmirate = e.target.value;
                 setFormData(prev => ({
                   ...prev,
-                  emirate: newEmirate,
-                  area: areas[newEmirate as keyof typeof areas][0]
+                  emirate: newEmirate
                 }));
               }}
-            />
-
-            <FormSelect
-              label="Area"
-              icon={MapPin}
-              options={areas[formData.emirate as keyof typeof areas].map(area => ({
-                value: area,
-                label: area
-              }))}
-              value={formData.area}
-              onChange={(e) => setFormData(prev => ({ ...prev, area: e.target.value }))}
             />
 
             <FormInput
@@ -1504,7 +1578,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                         onClick={() => setShowNumberPool(true)}
                         className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                       >
-                        Select Another Number
+                        {isEditing ? 'Add Another Number' : 'Select Another Number'}
                       </button>
                     )}
                   </div>
@@ -1543,6 +1617,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                       <p className="text-sm font-medium text-gray-900">{currentNumber}</p>
                       <p className="text-sm text-gray-500">{selectedCategory}</p>
                     </div>
+                    {!isEditing && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1555,6 +1630,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     >
                       Clear Selection
                     </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -1592,13 +1668,50 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   error={formErrors.plans}
               />
 
-              <button
+              <motion.button
                 type="button"
                 onClick={handleAddPlan}
-                className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                disabled={isCheckingNumber || !currentPlan || (!currentNumber && !isNoNumberProduct)}
+                whileHover={!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) ? { scale: 1.02 } : {}}
+                whileTap={!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) ? { scale: 0.98 } : {}}
+                className="relative w-full px-5 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 overflow-hidden shadow-lg shadow-indigo-500/25 group"
               >
-                {isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}
-              </button>
+                <AnimatePresence mode="wait">
+                  {isCheckingNumber ? (
+                    <motion.div
+                      key="checking"
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      className="flex items-center justify-center gap-2"
+                    >
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Checking Number...</span>
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="add"
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 5 }}
+                      className="flex items-center justify-center gap-2"
+                    >
+                      <Plus className="w-4 h-4 group-hover:rotate-90 transition-transform duration-300" />
+                      <span>{isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                
+                {/* Shimmer effect on hover */}
+                {!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) && (
+                  <motion.div
+                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                    initial={{ x: '-100%' }}
+                    whileHover={{ x: '100%' }}
+                    transition={{ duration: 0.6, ease: 'easeInOut' }}
+                  />
+                )}
+              </motion.button>
 
               {selectedPlans.length > 0 && (
                 <div className="mt-6">
@@ -1680,19 +1793,22 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               onChange={(e) => setFormData(prev => ({ ...prev, language: e.target.value }))}
             />
 
-            <FormSelect
-              label="Share With Team Member"
-              icon={Users}
-              options={[
-                { value: '', label: 'Select team member' },
-                ...teamMembers.map(member => ({
-                  value: member.id,
-                  label: `${member.name} (${member.role})`
-                }))
-              ]}
-              value={formData.sharedWith}
-              onChange={(e) => setFormData(prev => ({ ...prev, sharedWith: e.target.value }))}
-            />
+            {/* Hide "Share With Team Member" field from verifier and coordinator roles */}
+            {!isVerifier() && !isCoordinator() && (
+              <FormSelect
+                label="Share With Team Member"
+                icon={Users}
+                options={[
+                  { value: '', label: 'Select team member' },
+                  ...teamMembers.map(member => ({
+                    value: member.id,
+                    label: `${member.name} (${member.role})`
+                  }))
+                ]}
+                value={formData.sharedWith}
+                onChange={(e) => setFormData(prev => ({ ...prev, sharedWith: e.target.value }))}
+              />
+            )}
 
             <FormInput
               label="Date"
@@ -1700,7 +1816,32 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               type="date"
               required
               value={formData.startDate}
-              onChange={(e) => setFormData(prev => ({ ...prev, startDate: e.target.value }))}
+              onChange={(e) => {
+                const selectedDate = e.target.value;
+                setFormData(prev => ({ ...prev, startDate: selectedDate }));
+                
+                // If date is changed to today, validate time
+                if (selectedDate) {
+                  const date = new Date(selectedDate);
+                  const today = new Date();
+                  today.setHours(0, 0, 0, 0);
+                  date.setHours(0, 0, 0, 0);
+                  
+                  if (date.getTime() === today.getTime() && formData.startTime) {
+                    const [hours, minutes] = formData.startTime.split(':').map(Number);
+                    const selectedDateTime = new Date();
+                    selectedDateTime.setHours(hours, minutes, 0, 0);
+                    const now = new Date();
+                    
+                    if (selectedDateTime < now) {
+                      setFormErrors(prev => ({ ...prev, startTime: 'Time cannot be in the past' }));
+                    } else {
+                      setFormErrors(prev => ({ ...prev, startTime: '' }));
+                    }
+                  }
+                }
+              }}
+              min={new Date().toISOString().split('T')[0]}
               error={formErrors.startDate}
             />
 
@@ -1710,7 +1851,33 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               type="time"
               required
               value={formData.startTime}
-              onChange={(e) => setFormData(prev => ({ ...prev, startTime: e.target.value }))}
+              onChange={(e) => {
+                const selectedTime = e.target.value;
+                setFormData(prev => ({ ...prev, startTime: selectedTime }));
+                
+                // If date is today, validate that time is not in the past
+                if (formData.startDate && selectedTime) {
+                  const selectedDate = new Date(formData.startDate);
+                  const today = new Date();
+                  today.setHours(0, 0, 0, 0);
+                  selectedDate.setHours(0, 0, 0, 0);
+                  
+                  if (selectedDate.getTime() === today.getTime()) {
+                    const [hours, minutes] = selectedTime.split(':').map(Number);
+                    const selectedDateTime = new Date();
+                    selectedDateTime.setHours(hours, minutes, 0, 0);
+                    const now = new Date();
+                    
+                    if (selectedDateTime < now) {
+                      setFormErrors(prev => ({ ...prev, startTime: 'Time cannot be in the past' }));
+                    } else {
+                      setFormErrors(prev => ({ ...prev, startTime: '' }));
+                    }
+                  } else {
+                    setFormErrors(prev => ({ ...prev, startTime: '' }));
+                  }
+                }
+              }}
               error={formErrors.startTime}
             />
           </FormSection>
@@ -1771,6 +1938,16 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 >
                   Cancel
                 </button>
+                {savedDraft && (
+                  <button
+                    type="button"
+                    onClick={handleClearDraft}
+                    disabled={loading}
+                    className="px-4 py-2 text-sm font-medium text-orange-700 bg-orange-50 border border-orange-300 rounded-lg hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Clear Draft
+                  </button>
+                )}
                 <button
                   type="submit"
                   disabled={loading}
@@ -1802,6 +1979,36 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         message={successMessage}
         autoCloseDelay={2000}
       />
+
+      {/* Number Active Dialog */}
+      {showNumberActiveDialog && activeNumberInfo && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+            <div className="flex items-center justify-center mb-6">
+              <div className="p-3 rounded-full bg-red-100">
+                <XCircle className="h-8 w-8 text-red-600" />
+              </div>
+            </div>
+            <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+              Number Already Active
+            </h3>
+            <p className="text-gray-500 text-center mb-6">
+              The number <span className="font-semibold text-gray-900">{activeNumberInfo.number}</span> is currently active and cannot be attached to a lead.
+            </p>
+            <div className="flex justify-center">
+              <button
+                onClick={() => {
+                  setShowNumberActiveDialog(false);
+                  setActiveNumberInfo(null);
+                }}
+                className="px-6 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

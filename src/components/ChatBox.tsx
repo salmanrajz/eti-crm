@@ -238,7 +238,7 @@ export function ChatBox({ numberId, originalAgentId, claimingAgentId, onClose }:
                 }`}
               >
                 {renderUserInfo(message)}
-                <div>{message.message}</div>
+                <div className="whitespace-pre-wrap break-words">{message.message}</div>
               </div>
             </div>
           ))

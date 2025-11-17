@@ -58,6 +58,7 @@ const SEARCH_DEBOUNCE = 300;
 const MIN_SEARCH_LENGTH = 3;
 const SEARCH_LIMIT = 20;
 const SECONDARY_SCAN_LIMIT = 200; // broader scan to support substring matching
+//const INITIAL_LOAD_SIZE = 10; // Initial numbers to show when no search term
 
 const numberCategories = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'] as const;
 
@@ -307,8 +308,46 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
     async function setupSearchListener() {
       if (debouncedSearch) {
         unsubscribe = await searchNumbers(debouncedSearch);
-      } else {
+        return;
+      }
+
+      // No search term: show initial list for selected category up to INITIAL_LOAD_SIZE
+      try {
+        setLoading(true);
+        const initialQuery = query(
+          collection(db, 'numberPool'),
+          where('category', '==', selectedCategory),
+          where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned', 'reserved']),
+          orderBy('number', 'asc'),
+          limit(INITIAL_LOAD_SIZE)
+        );
+
+        unsubscribe = onSnapshot(initialQuery, (snapshot) => {
+          const available = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as NumberPool[];
+          // Combine: show user's reserved first, then fill with available non-duplicates up to INITIAL_LOAD_SIZE
+          const combined: NumberPool[] = [];
+          const seen = new Set<string>();
+          for (const n of reservedNumbers) {
+            if (!seen.has(n.id)) {
+              combined.push(n);
+              seen.add(n.id);
+            }
+          }
+          for (const n of available) {
+            if (combined.length >= INITIAL_LOAD_SIZE) break;
+            if (!seen.has(n.id)) {
+              combined.push(n);
+              seen.add(n.id);
+            }
+          }
+          setNumbers(combined);
+          setLoading(false);
+        }, () => {
+          setLoading(false);
+        });
+      } catch {
         setNumbers(reservedNumbers);
+        setLoading(false);
       }
     }
 
@@ -319,7 +358,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
         unsubscribe();
       }
     };
-  }, [debouncedSearch, searchNumbers, reservedNumbers]);
+  }, [debouncedSearch, searchNumbers, reservedNumbers, selectedCategory]);
 
   // Update the selection logic
   const isSelectable = (number: NumberPool) => {

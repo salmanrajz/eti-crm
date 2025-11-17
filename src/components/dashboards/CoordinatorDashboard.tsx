@@ -45,6 +45,7 @@ import { collection, query, where, getDocs, getDoc, doc, updateDoc, orderBy, add
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
+import { getWhatsAppCredentials } from '../../utils/configService';
 import { format, formatDistanceToNow } from 'date-fns';
 import {
   CheckCircle,
@@ -349,7 +350,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         id: doc.id,
         ...doc.data(),
         createdAt: doc.data().createdAt?.toDate(),
-        updatedAt: doc.data().updatedAt?.toDate()
+        updatedAt: doc.data().updatedAt?.toDate(),
+        scheduledFor: doc.data().scheduledFor?.toDate ? doc.data().scheduledFor.toDate() : doc.data().scheduledFor
       })) as Lead[];
 
       // Filter leads based on coordinator's group assignment
@@ -374,8 +376,21 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         lead => lead.status === 'follow_up' && lead.managerAssigned === true
       );
       
-      // Add manager-assigned verified and follow_up leads to filtered list if not already present
-      [...managerAssignedVerifiedLeads, ...managerAssignedFollowUpLeads].forEach(lead => {
+      // Include leads with scheduledFor matching today (marked "for later" by coordinator)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const scheduledForTodayLeads = coordinatorLeads.filter(lead => {
+        if (!lead.scheduledFor) return false;
+        const scheduledDate = lead.scheduledFor instanceof Date 
+          ? lead.scheduledFor 
+          : lead.scheduledFor.toDate ? lead.scheduledFor.toDate() : new Date(lead.scheduledFor);
+        scheduledDate.setHours(0, 0, 0, 0);
+        return scheduledDate.getTime() === today.getTime();
+      });
+      
+      // Add manager-assigned verified and follow_up leads, plus scheduled leads to filtered list if not already present
+      [...managerAssignedVerifiedLeads, ...managerAssignedFollowUpLeads, ...scheduledForTodayLeads].forEach(lead => {
         if (!filteredCoordinatorLeads.find(l => l.id === lead.id)) {
           filteredCoordinatorLeads.push(lead);
         }
@@ -401,10 +416,17 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       }, 0);
 
       // Calculate metrics from coordinator's leads only
-      // For "unassigned", count verified and follow_up leads with managerAssigned: true (these are unassigned to coordinators)
+      // For "unassigned", count verified and follow_up leads with managerAssigned: true, plus leads scheduled for today
       const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
         l => (l.status === 'verified' && l.managerAssigned === true) ||
-             (l.status === 'follow_up' && l.managerAssigned === true)
+             (l.status === 'follow_up' && l.managerAssigned === true) ||
+             (l.scheduledFor && (() => {
+               const scheduledDate = l.scheduledFor instanceof Date 
+                 ? l.scheduledFor 
+                 : l.scheduledFor.toDate ? l.scheduledFor.toDate() : new Date(l.scheduledFor);
+               scheduledDate.setHours(0, 0, 0, 0);
+               return scheduledDate.getTime() === today.getTime();
+             })())
       ).length;
       
       const metrics = {
@@ -427,10 +449,17 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         if (currentStatus === 'yesterday') {
           filteredLeads = filteredCoordinatorLeads.filter(lead => lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification');
         } else if (currentStatus === 'verified') {
-          // Show manager-assigned verified and follow_up leads (these appear in "Unassigned Leads" for coordinators)
+          // Show manager-assigned verified and follow_up leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
           filteredLeads = filteredCoordinatorLeads.filter(lead => 
             (lead.status === 'verified' && lead.managerAssigned === true) ||
-            (lead.status === 'follow_up' && lead.managerAssigned === true)
+            (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+            (lead.scheduledFor && (() => {
+              const scheduledDate = lead.scheduledFor instanceof Date 
+                ? lead.scheduledFor 
+                : lead.scheduledFor.toDate ? lead.scheduledFor.toDate() : new Date(lead.scheduledFor);
+              scheduledDate.setHours(0, 0, 0, 0);
+              return scheduledDate.getTime() === today.getTime();
+            })())
           );
         } else {
           filteredLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
@@ -596,8 +625,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             }
 
             if (managerPhoneNumbers.length > 0) {
-              const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-              const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
+              // Get WhatsApp credentials from Firebase
+              const whatsappCredentials = await getWhatsAppCredentials();
+              const WHATSAPP_API_URL = whatsappCredentials.apiUrl;
+              const WHATSAPP_ACCESS_TOKEN = whatsappCredentials.accessToken;
 
               for (const phoneNumber of managerPhoneNumbers) {
                 try {

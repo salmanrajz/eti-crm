@@ -69,7 +69,8 @@ import {
   FileText,
   X,
   DollarSign,
-  Phone
+  Phone,
+  AlertCircle
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Dialog, Transition } from '@headlessui/react';
@@ -135,6 +136,7 @@ interface MonthlyMetrics {
   activated: number;
   pendingAssignment: number;
   assigned: number;
+  nonVerified: number;
 }
 
 interface AgentTarget {
@@ -174,7 +176,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     rejected: 0,
     activated: 0,
     pendingAssignment: 0,
-    assigned: 0
+    assigned: 0,
+    nonVerified: 0
   });
   const [monthlyMetrics, setMonthlyMetrics] = useState<MonthlyMetrics>({
     totalLeads: 0,
@@ -183,7 +186,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     rejected: 0,
     activated: 0,
     pendingAssignment: 0,
-    assigned: 0
+    assigned: 0,
+    nonVerified: 0
   });
   const [loading, setLoading] = useState(true);
   const [teamMembers, setTeamMembers] = useState<User[]>([]);
@@ -242,7 +246,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
           rejected: 0,
           activated: 0,
           pendingAssignment: 0,
-          assigned: 0
+          assigned: 0,
+          nonVerified: 0
         });
         setMonthlyMetrics({
           totalLeads: 0,
@@ -251,7 +256,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
           rejected: 0,
           activated: 0,
           pendingAssignment: 0,
-          assigned: 0
+          assigned: 0,
+          nonVerified: 0
         });
         setTeamMembers([]);
         setAgentMetrics([]);
@@ -312,7 +318,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         rejected: 0,
         activated: 0,
         pendingAssignment: 0,
-        assigned: 0
+        assigned: 0,
+        nonVerified: 0
       };
 
       // Calculate monthly metrics
@@ -326,7 +333,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         rejected: 0,
         activated: 0,
         pendingAssignment: 0,
-        assigned: 0
+        assigned: 0,
+        nonVerified: 0
       };
 
       teamLeads.forEach(lead => {
@@ -341,6 +349,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
           teamMetrics.pendingAssignment++;
         }
         if (lead.status === 'assigned') teamMetrics.assigned++;
+        if (lead.status === 'follow_verification') teamMetrics.nonVerified++;
 
         // Monthly metrics - for most statuses, check if created in current month
         if (lead.createdAt && lead.createdAt >= startOfCurrentMonth && lead.createdAt <= endOfCurrentMonth) {
@@ -354,6 +363,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
             monthlyMetricsData.pendingAssignment++;
           }
           if (lead.status === 'assigned') monthlyMetricsData.assigned++;
+          if (lead.status === 'follow_verification') monthlyMetricsData.nonVerified++;
         }
       });
 
@@ -795,6 +805,15 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
       icon: XCircle,
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
+    },
+    {
+      name: 'Non-Verified Leads',
+      description: 'Follow-up verification required',
+      value: metrics.nonVerified,
+      href: '/dashboard/leads?status=follow_verification',
+      icon: AlertCircle,
+      color: 'bg-gradient-to-br from-amber-500 to-amber-600',
+      textColor: 'text-amber-600',
     },
   ];
 

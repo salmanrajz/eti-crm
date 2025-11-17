@@ -87,6 +87,11 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
       icon: '🔍',
       label: 'PENDING VERIFICATION'
     },
+    activated_non_verified: {
+      color: 'bg-amber-50 text-amber-700 border-amber-200',
+      icon: '⏱️',
+      label: 'ACTIVATED - PENDING VERIFICATION'
+    },
     verified: {
       color: 'bg-violet-50 text-violet-700 border-violet-200',
       icon: '✅',

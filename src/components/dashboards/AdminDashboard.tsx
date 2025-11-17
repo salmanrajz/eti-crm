@@ -3085,9 +3085,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             
             <div className="p-8">
               <div className="mb-6">
-                <h2 className="text-2xl font-bold text-gray-900 mb-2">Manager WhatsApp Numbers</h2>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">WhatsApp Notification Numbers</h2>
                 <p className="text-gray-600">
-                  Manage WhatsApp notification numbers for all managers across teams.
+                  Manage WhatsApp notification numbers for admins, coordinators, and managers.
                 </p>
               </div>
               

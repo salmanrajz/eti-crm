@@ -68,6 +68,7 @@ import { FormSection } from './FormSection';
 import { FormInput } from './FormInput';
 import { FormSelect } from './FormSelect';
 import { NumberSelect } from './NumberSelect';
+import { QuickNumberSelect } from './QuickNumberSelect';
 import clsx from 'clsx';
 import { MediaUpload } from './MediaUpload';
 import { SplitLead } from './SplitLead';
@@ -194,13 +195,15 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const navigate = useNavigate();
   const chatBoxRef = useRef<HTMLDivElement>(null);
   const pageEndRef = useRef<HTMLDivElement>(null);
+  const hasScrolledOnMountRef = useRef(false);
   const [showVerifyDialog, setShowVerifyDialog] = useState(false);
   const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'follow_verification' | null>(null);
   const [verificationNote, setVerificationNote] = useState('');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
-  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | 'later' | null>(null);
+  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | 'later' | 'reject' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
+  const [scheduledForDate, setScheduledForDate] = useState<string>('');
   const [showManagerAssignDialog, setShowManagerAssignDialog] = useState(false);
   const [managerNote, setManagerNote] = useState('');
   const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
@@ -219,15 +222,33 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [editablePasscode, setEditablePasscode] = useState<string>('');
   const [editableCategory, setEditableCategory] = useState<string>('');
 
-  // Prefill passcode, category, and group when opening Activate dialog
+  // New states for editable number and plan
+  const [editableNumber, setEditableNumber] = useState<string>('');
+  const [editableNumberId, setEditableNumberId] = useState<string>('');
+  const [editablePlan, setEditablePlan] = useState<string>('');
+  const [originalNumber, setOriginalNumber] = useState<string>('');
+  const [originalPlan, setOriginalPlan] = useState<string>('');
+  const [showNumberSelector, setShowNumberSelector] = useState(false);
+  const [allPlans, setAllPlans] = useState<{id: string; name: string; category: string}[]>([]);
+
+  // Prefill passcode, category, group, number, and plan when opening Activate dialog
   useEffect(() => {
     const prefill = async () => {
       if (!showCoordinatorDialog || coordinatorAction !== 'activate') return;
       try {
         const firstPlan = lead.plans?.[0];
         setEditableCategory(firstPlan?.category || '');
-        // Prefill group from existing plan
         setSelectedGroup(firstPlan?.group || '');
+        
+        // Set editable number and plan (and store originals)
+        const planNumber = firstPlan?.number || '';
+        const planName = firstPlan?.plan || '';
+        setEditableNumber(planNumber);
+        setEditableNumberId(firstPlan?.numberId || '');
+        setEditablePlan(planName);
+        setOriginalNumber(planNumber);
+        setOriginalPlan(planName);
+        
         if (firstPlan?.numberId && !firstPlan.numberId.startsWith('virtual-')) {
           const numberRef = doc(db, 'numberPool', firstPlan.numberId);
           const numberDoc = await getDoc(numberRef);
@@ -240,6 +261,10 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         } else {
           setEditablePasscode('');
         }
+        
+        // Load all plans for the dropdown
+        const plans = await getPlans();
+        setAllPlans(plans);
       } catch (_) {
         setEditablePasscode('');
       }
@@ -314,7 +339,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     isAdmin() ||
     isCoordinator()
   );
-  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'follow_verification');
+  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'follow_verification' || lead.status === 'activated_non_verified');
   const isUserCoordinator = isCoordinator();
   const isUserManager = isManager();
   // Manager can assign verified leads or follow_up leads that haven't been assigned yet
@@ -390,16 +415,20 @@ Language: ${lead.language || 'N/A'}`;
   };
 
   useEffect(() => {
-    // Auto scroll to chat box when component mounts
-    if (chatBoxRef.current) {
+    // Auto scroll to chat box only on page refresh (initial mount)
+    // Use hasScrolledOnMountRef to ensure it only happens once per page load
+    if (!hasScrolledOnMountRef.current && chatBoxRef.current) {
       chatBoxRef.current.scrollIntoView({ behavior: 'smooth' });
+      hasScrolledOnMountRef.current = true;
     }
   }, []);
 
   useEffect(() => {
-    // Auto scroll to end of page when component mounts
-    if (pageEndRef.current) {
+    // Auto scroll to end of page only on page refresh (initial mount)
+    // Use hasScrolledOnMountRef to ensure it only happens once per page load
+    if (!hasScrolledOnMountRef.current && pageEndRef.current) {
       pageEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      hasScrolledOnMountRef.current = true;
     }
   }, []);
 
@@ -470,7 +499,9 @@ Language: ${lead.language || 'N/A'}`;
     try {
       const leadRef = doc(db, 'leads', lead.id);
       
-      const leadStatus = verifyAction === 'verify' ? 'verified' 
+      // Handle activated_non_verified status - convert to activated when verified
+      let leadStatus = verifyAction === 'verify' ? 
+                      (lead.status === 'activated_non_verified' ? 'activated' : 'verified') 
                       : verifyAction === 'reject' ? 'rejected'
                       : 'follow_verification';
       
@@ -483,7 +514,7 @@ Language: ${lead.language || 'N/A'}`;
         verificationNotes: verificationNote,
         verificationMedia: verificationMedia,
         updatedAt: serverTimestamp(),
-        ...(leadStatus === 'verified' ? { verifiedAt: serverTimestamp() } : {})
+        ...(leadStatus === 'verified' || leadStatus === 'activated' ? { verifiedAt: serverTimestamp() } : {})
       });
 
       // Update all numbers in the lead's plans
@@ -579,14 +610,20 @@ Language: ${lead.language || 'N/A'}`;
         await Promise.all(updatePromises);
       }
 
+      // Fetch the latest lead data from Firestore to ensure we have the correct agentId
+      // This is important because if a verifier edited the lead, the component state might be stale
+      const leadDoc = await getDoc(leadRef);
+      const latestLeadData = leadDoc.exists() ? leadDoc.data() : null;
+      const agentId = latestLeadData?.agentId || lead.agentId;
+
       // Send notification to the agent
-      if (lead.agentId) {
+      if (agentId) {
         const statusMessage = leadStatus === 'verified' ? 'Lead Verified' : 
                             leadStatus === 'rejected' ? 'Lead Rejected' : 
                             'Lead Marked for Follow-up Verification';
         
         await addDoc(collection(db, 'notifications'), {
-          userId: lead.agentId,
+          userId: agentId,
           type: 'lead_verification',
           title: statusMessage,
           message: `${user?.name} has ${leadStatus === 'verified' ? 'verified' : 
@@ -601,16 +638,15 @@ Language: ${lead.language || 'N/A'}`;
 
         // Send WhatsApp notification to agent if they have a phone number
         try {
-          const agentRef = doc(db, 'users', lead.agentId);
+          const agentRef = doc(db, 'users', agentId);
           const agentDoc = await getDoc(agentRef);
           if (agentDoc.exists()) {
             const agentData = agentDoc.data();
             const agentPhone = agentData.phoneNumber || agentData.phoneNumbers?.[0];
             
             if (agentPhone) {
-              const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-              const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
-
+              // WhatsApp credentials are now fetched from Firebase via whatsappRouter.ts
+              // The sendWhatsAppTemplateByGroup function handles credentials automatically
               try {
                 const { sendWhatsAppTemplateByGroup, getPartnerLabel } = await import('../../utils/whatsappRouter');
                 const group = lead.plans?.[0]?.group || undefined;
@@ -639,98 +675,6 @@ Language: ${lead.language || 'N/A'}`;
         }
       }
 
-      // Send WhatsApp notification to manager
-      if (lead.managerId) {
-        try {
-          const managerRef = doc(db, 'users', lead.managerId);
-          const managerDoc = await getDoc(managerRef);
-          
-          if (managerDoc.exists()) {
-            const managerData = managerDoc.data();
-            let managerPhoneNumbers: string[] = [];
-            
-            if (Array.isArray(managerData.phoneNumbers)) {
-              managerPhoneNumbers = managerData.phoneNumbers;
-            } else if (typeof managerData.phoneNumbers === 'string') {
-              managerPhoneNumbers = [managerData.phoneNumbers];
-            } else if (managerData.phoneNumber) {
-              managerPhoneNumbers = [managerData.phoneNumber];
-            }
-
-            if (managerPhoneNumbers.length > 0) {
-              const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-              const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
-
-              for (const phoneNumber of managerPhoneNumbers) {
-                try {
-                  const response = await fetch(WHATSAPP_API_URL, {
-                    method: 'POST',
-                    headers: {
-                      'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-                      'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                      messaging_product: "whatsapp",
-                      to: phoneNumber,
-                      type: "template",
-                      template: {
-                        name: "leadupdate",
-                        language: {
-                          code: "en"
-                        },
-                        components: [
-                          {
-                            type: "body",
-                            parameters: [
-                              {
-                                type: "text",
-                                text: lead.customerName || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: lead.customerNumber || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: lead.plans?.[0]?.number || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: leadStatus === 'verified' ? 'Verified' : 
-                                      leadStatus === 'rejected' ? 'Rejected' : 
-                                      'Follow Up Required'
-                              },
-                              {
-                                type: "text",
-                                text: user?.name || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: `${window.location.origin}/dashboard/leads/${lead.id}`
-                              }
-                            ]
-                          }
-                        ]
-                      }
-                    })
-                  });
-
-                  if (!response.ok) {
-                    console.error('Failed to send WhatsApp notification to manager:', await response.text());
-                  } else {
-                   // console.log('Successfully sent WhatsApp notification to manager:', phoneNumber);
-                  }
-                } catch (error) {
-                  console.error('Error sending WhatsApp notification to manager:', error);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching manager data for WhatsApp notification:', error);
-        }
-      }
-
       // Add verification note as a chat message if it exists
       if (verificationNote && verificationNote.trim() !== '') {
         try {
@@ -741,6 +685,10 @@ Language: ${lead.language || 'N/A'}`;
             message: verificationNote.trim(),
             createdAt: new Date()
           });
+
+          // Send WhatsApp notification to manager after message is added to chat
+          const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
+          await sendChatMessageWhatsAppNotification(lead, verificationNote.trim(), user?.name || 'Unknown');
         } catch (chatError) {
           console.error('Error creating verification chat message:', chatError);
           // Don't fail verification action if chat message fails
@@ -784,6 +732,10 @@ Language: ${lead.language || 'N/A'}`;
             message: managerNote.trim(),
             createdAt: new Date()
           });
+          
+          // Send WhatsApp notification for the chat message
+          const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
+          await sendChatMessageWhatsAppNotification(lead, managerNote.trim(), user?.name || 'Unknown');
         } catch (chatError) {
           console.error('Error creating manager chat message:', chatError);
           // Don't fail manager action if chat message fails
@@ -842,14 +794,27 @@ Language: ${lead.language || 'N/A'}`;
         return;
       }
     }
+    if (coordinatorAction === 'later') {
+      if (!scheduledForDate) {
+        toast.error('Schedule For Date is required');
+        return;
+      }
+    }
 
     setIsCoordinatorActionProcessing(true);
     try {
       const leadRef = doc(db, 'leads', lead.id);
+      
+      // Check if number or plan was changed during activation
+      const numberChanged = coordinatorAction === 'activate' && editableNumber !== originalNumber;
+      const planChanged = coordinatorAction === 'activate' && editablePlan !== originalPlan;
+      const hasChanges = numberChanged || planChanged;
+      
       const updateData: Partial<Lead> = {
         status: coordinatorAction === 'assign' ? 'assigned' : 
-                coordinatorAction === 'activate' ? 'activated' : 
-                coordinatorAction === 'later' ? 'later' : 'follow_up',
+                coordinatorAction === 'activate' ? (hasChanges ? 'activated_non_verified' : 'activated') : 
+                coordinatorAction === 'later' ? 'later' : 
+                coordinatorAction === 'reject' ? 'rejected' : 'follow_up',
         coordinatorNotes: coordinatorNote,
         updatedAt: new Date()
       };
@@ -864,16 +829,46 @@ Language: ${lead.language || 'N/A'}`;
         (updateData as any).activationDate = new Date(activationDate);
         (updateData as any).srNumber = srNumber.trim();
         (updateData as any).serviceOrderNumber = serviceOrderNumber.trim();
-        // Update existing plan group attribute instead of creating a new field
+        
+        // Update existing plan with new number/plan if changed
         if (selectedGroup) {
           const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
-          (updateData as any).plans = currentPlans.map((p: any) => ({
+          (updateData as any).plans = currentPlans.map((p: any, index: number) => {
+            // Update first plan with potentially new number and plan
+            if (index === 0) {
+              return {
             ...p,
+                number: editableNumber,
+                numberId: editableNumberId,
+                plan: editablePlan,
+                category: editableCategory,
             group: selectedGroup
-          }));
+              };
+            }
+            return {
+              ...p,
+              group: selectedGroup
+            };
+          });
         }
+        
         if (editablePasscode) (updateData as any).activationPasscode = editablePasscode.trim();
         if (editableCategory) (updateData as any).activationCategory = editableCategory.trim();
+        
+        // If number or plan changed, store metadata
+        if (hasChanges) {
+          (updateData as any).changesAtActivation = {
+            numberChanged,
+            planChanged,
+            originalNumber: numberChanged ? originalNumber : null,
+            originalPlan: planChanged ? originalPlan : null,
+            newNumber: numberChanged ? editableNumber : null,
+            newPlan: planChanged ? editablePlan : null,
+            changedAt: new Date(),
+            changedBy: user!.id
+          };
+        }
+        
         if (srImageFile) {
           const toDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
@@ -893,10 +888,100 @@ Language: ${lead.language || 'N/A'}`;
       if (coordinatorAction === 'followup' || coordinatorAction === 'later') {
         updateData.managerAssigned = false;
       }
+      
+      // When marking as later, store the scheduled date
+      if (coordinatorAction === 'later' && scheduledForDate) {
+        updateData.scheduledFor = new Date(scheduledForDate);
+      }
 
       await updateDoc(leadRef, updateData);
 
-      // Update all numbers in the lead's plans (skip virtual entries like virtual-mnp)
+      // Handle number pool updates for activation with number change
+      if (coordinatorAction === 'activate' && numberChanged) {
+        // Release the old number (set back to available/open)
+        const oldNumberId = lead.plans?.[0]?.numberId;
+        if (oldNumberId && !oldNumberId.startsWith('virtual-')) {
+          const oldNumberRef = doc(db, 'numberPool', oldNumberId);
+          const oldNumberDoc = await getDoc(oldNumberRef);
+          if (oldNumberDoc.exists()) {
+            await updateDoc(oldNumberRef, {
+              status: 'open',
+              lastStatusChange: new Date(),
+              leadId: null,
+              reservedBy: null,
+              reservedAt: null
+            });
+            
+            await logNumberAction(
+              oldNumberId,
+              originalNumber,
+              'status_changed',
+              { status: oldNumberDoc.data()?.status, leadId: lead.id },
+              { status: 'open', leadId: null },
+              `Number released - Coordinator ${user?.name || 'Unknown'} changed to ${editableNumber} during activation`
+            );
+          }
+        }
+        
+        // Update the new number to activated or activated_non_verified
+        if (editableNumberId && !editableNumberId.startsWith('virtual-')) {
+          const newNumberRef = doc(db, 'numberPool', editableNumberId);
+          const newNumberDoc = await getDoc(newNumberRef);
+          if (newNumberDoc.exists()) {
+            await updateDoc(newNumberRef, {
+              status: hasChanges ? 'activated_non_verified' : 'activated',
+              lastStatusChange: new Date(),
+              leadId: lead.id,
+              ...(selectedGroup ? { group: selectedGroup } : {})
+            });
+            
+            await logNumberAction(
+              editableNumberId,
+              editableNumber,
+              'status_changed',
+              { status: newNumberDoc.data()?.status },
+              { status: hasChanges ? 'activated_non_verified' : 'activated', leadId: lead.id },
+              `Coordinator ${user?.name || 'Unknown'} activated with number change`
+            );
+          }
+        }
+      } else if (coordinatorAction === 'reject') {
+        // Reject flow - Set number status to 'open'
+        if (lead.plans && lead.plans.length > 0) {
+          const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+          const updatePromises = realPlans.map(async (plan) => {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) {
+              return;
+            }
+            const numberData = numberDoc.data();
+            await updateDoc(numberRef, {
+              status: 'open',
+              lastStatusChange: new Date(),
+              leadId: null,
+              reservedBy: null,
+              reservedAt: null,
+              claimingAgentId: null,
+              claimingStartedAt: null,
+              claimingExpiresAt: null,
+              claimQueue: []
+            });
+
+            await logNumberAction(
+              plan.numberId,
+              plan.number || '',
+              'status_changed',
+              { status: numberData?.status },
+              { status: 'open', leadId: null },
+              `Coordinator ${user?.name || 'Unknown'} rejected lead, set number to open`
+            );
+          });
+          
+          await Promise.all(updatePromises);
+        }
+      } else {
+        // Normal flow - Update all numbers in the lead's plans (skip virtual entries like virtual-mnp)
       if (lead.plans && lead.plans.length > 0) {
         const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
         const updatePromises = realPlans.map(async (plan) => {
@@ -924,6 +1009,7 @@ Language: ${lead.language || 'N/A'}`;
         });
         
         await Promise.all(updatePromises);
+        }
       }
 
       // Send notifications
@@ -935,14 +1021,19 @@ Language: ${lead.language || 'N/A'}`;
           userId: lead.agentId,
           type: 'lead_update',
           title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
-                 coordinatorAction === 'activate' ? 'Lead Activated' : 
-                 coordinatorAction === 'later' ? 'Lead Marked for Later' : 'Lead Marked for Follow-up',
+                 coordinatorAction === 'activate' ? (hasChanges ? 'Lead Activated - Pending Verification' : 'Lead Activated') : 
+                 coordinatorAction === 'later' ? 'Lead Marked for Later' : 
+                 coordinatorAction === 'reject' ? 'Lead Rejected' : 'Lead Marked for Follow-up',
           message: coordinatorAction === 'assign' ? 
             'Your lead has been assigned by the coordinator' : 
             coordinatorAction === 'activate' ?
-            'Your lead has been activated by the coordinator' :
+            (hasChanges ? 
+              `Your lead has been activated with changes (${numberChanged ? 'number' : ''}${numberChanged && planChanged ? ' and ' : ''}${planChanged ? 'plan' : ''}) - pending verifier approval` :
+              'Your lead has been activated by the coordinator') :
             coordinatorAction === 'later' ?
             'Your lead has been marked for later by the coordinator' :
+            coordinatorAction === 'reject' ?
+            'Your lead has been rejected by the coordinator' :
             'Your lead has been marked for follow-up by the coordinator',
           read: false,
           createdAt: new Date(),
@@ -960,13 +1051,16 @@ Language: ${lead.language || 'N/A'}`;
             type: 'lead_update',
             title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
                    coordinatorAction === 'activate' ? 'Lead Activated' : 
-                   coordinatorAction === 'later' ? 'Lead Marked for Later' : 'Lead Marked for Follow-up',
+                   coordinatorAction === 'later' ? 'Lead Marked for Later' : 
+                   coordinatorAction === 'reject' ? 'Lead Rejected' : 'Lead Marked for Follow-up',
             message: coordinatorAction === 'assign' ? 
               'A lead has been assigned by the coordinator' : 
               coordinatorAction === 'activate' ?
               'A lead has been activated by the coordinator' :
               coordinatorAction === 'later' ?
               'A lead has been marked for later by the coordinator' :
+              coordinatorAction === 'reject' ?
+              'A lead has been rejected by the coordinator' :
               'A lead has been marked for follow-up by the coordinator',
             read: false,
             createdAt: new Date(),
@@ -979,99 +1073,6 @@ Language: ${lead.language || 'N/A'}`;
 
         await Promise.all(notificationPromises);
 
-      // Send WhatsApp notification to manager
-      if (lead.managerId) {
-        try {
-          const managerRef = doc(db, 'users', lead.managerId);
-          const managerDoc = await getDoc(managerRef);
-          
-          if (managerDoc.exists()) {
-            const managerData = managerDoc.data();
-            let managerPhoneNumbers: string[] = [];
-            
-            if (Array.isArray(managerData.phoneNumbers)) {
-              managerPhoneNumbers = managerData.phoneNumbers;
-            } else if (typeof managerData.phoneNumbers === 'string') {
-              managerPhoneNumbers = [managerData.phoneNumbers];
-            } else if (managerData.phoneNumber) {
-              managerPhoneNumbers = [managerData.phoneNumber];
-            }
-
-            if (managerPhoneNumbers.length > 0) {
-              const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-              const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
-
-              for (const phoneNumber of managerPhoneNumbers) {
-                try {
-                  const response = await fetch(WHATSAPP_API_URL, {
-                    method: 'POST',
-                    headers: {
-                      'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-                      'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                      messaging_product: "whatsapp",
-                      to: phoneNumber,
-                      type: "template",
-                      template: {
-                        name: "leadupdate",
-                        language: {
-                          code: "en"
-                        },
-                        components: [
-                          {
-                            type: "body",
-                            parameters: [
-                              {
-                                type: "text",
-                                text: lead.customerName || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: lead.customerNumber || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: lead.plans?.[0]?.number || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: coordinatorAction === 'assign' ? 'Assigned' : 
-                                      coordinatorAction === 'activate' ? 'Activated' : 
-                                      coordinatorAction === 'later' ? 'Marked for Later' :
-                                      'Follow Up Required'
-                              },
-                              {
-                                type: "text",
-                                text: user?.name || "N/A"
-                              },
-                              {
-                                type: "text",
-                                text: `${window.location.origin}/dashboard/leads/${lead.id}`
-                              }
-                            ]
-                          }
-                        ]
-                      }
-                    })
-                  });
-
-                  if (!response.ok) {
-                    console.error('Failed to send WhatsApp notification to manager:', await response.text());
-                  } else {
-                    console.log('Successfully sent WhatsApp notification to manager:', phoneNumber);
-                  }
-                } catch (error) {
-                  console.error('Error sending WhatsApp notification to manager:', error);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching manager data for WhatsApp notification:', error);
-        }
-      }
-
       // For assignment, show formatted message instead of navigating away
       // Add coordinator note as a chat message if it exists
       if (coordinatorNote && coordinatorNote.trim() !== '') {
@@ -1083,6 +1084,10 @@ Language: ${lead.language || 'N/A'}`;
             message: coordinatorNote.trim(),
             createdAt: new Date()
           });
+
+          // Send WhatsApp notification to manager after message is added to chat
+          const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
+          await sendChatMessageWhatsAppNotification(lead, coordinatorNote.trim(), user?.name || 'Unknown');
         } catch (chatError) {
           console.error('Error creating coordinator chat message:', chatError);
           // Don't fail coordinator action if chat message fails
@@ -1101,10 +1106,12 @@ Language: ${lead.language || 'N/A'}`;
         toast.success(
           coordinatorAction === 'activate' ? 'Lead activated successfully' :
           coordinatorAction === 'later' ? 'Lead marked for later' :
+          coordinatorAction === 'reject' ? 'Lead rejected successfully' :
           'Lead marked for follow-up'
         );
         setShowCoordinatorDialog(false);
         setCoordinatorNote('');
+        setScheduledForDate('');
         setCoordinatorAction(null);
         navigate('/dashboard/leads');
       }
@@ -1206,24 +1213,36 @@ Language: ${lead.language || 'N/A'}`;
             <>
               {(lead.status === 'verified' && lead.managerAssigned === true) || 
                (lead.status === 'follow_up' && lead.managerAssigned === true) ? (
-            <button
-                  onClick={() => {
-                    // Prefill Etisalat Lead ID and Emirates if they exist
-                    if (lead.etisalatLeadId) {
-                      setEtisalatLeadId(lead.etisalatLeadId);
-                    }
-                    if (lead.emirate) {
-                      setSelectedEmirate(lead.emirate);
-                    }
-                    setCoordinatorAction('assign');
-                    setShowCoordinatorDialog(true);
-                  }}
-                  className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-            >
-                  <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
-                  Assign
-            </button>
-          ) : null}
+                <>
+                  <button
+                    onClick={() => {
+                      // Prefill Etisalat Lead ID and Emirates if they exist
+                      if (lead.etisalatLeadId) {
+                        setEtisalatLeadId(lead.etisalatLeadId);
+                      }
+                      if (lead.emirate) {
+                        setSelectedEmirate(lead.emirate);
+                      }
+                      setCoordinatorAction('assign');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Assign
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('reject');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                  >
+                    <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Reject
+                  </button>
+                </>
+              ) : null}
               {lead.status === 'assigned' && (
                 <>
                   <button
@@ -1256,6 +1275,16 @@ Language: ${lead.language || 'N/A'}`;
                     <Clock className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Later
                   </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('reject');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                  >
+                    <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Reject
+                  </button>
                 </>
               )}
               {lead.status === 'later' && (
@@ -1280,6 +1309,16 @@ Language: ${lead.language || 'N/A'}`;
                     <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Follow-up
                   </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('reject');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                  >
+                    <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Reject
+                  </button>
                 </>
               )}
               {lead.status === 'activated' && (
@@ -1290,23 +1329,35 @@ Language: ${lead.language || 'N/A'}`;
               )}
               {/* Follow_up leads without manager assignment show assign button, but if managerAssigned is true, it's already shown above */}
               {lead.status === 'follow_up' && !lead.managerAssigned && (
-                <button
-                  onClick={() => {
-                    // Prefill Etisalat Lead ID and Emirates if they exist
-                    if (lead.etisalatLeadId) {
-                      setEtisalatLeadId(lead.etisalatLeadId);
-                    }
-                    if (lead.emirate) {
-                      setSelectedEmirate(lead.emirate);
-                    }
-                    setCoordinatorAction('assign');
-                    setShowCoordinatorDialog(true);
-                  }}
-                  className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                >
-                  <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
-                  Assign
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      // Prefill Etisalat Lead ID and Emirates if they exist
+                      if (lead.etisalatLeadId) {
+                        setEtisalatLeadId(lead.etisalatLeadId);
+                      }
+                      if (lead.emirate) {
+                        setSelectedEmirate(lead.emirate);
+                      }
+                      setCoordinatorAction('assign');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Assign
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('reject');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                  >
+                    <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Reject
+                  </button>
+                </>
               )}
             </>
           )}
@@ -1320,16 +1371,6 @@ Language: ${lead.language || 'N/A'}`;
               >
                 <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                 {lead.status === 'follow_verification' ? 'Verify Follow-up' : 'Verify'}
-              </button>
-              <button
-                onClick={() => {
-                  setVerifyAction('reject');
-                  setShowVerifyDialog(true);
-                }}
-                className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
-              >
-                <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
-                Reject
               </button>
               <button
                 onClick={() => {
@@ -1760,7 +1801,10 @@ Language: ${lead.language || 'N/A'}`;
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-3xl w-full mx-4 overflow-hidden">
             {/* Header */}
-            <div className="bg-gradient-to-r from-indigo-500 to-purple-600 px-6 py-4">
+            <div className={`px-6 py-4 ${
+              coordinatorAction === 'reject' ? 'bg-gradient-to-r from-red-500 to-red-600' :
+              'bg-gradient-to-r from-indigo-500 to-purple-600'
+            }`}>
               <div className="flex items-center space-x-3">
                 <div className="p-2 bg-white/20 rounded-lg">
                   {coordinatorAction === 'assign' ? (
@@ -1769,6 +1813,8 @@ Language: ${lead.language || 'N/A'}`;
                     <CheckCircle className="h-5 w-5 text-white" />
                   ) : coordinatorAction === 'later' ? (
                     <Clock className="h-5 w-5 text-white" />
+                  ) : coordinatorAction === 'reject' ? (
+                    <XCircle className="h-5 w-5 text-white" />
                   ) : (
                     <AlertTriangle className="h-5 w-5 text-white" />
                   )}
@@ -1777,12 +1823,14 @@ Language: ${lead.language || 'N/A'}`;
                   <h3 className="text-lg font-semibold text-white">
                     {coordinatorAction === 'assign' ? 'Assign Lead' :
                      coordinatorAction === 'activate' ? 'Activate Lead' : 
-                     coordinatorAction === 'later' ? 'Mark for Later' : 'Mark for Follow-up'}
+                     coordinatorAction === 'later' ? 'Mark for Later' : 
+                     coordinatorAction === 'reject' ? 'Reject Lead' : 'Mark for Follow-up'}
                   </h3>
                   <p className="text-indigo-100 text-sm">
                     {coordinatorAction === 'assign' ? 'Assign this lead to Etisalat system' :
                      coordinatorAction === 'activate' ? 'Activate the lead and mark as complete' :
                      coordinatorAction === 'later' ? 'Mark this lead for later action' :
+                     coordinatorAction === 'reject' ? 'Reject this lead and set number status to open' :
                      'Mark this lead for follow-up action'}
                   </p>
                 </div>
@@ -1794,24 +1842,40 @@ Language: ${lead.language || 'N/A'}`;
               {coordinatorAction === 'activate' && (
                 <>
                   {/* Number & Plan & Passcode & Category */}
+                  <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-semibold text-gray-900">Number</label>
+                        <div className="flex gap-2 mt-1">
                       <input
                         type="text"
-                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={lead.plans?.[0]?.number || ''}
+                            className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={editableNumber}
                         readOnly
                       />
+                          <button
+                            type="button"
+                            onClick={() => setShowNumberSelector(!showNumberSelector)}
+                            className="px-3 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors"
+                          >
+                            {showNumberSelector ? 'Cancel' : 'Change'}
+                          </button>
+                        </div>
                     </div>
                     <div>
                       <label className="block text-sm font-semibold text-gray-900">Plan</label>
-                      <input
-                        type="text"
-                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={lead.plans?.[0]?.plan || ''}
-                        readOnly
-                      />
+                        <select
+                          className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                          value={editablePlan}
+                          onChange={(e) => setEditablePlan(e.target.value)}
+                        >
+                          <option value="">Select plan</option>
+                          {allPlans.map((plan) => (
+                            <option key={plan.id} value={plan.name}>
+                              {plan.name} ({plan.category})
+                            </option>
+                          ))}
+                        </select>
                     </div>
                     <div>
                       <label className="block text-sm font-semibold text-gray-900">Passcode</label>
@@ -1832,6 +1896,24 @@ Language: ${lead.language || 'N/A'}`;
                         readOnly
                       />
                     </div>
+                    </div>
+                    
+                    {/* Number Selector */}
+                    {showNumberSelector && (
+                      <div className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                        <QuickNumberSelect
+                          onSelect={async (numberData) => {
+                            setEditableNumber(numberData.number);
+                            setEditableNumberId(numberData.id);
+                            setEditablePasscode(numberData.passcode || '');
+                            setEditableCategory(numberData.category || '');
+                            setShowNumberSelector(false);
+                          }}
+                          selectedCategory={editableCategory}
+                          onCategoryChange={(category) => setEditableCategory(category)}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {/* Activation Details */}
@@ -1935,6 +2017,25 @@ Language: ${lead.language || 'N/A'}`;
 
               {coordinatorAction === 'later' && (
                 <>
+                  {/* Date for Later action */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Schedule For Date <span className="text-red-500">*</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="date"
+                        className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl focus:border-yellow-300 focus:ring-2 focus:ring-yellow-100 focus:bg-white transition-all duration-200 text-gray-900"
+                        value={scheduledForDate}
+                        onChange={(e) => setScheduledForDate(e.target.value)}
+                        min={new Date().toISOString().split('T')[0]}
+                        required
+                      />
+                    </div>
+                    <p className="text-sm text-gray-500">
+                      The lead will appear in unassigned on this date
+                    </p>
+                  </div>
                   {/* Notes for Later action */}
                   <div className="space-y-2">
                     <label className="block text-sm font-semibold text-gray-900">
@@ -1943,6 +2044,25 @@ Language: ${lead.language || 'N/A'}`;
                     <div className="relative">
                       <textarea
                         className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-yellow-300 focus:ring-2 focus:ring-yellow-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                        rows={4}
+                        value={coordinatorNote}
+                        onChange={(e) => setCoordinatorNote(e.target.value)}
+                        placeholder="Add any additional notes or comments..."
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+              {coordinatorAction === 'reject' && (
+                <>
+                  {/* Notes for Reject action */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Notes (Optional)
+                    </label>
+                    <div className="relative">
+                      <textarea
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
                         rows={4}
                         value={coordinatorNote}
                         onChange={(e) => setCoordinatorNote(e.target.value)}
@@ -2027,7 +2147,12 @@ Language: ${lead.language || 'N/A'}`;
             <div className="bg-gray-50 px-6 py-4 border-t border-gray-100">
               <div className="flex flex-col sm:flex-row justify-end gap-3">
                 <button
-                  onClick={() => setShowCoordinatorDialog(false)}
+                  onClick={() => {
+                    setShowCoordinatorDialog(false);
+                    setCoordinatorNote('');
+                    setScheduledForDate('');
+                    setCoordinatorAction(null);
+                  }}
                   disabled={isCoordinatorActionProcessing}
                   className="px-6 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-xl hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
                 >
@@ -2040,6 +2165,7 @@ Language: ${lead.language || 'N/A'}`;
                     coordinatorAction === 'assign' ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 focus:ring-indigo-100' :
                     coordinatorAction === 'activate' ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 focus:ring-green-100' :
                     coordinatorAction === 'later' ? 'bg-gradient-to-r from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700 focus:ring-yellow-100' :
+                    coordinatorAction === 'reject' ? 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 focus:ring-red-100' :
                     'bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-700 hover:to-amber-700 focus:ring-orange-100'
                   }`}
                 >
@@ -2067,6 +2193,11 @@ Language: ${lead.language || 'N/A'}`;
                         <>
                           <Clock className="h-4 w-4 mr-2" />
                           Mark for Later
+                        </>
+                      ) : coordinatorAction === 'reject' ? (
+                        <>
+                          <XCircle className="h-4 w-4 mr-2" />
+                          Reject Lead
                         </>
                       ) : (
                         <>
@@ -2406,13 +2537,6 @@ Language: ${lead.language || 'N/A'}`;
             icon={MapPin}
             type="text"
             value={lead.emirate}
-            readOnly
-          />
-          <FormInput
-            label="Area"
-            icon={MapPin}
-            type="text"
-            value={lead.area}
             readOnly
           />
           <FormInput

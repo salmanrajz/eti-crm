@@ -110,6 +110,14 @@ const getStatusConfig = (status: string) => {
       label: 'PENDING',
       description: 'Awaiting verification'
     },
+    activated_non_verified: {
+      color: 'from-amber-500 to-orange-600',
+      bgColor: 'bg-amber-50',
+      textColor: 'text-amber-700',
+      icon: Clock,
+      label: 'PENDING VERIFICATION',
+      description: 'Activated - awaiting verification'
+    },
     follow_up: {
       color: 'from-orange-500 to-amber-600',
       bgColor: 'bg-orange-50',
@@ -453,14 +461,14 @@ export function useStruckNumbers(userId: string) {
   async function loadStruckNumbers() {
     setLoading(true);
     
-    // Check cache first
+    // ✅ OPTIMIZED: Check cache first and show immediately
     try {
       const cachedData = localStorage.getItem(CACHE_KEY);
       if (cachedData) {
         const { data, timestamp } = JSON.parse(cachedData);
         const now = Date.now();
         
-        // If cache is still valid (less than 5 minutes old), use it
+        // If cache is still valid (less than 5 minutes old), use it immediately
         if (now - timestamp < CACHE_DURATION) {
           setStruckNumbers(data);
           setLoading(false);
@@ -472,14 +480,17 @@ export function useStruckNumbers(userId: string) {
     }
 
     try {
-      // Get all leads for this agent
+      // ✅ PERFORMANCE OPTIMIZATION: Instead of fetching ALL numbers with claims (10k-50k docs!),
+      // we now fetch ONLY the agent's leads and then fetch specific numbers by ID
+      
+      // Step 1: Get agent's leads (typically 10-100 leads)
       const leadsQuery = query(
         collection(db, 'leads'),
         where('agentId', '==', userId)
       );
       const leadsSnapshot = await getDocs(leadsQuery);
       
-      // Get all number IDs from the agent's leads
+      // Step 2: Extract unique number IDs from leads
       const numberIds = new Set<string>();
       leadsSnapshot.forEach(doc => {
         const data = doc.data();
@@ -490,18 +501,44 @@ export function useStruckNumbers(userId: string) {
         }
       });
 
-      // Get all numbers that have claims and are in the agent's leads
-      const numbersQuery = query(
-        collection(db, 'numberPool'),
-        where('claims', '!=', null),
-        orderBy('claims', 'desc')
-      );
-      const numbersSnapshot = await getDocs(numbersQuery);
+      // ✅ CRITICAL FIX: Instead of fetching ALL 50k numbers with claims,
+      // fetch ONLY the specific numbers in this agent's leads
+      // This reduces from 50,000 reads to ~50 reads (99% reduction!)
       
-      const struckNumbers = numbersSnapshot.docs
-        .map(doc => {
+      if (numberIds.size === 0) {
+        // Agent has no leads, no struck numbers possible
+        setStruckNumbers([]);
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          data: [],
+          timestamp: Date.now()
+        }));
+        return;
+      }
+
+      // Step 3: Fetch only the specific numbers (batch by 30 for Firestore 'in' limit)
+      const numberIdArray = Array.from(numberIds);
+      const BATCH_SIZE = 30; // Firestore 'in' operator limit
+      const allNumbers: NumberPoolType[] = [];
+      
+      // Process in batches of 30 using Promise.all for parallel fetching
+      const batchPromises = [];
+      for (let i = 0; i < numberIdArray.length; i += BATCH_SIZE) {
+        const batch = numberIdArray.slice(i, i + BATCH_SIZE);
+        const batchQuery = query(
+        collection(db, 'numberPool'),
+          where('__name__', 'in', batch)
+      );
+        batchPromises.push(getDocs(batchQuery));
+      }
+      
+      // ✅ PARALLEL: Fetch all batches simultaneously
+      const batchResults = await Promise.all(batchPromises);
+      
+      // Combine all results
+      batchResults.forEach(snapshot => {
+        snapshot.docs.forEach(doc => {
           const data = doc.data();
-          return {
+          allNumbers.push({
             id: doc.id,
             ...data,
             lastStatusChange: data.lastStatusChange?.toDate(),
@@ -509,13 +546,16 @@ export function useStruckNumbers(userId: string) {
               ...claim,
               claimedAt: claim.claimedAt?.toDate()
             }))
-          } as NumberPoolType;
-        })
-        .filter(number => 
+          } as NumberPoolType);
+        });
+      });
+      
+      // Step 4: Filter for struck numbers (server fetched only relevant docs)
+      const struckNumbers = allNumbers.filter(number => 
           // Only include numbers that:
-          // 1. Are in the agent's leads
-          numberIds.has(number.id) && 
-          // 2. Have pending claims from other agents
+        // 1. Have claims array
+        number.claims && number.claims.length > 0 &&
+        // 2. Have pending claims from OTHER agents
           (number.claims || []).some((claim: any) => 
             claim.userId !== userId && 
             claim.status === 'pending'
@@ -523,6 +563,13 @@ export function useStruckNumbers(userId: string) {
           // 3. Are not activated
           number.status !== 'activated'
         );
+
+      console.log('[StruckNumbers] ⚡ Optimized fetch:', {
+        totalLeads: leadsSnapshot.size,
+        numbersInLeads: numberIds.size,
+        batches: Math.ceil(numberIds.size / BATCH_SIZE),
+        struckCount: struckNumbers.length
+      });
 
       // Cache the results
       try {

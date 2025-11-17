@@ -40,6 +40,7 @@ import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { generateDeviceFingerprint } from '../../utils/deviceFingerprint';
 import { isDeviceTrusted } from '../../services/trustedDeviceService';
+//import { numberPoolPreloader } from '../../services/numberPoolPreloader';
 
 /**
  * ===============================================================================
@@ -87,77 +88,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const userDoc = await getDoc(userDocRef);
           
           if (userDoc.exists()) {
+            // ✅ FIX: Always allow session restoration if Firebase Auth is valid
+            // Firebase Auth handles its own persistence reliably across all devices
+            const userData = userDoc.data();
+            setUser({
+              id: firebaseUser.uid,
+              email: userData.email,
+              role: userData.role,
+              name: userData.name,
+              teamId: userData.teamId,
+              managerId: userData.managerId,
+              coordinatorType: userData.coordinatorType,
+              verifierGroups: userData.verifierGroups,
+              phoneNumbers: userData.phoneNumbers,
+              // Handle potentially missing timestamp fields
+              createdAt: userData.createdAt?.toDate() || new Date(),
+              updatedAt: userData.updatedAt?.toDate() || new Date()
+            });
+            
+          
+            
+            // ✅ OPTIONAL: Check device trust in background (non-blocking, for logging only)
             // Check if this is a fresh login or session restoration
             const isFreshLogin = sessionStorage.getItem('freshLogin') === 'true';
-            
             if (isFreshLogin) {
-              // Fresh login: User just entered credentials, allow login regardless of device trust
               sessionStorage.removeItem('freshLogin'); // Clean up
+            }
+            
+            // Background device trust check (doesn't affect login)
+            try {
+              const deviceFingerprint = generateDeviceFingerprint();
+              const trustedDevice = await isDeviceTrusted(firebaseUser.uid, deviceFingerprint);
               
-              const userData = userDoc.data();
-              setUser({
-                id: firebaseUser.uid,
-                email: userData.email,
-                role: userData.role,
-                name: userData.name,
-                teamId: userData.teamId,
-                managerId: userData.managerId,
-                coordinatorType: userData.coordinatorType,
-                verifierGroups: userData.verifierGroups,
-                phoneNumbers: userData.phoneNumbers,
-                // Handle potentially missing timestamp fields
-                createdAt: userData.createdAt?.toDate() || new Date(),
-                updatedAt: userData.updatedAt?.toDate() || new Date()
-              });
-              
-              // Check device trust in background for fresh login
-              try {
-                const deviceFingerprint = generateDeviceFingerprint();
-                const trustedDevice = await isDeviceTrusted(firebaseUser.uid, deviceFingerprint);
-                
-                if (trustedDevice && trustedDevice.isActive && new Date() < trustedDevice.expiresAt) {
-                  toast.success('Welcome back from trusted device!');
-                }
-              } catch (trustError) {
-                // Device trust check failed (non-blocking)
-              }
-            } else {
-              // Session restoration: Browser reopened, check device trust
-              try {
-                const deviceFingerprint = generateDeviceFingerprint();
-                const trustedDevice = await isDeviceTrusted(firebaseUser.uid, deviceFingerprint);
-                
-                if (trustedDevice && trustedDevice.isActive && new Date() < trustedDevice.expiresAt) {
-                  // Device is trusted and active, proceed with login
-                  const userData = userDoc.data();
-                  setUser({
-                    id: firebaseUser.uid,
-                    email: userData.email,
-                    role: userData.role,
-                    name: userData.name,
-                    teamId: userData.teamId,
-                    managerId: userData.managerId,
-                    coordinatorType: userData.coordinatorType,
-                    verifierGroups: userData.verifierGroups,
-                    phoneNumbers: userData.phoneNumbers,
-                    // Handle potentially missing timestamp fields
-                    createdAt: userData.createdAt?.toDate() || new Date(),
-                    updatedAt: userData.updatedAt?.toDate() || new Date()
-                  });
-                  
-                  // Show welcome message for trusted device
-                  toast.success('Welcome back from trusted device!');
+              if (trustedDevice && trustedDevice.isActive && new Date() < trustedDevice.expiresAt) {
+                if (isFreshLogin) {
+                  toast.success('Welcome back!');
                 } else {
-                  // Device is not trusted or expired, force logout
-                  await auth.signOut();
-                  setUser(null);
-                  // Don't show error toast as this is expected behavior
+                  console.log('[AuthProvider] Session restored from trusted device');
                 }
-              } catch (trustError) {
-                // If trust check fails, logout for security
-                await auth.signOut();
-                setUser(null);
+              } else {
+                // Device not trusted, but we still allow login (Firebase Auth is valid)
+                if (isFreshLogin) {
+                  console.log('[AuthProvider] New device detected - consider adding to trusted devices');
+                }
               }
+            } catch (trustError) {
+              // Device trust check failed - log but don't prevent login
+              console.warn('[AuthProvider] Device trust check failed:', trustError);
             }
           } else {
             // Only admins can create users now
@@ -166,6 +143,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }
         } else {
           setUser(null);
+          // Clear preloader on logout
+         
         }
       } catch (error) {
         console.error('Error in AuthProvider:', error);

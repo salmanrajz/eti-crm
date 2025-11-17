@@ -70,9 +70,7 @@ import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { MediaUpload } from '../Leads/MediaUpload';
-// WhatsApp send credentials (same as CreateLead)
-const WHATSAPP_API_URL = 'https://graph.facebook.com/v17.0/542227575631617/messages';
-const WHATSAPP_ACCESS_TOKEN = 'EAAQzFQxG0goBO4DZABL7PrPyIdmFxDbP3hFYQCiioiJZAo4P4JbABnGw1qmBzVJUerTHkZB2qZAfWdaos16NJUYmXIewPTmV90neQjceLWnycrhZBfayZAP5EHCYD4qwBDNAiMvdBz8gLj6pwjDCCCVVA2UasKMPgvFx5GGwXfIMBBCc0tOvOCvTc6VeNkgD5GyAZDZD';
+import { getWhatsAppCredentials } from '../../utils/configService';
 
 // Ready-made message templates for verifiers
 const READY_MADE_MESSAGES = [
@@ -327,6 +325,11 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         to = `${code}${to}`;
       }
 
+      // Get WhatsApp credentials from Firebase
+      const whatsappCredentials = await getWhatsAppCredentials();
+      const WHATSAPP_API_URL = whatsappCredentials.apiUrl;
+      const WHATSAPP_ACCESS_TOKEN = whatsappCredentials.accessToken;
+
       const resp = await fetch(WHATSAPP_API_URL, {
         method: 'POST',
         headers: {
@@ -424,19 +427,24 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       const hasAllGroups = verifierGroups.includes('all') || verifierGroups.length === 0;
 
       // Get leads based on verifier's group assignment
+      // For pending_verification, also include activated_non_verified leads
+      const statusesToQuery = currentStatus === 'pending_verification' 
+        ? ['pending_verification', 'activated_non_verified']
+        : [currentStatus];
+      
       let verificationQuery;
       if (hasAllGroups) {
         // Show all leads if verifier handles all groups
         verificationQuery = query(
           collection(db, 'leads'),
-          where('status', '==', currentStatus),
+          where('status', 'in', statusesToQuery),
           orderBy('createdAt', 'desc')
         );
       } else {
         // Filter leads by verifier's specific groups
         verificationQuery = query(
           collection(db, 'leads'),
-          where('status', '==', currentStatus),
+          where('status', 'in', statusesToQuery),
           orderBy('createdAt', 'desc')
         );
       }
@@ -494,10 +502,10 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       // Show ALL leads with the current status (no date filtering)
       const verificationData = leadsWithGroups;
 
-      // Get all pending verification leads for metrics (not filtered by verifier)
+      // Get all pending verification leads for metrics (including activated_non_verified)
       const pendingQuery = query(
         collection(db, 'leads'),
-        where('status', '==', 'pending_verification')
+        where('status', 'in', ['pending_verification', 'activated_non_verified'])
       );
       const pendingSnapshot = await getDocs(pendingQuery);
       let pendingData = pendingSnapshot.docs.map(doc => ({
@@ -700,136 +708,6 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         });
       }
 
-      // Get manager's phone numbers for notification
-      let managerPhoneNumbers: string[] = [];
-      if (selectedLead.managerId) {
-        try {
-          const managerRef = doc(db, 'users', selectedLead.managerId);
-          const managerDoc = await getDoc(managerRef);
-          
-          if (managerDoc.exists()) {
-            const managerData = managerDoc.data();
-            if (Array.isArray(managerData.phoneNumbers)) {
-              managerPhoneNumbers = managerData.phoneNumbers;
-            } else if (typeof managerData.phoneNumbers === 'string') {
-              managerPhoneNumbers = [managerData.phoneNumbers];
-            } else if (managerData.phoneNumber) {
-              managerPhoneNumbers = [managerData.phoneNumber];
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching manager data:', error);
-        }
-      }
-
-      console.log('Manager phone numbers for notification:', managerPhoneNumbers);
-      console.log('Selected lead manager ID:', selectedLead.managerId);
-
-      // Send WhatsApp notification to manager
-      if (managerPhoneNumbers.length > 0) {
-        console.log('Attempting to send WhatsApp notifications to', managerPhoneNumbers.length, 'phone numbers');
-      } else {
-        console.log('No manager phone numbers found. WhatsApp notification will not be sent.');
-        console.log('Manager ID:', selectedLead.managerId);
-        if (selectedLead.managerId) {
-          console.log('Attempting to fetch manager data for debugging...');
-          try {
-            const managerRef = doc(db, 'users', selectedLead.managerId);
-            const managerDoc = await getDoc(managerRef);
-            if (managerDoc.exists()) {
-              const managerData = managerDoc.data();
-              console.log('Manager data found:', {
-                id: managerDoc.id,
-                name: managerData.name,
-                phoneNumbers: managerData.phoneNumbers,
-                phoneNumber: managerData.phoneNumber,
-                role: managerData.role
-              });
-            } else {
-              console.log('Manager document not found in database');
-            }
-          } catch (error) {
-            console.error('Error fetching manager data for debugging:', error);
-          }
-        }
-      }
-
-      if (managerPhoneNumbers.length > 0) {
-        // Get agent's information
-          const agentRef = doc(db, 'users', selectedLead.agentId);
-          const agentDoc = await getDoc(agentRef);
-        const agentData = agentDoc.exists() ? agentDoc.data() : null;
-        const agentName = agentData?.name || 'N/A';
-
-        for (const phoneNumber of managerPhoneNumbers) {
-          try {
-            const response = await fetch(WHATSAPP_API_URL, {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  messaging_product: "whatsapp",
-                to: phoneNumber,
-                  type: "template",
-                  template: {
-                  name: "leadupdate",
-                    language: {
-                      code: "en"
-                    },
-                    components: [
-                      {
-                        type: "body",
-                        parameters: [
-                          {
-                            type: "text",
-                            text: selectedLead.customerName || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: selectedLead.customerNumber || "N/A"
-                          },
-                          {
-                            type: "text",
-                            text: selectedLead.plans?.[0]?.number || "N/A"
-                          },
-                          {
-                            type: "text",
-                          text: newStatus === 'verified' ? 'Verified' : 
-                                newStatus === 'rejected' ? 'Rejected' : 
-                                'Follow Up Required'
-                          },
-                          {
-                            type: "text",
-                          text: agentName
-                          },
-                          {
-                            type: "text",
-                            text: `${window.location.origin}/dashboard/leads/${selectedLead.id}`
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                })
-              });
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              console.error('Failed to send WhatsApp notification to manager:', phoneNumber);
-              console.error('Response status:', response.status);
-              console.error('Response text:', errorText);
-            } else {
-              const responseData = await response.json();
-              console.log('Successfully sent WhatsApp notification to manager:', phoneNumber);
-              console.log('WhatsApp API response:', responseData);
-          }
-        } catch (error) {
-            console.error('Error sending WhatsApp notification:', error);
-          }
-        }
-      }
 
       // Update number status in numberPool
       if (selectedLead.plans) {
@@ -1801,7 +1679,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                 {planInfo?.duration && planInfo.duration !== 'N/A' && (
                                   <div className="flex items-center gap-2">
                                     <span className="text-gray-700">Contract Duration:</span>
-                                    <span className="font-semibold text-gray-900">{planInfo.duration} Year</span>
+                                    <span className="font-semibold text-gray-900">{planInfo.duration}</span>
                                   </div>
                                 )}
                               </div>

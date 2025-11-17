@@ -108,6 +108,8 @@ export function DashboardLayout() {
   const [notificationTimeout, setNotificationTimeout] = useState<NodeJS.Timeout | null>(null);
   const [userMenuTimeout, setUserMenuTimeout] = useState<NodeJS.Timeout | null>(null);
   const [sidebarTimeout, setSidebarTimeout] = useState<NodeJS.Timeout | null>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const isMouseOverSidebarRef = useRef(false);
   
   // Mobile touch interaction state
   const [isDraggingNotif, setIsDraggingNotif] = useState(false);
@@ -467,9 +469,7 @@ export function DashboardLayout() {
       sessionStorage.clear();
       
       toast.success('Logged out successfully');
-      
-      // Full page reload to reset application state
-      window.location.href = '/login';
+      // Do not force a full reload here; ProtectedRoute will navigate to /login once auth is cleared
     } catch (error) {
       console.error('Error logging out:', error);
       toast.error('Failed to log out');
@@ -601,7 +601,7 @@ export function DashboardLayout() {
             {/* Left side */}
             <div className="flex items-center space-x-4">
                 <div 
-                  className="relative"
+                  className="relative py-8 px-6 -my-2 -mx-2"
                   onMouseEnter={() => {
                     // Clear any pending close timeout
                     if (sidebarTimeout) {
@@ -612,19 +612,18 @@ export function DashboardLayout() {
                   }}
                   onMouseLeave={() => {
                     // Only auto-close on desktop, with a delay to allow mouse to move to sidebar
+                    // Increased delay to 300ms to give more time to reach sidebar
                     if (window.innerWidth >= 768) {
-                      const timeout = setTimeout(() => setIsSidebarOpen(false), 200);
+                      const timeout = setTimeout(() => setIsSidebarOpen(false), 300);
                       setSidebarTimeout(timeout);
                     }
                   }}
                 >
                 <button
-                className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors relative z-10"
               >
                 <Menu className="h-5 w-5" />
               </button>
-                {/* Hover area */}
-                <div className="absolute left-0 top-0 w-8 h-16 -ml-4" />
               </div>
               <div className="hidden sm:block">
                 <h1 className="text-xl font-semibold text-gray-900"></h1>
@@ -656,8 +655,6 @@ export function DashboardLayout() {
                 </Link>
                 <Link
                   to="/dashboard/numbers"
-                  target="_blank"
-                  rel="noopener noreferrer"
                   className={clsx(
                     "group relative px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ease-out touch-manipulation",
                     "active:scale-95 active:transition-transform active:duration-100"
@@ -956,11 +953,14 @@ export function DashboardLayout() {
 
       {/* Sidebar */}
       <div 
+        ref={sidebarRef}
         className={clsx(
-          "fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 transform transition-transform duration-200 ease-in-out",
+          "sidebar-container fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 transform transition-transform duration-200 ease-in-out",
           !isSidebarOpen && "-translate-x-full"
         )}
         onMouseEnter={() => {
+          // Mark that mouse is over sidebar
+          isMouseOverSidebarRef.current = true;
           // Clear any pending close timeout when mouse enters sidebar
           if (sidebarTimeout) {
             clearTimeout(sidebarTimeout);
@@ -971,15 +971,58 @@ export function DashboardLayout() {
             setIsSidebarOpen(true);
           }
         }}
+        onMouseMove={() => {
+          // Keep sidebar open as long as mouse is moving within sidebar
+          isMouseOverSidebarRef.current = true;
+          if (sidebarTimeout) {
+            clearTimeout(sidebarTimeout);
+            setSidebarTimeout(null);
+          }
+        }}
         onMouseLeave={() => {
-          // Only auto-close on desktop (md and up), with a delay
+          // Mark that mouse left sidebar
+          isMouseOverSidebarRef.current = false;
+          // Only auto-close on desktop (md and up), with increased delay
+          // Use a longer delay (1000ms) and double-check mouse position before closing
           if (window.innerWidth >= 768) {
-            const timeout = setTimeout(() => setIsSidebarOpen(false), 200);
+            const timeout = setTimeout(() => {
+              // Double-check: only close if mouse is still not over sidebar
+              if (!isMouseOverSidebarRef.current && sidebarRef.current) {
+                setIsSidebarOpen(false);
+              }
+            }, 1000);
             setSidebarTimeout(timeout);
           }
         }}
       >
-        <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200">
+        {/* Extended hover area at top to bridge gap with hamburger */}
+        <div 
+          className="absolute top-0 left-0 right-0 h-20 -mt-20"
+          onMouseEnter={(e) => {
+            e.stopPropagation();
+            isMouseOverSidebarRef.current = true;
+            // Clear any pending close timeout
+            if (sidebarTimeout) {
+              clearTimeout(sidebarTimeout);
+              setSidebarTimeout(null);
+            }
+            setIsSidebarOpen(true);
+          }}
+        />
+        <div 
+          className="h-16 flex items-center justify-between px-4 border-b border-gray-200"
+          onMouseEnter={() => {
+            isMouseOverSidebarRef.current = true;
+            // Keep sidebar open when hovering over header
+            if (sidebarTimeout) {
+              clearTimeout(sidebarTimeout);
+              setSidebarTimeout(null);
+            }
+            if (window.innerWidth >= 768) {
+              setIsSidebarOpen(true);
+            }
+          }}
+        >
           <h2 className="text-xl font-semibold text-gray-900">Menu</h2>
           <button
             onClick={() => setIsSidebarOpen(false)}
@@ -988,13 +1031,37 @@ export function DashboardLayout() {
             <X className="h-5 w-5" />
           </button>
         </div>
-        <nav className="p-4 space-y-2">
+        <nav 
+          className="p-4 space-y-2"
+          onMouseEnter={() => {
+            isMouseOverSidebarRef.current = true;
+            // Keep sidebar open when hovering over navigation
+            if (sidebarTimeout) {
+              clearTimeout(sidebarTimeout);
+              setSidebarTimeout(null);
+            }
+            if (window.innerWidth >= 768) {
+              setIsSidebarOpen(true);
+            }
+          }}
+        >
           {navigation.map((item) => {
             const isActive = location.pathname === item.href;
             return (
               <Link
                 key={item.name}
                 to={item.href}
+                onMouseEnter={() => {
+                  isMouseOverSidebarRef.current = true;
+                  // Keep sidebar open when hovering over navigation items
+                  if (sidebarTimeout) {
+                    clearTimeout(sidebarTimeout);
+                    setSidebarTimeout(null);
+                  }
+                  if (window.innerWidth >= 768) {
+                    setIsSidebarOpen(true);
+                  }
+                }}
                 onClick={() => {
                   // Auto-close sidebar on mobile when navigation item is clicked
                   if (window.innerWidth < 768) {
@@ -1097,8 +1164,6 @@ export function DashboardLayout() {
           
           <Link
             to="/dashboard/numbers"
-            target="_blank"
-            rel="noopener noreferrer"
             className={clsx(
               "group relative flex flex-col items-center justify-center w-full h-full mx-1 rounded-2xl transition-all duration-300 ease-out touch-manipulation",
               "active:scale-95 active:transition-transform active:duration-100",

@@ -53,7 +53,7 @@ export function PWAInstallPrompt() {
 
     // Listen for beforeinstallprompt event
     const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
+      // Store the event without preventing default to avoid browser warnings
       setDeferredPrompt(e as BeforeInstallPromptEvent);
       setShowPrompt(true);
     };

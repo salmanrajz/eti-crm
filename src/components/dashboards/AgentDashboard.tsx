@@ -66,7 +66,8 @@ import {
   UserCheck,
   FileText,
   Shield,
-  MessageCircle
+  MessageCircle,
+  AlertCircle
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { clsx } from 'clsx';
@@ -124,6 +125,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
     follow_up: 0,
     activated: 0,
     assigned: 0,
+    nonVerified: 0,
     target: 0,
     mar: 0,
     achieved: 0
@@ -203,6 +205,9 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
         case 'assigned':
           acc.assigned++;
           break;
+        case 'follow_verification':
+          acc.nonVerified++;
+          break;
       }
 
       // Count activated plans for current month
@@ -218,7 +223,8 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       verified: 0,
       follow_up: 0,
       activated: 0,
-      assigned: 0
+      assigned: 0,
+      nonVerified: 0
     });
 
     // When setting metrics, always default mar to 0 if undefined or null
@@ -532,15 +538,6 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       textColor: 'text-green-600',
     },
     {
-      name: 'Activated',
-      description: 'Active subscriptions',
-      value: metrics.activated,
-      href: '/dashboard/leads?status=activated',
-      icon: Zap,
-      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
-      textColor: 'text-purple-600',
-    },
-    {
       name: 'Follow Up',
       description: 'Follow Up leads',
       value: metrics.follow_up,
@@ -548,6 +545,15 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       icon: XCircle,
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
+    },
+    {
+      name: 'Non-Verified Leads',
+      description: 'Follow-up verification required',
+      value: metrics.nonVerified,
+      href: '/dashboard/leads?status=follow_verification',
+      icon: AlertCircle,
+      color: 'bg-gradient-to-br from-amber-500 to-amber-600',
+      textColor: 'text-amber-600',
     },
   ], [metrics]);
 
@@ -1155,6 +1161,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                                   lead.status === 'verified' ? 'bg-green-100 text-green-800 ring-green-500/20' :
                                   lead.status === 'rejected' ? 'bg-red-100 text-red-800 ring-red-500/20' :
                                   lead.status === 'pending_verification' ? 'bg-yellow-100 text-yellow-800 ring-yellow-500/20' :
+                                  lead.status === 'activated_non_verified' ? 'bg-amber-100 text-amber-800 ring-amber-500/20' :
                                   lead.status === 'follow_up' ? 'bg-orange-100 text-orange-800 ring-orange-500/20' :
                                   lead.status === 'activated' ? 'bg-blue-100 text-blue-800 ring-blue-500/20' :
                                   'bg-gray-100 text-gray-800 ring-gray-500/20'
@@ -1163,6 +1170,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                                 {lead.status === 'verified' ? <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> :
                                  lead.status === 'rejected' ? <XCircle className="h-3.5 w-3.5 mr-1.5" /> :
                                  lead.status === 'pending_verification' ? <Clock className="h-3.5 w-3.5 mr-1.5" /> :
+                                 lead.status === 'activated_non_verified' ? <Clock className="h-3.5 w-3.5 mr-1.5" /> :
                                  lead.status === 'activated' ? <Zap className="h-3.5 w-3.5 mr-1.5" /> : null}
                               {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                             </motion.span>

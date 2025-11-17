@@ -333,6 +333,7 @@ export function LeadList() {
         constraints.push(
           where('status', 'in', [
             'pending_verification',
+            'activated_non_verified',
             'verified',
             'rejected',
             'follow_up'
@@ -541,11 +542,19 @@ export function LeadList() {
       const resolvedAgent = agentInfo.get(lead.agentId);
       const resolvedTeamId = (lead.teamId as string) || resolvedAgent?.teamId;
       const resolvedTeamName = resolvedTeamId ? teamInfo.get(resolvedTeamId) : undefined;
+      
+      // For MNP and Prepaid to postpaid, read group from lead document (not numberPool)
+      // because they use virtual numbers that don't exist in numberPool
+      const isMNPOrP2P = lead.productType === 'MNP' || lead.productType === 'Prepaid to postpaid';
+      
       return {
         ...lead,
         plans: lead.plans?.map(plan => ({
           ...plan,
-          group: numberGroupsMap.get(plan.numberId) || 'Unassigned'
+          // For MNP/P2P, use group from lead document; otherwise fetch from numberPool
+          group: isMNPOrP2P 
+            ? (plan.group || 'Unassigned')
+            : (numberGroupsMap.get(plan.numberId) || plan.group || 'Unassigned')
         })),
         agentName: resolvedAgent?.name || 'Unknown Agent',
         teamName: resolvedTeamName || (resolvedTeamId ? 'Unknown Team' : undefined)
@@ -851,8 +860,12 @@ export function LeadList() {
         filtered = filtered.filter(lead => {
           // Check if any of the lead's plans belong to any of the verifier's groups
           const hasMatchingGroup = lead.plans?.some(plan => {
-            // Get group from number groups mapping (same as used in display)
-            const planGroup = numberGroups.get(plan.numberId)?.toLowerCase();
+            // For MNP/P2P, read group from lead document; otherwise from numberPool
+            const isMNPOrP2P = lead.productType === 'MNP' || lead.productType === 'Prepaid to postpaid';
+            const planGroup = isMNPOrP2P
+              ? (plan.group || '').toLowerCase()
+              : (numberGroups.get(plan.numberId) || plan.group || '').toLowerCase();
+            
             return (user.verifierGroups as VerifierGroups)?.some((verifierGroup: string) => {
               const normalizedVerifierGroup = verifierGroup.toLowerCase();
               return planGroup === normalizedVerifierGroup;
@@ -1054,6 +1067,8 @@ export function LeadList() {
         return 'bg-red-100 text-red-800';
       case 'pending_verification':
         return 'bg-yellow-100 text-yellow-800';
+      case 'activated_non_verified':
+        return 'bg-amber-100 text-amber-800';
       case 'pending_coordinator':
         return 'bg-blue-100 text-blue-800';
       case 'follow_up':
@@ -1078,6 +1093,8 @@ export function LeadList() {
       case 'rejected':
         return <XCircle className="w-4 h-4 mr-1.5" />;
       case 'pending_verification':
+        return <Clock className="w-4 h-4 mr-1.5" />;
+      case 'activated_non_verified':
         return <Clock className="w-4 h-4 mr-1.5" />;
       case 'pending_coordinator':
         return <Clock className="w-4 h-4 mr-1.5" />;

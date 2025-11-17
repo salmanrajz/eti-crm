@@ -2,84 +2,126 @@ import { useState, useEffect } from 'react';
 import { collection, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
-import { Phone, Plus, Trash2, Users, Search, Filter, XCircle } from 'lucide-react';
+import { Phone, Plus, Trash2, Users, Search, Filter, XCircle, Shield, UserCog } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { CoordinatorType } from '../../types';
 
-interface Manager {
+interface User {
   id: string;
   name: string;
   email: string;
+  role: 'admin' | 'coordinator' | 'manager';
   teamId?: string;
   teamName?: string;
+  coordinatorType?: CoordinatorType;
   phoneNumbers: string[];
 }
 
+type RoleFilter = 'all' | 'admin' | 'coordinator' | 'manager';
+
 export function AdminManagerPhoneNumbers() {
-  const [managers, setManagers] = useState<Manager[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedManager, setSelectedManager] = useState<Manager | null>(null);
-  const [phoneInputs, setPhoneInputs] = useState<{ [managerId: string]: string }>({});
-  const [isAddingPhone, setIsAddingPhone] = useState<{ [managerId: string]: boolean }>({});
+  const [roleFilter, setRoleFilter] = useState<RoleFilter>('all');
+  const [phoneInputs, setPhoneInputs] = useState<{ [userId: string]: string }>({});
+  const [isAddingPhone, setIsAddingPhone] = useState<{ [userId: string]: boolean }>({});
   const [isRemovingPhone, setIsRemovingPhone] = useState<string | null>(null);
 
   useEffect(() => {
-    loadManagers();
+    loadUsers();
   }, []);
 
-  const loadManagers = async () => {
+  const loadUsers = async () => {
     try {
       setLoading(true);
       
-      // Get all users with manager role
-      const usersQuery = query(
-        collection(db, 'users'),
-        where('role', '==', 'manager')
-      );
+      // Fetch all data in parallel: users and teams
+      const adminQuery = query(collection(db, 'users'), where('role', '==', 'admin'));
+      const coordinatorQuery = query(collection(db, 'users'), where('role', '==', 'coordinator'));
+      const managerQuery = query(collection(db, 'users'), where('role', '==', 'manager'));
+      const teamsQuery = query(collection(db, 'teams'));
       
-      const usersSnapshot = await getDocs(usersQuery);
-      const managersData: Manager[] = [];
+      const [adminSnapshot, coordinatorSnapshot, managerSnapshot, teamsSnapshot] = await Promise.all([
+        getDocs(adminQuery),
+        getDocs(coordinatorQuery),
+        getDocs(managerQuery),
+        getDocs(teamsQuery)
+      ]);
       
-      for (const userDoc of usersSnapshot.docs) {
+      // Build team name lookup map (O(1) access)
+      const teamNameMap = new Map<string, string>();
+      teamsSnapshot.docs.forEach(teamDoc => {
+        const teamData = teamDoc.data();
+        teamNameMap.set(teamDoc.id, teamData.name || 'Unknown Team');
+      });
+      
+      const usersData: User[] = [];
+      
+      // Process admins - aggregate all admin phone numbers into a single entry
+      const allAdminPhoneNumbers = new Set<string>();
+      const adminIds: string[] = [];
+      adminSnapshot.docs.forEach(userDoc => {
         const userData = userDoc.data();
-        
-        // Get team name if teamId exists
-        let teamName = 'No Team';
-        if (userData.teamId) {
-          try {
-            const teamRef = doc(db, 'teams', userData.teamId);
-            const teamDoc = await getDocs(query(collection(db, 'teams'), where('__name__', '==', userData.teamId)));
-            if (!teamDoc.empty) {
-              const teamData = teamDoc.docs[0].data();
-              teamName = teamData.name || 'Unknown Team';
-            }
-          } catch (error) {
-            console.error('Error fetching team name:', error);
-          }
-        }
-        
-        managersData.push({
+        const phoneNumbers = userData.phoneNumbers || [];
+        phoneNumbers.forEach((phone: string) => allAdminPhoneNumbers.add(phone));
+        adminIds.push(userDoc.id);
+      });
+      
+      // Create a single "Admin" entry with aggregated phone numbers
+      if (adminIds.length > 0) {
+        usersData.push({
+          id: 'admin-aggregated', // Special ID for aggregated admin entry
+          name: 'Admin',
+          email: '',
+          role: 'admin',
+          phoneNumbers: Array.from(allAdminPhoneNumbers)
+        });
+      }
+      
+      // Process coordinators
+      coordinatorSnapshot.docs.forEach(userDoc => {
+        const userData = userDoc.data();
+        usersData.push({
           id: userDoc.id,
           name: userData.name || 'Unknown',
           email: userData.email || '',
+          role: 'coordinator',
+          coordinatorType: userData.coordinatorType,
+          phoneNumbers: userData.phoneNumbers || []
+        });
+      });
+      
+      // Process managers (using team map for fast lookup)
+      managerSnapshot.docs.forEach(userDoc => {
+        const userData = userDoc.data();
+        const teamName = userData.teamId 
+          ? (teamNameMap.get(userData.teamId) || 'No Team')
+          : 'No Team';
+        
+        usersData.push({
+          id: userDoc.id,
+          name: userData.name || 'Unknown',
+          email: userData.email || '',
+          role: 'manager',
           teamId: userData.teamId,
           teamName,
           phoneNumbers: userData.phoneNumbers || []
         });
-      }
+      });
       
-      setManagers(managersData);
+      setUsers(usersData);
     } catch (error) {
-      console.error('Error loading managers:', error);
-      toast.error('Failed to load managers');
+      console.error('Error loading users:', error);
+      toast.error('Failed to load users');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAddPhoneNumber = async (managerId: string) => {
+  const handleAddPhoneNumber = async (userId: string) => {
     try {
-      const phoneNumber = phoneInputs[managerId]?.trim();
+      const phoneNumber = phoneInputs[userId]?.trim();
       if (!phoneNumber) {
         toast.error('Please enter a phone number');
         return;
@@ -92,68 +134,92 @@ export function AdminManagerPhoneNumbers() {
         return;
       }
 
-      setIsAddingPhone(prev => ({ ...prev, [managerId]: true }));
+      setIsAddingPhone(prev => ({ ...prev, [userId]: true }));
       
-      const manager = managers.find(m => m.id === managerId);
-      if (!manager) return;
+      const user = users.find(u => u.id === userId);
+      if (!user) return;
 
-      const updatedPhoneNumbers = [...manager.phoneNumbers, phoneNumber];
+      const updatedPhoneNumbers = [...user.phoneNumbers, phoneNumber];
       
-      const userRef = doc(db, 'users', managerId);
-      await updateDoc(userRef, {
-        phoneNumbers: updatedPhoneNumbers,
-        updatedAt: new Date()
-      });
-
-      // Update local state
-      setManagers(prev => prev.map(m => 
-        m.id === managerId 
-          ? { ...m, phoneNumbers: updatedPhoneNumbers }
-          : m
-      ));
-
-      // Update selected manager if it's the same one
-      if (selectedManager?.id === managerId) {
-        setSelectedManager({ ...selectedManager, phoneNumbers: updatedPhoneNumbers });
+      // If this is the aggregated admin entry, update ALL admin users
+      if (userId === 'admin-aggregated') {
+        // Fetch all admin users and update them all
+        const adminQuery = query(collection(db, 'users'), where('role', '==', 'admin'));
+        const adminSnapshot = await getDocs(adminQuery);
+        
+        const updatePromises = adminSnapshot.docs.map(adminDoc => {
+          const userRef = doc(db, 'users', adminDoc.id);
+          // Merge with existing phone numbers (remove duplicates)
+          const existingPhones = adminDoc.data().phoneNumbers || [];
+          const mergedPhones = Array.from(new Set([...existingPhones, phoneNumber]));
+          return updateDoc(userRef, {
+            phoneNumbers: mergedPhones,
+            updatedAt: new Date()
+          });
+        });
+        
+        await Promise.all(updatePromises);
+      } else {
+        // Regular user update
+        const userRef = doc(db, 'users', userId);
+        await updateDoc(userRef, {
+          phoneNumbers: updatedPhoneNumbers,
+          updatedAt: new Date()
+        });
       }
 
-      // Clear the input for this manager
-      setPhoneInputs(prev => ({ ...prev, [managerId]: '' }));
+      // Reload users to get updated data
+      await loadUsers();
+
+      // Clear the input for this user
+      setPhoneInputs(prev => ({ ...prev, [userId]: '' }));
       toast.success('Phone number added successfully');
     } catch (error) {
       console.error('Error adding phone number:', error);
       toast.error('Failed to add phone number');
     } finally {
-      setIsAddingPhone(prev => ({ ...prev, [managerId]: false }));
+      setIsAddingPhone(prev => ({ ...prev, [userId]: false }));
     }
   };
 
-  const handleRemovePhoneNumber = async (managerId: string, phoneIndex: number) => {
+  const handleRemovePhoneNumber = async (userId: string, phoneIndex: number) => {
     try {
-      setIsRemovingPhone(`${managerId}-${phoneIndex}`);
+      setIsRemovingPhone(`${userId}-${phoneIndex}`);
       
-      const manager = managers.find(m => m.id === managerId);
-      if (!manager) return;
+      const user = users.find(u => u.id === userId);
+      if (!user) return;
 
-      const updatedPhoneNumbers = manager.phoneNumbers.filter((_, i) => i !== phoneIndex);
+      const phoneToRemove = user.phoneNumbers[phoneIndex];
+      const updatedPhoneNumbers = user.phoneNumbers.filter((_, i) => i !== phoneIndex);
       
-      const userRef = doc(db, 'users', managerId);
-      await updateDoc(userRef, {
-        phoneNumbers: updatedPhoneNumbers,
-        updatedAt: new Date()
-      });
-
-      // Update local state
-      setManagers(prev => prev.map(m => 
-        m.id === managerId 
-          ? { ...m, phoneNumbers: updatedPhoneNumbers }
-          : m
-      ));
-
-      // Update selected manager if it's the same one
-      if (selectedManager?.id === managerId) {
-        setSelectedManager({ ...selectedManager, phoneNumbers: updatedPhoneNumbers });
+      // If this is the aggregated admin entry, update ALL admin users
+      if (userId === 'admin-aggregated') {
+        // Fetch all admin users and remove the phone number from all of them
+        const adminQuery = query(collection(db, 'users'), where('role', '==', 'admin'));
+        const adminSnapshot = await getDocs(adminQuery);
+        
+        const updatePromises = adminSnapshot.docs.map(adminDoc => {
+          const userRef = doc(db, 'users', adminDoc.id);
+          const existingPhones = adminDoc.data().phoneNumbers || [];
+          const filteredPhones = existingPhones.filter((phone: string) => phone !== phoneToRemove);
+          return updateDoc(userRef, {
+            phoneNumbers: filteredPhones,
+            updatedAt: new Date()
+          });
+        });
+        
+        await Promise.all(updatePromises);
+      } else {
+        // Regular user update
+        const userRef = doc(db, 'users', userId);
+        await updateDoc(userRef, {
+          phoneNumbers: updatedPhoneNumbers,
+          updatedAt: new Date()
+        });
       }
+
+      // Reload users to get updated data
+      await loadUsers();
 
       toast.success('Phone number removed successfully');
     } catch (error) {
@@ -164,11 +230,34 @@ export function AdminManagerPhoneNumbers() {
     }
   };
 
-  const filteredManagers = managers.filter(manager =>
-    manager.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    manager.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    manager.teamName.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const getRoleDisplay = (role: string, coordinatorType?: CoordinatorType) => {
+    if (role === 'admin') return 'Admin';
+    if (role === 'coordinator') {
+      if (coordinatorType === 'g1') return 'Coordinator (G1)';
+      if (coordinatorType === 'g2') return 'Coordinator (G2)';
+      if (coordinatorType === 'g3') return 'Coordinator (G3)';
+      if (coordinatorType === 'all') return 'Coordinator (All Groups)';
+      return 'Coordinator';
+    }
+    return 'Manager';
+  };
+
+  const getRoleIcon = (role: string) => {
+    if (role === 'admin') return Shield;
+    if (role === 'coordinator') return UserCog;
+    return Users;
+  };
+
+  const filteredUsers = users.filter(user => {
+    const matchesSearch = 
+      user.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      user.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (user.teamName && user.teamName.toLowerCase().includes(searchTerm.toLowerCase()));
+    
+    const matchesRole = roleFilter === 'all' || user.role === roleFilter;
+    
+    return matchesSearch && matchesRole;
+  });
 
   if (loading) {
     return (
@@ -185,24 +274,32 @@ export function AdminManagerPhoneNumbers() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between mb-8">
+      {/* Role Filter */}
+      <div className="flex items-center justify-between mb-6">
         <div className="flex items-center space-x-4">
-          <div className="w-12 h-12 bg-gradient-to-r from-green-500 to-emerald-600 rounded-xl flex items-center justify-center shadow-lg">
-            <Phone className="h-6 w-6 text-white" />
-          </div>
-          <div>
-            <h3 className="text-2xl font-bold text-gray-900">Manager WhatsApp Numbers</h3>
-            <p className="mt-1 text-gray-600">
-              Manage WhatsApp notification numbers for all managers across teams.
-            </p>
+          <Filter className="h-5 w-5 text-gray-500" />
+          <div className="flex space-x-2">
+            {(['all', 'admin', 'coordinator', 'manager'] as RoleFilter[]).map((role) => (
+              <button
+                key={role}
+                onClick={() => setRoleFilter(role)}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  roleFilter === role
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {role === 'all' ? 'All' : role.charAt(0).toUpperCase() + role.slice(1) + 's'}
+              </button>
+            ))}
           </div>
         </div>
         <div className="bg-white rounded-xl px-4 py-3 shadow-sm border border-gray-200">
           <div className="flex items-center space-x-3">
             <Users className="h-5 w-5 text-indigo-500" />
             <div className="text-right">
-              <div className="text-lg font-bold text-gray-900">{managers.length}</div>
-              <div className="text-xs text-gray-500">Total Managers</div>
+              <div className="text-lg font-bold text-gray-900">{filteredUsers.length}</div>
+              <div className="text-xs text-gray-500">Total Users</div>
             </div>
           </div>
         </div>
@@ -213,7 +310,7 @@ export function AdminManagerPhoneNumbers() {
         <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
         <input
           type="text"
-          placeholder="Search managers by name, email, or team..."
+          placeholder="Search by name, email, or team..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="w-full pl-12 pr-4 py-4 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200 bg-white shadow-sm text-lg"
@@ -228,182 +325,196 @@ export function AdminManagerPhoneNumbers() {
         )}
       </div>
 
-      {/* Managers List */}
-      <div className="grid gap-4">
-        <AnimatePresence>
-          {filteredManagers.map((manager) => (
-            <motion.div
-              key={manager.id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              transition={{ duration: 0.2 }}
-              className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow"
-            >
-              {/* Manager Header */}
-              <div className="px-6 py-5 bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 border-b border-gray-200">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-4">
-                    <div className="w-12 h-12 bg-gradient-to-r from-blue-500 via-indigo-600 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
-                      <Users className="h-6 w-6 text-white" />
-                    </div>
-                    <div>
-                      <h4 className="text-xl font-bold text-gray-900">{manager.name}</h4>
-                      <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
-                        <span className="flex items-center">
-                          <span className="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>
-                          {manager.email}
-                        </span>
-                        <span className="text-gray-400">•</span>
-                        <span className="flex items-center">
-                          <span className="w-2 h-2 bg-indigo-500 rounded-full mr-2"></span>
-                          {manager.teamName}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <div className="bg-white rounded-lg px-3 py-2 shadow-sm border border-gray-200">
-                      <div className="flex items-center space-x-2">
-                        <Phone className="h-4 w-4 text-green-500" />
-                        <span className="text-sm font-semibold text-gray-700">
-                          {manager.phoneNumbers.length} {manager.phoneNumbers.length === 1 ? 'Number' : 'Numbers'}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Phone Numbers */}
-              <div className="px-6 py-4">
-                {manager.phoneNumbers.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="w-20 h-20 bg-gradient-to-r from-gray-100 to-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <Phone className="h-10 w-10 text-gray-400" />
-                    </div>
-                    <h5 className="text-lg font-semibold text-gray-700 mb-2">No Phone Numbers</h5>
-                    <p className="text-gray-500 mb-1">This manager won't receive WhatsApp notifications</p>
-                    <p className="text-sm text-gray-400">Add a phone number below to enable notifications</p>
-                  </div>
-                ) : (
-                  <div className="grid gap-3">
-                    {manager.phoneNumbers.map((phone, index) => (
-                      <motion.div
-                        key={index}
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ duration: 0.2, delay: index * 0.1 }}
-                        className="flex items-center justify-between p-4 bg-gradient-to-r from-white to-gray-50 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200"
-                      >
-                        <div className="flex items-center space-x-4">
-                          <div className="w-10 h-10 bg-gradient-to-r from-green-500 to-emerald-600 rounded-lg flex items-center justify-center">
-                            <Phone className="h-5 w-5 text-white" />
+      {/* Users Table */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gradient-to-r from-indigo-50 to-purple-50">
+              <tr>
+                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                  User
+                </th>
+                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                  Role
+                </th>
+                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                  Email / Team
+                </th>
+                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                  Phone Numbers
+                </th>
+                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              <AnimatePresence>
+                {filteredUsers.map((user) => {
+                  const RoleIcon = getRoleIcon(user.role);
+                  return (
+                    <motion.tr
+                      key={user.id}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="hover:bg-gray-50 transition-colors"
+                    >
+                      {/* User Name */}
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center space-x-3">
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
+                            user.role === 'admin' ? 'bg-gradient-to-r from-red-500 via-orange-600 to-yellow-600' :
+                            user.role === 'coordinator' ? 'bg-gradient-to-r from-purple-500 via-pink-600 to-rose-600' :
+                            'bg-gradient-to-r from-blue-500 via-indigo-600 to-purple-600'
+                          }`}>
+                            <RoleIcon className="h-5 w-5 text-white" />
                           </div>
                           <div>
-                            <span className="text-gray-900 font-semibold text-lg">{phone}</span>
-                            <div className="flex items-center mt-1">
-                              <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-                              <span className="text-xs text-gray-500">Active for notifications</span>
-                            </div>
+                            <div className="text-sm font-semibold text-gray-900">{user.name}</div>
                           </div>
                         </div>
-                        <button
-                          onClick={() => handleRemovePhoneNumber(manager.id, index)}
-                          disabled={isRemovingPhone === `${manager.id}-${index}`}
-                          className="p-3 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-xl transition-all duration-200 disabled:opacity-50 hover:scale-105"
-                          title="Remove phone number"
-                        >
-                          {isRemovingPhone === `${manager.id}-${index}` ? (
-                            <div className="w-4 h-4 border-2 border-red-600 border-t-transparent rounded-full animate-spin"></div>
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
+                      </td>
+
+                      {/* Role */}
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
+                          user.role === 'admin' ? 'bg-red-100 text-red-800' :
+                          user.role === 'coordinator' ? 'bg-purple-100 text-purple-800' :
+                          'bg-blue-100 text-blue-800'
+                        }`}>
+                          {getRoleDisplay(user.role, user.coordinatorType)}
+                        </span>
+                      </td>
+
+                      {/* Email / Team */}
+                      <td className="px-6 py-4">
+                        <div className="text-sm text-gray-900">
+                          {user.email && <div className="flex items-center space-x-1">
+                            <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
+                            <span>{user.email}</span>
+                          </div>}
+                          {user.teamName && (
+                            <div className="flex items-center space-x-1 mt-1 text-gray-600">
+                              <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full"></span>
+                              <span>{user.teamName}</span>
+                            </div>
                           )}
-                        </button>
-                      </motion.div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Add Phone Number */}
-                <div className="mt-6 pt-4 border-t border-gray-200">
-                  <div className="bg-gradient-to-r from-gray-50 to-blue-50 rounded-xl p-4 border border-gray-200">
-                    <h5 className="text-sm font-semibold text-gray-700 mb-3 flex items-center">
-                      <Plus className="h-4 w-4 mr-2 text-indigo-500" />
-                      Add New Phone Number
-                    </h5>
-                    <div className="flex items-center space-x-3">
-                      <div className="flex-1 relative">
-                        <input
-                          type="tel"
-                          value={phoneInputs[manager.id] || ''}
-                          onChange={(e) => setPhoneInputs(prev => ({ ...prev, [manager.id]: e.target.value }))}
-                          placeholder="Enter phone number (e.g., +1234567890)"
-                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200 bg-white shadow-sm"
-                          onKeyPress={(e) => {
-                            if (e.key === 'Enter') {
-                              handleAddPhoneNumber(manager.id);
-                            }
-                          }}
-                        />
-                        <div className="absolute inset-y-0 right-0 flex items-center pr-3">
-                          <Phone className="h-5 w-5 text-gray-400" />
                         </div>
-                      </div>
-                      <button
-                        onClick={() => handleAddPhoneNumber(manager.id)}
-                        disabled={isAddingPhone[manager.id] || !phoneInputs[manager.id]?.trim()}
-                        className="inline-flex items-center px-6 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
-                      >
-                        {isAddingPhone[manager.id] ? (
-                          <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                        ) : (
-                          <>
-                            <Plus className="h-4 w-4 mr-2" />
-                            Add
-                          </>
-                        )}
-                      </button>
-                    </div>
-                    <p className="text-xs text-gray-500 mt-2">
-                      Phone numbers will receive WhatsApp notifications for team updates and lead activities.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          ))}
-        </AnimatePresence>
+                      </td>
 
-        {filteredManagers.length === 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center py-16"
-          >
-            <div className="w-24 h-24 bg-gradient-to-r from-gray-100 to-gray-200 rounded-full flex items-center justify-center mx-auto mb-6">
-              <Search className="h-12 w-12 text-gray-400" />
-            </div>
-            <h3 className="text-xl font-semibold text-gray-900 mb-3">
-              {searchTerm ? 'No managers found' : 'No managers available'}
-            </h3>
-            <p className="text-gray-500 mb-4 max-w-md mx-auto">
-              {searchTerm 
-                ? 'Try adjusting your search terms or clear the search to see all managers'
-                : 'No managers are currently registered in the system'
-              }
-            </p>
-            {searchTerm && (
-              <button
-                onClick={() => setSearchTerm('')}
-                className="inline-flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
-              >
-                <XCircle className="h-4 w-4 mr-2" />
-                Clear Search
-              </button>
-            )}
-          </motion.div>
-        )}
+                      {/* Phone Numbers */}
+                      <td className="px-6 py-4">
+                        <div className="space-y-2">
+                          {user.phoneNumbers.length > 0 ? (
+                            user.phoneNumbers.map((phone, index) => (
+                              <div key={index} className="flex items-center justify-between group">
+                                <div className="flex items-center space-x-2">
+                                  <Phone className="h-4 w-4 text-green-500" />
+                                  <span className="text-sm text-gray-900 font-medium">{phone}</span>
+                                </div>
+                                <button
+                                  onClick={() => handleRemovePhoneNumber(user.id, index)}
+                                  disabled={isRemovingPhone === `${user.id}-${index}`}
+                                  className="opacity-0 group-hover:opacity-100 p-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-all disabled:opacity-50"
+                                  title="Remove phone number"
+                                >
+                                  {isRemovingPhone === `${user.id}-${index}` ? (
+                                    <div className="w-3.5 h-3.5 border-2 border-red-600 border-t-transparent rounded-full animate-spin"></div>
+                                  ) : (
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            ))
+                          ) : (
+                            <span className="text-sm text-gray-500 italic">No number set</span>
+                          )}
+                          
+                          {/* Add Phone Number Input */}
+                          <div className="flex items-center space-x-2 mt-2">
+                            <div className="flex-1 relative">
+                              <input
+                                type="tel"
+                                value={phoneInputs[user.id] || ''}
+                                onChange={(e) => setPhoneInputs(prev => ({ ...prev, [user.id]: e.target.value }))}
+                                placeholder="+1234567890"
+                                className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all bg-white"
+                                onKeyPress={(e) => {
+                                  if (e.key === 'Enter') {
+                                    handleAddPhoneNumber(user.id);
+                                  }
+                                }}
+                              />
+                            </div>
+                            <button
+                              onClick={() => handleAddPhoneNumber(user.id)}
+                              disabled={isAddingPhone[user.id] || !phoneInputs[user.id]?.trim()}
+                              className="inline-flex items-center px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                            >
+                              {isAddingPhone[user.id] ? (
+                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                              ) : (
+                                <Plus className="h-3.5 w-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Actions / Status */}
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center space-x-2">
+                          <div className={`flex items-center space-x-1 px-2 py-1 rounded-md text-xs font-medium ${
+                            user.phoneNumbers.length > 0 
+                              ? 'bg-green-50 text-green-700 border border-green-200' 
+                              : 'bg-gray-50 text-gray-500 border border-gray-200'
+                          }`}>
+                            <Phone className={`h-3 w-3 ${user.phoneNumbers.length > 0 ? 'text-green-500' : 'text-gray-400'}`} />
+                            <span>{user.phoneNumbers.length}</span>
+                          </div>
+                        </div>
+                      </td>
+                    </motion.tr>
+                  );
+                })}
+              </AnimatePresence>
+
+              {filteredUsers.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-6 py-16 text-center">
+                    <div className="flex flex-col items-center">
+                      <div className="w-16 h-16 bg-gradient-to-r from-gray-100 to-gray-200 rounded-full flex items-center justify-center mb-4">
+                        <Search className="h-8 w-8 text-gray-400" />
+                      </div>
+                      <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                        {searchTerm || roleFilter !== 'all' ? 'No users found' : 'No users available'}
+                      </h3>
+                      <p className="text-sm text-gray-500 mb-4">
+                        {searchTerm || roleFilter !== 'all'
+                          ? 'Try adjusting your search terms or filters'
+                          : 'No users are currently registered in the system'
+                        }
+                      </p>
+                      {(searchTerm || roleFilter !== 'all') && (
+                        <button
+                          onClick={() => {
+                            setSearchTerm('');
+                            setRoleFilter('all');
+                          }}
+                          className="inline-flex items-center px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+                        >
+                          <XCircle className="h-4 w-4 mr-2" />
+                          Clear Filters
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

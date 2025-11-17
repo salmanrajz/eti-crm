@@ -1013,7 +1013,7 @@ export function Reports() {
                 {/* Category header row - only show when a group is expanded */}
                 {expandedGroup && (
                   <tr className="bg-indigo-700">
-                    {allAvailableGroups.map((group) => {
+                     {allAvailableGroups.map((group) => {
                       const isExpanded = expandedGroup === group;
                       if (isExpanded) {
                         // Show category labels for expanded group
