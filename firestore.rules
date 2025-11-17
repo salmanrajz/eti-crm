@@ -661,6 +661,13 @@ match /invoices/{invoiceId} {
       // Allow Cloud Functions to update stats (they run with admin privileges)
     }
 
+    // Upload Jobs collection rules - for Lightning Upload progress tracking
+    match /uploadJobs/{jobId} {
+      allow read: if isSignedIn() && hasAnyRole(['admin', 'coordinator']);
+      allow create, update: if isSignedIn() && hasAnyRole(['admin', 'coordinator']);
+      // Cloud Functions can create/update (they run with admin privileges)
+    }
+
     // Agent Links collection rules - for customer landing page lead attribution
     match /agentLinks/{linkId} {
       allow read: if true; // Allow public read for link validation
