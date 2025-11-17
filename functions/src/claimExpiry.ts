@@ -81,6 +81,12 @@ export const handleClaimExpiry = onDocumentUpdated({
       return;
     }
 
+    // FAST SKIP: Ignore bulk upload flag removals
+    if (afterData.bulkUpload === true || 
+        (beforeData.bulkUpload === true && afterData.bulkUpload === false)) {
+      return; // Silent skip for bulk operations
+    }
+
     // Check if this is a claim-related update or if we need to check for expired claims
     const hasClaimingAgent = afterData.claimingAgentId && afterData.claimingExpiresAt;
     const isClaimExpiryCheck = afterData.claimExpiryCheck;
@@ -274,6 +280,12 @@ export const realtimeClaimExpiry = onDocumentUpdated({
     
     if (!beforeData || !afterData) {
       return;
+    }
+
+    // FAST SKIP: Ignore bulk upload flag removals
+    if (afterData.bulkUpload === true || 
+        (beforeData.bulkUpload === true && afterData.bulkUpload === false)) {
+      return; // Silent skip for bulk operations
     }
 
     // Check if this is a claim-related update

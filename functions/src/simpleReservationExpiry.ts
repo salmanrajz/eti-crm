@@ -83,6 +83,12 @@ export const handleReservationExpiry = onDocumentUpdated({
       return;
     }
 
+    // FAST SKIP: Ignore bulk upload flag removals
+    if (afterData.bulkUpload === true || 
+        (beforeData.bulkUpload === true && afterData.bulkUpload === false)) {
+      return; // Silent skip for bulk operations
+    }
+
     // Check if this is a reservation-related update
     const hasReservation = afterData.status === 'reserved' && afterData.reservedBy && afterData.expiresAt;
     if (!hasReservation) {

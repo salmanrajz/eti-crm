@@ -41,13 +41,16 @@
  * ===============================================================================
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createUserAsAdmin = exports.checkNumberStatusHTTP = exports.checkNumberStatus = exports.recomputeNumberPoolStats = exports.uploadVerificationMediaToAzure = exports.bulkDNCImportStatus = exports.bulkDNCImport = exports.backupReservationExpiry = exports.triggerReservationExpiry = exports.testReservationExpiry = exports.processReservationExpiry = exports.handleReservationExpiry = exports.emergencyClaimExpiry = exports.smartBatchClaimExpiry = exports.realtimeClaimExpiry = exports.handleClaimExpiry = exports.updateNumberPoolStatsOnDelete = exports.updateNumberPoolStatsOnCreate = exports.resetUserPassword = exports.whatsappWebhook = exports.checkNumberAvailability = exports.processLeadRejection = exports.claimNumber = exports.backfillNumberTokens = exports.onNumberPoolWrite = void 0;
+exports.createUserAsAdmin = exports.checkNumberStatusHTTP = exports.checkNumberStatus = exports.recomputeNumberPoolStats = exports.uploadVerificationMediaToAzure = exports.algoliaTransform = exports.bulkNumberUploadV2 = exports.bulkDNCImportStatus = exports.bulkDNCImport = exports.updateUserReservedNumbersOnWrite = exports.backupReservationExpiry = exports.triggerReservationExpiry = exports.testReservationExpiry = exports.processReservationExpiry = exports.handleReservationExpiry = exports.emergencyClaimExpiry = exports.smartBatchClaimExpiry = exports.realtimeClaimExpiry = exports.handleClaimExpiry = exports.autoAggregateStats = exports.aggregateStatsShards = exports.initializeNumberPoolStats = exports.updateNumberPoolStatsOnDelete = exports.updateNumberPoolStatsOnCreate = exports.resetUserPassword = exports.whatsappWebhook = exports.checkNumberAvailability = exports.processLeadRejection = exports.claimNumber = exports.backfillNumberTokens = exports.onNumberPoolUpdate = exports.onNumberPoolCreate = void 0;
 require("dotenv/config");
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const numberPoolStats_1 = require("./numberPoolStats");
 Object.defineProperty(exports, "updateNumberPoolStatsOnCreate", { enumerable: true, get: function () { return numberPoolStats_1.updateNumberPoolStatsOnCreate; } });
 Object.defineProperty(exports, "updateNumberPoolStatsOnDelete", { enumerable: true, get: function () { return numberPoolStats_1.updateNumberPoolStatsOnDelete; } });
+Object.defineProperty(exports, "initializeNumberPoolStats", { enumerable: true, get: function () { return numberPoolStats_1.initializeNumberPoolStats; } });
+Object.defineProperty(exports, "aggregateStatsShards", { enumerable: true, get: function () { return numberPoolStats_1.aggregateStatsShards; } });
+Object.defineProperty(exports, "autoAggregateStats", { enumerable: true, get: function () { return numberPoolStats_1.autoAggregateStats; } });
 const azureStorage_1 = require("./azureStorage");
 Object.defineProperty(exports, "uploadVerificationMediaToAzure", { enumerable: true, get: function () { return azureStorage_1.uploadVerificationMediaToAzure; } });
 const claimExpiry_1 = require("./claimExpiry");
@@ -151,40 +154,64 @@ async function upsertTokensForNumberPoolDoc(docRef, data) {
 }
 /**
  * ===============================================================================
- * FIRESTORE TRIGGER: Automatic Token Generation
+ * FIRESTORE TRIGGER: Automatic Token Generation on Create
  * ===============================================================================
- * This trigger automatically maintains search tokens for number pool documents.
- * It fires whenever a document in the 'numberPool' collection is created or updated.
+ * This trigger automatically generates search tokens when a new number is created.
+ * Optimized to use onCreate instead of onWrite for better performance.
  *
- * Token Update Conditions:
- * 1. numberTokens field is missing
- * 2. Phone number has changed since last token update
- * 3. This is a new document
+ * Token Generation:
+ * - Fires only on document creation (not updates)
+ * - Generates phone number search tokens
+ * - Skips during bulk uploads (handled by backfillNumberTokens)
  *
- * This ensures that all search tokens are always up-to-date for fast searching.
+ * This ensures fast searching while minimizing function invocations.
  */
-exports.onNumberPoolWrite = functions.firestore
+exports.onNumberPoolCreate = functions.firestore
     .document('numberPool/{id}')
-    .onWrite(async (change, context) => {
-    const after = change.after;
-    if (!after.exists)
-        return;
-    const data = after.data();
-    const before = change.before.exists ? change.before.data() : null;
-    // Only update tokens if:
-    // 1. numberTokens are missing, OR
-    // 2. number changed since last token update, OR
-    // 3. new document
-    const needsTokenUpdate = !(data === null || data === void 0 ? void 0 : data.numberTokens) ||
-        (before && (before.number !== data.number)) ||
-        !before; // new document
-    if (!needsTokenUpdate)
-        return;
+    .onCreate(async (snapshot, context) => {
+    const data = snapshot.data();
+    // Skip token generation during bulk uploads to prevent function spam
+    // Bulk uploads will generate tokens via backfillNumberTokens after upload completes
+    if ((data === null || data === void 0 ? void 0 : data.bulkUpload) === true) {
+        return; // Silent skip, no logging needed for bulk
+    }
+    // Only generate tokens if they don't already exist
+    if (data === null || data === void 0 ? void 0 : data.numberTokens) {
+        return; // Tokens already present
+    }
     try {
-        await upsertTokensForNumberPoolDoc(after.ref, after.data());
+        await upsertTokensForNumberPoolDoc(snapshot.ref, data);
     }
     catch (e) {
-        console.error('Failed to upsert tokens for numberPool doc', after.id, e);
+        console.error('Failed to generate tokens for numberPool doc', snapshot.id, e);
+    }
+});
+/**
+ * ===============================================================================
+ * FIRESTORE TRIGGER: Token Update on Number Change
+ * ===============================================================================
+ * This trigger updates search tokens when a number's phone number changes.
+ * Only fires on updates where the actual number field has changed.
+ */
+exports.onNumberPoolUpdate = functions.firestore
+    .document('numberPool/{id}')
+    .onUpdate(async (change, context) => {
+    const before = change.before.data();
+    const after = change.after.data();
+    // FAST SKIP: Ignore bulk upload operations and flag removals
+    if ((after === null || after === void 0 ? void 0 : after.bulkUpload) === true ||
+        (before.bulkUpload === true && after.bulkUpload === false)) {
+        return; // Silent skip for bulk operations
+    }
+    // Only update if the actual number changed
+    if (before.number === after.number) {
+        return; // Number didn't change, no token update needed
+    }
+    try {
+        await upsertTokensForNumberPoolDoc(change.after.ref, after);
+    }
+    catch (e) {
+        console.error('Failed to update tokens for numberPool doc', change.after.id, e);
     }
 });
 /**
@@ -195,6 +222,7 @@ exports.onNumberPoolWrite = functions.firestore
  * number pool documents that may be missing tokens or have outdated tokens.
  *
  * Features:
+ * - V1 callable function (CORS handled automatically by Firebase SDK)
  * - Processes documents in configurable batch sizes (default: 500, max: 1000)
  * - Supports pagination with cursor-based iteration
  * - Handles large datasets efficiently with batched processing
@@ -203,11 +231,10 @@ exports.onNumberPoolWrite = functions.firestore
  * Usage: Call from admin dashboard or maintenance scripts
  */
 exports.backfillNumberTokens = functions.https.onCall(async (data, context) => {
-    // Optional auth check
+    // Auth check
     if (!context.auth) {
         throw new functions.https.HttpsError('unauthenticated', 'Auth required');
     }
-    // Only allow admins (optional)
     try {
         const batchSize = Math.min(Number((data === null || data === void 0 ? void 0 : data.batchSize) || 500), 1000);
         const cursor = data === null || data === void 0 ? void 0 : data.cursor;
@@ -872,17 +899,28 @@ async function checkStrikeLimit(userId) {
         nextAvailableTime
     };
 }
+// Export user reserved numbers sync function
+var numberPoolReserved_1 = require("./numberPoolReserved");
+Object.defineProperty(exports, "updateUserReservedNumbersOnWrite", { enumerable: true, get: function () { return numberPoolReserved_1.updateUserReservedNumbersOnWrite; } });
 // Export bulk DNC import functions
 var bulkDNCImport_1 = require("./bulkDNCImport");
 Object.defineProperty(exports, "bulkDNCImport", { enumerable: true, get: function () { return bulkDNCImport_1.bulkDNCImport; } });
 Object.defineProperty(exports, "bulkDNCImportStatus", { enumerable: true, get: function () { return bulkDNCImport_1.bulkDNCImportStatus; } });
+// Export ultra-fast bulk number upload
+var bulkNumberUpload_1 = require("./bulkNumberUpload");
+Object.defineProperty(exports, "bulkNumberUploadV2", { enumerable: true, get: function () { return bulkNumberUpload_1.bulkNumberUploadV2; } });
+// Export Algolia transform function (skips bulk uploads)
+var algoliaTransform_1 = require("./algoliaTransform");
+Object.defineProperty(exports, "algoliaTransform", { enumerable: true, get: function () { return algoliaTransform_1.algoliaTransform; } });
 /**
  * ===============================================================================
- * CALLABLE FUNCTION: Statistics Recalculation
+ * CALLABLE FUNCTION: Statistics Recalculation (Deprecated)
  * ===============================================================================
  * This function manually recalculates number pool statistics.
- * Useful for administrative maintenance or after bulk data operations.
+ * NOTE: initializeNumberPoolStats is now a v2 callable function.
+ * This legacy wrapper duplicates the logic for backward compatibility.
  *
+ * @deprecated Use initializeNumberPoolStats directly instead
  * Authentication: Required (authenticated users only)
  * Usage: Call from admin dashboard or maintenance scripts
  */
@@ -891,8 +929,32 @@ exports.recomputeNumberPoolStats = functions.https.onCall(async (data, context) 
         throw new functions.https.HttpsError('unauthenticated', 'Auth required');
     }
     try {
-        await (0, numberPoolStats_1.initializeNumberPoolStats)();
-        return { ok: true };
+        // Duplicate the stats calculation logic here since v2 callable can't be called from v1
+        const numbersRef = db.collection('numberPool');
+        const statsRef = db.collection('stats').doc('numberPool');
+        const snapshot = await numbersRef.get();
+        const totalItems = snapshot.size;
+        const categoryCounts = {};
+        snapshot.docs.forEach(doc => {
+            const category = doc.data().category || 'all';
+            categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+        });
+        const updates = {
+            totalItems,
+            lastUpdated: FieldValue.serverTimestamp()
+        };
+        Object.entries(categoryCounts).forEach(([category, count]) => {
+            updates[`totalItems_${category}`] = count;
+            for (const pageSize of [10, 20, 50, 80, 100, 120]) {
+                updates[`totalPages_${pageSize}_${category}`] = Math.ceil(count / pageSize);
+            }
+        });
+        for (const pageSize of [10, 20, 50, 80, 100, 120]) {
+            updates[`totalPages_${pageSize}`] = Math.ceil(totalItems / pageSize);
+        }
+        updates.needsPageRecalc = false;
+        await statsRef.set(updates, { merge: true });
+        return { ok: true, totalItems, categoryCounts };
     }
     catch (e) {
         console.error('recomputeNumberPoolStats failed', e);
@@ -1033,10 +1095,12 @@ exports.checkNumberStatus = functions.https.onCall(async (data, context) => {
  * CORS: Enabled for all origins with appropriate headers
  */
 exports.checkNumberStatusHTTP = functions.https.onRequest(async (req, res) => {
-    // Set CORS headers
+    // Set CORS headers for all responses
+    // Allow all origins for CORS
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.set('Access-Control-Max-Age', '3600');
     // Handle preflight requests
     if (req.method === 'OPTIONS') {
         res.status(204).send('');
@@ -1044,7 +1108,7 @@ exports.checkNumberStatusHTTP = functions.https.onRequest(async (req, res) => {
     }
     // Only allow POST requests
     if (req.method !== 'POST') {
-        res.status(405).send('Method not allowed');
+        res.status(405).json({ error: 'Method not allowed' });
         return;
     }
     try {
