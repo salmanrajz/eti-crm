@@ -43,6 +43,27 @@ export interface WhatsAppVerificationLog {
   payload?: any;
   consents?: Record<string, boolean>;
   createdAt: Date;
+  // WhatsApp message status tracking
+  messageId?: string; // wamid from Meta
+  status?: 'accepted' | 'sent' | 'delivered' | 'read' | 'failed'; // Message delivery status
+  statusUpdatedAt?: Date; // Last status update timestamp
+  error?: {
+    code?: number;
+    title?: string;
+    message?: string;
+    details?: string;
+  };
+  conversation?: {
+    id?: string;
+    origin?: {
+      type?: string;
+    };
+  };
+  pricing?: {
+    billable?: boolean;
+    pricing_model?: string;
+    category?: string;
+  };
 }
 
 const CUSTOMER_TEMPLATE =
@@ -63,21 +84,53 @@ export function renderVerificationTemplate(parameters: string[]): string {
   return rendered;
 }
 
+interface LogOutboundOptions {
+  messageText?: string;
+  messageId?: string;
+  sendResponse?: any;
+  status?: WhatsAppVerificationLog['status'];
+  error?: WhatsAppVerificationLog['error'];
+}
+
 export async function logOutboundVerificationMessage(
   leadId: string,
   to: string,
   templateName: string,
   parameters: string[],
-  messageText?: string
+  options: LogOutboundOptions = {}
 ) {
-  const docData: Omit<WhatsAppVerificationLog, 'createdAt'> & { createdAt: any } = {
+  const docData: any = {
     direction: 'outbound',
     to,
     templateName,
     parameters,
-    messageText: messageText ?? renderVerificationTemplate(parameters),
+    messageText: options.messageText ?? renderVerificationTemplate(parameters),
     createdAt: serverTimestamp()
   };
+
+  // Extract messageId from sendResponse if available
+  let finalMessageId = options.messageId;
+  if (!finalMessageId && options.sendResponse?.messages?.[0]?.id) {
+    finalMessageId = options.sendResponse.messages[0].id;
+  }
+
+  if (finalMessageId) {
+    docData.messageId = finalMessageId;
+  }
+
+  const resolvedStatus =
+    options.status ||
+    (finalMessageId ? options.sendResponse?.messages?.[0]?.message_status || 'accepted' : undefined);
+
+  if (resolvedStatus) {
+    docData.status = resolvedStatus;
+    docData.statusUpdatedAt = serverTimestamp();
+  }
+
+  if (options.error) {
+    docData.error = options.error;
+  }
+
   await addDoc(collection(db, 'leads', leadId, 'whatsappLogs'), docData);
 }
 

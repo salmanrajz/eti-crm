@@ -274,8 +274,8 @@ class NumberPoolManager {
 
         this.pagination = new SmartPagination<NumberPool>('numberPool', {
           pageSize,
-          orderBy: 'lastStatusChange',
-          orderDirection: 'asc', // ASC to show untouched numbers (baseline date) first
+          orderBy: 'createdAt',
+          orderDirection: 'desc', // DESC to show newest numbers first
           filters
         });
         
