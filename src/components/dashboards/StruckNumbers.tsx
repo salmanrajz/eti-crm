@@ -67,7 +67,8 @@ import {
   SortDesc,
   RefreshCw,
   Eye,
-  AlertOctagon
+  AlertOctagon,
+  X
 } from 'lucide-react';
 import { format, subHours } from 'date-fns';
 import { clsx } from 'clsx';
@@ -76,6 +77,7 @@ import { toast } from 'react-hot-toast';
 interface StruckNumbersProps {
   struckNumbers: NumberPoolType[];
   loading: boolean;
+  onClose?: () => void;
 }
 
 interface StrikeLimit {
@@ -655,7 +657,7 @@ export function useStruckNumbersForCoordinator() {
   return { struckNumbers, loading };
 }
 
-export function StruckNumbers({ struckNumbers, loading }: StruckNumbersProps) {
+export function StruckNumbers({ struckNumbers, loading, onClose }: StruckNumbersProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'number' | 'claims' | 'time'>('time');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -712,22 +714,35 @@ export function StruckNumbers({ struckNumbers, loading }: StruckNumbersProps) {
         {/* Header with gradient background */}
         <div className="px-6 py-5 bg-gradient-to-r from-red-600 to-orange-600">
           <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                <AlertTriangle className="h-6 w-6" />
-                Struck Numbers
-              </h3>
-              <p className="mt-1 text-red-100 text-sm">
-                Numbers from your leads have been struck by other agents. Please take immediate action to Activate them, or you risk losing these numbers.
-              </p>
+            <div className="flex items-center gap-3 flex-1">
+              <motion.div
+                whileHover={{ scale: 1.05, rotate: 5 }}
+                whileTap={{ scale: 0.95 }}
+                className="p-3 bg-white/10 rounded-xl flex-shrink-0"
+              >
+                <Shield className="h-7 w-7 text-white" />
+              </motion.div>
+              <div>
+                <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                  <AlertTriangle className="h-6 w-6" />
+                  Struck Numbers
+                </h3>
+                <p className="mt-1 text-red-100 text-sm">
+                  Numbers from your leads have been struck by other agents. Please take immediate action to Activate them, or you risk losing these numbers.
+                </p>
+              </div>
             </div>
-            <motion.div
-              whileHover={{ scale: 1.05, rotate: 5 }}
-              whileTap={{ scale: 0.95 }}
-              className="p-3 bg-white/10 rounded-xl"
-            >
-              <Shield className="h-7 w-7 text-white" />
-            </motion.div>
+            {onClose && (
+              <motion.button
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.9 }}
+                onClick={onClose}
+                className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors flex-shrink-0"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5 text-white" />
+              </motion.button>
+            )}
           </div>
         </div>
 

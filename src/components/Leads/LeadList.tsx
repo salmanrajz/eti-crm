@@ -74,7 +74,11 @@ import {
   MapPin,
   User2,
   ArrowUpDown,
-  Settings
+  Settings,
+  X,
+  Check,
+  CheckCheck,
+  Calendar
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'react-hot-toast';
@@ -96,7 +100,7 @@ const PAGINATION_SIZE = (() => {
 })();
 
 // ✅ PERFORMANCE: Debounce configuration for real-time updates
-const DEBOUNCE_DELAY = 500; // 500ms debounce for real-time updates
+const DEBOUNCE_DELAY = 200; // 200ms debounce for real-time updates (reduced for faster response)
 
 // ✅ ENHANCED: Separate cache instances for different data types with localStorage support
 import { PerformanceCache } from '../../utils/cache';
@@ -110,8 +114,8 @@ const numberGroupsCache = new PerformanceCache<Map<string, string>>({
 });
 
 const agentInfoCache = new PerformanceCache<Map<string, { name: string; teamId?: string }>>({
-  maxAge: 60 * 60 * 1000, // 1 hour
-  maxSize: 100,
+  maxAge: 24 * 60 * 60 * 1000, // 24 hours (agent names rarely change)
+  maxSize: 200, // Increased cache size
   persistent: true,
   prefix: 'crm_agent_info',
   trackPerformance: true
@@ -119,8 +123,8 @@ const agentInfoCache = new PerformanceCache<Map<string, { name: string; teamId?:
 
 // Team info cache (teamId -> teamName)
 const teamInfoCache = new PerformanceCache<Map<string, string>>({
-  maxAge: 60 * 60 * 1000, // 1 hour
-  maxSize: 100,
+  maxAge: 24 * 60 * 60 * 1000, // 24 hours (team names rarely change)
+  maxSize: 200, // Increased cache size
   persistent: true,
   prefix: 'crm_team_info',
   trackPerformance: true
@@ -154,7 +158,6 @@ const isLeadInCoordinatorGroup = (lead: Lead, coordinatorType: CoordinatorType):
 export function LeadList() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
-  const [numberGroups, setNumberGroups] = useState<Map<string, string>>(new Map());
   const [loadingMore, setLoadingMore] = useState(false);
   const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
   const [searchTerm, setSearchTerm] = useState('');
@@ -166,7 +169,7 @@ export function LeadList() {
   const [itemsPerPage, setItemsPerPage] = useState(10);
   const [hasMore, setHasMore] = useState(true);
   const [lastDoc, setLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const { user, isAdmin, isManager, isVerifier } = useAuthStore();
+  const { user, isAdmin, isManager, isVerifier, isAgent } = useAuthStore();
   const [searchParams] = useSearchParams();
   const [sortField, setSortField] = useState<string>('createdAt');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
@@ -175,6 +178,52 @@ export function LeadList() {
     to?: string;
   }>({});
   const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
+  const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
+  const [selectedLeadForChat, setSelectedLeadForChat] = useState<Lead | null>(null);
+  const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
+  const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
+  const whatsAppLogsUnsubscribeRef = useRef<(() => void) | null>(null);
+  const logsContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Helper function to normalize log dates
+  const normalizeLogDate = (value: any): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value.toDate === 'function') return value.toDate();
+    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  // Load plan details from Firebase when selectedLeadForChat changes
+  useEffect(() => {
+    const loadPlanDetails = async () => {
+      if (!selectedLeadForChat?.plans?.[0]?.plan) {
+        setPlanDetails(null);
+        return;
+      }
+      try {
+        const planName = selectedLeadForChat.plans[0].plan;
+        const plansQuery = query(collection(db, 'plans'), where('name', '==', planName));
+        const plansSnapshot = await getDocs(plansQuery);
+        if (!plansSnapshot.empty) {
+          const planDoc = plansSnapshot.docs[0];
+          const planData = planDoc.data();
+          setPlanDetails({
+            amount: planData.amount || 'N/A',
+            benefits: planData.benefits || 'N/A',
+            duration: planData.duration || 'N/A'
+          });
+        } else {
+          setPlanDetails(null);
+        }
+      } catch (error) {
+        console.error('Error loading plan details:', error);
+        setPlanDetails(null);
+      }
+    };
+    loadPlanDetails();
+  }, [selectedLeadForChat]);
 
   // ✅ OPTIMIZED: Use refs to store unsubscribe functions for proper cleanup
   const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
@@ -184,10 +233,21 @@ export function LeadList() {
   const pendingUpdateRef = useRef<Lead[] | null>(null);
 
   // ✅ PERFORMANCE: Debounced update function to prevent excessive re-renders
-  const debouncedUpdateLeads = useCallback((leadsData: Lead[], lastDoc: QueryDocumentSnapshot<DocumentData> | null, hasMore: boolean) => {
+  // skipDebounce: true for immediate update (initial load), false for debounced (real-time updates)
+  const debouncedUpdateLeads = useCallback((leadsData: Lead[], lastDoc: QueryDocumentSnapshot<DocumentData> | null, hasMore: boolean, skipDebounce = false) => {
     // Clear existing timeout
     if (debouncedUpdateRef.current) {
       clearTimeout(debouncedUpdateRef.current);
+      debouncedUpdateRef.current = null;
+    }
+
+    // ✅ PERFORMANCE: Immediate update for initial load, debounced for real-time updates
+    if (skipDebounce) {
+      setLeads(leadsData);
+      setLastDoc(lastDoc);
+      setHasMore(hasMore);
+      pendingUpdateRef.current = null;
+      return;
     }
 
     // Store pending update
@@ -333,10 +393,7 @@ export function LeadList() {
         constraints.push(
           where('status', 'in', [
             'pending_verification',
-            'activated_non_verified',
-            'verified',
-            'rejected',
-            'follow_up'
+            'activated_non_verified'
           ])
         );
       } else if (isManager() && user.teamId) {
@@ -360,6 +417,7 @@ export function LeadList() {
       // ✅ PERFORMANCE: Optimized real-time updates with reduced overhead
       if (isInitialLoad) {
         // Setup onSnapshot for real-time updates with performance optimizations
+        let isFirstSnapshot = true; // Track first snapshot for immediate display
         const unsubscribe = onSnapshot(q, async (snapshot) => {
           try {
             // ✅ PERFORMANCE: Process data efficiently with early filtering
@@ -415,12 +473,18 @@ export function LeadList() {
               hasMore: snapshot.docs.length === loadSize
             });
 
-              // ✅ PERFORMANCE: Use debounced update to prevent excessive re-renders
+              // ✅ PERFORMANCE: Immediate update for first snapshot, debounced for subsequent updates
               debouncedUpdateLeads(
                 leadsWithInfo,
                 snapshot.docs[snapshot.docs.length - 1] || null,
-                snapshot.docs.length === loadSize
+                snapshot.docs.length === loadSize,
+                isFirstSnapshot // Skip debounce for first snapshot (instant display)
               );
+              
+              // Mark first snapshot as processed
+              if (isFirstSnapshot) {
+                isFirstSnapshot = false;
+              }
             }
             
             setLoading(false);
@@ -497,24 +561,41 @@ export function LeadList() {
     return () => window.removeEventListener('focus', handleFocus);
   }, [user, loading, loadLeads]);
 
+  // Cleanup WhatsApp logs listener on unmount or modal close
+  useEffect(() => {
+    return () => {
+      if (whatsAppLogsUnsubscribeRef.current) {
+        whatsAppLogsUnsubscribeRef.current();
+        whatsAppLogsUnsubscribeRef.current = null;
+      }
+    };
+  }, []);
+
+  // Auto-scroll WhatsApp logs container when new messages arrive
+  useEffect(() => {
+    if (showWhatsAppChat && logsContainerRef.current) {
+      try {
+        logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+      } catch {}
+    }
+  }, [whatsAppLogs, showWhatsAppChat]);
+
   // ✅ PERFORMANCE: Optimized batch processing with efficient queries
   const processLeadsWithInfo = useCallback(async (leadsData: Lead[]) => {
     // Early return for empty data
     if (!leadsData || leadsData.length === 0) return leadsData;
 
-    // Get unique ids for batch processing
-    const numberIds = [...new Set(leadsData.flatMap(lead => lead.plans?.map(plan => plan.numberId) || []))];
+    // ✅ PERFORMANCE: Group is always stored in lead document, no need to fetch from numberPool
     const agentIds = [...new Set(leadsData.map(lead => lead.agentId).filter((id): id is string => !!id))];
+    
+    // ✅ PERFORMANCE: Pre-extract team IDs from leads (before agent info) for parallel fetching
+    const leadTeamIds = [...new Set(leadsData.map(lead => lead.teamId as string).filter(Boolean))] as string[];
 
-    // ✅ PERFORMANCE: Batch fetch all data in parallel with optimized queries
-    const [numberGroupsResult, agentInfoResult] = await Promise.all([
-      fetchNumberGroupsOptimized(numberIds),
-      fetchAgentInfoOptimized(agentIds)
+    // ✅ PERFORMANCE: Fetch agent info and team info in parallel for maximum speed
+    const [agentInfoResult, teamInfoFromLeads] = await Promise.all([
+      fetchAgentInfoOptimized(agentIds),
+      leadTeamIds.length > 0 ? fetchTeamInfoOptimized(leadTeamIds) : Promise.resolve(new Map<string, string>())
     ]);
-
-    // ✅ PERFORMANCE: Process data efficiently
-    const numberGroupsMap = numberGroupsResult;
-    setNumberGroups(numberGroupsMap);
 
     // Normalize agent info map
     const agentInfo = new Map<string, { name: string; teamId?: string }>();
@@ -530,12 +611,20 @@ export function LeadList() {
       }
     });
 
-    // ✅ PERFORMANCE: Get team info only for unique team IDs
-    const derivedTeamIds = [...new Set(
-      leadsData.map(lead => (lead.teamId as string) || (agentInfo.get(lead.agentId)?.teamId as string)).filter(Boolean)
+    // ✅ PERFORMANCE: Get team IDs from agent info that weren't in leads
+    const agentTeamIds = [...new Set(
+      Array.from(agentInfo.values())
+        .map(agent => agent.teamId)
+        .filter((id): id is string => Boolean(id) && !leadTeamIds.includes(id))
     )] as string[];
-
-    const teamInfo = await fetchTeamInfoOptimized(derivedTeamIds);
+    
+    // ✅ PERFORMANCE: Fetch additional team info from agents if needed, then merge
+    const teamInfoFromAgents = agentTeamIds.length > 0 
+      ? await fetchTeamInfoOptimized(agentTeamIds)
+      : new Map<string, string>();
+    
+    // ✅ PERFORMANCE: Merge team info maps (leads first, then agents)
+    const teamInfo = new Map([...teamInfoFromLeads, ...teamInfoFromAgents]);
 
     // ✅ PERFORMANCE: Enrich leads efficiently
     return leadsData.map(lead => {
@@ -543,18 +632,12 @@ export function LeadList() {
       const resolvedTeamId = (lead.teamId as string) || resolvedAgent?.teamId;
       const resolvedTeamName = resolvedTeamId ? teamInfo.get(resolvedTeamId) : undefined;
       
-      // For MNP and Prepaid to postpaid, read group from lead document (not numberPool)
-      // because they use virtual numbers that don't exist in numberPool
-      const isMNPOrP2P = lead.productType === 'MNP' || lead.productType === 'Prepaid to postpaid';
-      
       return {
         ...lead,
         plans: lead.plans?.map(plan => ({
           ...plan,
-          // For MNP/P2P, use group from lead document; otherwise fetch from numberPool
-          group: isMNPOrP2P 
-            ? (plan.group || 'Unassigned')
-            : (numberGroupsMap.get(plan.numberId) || plan.group || 'Unassigned')
+          // ✅ PERFORMANCE: Group is always stored in lead document, no need to fetch from numberPool
+          group: plan.group || 'Unassigned'
         })),
         agentName: resolvedAgent?.name || 'Unknown Agent',
         teamName: resolvedTeamName || (resolvedTeamId ? 'Unknown Team' : undefined)
@@ -860,11 +943,8 @@ export function LeadList() {
         filtered = filtered.filter(lead => {
           // Check if any of the lead's plans belong to any of the verifier's groups
           const hasMatchingGroup = lead.plans?.some(plan => {
-            // For MNP/P2P, read group from lead document; otherwise from numberPool
-            const isMNPOrP2P = lead.productType === 'MNP' || lead.productType === 'Prepaid to postpaid';
-            const planGroup = isMNPOrP2P
-              ? (plan.group || '').toLowerCase()
-              : (numberGroups.get(plan.numberId) || plan.group || '').toLowerCase();
+            // ✅ PERFORMANCE: Group is always stored in lead document, no need to check numberPool
+            const planGroup = (plan.group || '').toLowerCase();
             
             return (user.verifierGroups as VerifierGroups)?.some((verifierGroup: string) => {
               const normalizedVerifierGroup = verifierGroup.toLowerCase();
@@ -882,16 +962,20 @@ export function LeadList() {
       return filtered;
     }
 
+    const normalizedSearch = searchTerm.trim().toLowerCase();
+    const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
+
     return filtered.filter(lead => {
-      const matchesSearch = !searchTerm || (
-        lead.customerNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        lead.customerName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      const matchesSearch = !normalizedSearch || (
+        lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
+        lead.customerName?.toLowerCase().includes(normalizedSearch) ||
         lead.plans?.some(plan => 
-          plan.number.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          plan.plan?.toLowerCase().includes(searchTerm.toLowerCase())
+          plan.number.toLowerCase().includes(normalizedSearch) ||
+          plan.plan?.toLowerCase().includes(normalizedSearch)
         ) ||
-        lead.status?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        lead.status?.replace(/_/g, ' ').toLowerCase().includes(searchTerm.toLowerCase())
+        lead.status?.toLowerCase().includes(normalizedSearch) ||
+        lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+        (canSearchEtisalatId && lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch))
       );
       
       let matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
@@ -904,7 +988,7 @@ export function LeadList() {
       
       return matchesSearch && matchesStatus;
     });
-  }, [leads, searchTerm, statusFilter, user?.role, user?.coordinatorType, user?.verifierGroups, numberGroups]);
+  }, [leads, searchTerm, statusFilter, user?.role, user?.coordinatorType, user?.verifierGroups]);
 
   // Add sorting function
   const handleSort = useCallback((field: string) => {
@@ -1429,213 +1513,147 @@ export function LeadList() {
           <span>entries</span>
         </motion.div>
 
-        {/* List Headers - Hide on mobile */}
+        {/* Leads Table Container */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.15 }}
-          className="hidden sm:block mt-4 px-4 py-4 bg-white rounded-t-xl border border-gray-200 shadow-sm"
+          className="mt-4 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl overflow-hidden border border-white/50"
         >
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center w-1/6">
-              <button
-                onClick={() => handleSort('customerName')}
-                className="flex items-center text-sm font-semibold text-gray-900 tracking-wide hover:text-indigo-600 transition-colors duration-200"
-              >
-                Customer Information
-                <ArrowUpDown className="h-4 w-4 ml-1" />
-                {sortField === 'customerName' && (
-                  sortDirection === 'asc' ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />
-                )}
-              </button>
-            </div>
-            <div className="flex items-center w-1/6">
-              <button
-                onClick={() => handleSort('customerNumber')}
-                className="flex items-center text-sm font-semibold text-gray-900 tracking-wide hover:text-indigo-600 transition-colors duration-200"
-              >
-                Selected Numbers
-                <ArrowUpDown className="h-4 w-4 ml-1" />
-                {sortField === 'customerNumber' && (
-                  sortDirection === 'asc' ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />
-                )}
-              </button>
-            </div>
-            <div className="flex items-center w-1/6">
-              <button
-                onClick={() => handleSort('group')}
-                className="flex items-center text-sm font-semibold text-gray-900 tracking-wide hover:text-indigo-600 transition-colors duration-200"
-              >
-                Group
-                <ArrowUpDown className="h-4 w-4 ml-1" />
-                {sortField === 'group' && (
-                  sortDirection === 'asc' ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />
-                )}
-              </button>
-            </div>
-            <div className="hidden md:flex items-center w-1/6">
-              <span className="text-sm font-semibold text-gray-900 tracking-wide">Plan Details</span>
-            </div>
-            {(isManager() || user?.role === 'coordinator') && (
-              <div className="flex items-center justify-center w-1/6">
-                <button
-                  onClick={() => handleSort('agentName')}
-                  className="flex items-center text-sm font-semibold text-gray-900 tracking-wide hover:text-indigo-600 transition-colors duration-200"
-                >
-                  {isManager() ? 'Agent' : 'Agent & Team'}
-                  <ArrowUpDown className="h-4 w-4 ml-1" />
-                  {sortField === 'agentName' && (
-                    sortDirection === 'asc' ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />
-                  )}
-                </button>
+          {/* Table Headers - Desktop Only */}
+          <div className="hidden sm:block relative px-6 py-5 bg-gradient-to-br from-indigo-50/90 via-purple-50/90 to-pink-50/90 backdrop-blur-sm border-b border-indigo-100/50">
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-3">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-lg">
+                    <User2 className="h-4 w-4 text-indigo-600" />
+                  </div>
+                  <span className="text-sm font-bold text-indigo-700 uppercase tracking-wide">Customer Info</span>
+                </div>
               </div>
-            )}
-            <div className="flex items-center justify-center w-1/6">
-              <button
-                onClick={() => handleSort('status')}
-                className="flex items-center text-sm font-semibold text-gray-900 tracking-wide hover:text-indigo-600 transition-colors duration-200"
-              >
-                Status
-                <ArrowUpDown className="h-4 w-4 ml-1" />
-                {sortField === 'status' && (
-                  sortDirection === 'asc' ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />
-                )}
-              </button>
-            </div>
-            <div className="flex items-center justify-end w-1/6">
-              <span className="text-sm font-semibold text-gray-900 tracking-wide">Actions</span>
+              <div className="col-span-2 -ml-3">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-gradient-to-br from-blue-100 to-cyan-100 rounded-lg">
+                    <Hash className="h-4 w-4 text-blue-600" />
+                  </div>
+                  <span className="text-sm font-bold text-blue-700 uppercase tracking-wide">Selected Number</span>
+                </div>
+              </div>
+              <div className="col-span-4">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-gradient-to-br from-emerald-100 to-green-100 rounded-lg">
+                    <Package className="h-4 w-4 text-emerald-600" />
+                  </div>
+                  <span className="text-sm font-bold text-emerald-700 uppercase tracking-wide">Plan Details</span>
+                </div>
+              </div>
+              <div className="col-span-1 pr-8">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-gradient-to-br from-amber-100 to-orange-100 rounded-lg">
+                    <Clock className="h-4 w-4 text-amber-600" />
+                  </div>
+                  <span className="text-sm font-bold text-amber-700 uppercase tracking-wide">Status</span>
+                </div>
+              </div>
+              <div className="col-span-2 pl-8">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2 bg-gradient-to-br from-purple-100 to-pink-100 rounded-lg">
+                    <Eye className="h-4 w-4 text-purple-600" />
+                  </div>
+                  <span className="text-sm font-bold text-purple-700 uppercase tracking-wide">Actions</span>
+                </div>
+              </div>
             </div>
           </div>
-        </motion.div>
 
-        {/* Leads List */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-          className="space-y-2 mt-6"
-        >
+          {/* Leads List */}
+          <div className="relative">
           <AnimatePresence>
             {currentLeads.map((lead, index) => (
               <motion.div
                 key={lead.id}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -20 }}
-                transition={{ duration: 0.3, delay: index * 0.05 }}
+                transition={{ duration: 0.3, delay: index * 0.1 }}
                 className={clsx(
-                  "group relative bg-white border border-gray-200 hover:border-indigo-200 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 overflow-hidden",
-                  (lead as any).verificationMethod === 'whatsapp' && "bg-gradient-to-r from-emerald-50/50 to-transparent"
+                  "group hover:bg-gradient-to-r hover:from-indigo-50/50 hover:to-purple-50/50 transition-all duration-200 relative",
+                  (lead as any).verificationMethod === 'whatsapp' && "bg-gradient-to-r from-emerald-50/50 to-transparent",
+                  index < currentLeads.length - 1 && "border-b border-gradient-to-r from-gray-200/60 via-indigo-200/40 to-purple-200/60"
                 )}
+                style={{
+                  borderBottom: index < currentLeads.length - 1 ? '2px solid transparent' : 'none',
+                  backgroundImage: index < currentLeads.length - 1 
+                    ? 'linear-gradient(white, white), linear-gradient(90deg, rgba(156, 163, 175, 0.7), rgba(129, 140, 248, 0.6), rgba(196, 181, 253, 0.6), rgba(236, 72, 153, 0.5))'
+                    : 'none',
+                  backgroundOrigin: 'border-box',
+                  backgroundClip: 'padding-box, border-box'
+                }}
               >
                 {/* WhatsApp Indicator */}
                 {(lead as any).verificationMethod === 'whatsapp' && (
                   <div className="absolute left-0 top-0 bottom-0 w-1 bg-emerald-500 z-10"></div>
                 )}
-                <div className="p-4 relative z-10">
+                <div className="px-6 py-4">
                   {/* Desktop Layout */}
-                  <div className="hidden sm:flex items-center justify-between gap-4">
-                    {/* Left Section - Customer Info */}
-                    <div className="flex items-center w-1/6">
-                      <div className="flex-shrink-0">
-                        <motion.div 
-                          whileHover={{ scale: 1.05 }}
-                          className="w-12 h-12 rounded-full bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center ring-2 ring-white shadow-sm"
-                        >
-                          <Phone className="h-6 w-6 text-indigo-600" />
-                        </motion.div>
-                      </div>
-                      <div className="ml-3">
-                        <h3 className="text-lg font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors duration-200">
-                          {lead.customerName || 'Unnamed Customer'}
-                        </h3>
-                        <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200">
-                          <Phone className="h-4 w-4 mr-1.5" />
-                          {lead.customerNumber}
+                  <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
+                    {/* Customer Information */}
+                    <div className="col-span-3 flex items-center">
+                      <div className="flex items-center space-x-2">
+                        <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
+                          <User2 className="h-5 w-5 text-indigo-600" />
                         </div>
-                        {lead.customerAddress && (
-                          <div className="flex items-center text-s text-gray-500 mt-1">
-                            <MapPin className="h-3 w-3 mr-1.5" />
-                            {lead.customerAddress}
+                        <div>
+                          <h3 className="text-sm font-semibold text-gray-900">
+                            {lead.customerName || 'Unnamed Customer'}
+                          </h3>
+                          <div className="flex items-center text-xs text-gray-500 mt-1">
+                            <Phone className="h-3 w-3 mr-1.5" />
+                            {lead.customerNumber}
                           </div>
-                        )}
-                        <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200 mt-1">
-                          <Clock className="h-4 w-4 mr-1.5" />
-                          {format(lead.createdAt, 'MMM d, yyyy')}
+                          <div className="flex items-center text-xs text-gray-500 mt-1">
+                            <Calendar className="h-3 w-3 mr-1.5" />
+                            {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
+                          </div>
                         </div>
                       </div>
                     </div>
 
-                    {/* Selected Number Column */}
-                    <div className="flex items-center w-1/6">
+                    {/* Selected Numbers */}
+                    <div className="col-span-2 -ml-3">
                       <div className="flex flex-col space-y-2">
-                        {lead.plans?.map((plan, planIndex) => (
-                          <div key={planIndex} className="flex items-center space-x-2 bg-gray-50 px-3 py-1.5 rounded-lg">
-                        <Hash className="h-4 w-4 text-indigo-500" />
-                        <span className="text-sm font-medium text-gray-700">
-                              {plan.number || 'N/A'}
-                            </span>
-                          </div>
-                        ))}
+                        {(lead.plans && lead.plans.length > 0)
+                          ? lead.plans.map((plan, planIndex) => (
+                              <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
+                                <Hash className="h-4 w-4 text-indigo-500" />
+                                <span className="text-sm font-medium text-gray-700">
+                                  {plan.number || ''}
+                                </span>
+                              </div>
+                            ))
+                          : <span className="text-sm font-medium text-gray-700"></span>
+                        }
                       </div>
                     </div>
 
-                    {/* Group Column */}
-                    <div className="flex items-center w-1/6">
+                    {/* Plan Details */}
+                    <div className="col-span-4">
                       <div className="flex flex-col space-y-2">
-                        {lead.plans?.map((plan, planIndex) => (
-                          <div key={planIndex} className="flex items-center">
-                            <span className={clsx(
-                              "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full",
-                              plan.group === 'G1' ? 'bg-blue-100 text-blue-800' :
-                              plan.group === 'G2' ? 'bg-green-100 text-green-800' :
-                              plan.group === 'G3' ? 'bg-purple-100 text-purple-800' :
-                              plan.group === 'G4' ? 'bg-yellow-100 text-yellow-800' :
-                              plan.group === 'G5' ? 'bg-red-100 text-red-800' :
-                              'bg-gray-100 text-gray-800'
-                            )}>
-                              {plan.group || 'Unassigned'}
-                            </span>
-                          </div>
-                        ))}
+                        {(lead.plans && lead.plans.length > 0)
+                          ? lead.plans.map((plan, planIndex) => (
+                              <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
+                                <Package className="h-4 w-4 text-indigo-500" />
+                                <span className="text-sm font-medium text-gray-700">
+                                  {plan.plan || ''}
+                                </span>
+                              </div>
+                            ))
+                          : <span className="text-sm font-medium text-gray-700"></span>
+                        }
                       </div>
                     </div>
 
-                    {/* Middle Section - Plan Details */}
-                    <div className="hidden md:flex items-center w-1/6">
-                      <div className="flex flex-col space-y-2">
-                        {lead.plans?.map((plan, planIndex) => (
-                          <div key={planIndex} className="flex items-center space-x-2 bg-gray-50 px-3 py-1.5 rounded-lg">
-                          <Package className="h-4 w-4 text-indigo-500" />
-                          <span className="text-sm font-medium text-gray-700">
-                              {plan.plan || 'N/A'}
-                          </span>
-                        </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Agent Column - Only visible to managers and coordinators */}
-                    {(isManager() || user?.role === 'coordinator') && (
-                      <div className="flex items-center justify-center w-1/6">
-                        <div className="flex items-center space-x-2">
-                          <User2 className="h-4 w-4 text-indigo-500" />
-                          <div className="flex flex-col leading-tight">
-                            <span className="text-sm font-medium text-gray-700">
-                              {(lead as any).agentName || 'Unknown Agent'}
-                            </span>
-                            {user?.role === 'coordinator' && (
-                              <span className="text-xs text-gray-500">
-                                {(lead as any).teamName || 'Unknown Team'}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Status Column */}
-                    <div className="flex items-center justify-center w-1/6">
+                    {/* Status */}
+                    <div className="col-span-1 pr-8">
                       <motion.span
                         whileHover={{ scale: 1.05 }}
                         className={clsx(
@@ -1649,22 +1667,63 @@ export function LeadList() {
                       </motion.span>
                     </div>
 
-                    {/* Right Section - Actions */}
-                    <div className="flex items-center justify-end w-1/6">
-                      <motion.div
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        className="relative z-20"
-                      >
-                        <Link
-                          to={`/dashboard/leads/${lead.id}`}
-                          className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                    {/* Actions */}
+                    <div className="col-span-2 pl-8">
+                      <div className="flex items-center gap-2">
+                        {(isAdmin() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
+                          <motion.button
+                            whileHover={{ scale: 1.02, y: -1 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => {
+                              setSelectedLeadForChat(lead);
+                              setShowWhatsAppChat(true);
+                              const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
+                              if (whatsAppLogsUnsubscribeRef.current) {
+                                whatsAppLogsUnsubscribeRef.current();
+                              }
+                              const unsubscribe = onSnapshot(
+                                query(logsCol, orderBy('createdAt', 'asc')),
+                                (snap) => {
+                                  const rows = snap.docs.map(d => ({
+                                    id: d.id,
+                                    ...d.data(),
+                                    createdAt: d.data().createdAt
+                                  }));
+                                  setWhatsAppLogs(rows as any[]);
+                                },
+                                (error) => {
+                                  if (error.code === 'permission-denied') {
+                                    return;
+                                  }
+                                  console.error('Error fetching WhatsApp logs:', error);
+                                  toast.error('Failed to load WhatsApp chat');
+                                }
+                              );
+                              whatsAppLogsUnsubscribeRef.current = unsubscribe;
+                            }}
+                            title="WhatsApp Verification"
+                            className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
+                          >
+                            <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true">
+                              <path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/>
+                            </svg>
+                          </motion.button>
+                        )}
+                        <motion.div
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="relative z-20"
                         >
-                          <Eye className="h-4 w-4 mr-2" />
-                          View Details
-                          <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
-                        </Link>
-                      </motion.div>
+                          <Link
+                            to={`/dashboard/leads/${lead.id}`}
+                            className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                          >
+                            <Eye className="h-4 w-4 mr-2" />
+                            View Details
+                            <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
+                          </Link>
+                        </motion.div>
+                      </div>
                     </div>
                   </div>
 
@@ -1765,12 +1824,51 @@ export function LeadList() {
                       </div>
                     </div>
 
-                    {/* Action Button */}
-                    <div className="mt-4">
+                    {/* Action Buttons */}
+                    <div className="mt-4 flex gap-2">
+                      {(isAdmin() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
+                        <motion.button
+                          whileHover={{ scale: 1.02, y: -1 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => {
+                            setSelectedLeadForChat(lead);
+                            setShowWhatsAppChat(true);
+                            const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
+                            if (whatsAppLogsUnsubscribeRef.current) {
+                              whatsAppLogsUnsubscribeRef.current();
+                            }
+                            const unsubscribe = onSnapshot(
+                              query(logsCol, orderBy('createdAt', 'asc')),
+                              (snap) => {
+                                const rows = snap.docs.map(d => ({
+                                  id: d.id,
+                                  ...d.data(),
+                                  createdAt: d.data().createdAt
+                                }));
+                                setWhatsAppLogs(rows as any[]);
+                              },
+                              (error) => {
+                                if (error.code === 'permission-denied') {
+                                  return;
+                                }
+                                console.error('Error fetching WhatsApp logs:', error);
+                                toast.error('Failed to load WhatsApp chat');
+                              }
+                            );
+                            whatsAppLogsUnsubscribeRef.current = unsubscribe;
+                          }}
+                          title="WhatsApp Verification"
+                          className="inline-flex items-center justify-center h-11 w-11 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200 flex-shrink-0"
+                        >
+                          <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true">
+                            <path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/>
+                          </svg>
+                        </motion.button>
+                      )}
                       <motion.div
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
-                        className="relative z-20"
+                        className="relative z-20 flex-1"
                       >
                         <Link
                           to={`/dashboard/leads/${lead.id}`}
@@ -1790,6 +1888,7 @@ export function LeadList() {
               </motion.div>
             ))}
           </AnimatePresence>
+          </div>
         </motion.div>
 
         {/* Empty State */}
@@ -1879,6 +1978,275 @@ export function LeadList() {
           </div>
         </motion.div>
       </div>
+
+      {/* WhatsApp Chat Modal for Admins */}
+      <AnimatePresence>
+        {showWhatsAppChat && selectedLeadForChat && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white/90 rounded-2xl p-0 max-w-6xl w-full mx-4 shadow-2xl overflow-hidden"
+            >
+              <div className="px-6 sm:px-8 py-4 bg-gradient-to-r from-emerald-50 to-green-50 border-b border-emerald-100 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-emerald-100 text-emerald-600">
+                    <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true"><path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/></svg>
+                  </span>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-semibold text-emerald-800">WhatsApp Verification</h3>
+                    {selectedLeadForChat && (
+                      <p className="text-xs sm:text-sm text-emerald-700/80">{selectedLeadForChat.customerName} · {selectedLeadForChat.customerNumber}</p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowWhatsAppChat(false);
+                    setSelectedLeadForChat(null);
+                    if (whatsAppLogsUnsubscribeRef.current) {
+                      whatsAppLogsUnsubscribeRef.current();
+                      whatsAppLogsUnsubscribeRef.current = null;
+                    }
+                    setWhatsAppLogs([]);
+                  }}
+                  className="inline-flex items-center justify-center h-9 w-9 rounded-full text-emerald-700 hover:bg-emerald-100/60"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div ref={logsContainerRef} className="px-6 sm:px-8 py-5 max-h-[70vh] overflow-y-auto space-y-4">
+                {whatsAppLogs.length === 0 ? (
+                  <div className="text-sm text-gray-500">No WhatsApp messages found for this lead.</div>
+                ) : (
+                  whatsAppLogs.map((log) => {
+                    const created = normalizeLogDate(log.createdAt);
+                    const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
+                    const fromDigits = (log.from || '').toString().replace(/\D/g, '');
+                    const fromDisplay = fromDigits ? `+${fromDigits}` : '';
+                    const firstPlan = selectedLeadForChat?.plans?.[0];
+                    const isOutbound = log.direction === 'outbound';
+                    const createdTime = created?.getTime() ?? 0;
+                    const hasCustomerReplyAfter =
+                      isOutbound &&
+                      whatsAppLogs.some(other => {
+                        if (other.id === log.id || other.direction !== 'inbound') return false;
+                        const otherCreated = normalizeLogDate(other.createdAt);
+                        return (otherCreated?.getTime() ?? 0) > createdTime;
+                      });
+                    const deriveStatus = (): 'read' | 'delivered' | 'sent' | 'failed' | undefined => {
+                      if (!isOutbound) return undefined;
+                      if (log.status === 'failed') return 'failed';
+                      if (log.status === 'read' || hasCustomerReplyAfter) return 'read';
+                      if (log.status === 'delivered') return 'delivered';
+                      if (log.status === 'sent' || log.status === 'accepted') return 'sent';
+                      return log.status ? 'sent' : undefined;
+                    };
+                    const effectiveStatus = deriveStatus();
+                    const statusLabelMap: Record<string, string> = {
+                      read: 'Read',
+                      delivered: 'Delivered',
+                      sent: 'Sent',
+                      failed: 'Failed'
+                    };
+                    const CONSENT_ORDER: Array<{ key: string; label: string }> = [
+                      {
+                        key: 'ownershipAfterContract',
+                        label:
+                          'The chosen number becomes yours only after completing the contract. During this period, transfer of ownership is not permitted, and porting out to other telecom providers is restricted. Plan upgrades (within the same category) are allowed; downgrades or switching to prepaid are not allowed.'
+                      },
+                      {
+                        key: 'proRatedAgree',
+                        label:
+                          'Multi-SIM is available exclusively with the Limited Data Packages; this feature is not available with Non-Stop Data plans. The plan will be pro-rated. In case of early cancellation, all pending bills must be cleared along with one-month rental + 5% VAT, and the number will be reclaimed by Etisalat.'
+                      },
+                      {
+                        key: 'gracePeriodAcknowledge',
+                        label:
+                          'If you are not a UAE citizen, you must pay half or full monthly rental in advance at activation, which will be adjusted in the 4th month of your billing cycle. In case of technical or network-related issues, or misinformation, you can cancel the plan without charges within the first five days.'
+                      },
+                      {
+                        key: 'dataAccuracyAcknowledge',
+                        label:
+                          'The information provided regarding the number and plan is accurate. Any other information received will not be considered valid. Please read this carefully and confirm, as this communication will be referenced in the event of any future complaints regarding the number or plan.'
+                      },
+                      {
+                        key: 'acceptAllTerms',
+                        label: 'Accept all the Terms & Conditions.'
+                      }
+                    ];
+                    const accepted = Array.isArray(CONSENT_ORDER)
+                      ? CONSENT_ORDER.filter(i => log.consents?.[i.key] === true)
+                      : [];
+                    return (
+                      <div key={log.id} className={clsx('flex', isOutbound ? 'justify-end' : 'justify-start')}>
+                        <div className={clsx('max-w-[85%] rounded-2xl px-4 py-3 shadow-sm border',
+                          isOutbound ? 'bg-indigo-50 text-indigo-900 border-indigo-100' : 'bg-emerald-50 text-emerald-900 border-emerald-100'
+                        )}>
+                          <div className="flex items-center justify-between text-[11px] text-gray-500/80 mb-2">
+                            <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
+                              {isOutbound ? 'Outbound' : 'Inbound'}
+                            </span>
+                            <span className="ml-2 flex items-center gap-1.5">
+                              {fromDisplay && (
+                                <span className="font-bold text-blue-600">From {fromDisplay}</span>
+                              )}
+                              {createdStr && ` · ${createdStr}`}
+                              {isOutbound && (
+                                <span
+                                  className="ml-1.5 inline-flex items-center"
+                                  title={effectiveStatus ? `Message ${statusLabelMap[effectiveStatus] || effectiveStatus}` : 'Message sent'}
+                                >
+                                  {effectiveStatus === 'read' && (
+                                    <CheckCheck className="w-4 h-4 text-green-500" />
+                                  )}
+                                  {effectiveStatus === 'delivered' && (
+                                    <CheckCheck className="w-4 h-4 text-gray-600" />
+                                  )}
+                                  {(!effectiveStatus || effectiveStatus === 'sent') && (
+                                    <Check className="w-3.5 h-3.5 text-gray-500" />
+                                  )}
+                                  {effectiveStatus === 'failed' && (
+                                    <XCircle className="w-4 h-4 text-red-500" />
+                                  )}
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                          {accepted.length > 0 && firstPlan && (
+                            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 mb-3 shadow-sm">
+                              <div className="flex items-center gap-2 mb-3">
+                                <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                                <h4 className="text-sm font-semibold text-blue-900">Plan & Number Summary</h4>
+                              </div>
+                              <div className="space-y-2 text-sm">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-gray-700">Selected Number:</span>
+                                  <span className="font-semibold text-gray-900">{firstPlan.number}</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-gray-700">Monthly Plan:</span>
+                                  <span className="font-semibold text-gray-900">
+                                    {firstPlan.plan ? 
+                                      (() => {
+                                        const match = firstPlan.plan.match(/\d+/);
+                                        return match ? `${match[0]} AED + 5% VAT` : firstPlan.plan;
+                                      })() 
+                                      : ''
+                                    }
+                                  </span>
+                                </div>
+                                {planDetails?.benefits && planDetails.benefits !== 'N/A' && (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-gray-700">Benefits:</span>
+                                    <span className="font-semibold text-gray-900">{planDetails.benefits}</span>
+                                  </div>
+                                )}
+                                {planDetails?.duration && planDetails.duration !== 'N/A' && (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-gray-700">Contract Duration:</span>
+                                    <span className="font-semibold text-gray-900">{planDetails.duration}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {log.messageText && (
+                            <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
+                          )}
+                          {/* Show error message if status is failed */}
+                          {effectiveStatus === 'failed' && log.error && (() => {
+                            const errorObj = log.error as any;
+                            let errorText = '';
+                            let errorCode = '';
+                            let errorExplanation = '';
+                            
+                            if (typeof log.error === 'string') {
+                              errorText = log.error;
+                            } else if (errorObj) {
+                              // WhatsApp error structure: { code, title, message, error_data }
+                              const parts = [];
+                              if (errorObj.title) parts.push(errorObj.title);
+                              // Only add message if it's different from title (avoid duplication)
+                              if (errorObj.message && errorObj.message !== errorObj.title) {
+                                parts.push(errorObj.message);
+                              }
+                              errorText = parts.length > 0 ? parts.join(' - ') : '';
+                              errorCode = errorObj.code || '';
+                              
+                              // Provide user-friendly explanations for common error codes
+                              const errorExplanations: Record<string, string> = {
+                                '131026': 'The customer\'s phone number is not registered on WhatsApp or has blocked your business number.',
+                                '131047': 'The customer has not replied within the 24-hour messaging window. Send a template message to re-engage.',
+                                '131051': 'This type of message is not supported. Try using a different message format.',
+                                '131052': 'Media download failed. The media file may be corrupted or too large.',
+                                '131053': 'Media upload failed. Check the file format and size.',
+                                '133000': 'The phone number format is invalid. Use international format (e.g., 971XXXXXXXXX).',
+                                '133004': 'The template message was rejected. Verify the template name and parameters.',
+                                '133005': 'Template not found. Make sure the template is approved in Meta Business Manager.',
+                                '133006': 'Invalid template parameters. Check parameter count and format.',
+                                '133010': 'Message limit exceeded. You\'ve reached the messaging limit for this customer.',
+                                '130472': 'The customer has opted out of marketing messages. They must opt back in before you can send them marketing content.',
+                                '135000': 'Generic WhatsApp Business API error. Contact support if this persists.',
+                                '136000': 'Insufficient WhatsApp Business Account balance. Add funds to continue messaging.',
+                                '368': 'Temporarily blocked for spammy behavior. Reduce message frequency.',
+                                '131031': 'Rate limit exceeded. Too many messages sent in a short time. Wait before retrying.',
+                              };
+                              
+                              errorExplanation = errorExplanations[errorCode] || '';
+                            }
+                            
+                            return (
+                              <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-2.5">
+                                <div className="flex items-start gap-2">
+                                  <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                                  <div className="flex-1 text-xs text-red-800">
+                                    <div className="font-semibold mb-1">Message Failed</div>
+                                    {errorText && <div className="text-red-700 mb-1">{errorText}</div>}
+                                    {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
+                                    {errorExplanation && (
+                                      <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
+                                        <span className="font-semibold">💡 What to do: </span>
+                                        {errorExplanation}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                          {accepted.length > 0 && (
+                            <ol className="mt-1 space-y-2 text-sm">
+                              {accepted.map((item, idx) => (
+                                <li key={item.key} className="flex items-start">
+                                  <span className="mr-2 text-gray-700">{idx + 1}.</span>
+                                  <span className="text-gray-900">
+                                    {item.label}
+                                    <span className="ml-2 inline-flex items-center text-green-600 text-xs font-medium align-middle">
+                                      <svg className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M16.704 5.29a1 1 0 00-1.408-1.418L7.5 11.66 4.704 8.864a1 1 0 10-1.408 1.418l3.5 3.5a1 1 0 001.408 0l8.5-8.5z" clipRule="evenodd"/></svg>
+                                      Accepted
+                                    </span>
+                                  </span>
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Advanced Search Modal */}
       <AdvancedLeadSearch

@@ -1195,26 +1195,15 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             const routeConfig = await resolveWhatsAppRoute(group);
             const { template } = routeConfig;
             const dynamicTemplateName = template.templateName;
-            
-            // Log outbound verification message
-            try {
-              const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
-              const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
-              
-              await logOutboundVerificationMessage(
-                docRef.id,
-                formattedNumber,
-                dynamicTemplateName,
-                [
-                  selectedPlans[0]?.number || 'N/A',
-                  monthlyLabel,
-                  planDetails.benefits,
-                  planDetails.duration
-                ]
-              );
-            } catch (e) {
-              // Error logging outbound message
-            }
+
+            const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+            const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
+            const templateParameters = [
+              selectedPlans[0]?.number || 'N/A',
+              monthlyLabel,
+              planDetails.benefits,
+              planDetails.duration
+            ];
 
             try {
               const payload = {
@@ -1239,8 +1228,24 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 ]
               };
               
-              // Preserve Flow-style template usage with button sub_type: 'flow'
-              await sendWhatsAppWithComponentsByGroup(payload);
+              // Send WhatsApp message and capture response with messageId
+              const sendResponse = await sendWhatsAppWithComponentsByGroup(payload);
+              
+              // Log outbound verification message with messageId from response
+              try {
+                await logOutboundVerificationMessage(
+                  docRef.id,
+                  formattedNumber,
+                  dynamicTemplateName,
+                  templateParameters,
+                  {
+                    sendResponse
+                  }
+                );
+              } catch (e) {
+                // Error logging outbound message
+                console.error('Failed to log outbound message:', e);
+              }
               
               setSuccessMessage('Lead created and verification message sent to customer');
               setShowSuccessPopup(true);
@@ -1250,6 +1255,23 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
               }, 2000);
             } catch (e: any) {
+              try {
+                await logOutboundVerificationMessage(
+                  docRef.id,
+                  formattedNumber,
+                  dynamicTemplateName,
+                  templateParameters,
+                  {
+                    status: 'failed',
+                    error: {
+                      message: e?.message,
+                      details: typeof e?.toString === 'function' ? e.toString() : undefined
+                    }
+                  }
+                );
+              } catch (logError) {
+                console.error('Failed to log failed outbound message:', logError);
+              }
               toast.error('Failed to send verification message to customer');
             }
           }

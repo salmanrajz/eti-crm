@@ -47,12 +47,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { format } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
-import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, onSnapshot, orderBy } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { logNumberAction } from '../../utils/numberLogging';
 import { getPlans } from '../../utils/planService';
+import { incrementVerifierCounters } from '../../utils/verifierCounters';
 import { 
   UserIcon, Phone, MapPin, Calendar, Globe2, 
   Languages, Users, Clock, Package, Hash,
@@ -61,7 +62,7 @@ import {
   MapPinned, FileSpreadsheet, Briefcase,
   Clock as ClockIcon, CheckCircle2, AlertCircle, AlertTriangle, ThumbsDown,
   MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
-  MessageCircle, Check, Paperclip, RefreshCw
+  MessageCircle, Check, CheckCheck, Paperclip, RefreshCw
 } from 'lucide-react';
 import type { Lead, UserRole } from '../../types';
 import { FormSection } from './FormSection';
@@ -280,6 +281,59 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [isCoordinatorActionProcessing, setIsCoordinatorActionProcessing] = useState(false);
   const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
+  const whatsappLogsUnsubRef = useRef<null | (() => void)>(null);
+
+  const normalizeLogDate = (value: any): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value.toDate === 'function') return value.toDate();
+    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const stopWhatsAppLogsListener = () => {
+    if (whatsappLogsUnsubRef.current) {
+      whatsappLogsUnsubRef.current();
+      whatsappLogsUnsubRef.current = null;
+    }
+  };
+
+  const startWhatsAppLogsListener = () => {
+    try {
+      const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
+      const logsQuery = query(logsCol, orderBy('createdAt', 'asc'));
+      whatsappLogsUnsubRef.current = onSnapshot(
+        logsQuery,
+        snapshot => {
+          const rows = snapshot.docs.map(docSnap => ({
+            id: docSnap.id,
+            ...docSnap.data(),
+            createdAt: docSnap.data().createdAt
+          }));
+          setWhatsAppLogs(rows as any[]);
+        },
+        error => {
+          if (error.code !== 'permission-denied') {
+            console.error('Error listening to WhatsApp logs:', error);
+            toast.error('Failed to listen to WhatsApp chat updates');
+          }
+          stopWhatsAppLogsListener();
+        }
+      );
+    } catch (error) {
+      console.error('Error starting WhatsApp logs listener:', error);
+    }
+  };
+
+  useEffect(() => {
+    if (!showWhatsAppChat) {
+      stopWhatsAppLogsListener();
+    }
+    return () => {
+      stopWhatsAppLogsListener();
+    };
+  }, [showWhatsAppChat]);
   
   // Determine if we need to show the postpaid campaign checklist
   const showPostpaidCampaignChecklist = hasPostpaidCampaignPlan(lead);
@@ -516,6 +570,11 @@ Language: ${lead.language || 'N/A'}`;
         updatedAt: serverTimestamp(),
         ...(leadStatus === 'verified' || leadStatus === 'activated' ? { verifiedAt: serverTimestamp() } : {})
       });
+
+      // Increment verifier counters if lead is verified or activated
+      if ((leadStatus === 'verified' || leadStatus === 'activated') && user?.id) {
+        await incrementVerifierCounters(user.id);
+      }
 
       // Update all numbers in the lead's plans
       if (lead.plans && lead.plans.length > 0) {
@@ -1430,20 +1489,10 @@ Language: ${lead.language || 'N/A'}`;
             return user?.role === 'agent' && user.id === lead.agentId && (lead as any).verificationMethod === 'whatsapp';
           })() && (
             <button
-              onClick={async () => {
+              onClick={() => {
                 setShowWhatsAppChat(true);
-                try {
-                  const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
-                  const logsSnapshot = await getDocs(logsCol);
-                  const rows = logsSnapshot.docs.map((doc: any) => ({
-                    id: doc.id,
-                    ...doc.data(),
-                    createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt
-                  }));
-                  setWhatsAppLogs(rows as any[]);
-                } catch (error) {
-                  console.error('Error fetching WhatsApp logs:', error);
-                  toast.error('Failed to load WhatsApp chat');
+                if (!whatsappLogsUnsubRef.current) {
+                  startWhatsAppLogsListener();
                 }
               }}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
@@ -2821,13 +2870,36 @@ Language: ${lead.language || 'N/A'}`;
                   {whatsAppLogs
                     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
                     .map((log) => {
-                      const created = (log.createdAt?.toDate?.() || log.createdAt) ? new Date(log.createdAt?.toDate?.() || log.createdAt) : null;
+                    const created = normalizeLogDate(log.createdAt);
                       const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
                       const fromDigits = (log.from || '').toString().replace(/\D/g, '');
                       const fromDisplay = fromDigits ? `+${fromDigits}` : '';
                       const firstPlan = lead.plans?.[0];
                       const planInfo = planDetails;
                       const isOutbound = log.direction === 'outbound';
+                    const createdTime = created?.getTime() ?? 0;
+                    const hasCustomerReplyAfter =
+                      isOutbound &&
+                      whatsAppLogs.some(other => {
+                        if (other.id === log.id || other.direction !== 'inbound') return false;
+                        const otherCreated = normalizeLogDate(other.createdAt);
+                        return (otherCreated?.getTime() ?? 0) > createdTime;
+                      });
+                    const deriveStatus = (): 'read' | 'delivered' | 'sent' | 'failed' | undefined => {
+                      if (!isOutbound) return undefined;
+                      if (log.status === 'failed') return 'failed';
+                      if (log.status === 'read' || hasCustomerReplyAfter) return 'read';
+                      if (log.status === 'delivered') return 'delivered';
+                      if (log.status === 'sent' || log.status === 'accepted') return 'sent';
+                      return log.status ? 'sent' : undefined;
+                    };
+                    const effectiveStatus = deriveStatus();
+                    const statusLabelMap: Record<string, string> = {
+                      read: 'Read',
+                      delivered: 'Delivered',
+                      sent: 'Sent',
+                      failed: 'Failed'
+                    };
                       const CONSENT_ORDER: Array<{ key: string; label: string }> = [
                         {
                           key: 'ownershipAfterContract',
@@ -2867,11 +2939,30 @@ Language: ${lead.language || 'N/A'}`;
                               <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
                                 {isOutbound ? 'Outbound' : 'Inbound'}
                               </span>
-                              <span className="ml-2">
+                              <span className="ml-2 flex items-center gap-1.5">
                                 {fromDisplay && (
                                   <span className="font-bold text-blue-600">From {fromDisplay}</span>
                                 )}
                                 {createdStr && ` · ${createdStr}`}
+                                {isOutbound && (
+                                  <span
+                                    className="ml-1.5 inline-flex items-center"
+                                    title={effectiveStatus ? `Message ${statusLabelMap[effectiveStatus] || effectiveStatus}` : 'Message sent'}
+                                  >
+                                    {effectiveStatus === 'read' && (
+                                      <CheckCheck className="w-4 h-4 text-green-500" />
+                                    )}
+                                    {effectiveStatus === 'delivered' && (
+                                      <CheckCheck className="w-4 h-4 text-gray-600" />
+                                    )}
+                                    {(!effectiveStatus || effectiveStatus === 'sent') && (
+                                      <Check className="w-3.5 h-3.5 text-gray-500" />
+                                    )}
+                                    {effectiveStatus === 'failed' && (
+                                      <XCircle className="w-4 h-4 text-red-500" />
+                                    )}
+                                  </span>
+                                )}
                               </span>
                             </div>
                             {/* Summary only for the acceptance message (when consents are present) */}
@@ -2916,6 +3007,67 @@ Language: ${lead.language || 'N/A'}`;
                             {log.messageText && (
                               <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
                             )}
+                            {/* Show error message if status is failed */}
+                            {effectiveStatus === 'failed' && log.error && (() => {
+                              const errorObj = log.error as any;
+                              let errorText = '';
+                              let errorCode = '';
+                              let errorExplanation = '';
+                              
+                              if (typeof log.error === 'string') {
+                                errorText = log.error;
+                              } else if (errorObj) {
+                                // WhatsApp error structure: { code, title, message, error_data }
+                                const parts = [];
+                                if (errorObj.title) parts.push(errorObj.title);
+                                // Only add message if it's different from title (avoid duplication)
+                                if (errorObj.message && errorObj.message !== errorObj.title) {
+                                  parts.push(errorObj.message);
+                                }
+                                errorText = parts.length > 0 ? parts.join(' - ') : '';
+                                errorCode = errorObj.code || '';
+                                
+                                // Provide user-friendly explanations for common error codes
+                                const errorExplanations: Record<string, string> = {
+                                  '131026': 'The customer\'s phone number is not registered on WhatsApp or has blocked your business number.',
+                                  '131047': 'The customer has not replied within the 24-hour messaging window. Send a template message to re-engage.',
+                                  '131051': 'This type of message is not supported. Try using a different message format.',
+                                  '131052': 'Media download failed. The media file may be corrupted or too large.',
+                                  '131053': 'Media upload failed. Check the file format and size.',
+                                  '133000': 'The phone number format is invalid. Use international format (e.g., 971XXXXXXXXX).',
+                                  '133004': 'The template message was rejected. Verify the template name and parameters.',
+                                  '133005': 'Template not found. Make sure the template is approved in Meta Business Manager.',
+                                  '133006': 'Invalid template parameters. Check parameter count and format.',
+                                  '133010': 'Message limit exceeded. You\'ve reached the messaging limit for this customer.',
+                                  '130472': 'The customer has opted out of marketing messages. They must opt back in before you can send them marketing content.',
+                                  '135000': 'Generic WhatsApp Business API error. Contact support if this persists.',
+                                  '136000': 'Insufficient WhatsApp Business Account balance. Add funds to continue messaging.',
+                                  '368': 'Temporarily blocked for spammy behavior. Reduce message frequency.',
+                                  '131031': 'Rate limit exceeded. Too many messages sent in a short time. Wait before retrying.',
+                                };
+                                
+                                errorExplanation = errorExplanations[errorCode] || '';
+                              }
+                              
+                              return (
+                                <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-2.5">
+                                  <div className="flex items-start gap-2">
+                                    <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                                    <div className="flex-1 text-xs text-red-800">
+                                      <div className="font-semibold mb-1">Message Failed</div>
+                                      {errorText && <div className="text-red-700 mb-1">{errorText}</div>}
+                                      {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
+                                      {errorExplanation && (
+                                        <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
+                                          <span className="font-semibold">💡 What to do: </span>
+                                          {errorExplanation}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })()}
                             {accepted.length > 0 && (
                               <ol className="mt-1 space-y-2 text-sm">
                                 {accepted.map((item, idx) => (

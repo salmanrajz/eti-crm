@@ -51,6 +51,7 @@ import { DNCManagement } from '../admin/DNCManagement';
 import { TrustedDevicesAdmin } from '../admin/TrustedDevicesAdmin';
 import { WhatsAppSettings } from '../admin/WhatsAppSettings';
 import { BulkDNCImport } from '../admin/BulkDNCImport';
+import { BulkDeleteNumbers } from '../admin/BulkDeleteNumbers';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
 import { 
@@ -94,7 +95,8 @@ import {
   Square,
   CheckSquare2,
   X,
-  Database
+  Database,
+  Trash2
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Line, Bar } from 'react-chartjs-2';
@@ -318,6 +320,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [managerPhoneModalOpen, setManagerPhoneModalOpen] = useState(false);
   const [planManagementModalOpen, setPlanManagementModalOpen] = useState(false);
   const [whatsappSettingsModalOpen, setWhatsappSettingsModalOpen] = useState(false);
+  const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
   // Group targets and activations (dynamic groups like G1..G5 and custom)
   const [groupTargets, setGroupTargets] = useState<{ groups: Record<string, number>; visibleToCoordinators: boolean }>({ groups: { G1: 0, G2: 0, G3: 0 }, visibleToCoordinators: false });
   const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
@@ -1515,6 +1518,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       color: 'bg-gradient-to-br from-emerald-500 to-emerald-600',
       textColor: 'text-emerald-600',
     },
+    {
+      name: 'Bulk Delete Numbers',
+      description: 'Delete multiple numbers',
+      value: 'Delete',
+      href: '#bulk-delete',
+      icon: Trash2,
+      color: 'bg-gradient-to-br from-red-500 to-red-600',
+      textColor: 'text-red-600',
+    },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
   // Memoize sorted team metrics to prevent unnecessary re-sorting
@@ -2212,6 +2224,33 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setWhatsappSettingsModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Bulk Delete Numbers' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkDeleteModalOpen(true)}
               className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
@@ -3135,6 +3174,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             onClose={() => setBulkImportOpen(false)} 
           />
 
+      {/* Bulk Delete Numbers Modal */}
+      {bulkDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setBulkDeleteModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <BulkDeleteNumbers />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Trusted Devices Management Modal */}
       {trustedDevicesModalOpen && (

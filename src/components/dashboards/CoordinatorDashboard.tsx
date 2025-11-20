@@ -66,7 +66,8 @@ import {
   Hash,
   CheckCircle2,
   Users,
-  UserCheck
+  UserCheck,
+  X
 } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { clsx } from 'clsx';
@@ -788,13 +789,24 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
         <div className="px-8 py-6 bg-gradient-to-r from-blue-500 to-indigo-600">
           <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-xl font-bold text-white">Status Check Requests</h3>
-              <p className="mt-1 text-blue-100 text-sm">Manage number status check requests</p>
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-white/10 rounded-lg">
+                <CheckSquare className="h-6 w-6 text-white" />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-white">Status Check Requests</h3>
+                <p className="mt-1 text-blue-100 text-sm">Manage number status check requests</p>
+              </div>
             </div>
-            <div className="p-2 bg-white/10 rounded-lg">
-              <CheckSquare className="h-6 w-6 text-white" />
-            </div>
+            <motion.button
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              onClick={() => setShowStatusChecks(false)}
+              className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors"
+              aria-label="Close"
+            >
+              <X className="h-5 w-5 text-white" />
+            </motion.button>
           </div>
         </div>
         <div className="p-6">
@@ -915,15 +927,9 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             <h1 className="text-3xl font-bold text-gray-900">
               Welcome back, {user?.name}!
             </h1>
-            <div className="mt-2 flex items-center gap-4">
-              <p className="text-lg text-gray-600">
-                Here's an overview of leads requiring coordination.
-              </p>
-              <div className="inline-flex items-center px-3 py-1 bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-700 rounded-full text-sm font-medium">
-                <Users className="h-4 w-4 mr-1.5" />
-                {getCoordinatorGroupDisplay(coordinatorType)}
-              </div>
-            </div>
+            <p className="mt-2 text-lg text-gray-600">
+              Here's an overview of leads requiring coordination.
+            </p>
             <p className="mt-1 text-sm text-gray-500">
               {coordinatorType === 'g1' && 'You are assigned to handle leads with G1 group numbers only.'}
               {coordinatorType === 'g2' && 'You are assigned to handle leads with G2 group numbers only.'}
@@ -931,32 +937,32 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               {coordinatorType === 'all' && 'You are assigned to handle leads from all groups (G1, G2, G3, G4, G5).'}
             </p>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             {coordinatorType === 'all' && (
               <>
                 <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
                   onClick={() => setShowStatusChecks(!showStatusChecks)}
-                  className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300"
+                  className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 text-sm"
                 >
-                  <CheckSquare className="h-5 w-5 mr-2" />
-                  Status Check Requests
+                  <CheckSquare className="h-4 w-4 mr-1.5" />
+                  <span className="font-medium">Status Checks</span>
                   {statusChecks.length > 0 && (
-                    <span className="ml-2 px-2 py-0.5 bg-white/20 rounded-full text-sm">
+                    <span className="ml-1.5 px-1.5 py-0.5 bg-white/25 rounded-full text-xs font-semibold">
                       {statusChecks.length}
                     </span>
                   )}
                 </motion.button>
                 <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
                   onClick={() => setShowStruckNumbers((prev) => !prev)}
-                  className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300"
+                  className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 text-sm"
                 >
-                  <AlertTriangle className="h-5 w-5 mr-2" />
-                  Struck Numbers
-                  <span className="ml-2 px-2 py-0.5 bg-white/20 rounded-full text-sm">
+                  <AlertTriangle className="h-4 w-4 mr-1.5" />
+                  <span className="font-medium">Struck Numbers</span>
+                  <span className="ml-1.5 px-1.5 py-0.5 bg-white/25 rounded-full text-xs font-semibold">
                     {struckLoading ? '...' : struckNumbers.length}
                   </span>
                 </motion.button>
@@ -972,7 +978,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
 
       {showStruckNumbers && coordinatorType === 'all' && (
         <div className="mt-8">
-          <StruckNumbers struckNumbers={struckNumbers} loading={struckLoading} />
+          <StruckNumbers 
+            struckNumbers={struckNumbers} 
+            loading={struckLoading}
+            onClose={() => setShowStruckNumbers(false)}
+          />
         </div>
       )}
 
@@ -1209,26 +1219,6 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                           </>
                         )}
 
-                        {lead.status === 'assigned' && (
-                          <>
-                            <button
-                              onClick={() => handleLeadAction(lead, 'activate')}
-                              className="inline-flex items-center px-2.5 py-1.5 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 transition-colors text-xs font-medium"
-                              title="Activate Lead"
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
-                              Activate
-                            </button>
-                            <button
-                              onClick={() => handleLeadAction(lead, 'followup')}
-                              className="inline-flex items-center px-2.5 py-1.5 bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200 transition-colors text-xs font-medium"
-                              title="Mark for Follow-up"
-                            >
-                              <AlertTriangle className="h-3.5 w-3.5 mr-1" />
-                              Follow-up
-                            </button>
-                          </>
-                        )}
                       </div>
                     </td>
                   </tr>

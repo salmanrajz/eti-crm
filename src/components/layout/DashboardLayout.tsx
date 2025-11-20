@@ -699,29 +699,31 @@ export function DashboardLayout() {
                     <span>Leads</span>
                   </div>
                 </Link>
-                <Link
-                  to="/dashboard/leads/create"
-                  className={clsx(
-                    "group relative px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ease-out touch-manipulation",
-                    "active:scale-95 active:transition-transform active:duration-100"
-                  )}
-                >
-                  {/* Glass effect overlay */}
-                  <div className={clsx(
-                    "absolute inset-0 rounded-xl transition-all duration-300 ease-out",
-                    location.pathname === '/dashboard/leads/create'
-                      ? "bg-gradient-to-r from-indigo-500 to-purple-600 border-indigo-400/60 shadow-indigo-500/20"
-                      : "bg-gradient-to-r from-white/60 to-white/30 backdrop-blur-sm border-white/40 shadow-lg group-hover:from-white/80 group-hover:to-white/60 group-hover:shadow-xl group-hover:border-white/60"
-                  )} />
-                  
-                  <div className={clsx(
-                    "relative z-10 flex items-center space-x-2",
-                    location.pathname === '/dashboard/leads/create' ? "text-white" : "text-gray-600"
-                  )}>
-                    <PlusCircle className="h-4 w-4 transition-transform duration-300 group-active:scale-110" />
-                    <span>Submit Lead</span>
-                  </div>
-                </Link>
+                {(user?.role === 'agent' || user?.role === 'freelancer') && (
+                  <Link
+                    to="/dashboard/leads/create"
+                    className={clsx(
+                      "group relative px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ease-out touch-manipulation",
+                      "active:scale-95 active:transition-transform active:duration-100"
+                    )}
+                  >
+                    {/* Glass effect overlay */}
+                    <div className={clsx(
+                      "absolute inset-0 rounded-xl transition-all duration-300 ease-out",
+                      location.pathname === '/dashboard/leads/create'
+                        ? "bg-gradient-to-r from-indigo-500 to-purple-600 border-indigo-400/60 shadow-indigo-500/20"
+                        : "bg-gradient-to-r from-white/60 to-white/30 backdrop-blur-sm border-white/40 shadow-lg group-hover:from-white/80 group-hover:to-white/60 group-hover:shadow-xl group-hover:border-white/60"
+                    )} />
+                    
+                    <div className={clsx(
+                      "relative z-10 flex items-center space-x-2",
+                      location.pathname === '/dashboard/leads/create' ? "text-white" : "text-gray-600"
+                    )}>
+                      <PlusCircle className="h-4 w-4 transition-transform duration-300 group-active:scale-110" />
+                      <span>Submit Lead</span>
+                    </div>
+                  </Link>
+                )}
               </div>
             </div>
 
@@ -734,20 +736,22 @@ export function DashboardLayout() {
 
             {/* Right side items */}
             <div className="flex items-center space-x-4 relative"> {/* <-- add relative here for user menu */}
-              {/* Delivery Schedule Button in header */}
-              <button
-                className="group relative px-3 py-2 rounded-xl text-white text-sm font-medium transition-all duration-300 ease-out touch-manipulation active:scale-95 active:transition-transform active:duration-100 focus:outline-none focus:ring-2 focus:ring-indigo-300 flex items-center justify-center"
-                onClick={() => setShowNoticeBoard(true)}
-                aria-label="Open Delivery Schedule Notice Board"
-              >
-                {/* Glass effect overlay */}
-                <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 backdrop-blur-sm border border-indigo-400/60 shadow-lg shadow-indigo-500/20 transition-all duration-300 ease-out group-hover:shadow-xl group-hover:shadow-indigo-500/30 group-hover:border-indigo-300/80" />
-                
-                <div className="relative z-10 flex items-center sm:space-x-2">
-                  <Calendar className="w-4 h-4 transition-transform duration-300 group-active:scale-110" />
-                  <span className="hidden sm:inline whitespace-nowrap">Schedule</span>
-                </div>
-              </button>
+              {/* Delivery Schedule Button in header (hidden for agents, moved to sidebar) */}
+              {user?.role !== 'agent' && (
+                <button
+                  className="group relative px-3 py-2 rounded-xl text-white text-sm font-medium transition-all duration-300 ease-out touch-manipulation active:scale-95 active:transition-transform active:duration-100 focus:outline-none focus:ring-2 focus:ring-indigo-300 flex items-center justify-center"
+                  onClick={() => setShowNoticeBoard(true)}
+                  aria-label="Open Delivery Schedule Notice Board"
+                >
+                  {/* Glass effect overlay */}
+                  <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 backdrop-blur-sm border border-indigo-400/60 shadow-lg shadow-indigo-500/20 transition-all duration-300 ease-out group-hover:shadow-xl group-hover:shadow-indigo-500/30 group-hover:border-indigo-300/80" />
+                  
+                  <div className="relative z-10 flex items-center sm:space-x-2">
+                    <Calendar className="w-4 h-4 transition-transform duration-300 group-active:scale-110" />
+                    <span className="hidden sm:inline whitespace-nowrap">Schedule</span>
+                  </div>
+                </button>
+              )}
               
               {/* WhatsApp & DNC Buttons - Only for Agents and Freelancers */}
               {(user?.role === 'agent' || user?.role === 'freelancer') && (
@@ -1094,6 +1098,28 @@ export function DashboardLayout() {
               </Link>
             );
           })}
+
+          {user?.role === 'agent' && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowNoticeBoard(true);
+                if (typeof window !== 'undefined' && window.innerWidth < 768) {
+                  setIsSidebarOpen(false);
+                }
+              }}
+              className="group relative flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-300 ease-out touch-manipulation w-full text-left active:scale-95 active:transition-transform active:duration-100"
+            >
+              <div className="absolute inset-0 rounded-xl transition-all duration-300 ease-out bg-gradient-to-r from-white/40 to-white/20 backdrop-blur-sm border border-white/30 shadow-md group-hover:from-white/60 group-hover:to-white/40 group-hover:shadow-lg group-hover:border-white/50" />
+              <div className={clsx(
+                "relative z-10 flex items-center space-x-3",
+                "text-gray-600 group-active:text-gray-700 group-hover:text-gray-700"
+              )}>
+                <Calendar className="h-5 w-5 transition-transform duration-300 group-active:scale-110" />
+                <span className="font-medium transition-all duration-300">Schedule</span>
+              </div>
+            </button>
+          )}
         </nav>
       </div>
 

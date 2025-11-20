@@ -44,7 +44,7 @@ import { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, orderBy, doc, updateDoc, getDoc, addDoc, serverTimestamp, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { User, Lead } from '../../types';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { 
   CheckCircle, 
@@ -61,8 +61,14 @@ import {
   Search,
   X,
   Check,
+  CheckCheck,
   Paperclip,
-  AlertCircle
+  AlertCircle,
+  Users,
+  Hash,
+  ArrowRight,
+  Target,
+  CheckCircle2
 } from 'lucide-react';
 import { clsx } from 'clsx';
 // import { planBenefits } from '../../utils/planBenefits'; // Now using dynamic benefits from Firebase
@@ -70,7 +76,9 @@ import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { MediaUpload } from '../Leads/MediaUpload';
-import { getWhatsAppCredentials } from '../../utils/configService';
+import { logOutboundVerificationMessage } from '../../utils/whatsappVerification';
+import { resolveWhatsAppRoute, sendWhatsAppWithComponentsByGroup } from '../../utils/whatsappRouter';
+import { incrementVerifierCounters } from '../../utils/verifierCounters';
 
 // Ready-made message templates for verifiers
 const READY_MADE_MESSAGES = [
@@ -225,6 +233,16 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [showWhatsAppLogs, setShowWhatsAppLogs] = useState(false);
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const [replyText, setReplyText] = useState('');
+  const [resendingLogId, setResendingLogId] = useState<string | null>(null);
+  
+  const normalizeLogDate = (value: any): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value.toDate === 'function') return value.toDate();
+    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  };
   
   const [expandedSections, setExpandedSections] = useState<boolean[]>(() => {
     const baseExpanded = VERIFY_CHECKLIST.map(() => false);
@@ -286,13 +304,106 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     setReplyText(message);
   };
 
+  const handleResendVerificationMessage = async (log: any) => {
+    if (!selectedLead) {
+      toast.error('Select a lead before resending');
+      return;
+    }
+    if (!log?.templateName) {
+      toast.error('Template information missing for this message');
+      return;
+    }
+    const defaultParameters = (() => {
+      const firstPlan = selectedLead?.plans?.[0];
+      if (!firstPlan || !planDetails) return [];
+      const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+      const monthlyLabel = amountDigits ? `${amountDigits} AED + 5% VAT` : planDetails.amount || 'N/A';
+      return [
+        firstPlan.number || 'N/A',
+        monthlyLabel,
+        planDetails.benefits || 'N/A',
+        planDetails.duration || 'N/A'
+      ];
+    })();
+    const parameters = Array.isArray(log?.parameters) && log.parameters.length > 0 ? log.parameters : defaultParameters;
+    if (!Array.isArray(parameters) || parameters.length === 0) {
+      toast.error('Unable to determine template parameters');
+      return;
+    }
+    // Always use the current lead's customer number, not the old log number
+    // This ensures if the customer number was updated, the resend goes to the new number
+    let to = selectedLead.customerNumber;
+    if (!to) {
+      toast.error('Customer number missing in lead');
+      return;
+    }
+    // Format the number properly
+    to = to.replace(/\D/g, ''); // Remove non-digits
+    if (to.startsWith('0')) {
+      to = to.substring(1); // Remove leading zero
+    }
+    if (!to.startsWith('971')) {
+      to = `971${to}`; // Add UAE country code if not present
+    }
+    try {
+      setResendingLogId(log.id);
+      const components: any[] = [
+        {
+          type: 'body',
+          parameters: parameters.map((text: string) => ({ type: 'text', text }))
+        },
+        {
+          type: 'button',
+          sub_type: 'flow',
+          index: 0
+        }
+      ];
+      const group = selectedLead.plans?.[0]?.group || undefined;
+      const sendResponse = await sendWhatsAppWithComponentsByGroup({
+        to,
+        group,
+        templateName: log.templateName,
+        components
+      });
+      await logOutboundVerificationMessage(
+        selectedLead.id,
+        to,
+        log.templateName,
+        parameters,
+        { sendResponse }
+      );
+      toast.success('Verification message resent');
+    } catch (error: any) {
+      toast.error('Failed to resend WhatsApp message');
+      console.error('Resend WhatsApp error:', error);
+      try {
+        await logOutboundVerificationMessage(
+          selectedLead.id,
+          to,
+          log.templateName,
+          parameters,
+          {
+            status: 'failed',
+            error: {
+              message: error?.message || 'Resend failed',
+              details: typeof error?.toString === 'function' ? error.toString() : undefined
+            }
+          }
+        );
+      } catch (logError) {
+        console.error('Failed to log resend failure:', logError);
+      }
+    } finally {
+      setResendingLogId(null);
+    }
+  };
+
   // Function to send WhatsApp reply
   const sendWhatsAppReply = async () => {
     if (!selectedLead || !replyText.trim() || sendingReply) return;
     
     try {
       setSendingReply(true);
-      // Format destination number similar to CreateLead
       const country = (selectedLead as any).country || 'AE';
       let to = (selectedLead.customerNumber || '').toString().replace(/\D/g, '');
       const code = country === 'AE' ? '971'
@@ -319,22 +430,22 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         : country === 'US' ? '1'
         : country === 'CA' ? '1'
         : '971';
-      if (to.startsWith(code)) {
-        // already has code
-      } else {
+      if (!to.startsWith(code)) {
         to = `${code}${to}`;
       }
 
-      // Get WhatsApp credentials from Firebase
-      const whatsappCredentials = await getWhatsAppCredentials();
-      const WHATSAPP_API_URL = whatsappCredentials.apiUrl;
-      const WHATSAPP_ACCESS_TOKEN = whatsappCredentials.accessToken;
+      const group = selectedLead.plans?.[0]?.group || undefined;
+      const routeConfig = await resolveWhatsAppRoute(group);
+      const { meta } = routeConfig;
+      if (!meta.businessPhoneId || !meta.accessToken) {
+        throw new Error('WhatsApp credentials are not configured for this group');
+      }
 
-      const resp = await fetch(WHATSAPP_API_URL, {
+      const resp = await fetch(`https://graph.facebook.com/v19.0/${meta.businessPhoneId}/messages`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${meta.accessToken}`,
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           messaging_product: 'whatsapp',
@@ -343,25 +454,53 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
           text: { body: replyText.trim() }
         })
       });
+
+      const responseText = await resp.text();
+      let responseJson: any = {};
+      try {
+        responseJson = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        responseJson = {};
+      }
+
       if (!resp.ok) {
-        const txt = await resp.text();
-        console.error('Failed to send WhatsApp reply:', txt);
-        toast.error('Failed to send WhatsApp reply');
-      } else {
-        // Log to Firestore
-        await addDoc(collection(db, 'leads', selectedLead.id, 'whatsappLogs'), {
-          direction: 'outbound',
-          to,
+        console.error('Failed to send WhatsApp reply:', responseText);
+        throw new Error(responseJson?.error?.message || 'Failed to send WhatsApp reply');
+      }
+
+      await logOutboundVerificationMessage(
+        selectedLead.id,
+        to,
+        'verifier_text',
+        [],
+        {
           messageText: replyText.trim(),
-          createdAt: serverTimestamp(),
-          templateName: 'verifier_text'
-        });
+          sendResponse: responseJson
+        }
+      );
         toast.success('Reply sent');
         setReplyText('');
-      }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Error sending reply:', e);
-      toast.error('Error sending reply');
+      toast.error(e?.message || 'Error sending reply');
+      try {
+        await logOutboundVerificationMessage(
+          selectedLead?.id || '',
+          selectedLead?.customerNumber || '',
+          'verifier_text',
+          [],
+          {
+            messageText: replyText.trim(),
+            status: 'failed',
+            error: {
+              message: e?.message || 'Failed to send reply',
+              details: typeof e?.toString === 'function' ? e.toString() : undefined
+            }
+          }
+        );
+      } catch (logError) {
+        console.error('Failed to log failed verifier reply:', logError);
+      }
     } finally {
       setSendingReply(false);
     }
@@ -378,9 +517,193 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'pending_verification';
 
+  // Refs to store unsubscribe functions for cleanup
+  const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
+  const pendingCountUnsubscribeRef = useRef<(() => void) | null>(null);
+  const countersUnsubscribeRef = useRef<(() => void) | null>(null);
+
+  // Real-time listener for leads and metrics
   useEffect(() => {
-    loadVerifierData();
-  }, [user, currentStatus]);
+    if (!user?.id) return;
+
+      setLoading(true);
+
+    // Cleanup previous listeners
+    if (leadsUnsubscribeRef.current) {
+      leadsUnsubscribeRef.current();
+      leadsUnsubscribeRef.current = null;
+    }
+    if (pendingCountUnsubscribeRef.current) {
+      pendingCountUnsubscribeRef.current();
+      pendingCountUnsubscribeRef.current = null;
+    }
+    if (countersUnsubscribeRef.current) {
+      countersUnsubscribeRef.current();
+      countersUnsubscribeRef.current = null;
+    }
+
+    // Use verifierGroups directly from user object (already loaded in authStore)
+    const verifierGroups = user?.verifierGroups || [];
+      const hasAllGroups = verifierGroups.includes('all') || verifierGroups.length === 0;
+
+    // Statuses to query based on current status
+      const statusesToQuery = currentStatus === 'pending_verification' 
+        ? ['pending_verification', 'activated_non_verified']
+        : [currentStatus];
+      
+    // Real-time listener for leads
+    const leadsQuery = query(
+          collection(db, 'leads'),
+          where('status', 'in', statusesToQuery),
+          orderBy('createdAt', 'desc')
+        );
+
+    const leadsUnsubscribe = onSnapshot(leadsQuery, (snapshot) => {
+      try {
+        let allLeads = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
+        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
+      })) as Lead[];
+
+        // Filter by verifier groups (group is already in lead.plans, no need to fetch from numberPool)
+      if (!hasAllGroups) {
+        allLeads = allLeads.filter(lead => {
+          const hasMatchingGroup = lead.plans?.some(plan => {
+              const planGroup = (plan.group || '').toLowerCase();
+            return verifierGroups.some((verifierGroup: string) => {
+              const normalizedVerifierGroup = verifierGroup.toLowerCase();
+              return planGroup === normalizedVerifierGroup;
+            });
+          }) || false;
+          return hasMatchingGroup;
+        });
+      }
+
+        setVerificationLeads(allLeads);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error processing leads snapshot:', error);
+        setLoading(false);
+      }
+    }, (error) => {
+      if (error.code === 'permission-denied') {
+        if (leadsUnsubscribeRef.current) {
+          leadsUnsubscribeRef.current();
+          leadsUnsubscribeRef.current = null;
+          }
+        return;
+      }
+      console.error('Error in leads listener:', error);
+      setLoading(false);
+    });
+
+    leadsUnsubscribeRef.current = leadsUnsubscribe;
+
+    // Real-time listener for pending verification count
+      const pendingQuery = query(
+        collection(db, 'leads'),
+        where('status', 'in', ['pending_verification', 'activated_non_verified'])
+      );
+
+    const pendingCountUnsubscribe = onSnapshot(pendingQuery, (snapshot) => {
+      try {
+        let pendingLeads = snapshot.docs.map(doc => ({
+        ...doc.data(),
+        plans: doc.data().plans || []
+      })) as Lead[];
+
+        // Filter by verifier groups
+      if (!hasAllGroups) {
+          pendingLeads = pendingLeads.filter(lead => {
+          const hasMatchingGroup = lead.plans?.some(plan => {
+              const planGroup = (plan.group || '').toLowerCase();
+            return verifierGroups.some((verifierGroup: string) => {
+              const normalizedVerifierGroup = verifierGroup.toLowerCase();
+              return planGroup === normalizedVerifierGroup;
+            });
+          }) || false;
+          return hasMatchingGroup;
+        });
+      }
+
+        setVerificationMetrics(prev => ({
+          ...prev,
+          pendingVerificationCount: pendingLeads.length
+        }));
+      } catch (error) {
+        console.error('Error processing pending count snapshot:', error);
+      }
+    }, (error) => {
+      if (error.code === 'permission-denied') {
+        if (pendingCountUnsubscribeRef.current) {
+          pendingCountUnsubscribeRef.current();
+          pendingCountUnsubscribeRef.current = null;
+        }
+        return;
+      }
+      console.error('Error in pending count listener:', error);
+    });
+
+    pendingCountUnsubscribeRef.current = pendingCountUnsubscribe;
+        
+    // Real-time listener for verifier counters
+    const countersUnsubscribe = onSnapshot(doc(db, 'users', user.id), (userDoc) => {
+      if (userDoc.exists()) {
+        const userData = userDoc.data();
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        let dailyCount = userData.dailyVerifiedCount || 0;
+        let monthlyCount = userData.monthlyVerifiedCount || 0;
+        const lastDailyReset = userData.lastDailyReset?.toDate?.() || null;
+        const lastMonthlyReset = userData.lastMonthlyReset?.toDate?.() || null;
+
+        // Check if reset is needed (display only, actual reset happens on increment)
+        if (lastDailyReset && lastDailyReset < today) {
+          dailyCount = 0;
+        }
+        if (lastMonthlyReset && lastMonthlyReset < firstDayOfMonth) {
+          monthlyCount = 0;
+          }
+
+        setVerificationMetrics(prev => ({
+          ...prev,
+          dailyVerifiedCount: dailyCount,
+          monthlyVerifiedCount: monthlyCount
+        }));
+      }
+    }, (error) => {
+      if (error.code === 'permission-denied') {
+        if (countersUnsubscribeRef.current) {
+          countersUnsubscribeRef.current();
+          countersUnsubscribeRef.current = null;
+        }
+        return;
+      }
+      console.error('Error in counters listener:', error);
+    });
+
+    countersUnsubscribeRef.current = countersUnsubscribe;
+
+    // Cleanup function
+    return () => {
+      if (leadsUnsubscribeRef.current) {
+        leadsUnsubscribeRef.current();
+        leadsUnsubscribeRef.current = null;
+      }
+      if (pendingCountUnsubscribeRef.current) {
+        pendingCountUnsubscribeRef.current();
+        pendingCountUnsubscribeRef.current = null;
+      }
+      if (countersUnsubscribeRef.current) {
+        countersUnsubscribeRef.current();
+        countersUnsubscribeRef.current = null;
+      }
+    };
+  }, [user?.id, user?.verifierGroups, currentStatus]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -394,7 +717,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       lead.plans?.some(plan => plan.number?.includes(searchTerm));
     
     return matchesSearch;
-  });
+      });
 
   // Pagination calculations
   const totalPages = Math.ceil(filteredLeads.length / pageSize);
@@ -403,210 +726,6 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     currentPage * pageSize
   );
 
-  async function loadVerifierData() {
-    try {
-      setLoading(true);
-
-      // Get current date and time
-      const now = new Date();
-      
-      // Get today's start and end dates (local timezone)
-      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-      const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-      
-      // Get current month's start and end dates (local timezone)
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-
-
-
-      // Check verifier's group assignment
-      const userDoc = await getDoc(doc(db, 'users', user.id));
-      const userData = userDoc.data();
-      const verifierGroups = userData?.verifierGroups || [];
-      const hasAllGroups = verifierGroups.includes('all') || verifierGroups.length === 0;
-
-      // Get leads based on verifier's group assignment
-      // For pending_verification, also include activated_non_verified leads
-      const statusesToQuery = currentStatus === 'pending_verification' 
-        ? ['pending_verification', 'activated_non_verified']
-        : [currentStatus];
-      
-      let verificationQuery;
-      if (hasAllGroups) {
-        // Show all leads if verifier handles all groups
-        verificationQuery = query(
-          collection(db, 'leads'),
-          where('status', 'in', statusesToQuery),
-          orderBy('createdAt', 'desc')
-        );
-      } else {
-        // Filter leads by verifier's specific groups
-        verificationQuery = query(
-          collection(db, 'leads'),
-          where('status', 'in', statusesToQuery),
-          orderBy('createdAt', 'desc')
-        );
-      }
-
-      const verificationSnapshot = await getDocs(verificationQuery);
-      let allLeads = verificationSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
-        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
-      })) as Lead[];
-
-      // Filter leads based on verifier's group assignment
-      if (!hasAllGroups) {
-        allLeads = allLeads.filter(lead => {
-          // Check if any of the lead's plans belong to any of the verifier's groups
-          const hasMatchingGroup = lead.plans?.some(plan => {
-            // Normalize group names for comparison
-            const planGroup = plan.group?.toLowerCase();
-            return verifierGroups.some((verifierGroup: string) => {
-              const normalizedVerifierGroup = verifierGroup.toLowerCase();
-              return planGroup === normalizedVerifierGroup;
-            });
-          }) || false;
-
-          return hasMatchingGroup;
-        });
-      }
-
-      // Get group information for all numbers in the leads
-      const numberIds = allLeads.flatMap(lead => lead.plans?.map(plan => plan.numberId) || []);
-      const numberGroups = new Map();
-      
-      if (numberIds.length > 0) {
-        const numberPromises = numberIds.map(async (numberId) => {
-          const numberRef = doc(db, 'numberPool', numberId);
-          const numberDoc = await getDoc(numberRef);
-          if (numberDoc.exists()) {
-            const numberData = numberDoc.data();
-            numberGroups.set(numberId, numberData.group || 'Unassigned');
-          }
-        });
-        await Promise.all(numberPromises);
-      }
-
-      // Add group information to the leads
-      const leadsWithGroups = allLeads.map(lead => ({
-        ...lead,
-        plans: lead.plans?.map(plan => ({
-          ...plan,
-          group: numberGroups.get(plan.numberId) || 'Unassigned'
-        }))
-      }));
-
-      // Show ALL leads with the current status (no date filtering)
-      const verificationData = leadsWithGroups;
-
-      // Get all pending verification leads for metrics (including activated_non_verified)
-      const pendingQuery = query(
-        collection(db, 'leads'),
-        where('status', 'in', ['pending_verification', 'activated_non_verified'])
-      );
-      const pendingSnapshot = await getDocs(pendingQuery);
-      let pendingData = pendingSnapshot.docs.map(doc => ({
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
-        status: doc.data().status,
-        plans: doc.data().plans || []
-      })) as Lead[];
-
-      // Filter pending leads based on verifier's group assignment
-      if (!hasAllGroups) {
-        pendingData = pendingData.filter(lead => {
-          const hasMatchingGroup = lead.plans?.some(plan => {
-            const planGroup = plan.group?.toLowerCase();
-            return verifierGroups.some((verifierGroup: string) => {
-              const normalizedVerifierGroup = verifierGroup.toLowerCase();
-              return planGroup === normalizedVerifierGroup;
-            });
-          }) || false;
-          return hasMatchingGroup;
-        });
-      }
-
-      // Get all verified leads and filter by this verifier
-      // Using a broader query to catch all verified leads, then filter by verifier
-      const allVerifiedQuery = query(
-        collection(db, 'leads'),
-        where('status', '==', 'verified')
-      );
-      const allVerifiedSnapshot = await getDocs(allVerifiedQuery);
-      const allVerifiedLeads = allVerifiedSnapshot.docs.map(doc => {
-        const data = doc.data();
-        let verifiedAtDate = null;
-        let updatedAtDate = null;
-        
-        // Handle Firestore Timestamp conversion for verifiedAt
-        if (data.verifiedAt) {
-          if (typeof data.verifiedAt.toDate === 'function') {
-            verifiedAtDate = data.verifiedAt.toDate();
-          } else if (data.verifiedAt instanceof Date) {
-            verifiedAtDate = data.verifiedAt;
-          } else if (typeof data.verifiedAt === 'string') {
-            verifiedAtDate = new Date(data.verifiedAt);
-          }
-        }
-        
-        // Handle Firestore Timestamp conversion for updatedAt (fallback if verifiedAt doesn't exist)
-        if (data.updatedAt) {
-          if (typeof data.updatedAt.toDate === 'function') {
-            updatedAtDate = data.updatedAt.toDate();
-          } else if (data.updatedAt instanceof Date) {
-            updatedAtDate = data.updatedAt;
-          } else if (typeof data.updatedAt === 'string') {
-            updatedAtDate = new Date(data.updatedAt);
-          }
-        }
-        
-        return {
-          ...data,
-          id: doc.id,
-          verifiedAt: verifiedAtDate || updatedAtDate, // Use updatedAt as fallback
-          createdAt: data.createdAt?.toDate?.() || data.createdAt,
-          updatedAt: updatedAtDate,
-          status: data.status,
-          verifiedBy: data.verifiedBy
-        } as unknown as Lead;
-      });
-
-      // Filter to only include leads verified by this user
-      const verifiedData = allVerifiedLeads.filter(lead => (lead as any).verifiedBy === user.id);
-
-      // Filter verified leads for today
-      const dailyVerifiedData = verifiedData.filter(lead => {
-        const verifiedDate = (lead as any).verifiedAt ? new Date((lead as any).verifiedAt) : null;
-        return verifiedDate && verifiedDate >= startOfDay && verifiedDate <= endOfDay;
-      });
-
-      // Filter verified leads for current month
-      const monthlyVerifiedData = verifiedData.filter(lead => {
-        const verifiedDate = (lead as any).verifiedAt ? new Date((lead as any).verifiedAt) : null;
-        return verifiedDate && verifiedDate >= startOfMonth && verifiedDate <= endOfMonth;
-      });
-
-
-      // Calculate metrics
-      const metrics = {
-        pendingVerificationCount: pendingData.length,
-        dailyVerifiedCount: dailyVerifiedData.length,
-        monthlyVerifiedCount: monthlyVerifiedData.length
-      };
-
-
-
-      setVerificationMetrics(metrics);
-      setVerificationLeads(verificationData);
-    } catch (error) {
-      console.error('Error loading verifier data:', error);
-    } finally {
-      setLoading(false);
-    }
-  }
 
   const verificationStats = [
     {
@@ -679,6 +798,11 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         verificationMedia: verifyMediaFiles,
         ...(newStatus === 'verified' ? { verifiedAt: serverTimestamp() } : {})
       });
+
+      // Increment verifier counters if lead is verified
+      if (newStatus === 'verified') {
+        await incrementVerifierCounters(user.id);
+      }
 
       // Send notification to the agent
       if (selectedLead.agentId) {
@@ -777,7 +901,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       const currentShowCampaign = selectedLead ? hasPostpaidCampaignPlan(selectedLead) : false;
       setVerifyChecklist(currentShowCampaign ? [...baseChecklist, false] : baseChecklist);
       setVerifyMediaFiles([]);
-      loadVerifierData();
+      // Real-time listeners will automatically update the UI
     } catch (error) {
       console.error('Error updating lead:', error);
       toast.error('Failed to update lead');
@@ -795,222 +919,398 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-7xl mx-auto">
-      {/* Welcome Section */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">
-              Welcome back, {user?.name}!
-            </h1>
-            <p className="mt-2 text-lg text-gray-600">
-              Here's an overview of leads requiring verification.
-            </p>
-          </div>
-          <div className="hidden sm:flex items-center space-x-2 text-sm text-gray-600">
-            <Calendar className="h-5 w-5" />
-            <span>{format(new Date(), 'EEEE, MMMM d, yyyy')}</span>
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-6 sm:py-12 relative overflow-hidden">
+      {/* 3D Static Pattern Background */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        {/* 3D Geometric Pattern */}
+        <div className="absolute inset-0 opacity-[0.04]">
+          <div className="absolute top-0 left-0 w-full h-full">
+            {/* Large 3D cubes */}
+            <div className="absolute top-10 left-10 w-32 h-32 transform rotate-45 bg-gradient-to-br from-indigo-400 to-purple-600 rounded-lg shadow-2xl"></div>
+            <div className="absolute top-40 right-20 w-24 h-24 transform -rotate-12 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-lg shadow-xl"></div>
+            <div className="absolute bottom-20 left-1/4 w-28 h-28 transform rotate-30 bg-gradient-to-br from-purple-400 to-pink-600 rounded-lg shadow-2xl"></div>
+            <div className="absolute bottom-40 right-1/3 w-20 h-20 transform -rotate-45 bg-gradient-to-br from-blue-400 to-indigo-600 rounded-lg shadow-lg"></div>
+            
+            {/* Medium 3D cubes */}
+            <div className="absolute top-1/3 left-1/2 w-16 h-16 transform rotate-15 bg-gradient-to-br from-indigo-300 to-purple-500 rounded-md shadow-lg"></div>
+            <div className="absolute top-2/3 right-1/4 w-12 h-12 transform -rotate-30 bg-gradient-to-br from-cyan-300 to-blue-500 rounded-md shadow-md"></div>
+            <div className="absolute bottom-1/3 left-1/6 w-14 h-14 transform rotate-60 bg-gradient-to-br from-purple-300 to-pink-500 rounded-md shadow-lg"></div>
+            
+            {/* Small 3D cubes */}
+            <div className="absolute top-1/4 right-1/6 w-8 h-8 transform rotate-45 bg-gradient-to-br from-indigo-200 to-purple-400 rounded shadow"></div>
+            <div className="absolute top-3/4 left-1/3 w-6 h-6 transform -rotate-15 bg-gradient-to-br from-cyan-200 to-blue-400 rounded shadow"></div>
+            <div className="absolute bottom-1/4 right-1/2 w-10 h-10 transform rotate-75 bg-gradient-to-br from-purple-200 to-pink-400 rounded shadow"></div>
+            
+            {/* Floating 3D spheres */}
+            <div className="absolute top-1/6 left-1/3 w-4 h-4 bg-gradient-to-br from-indigo-300 to-purple-500 rounded-full shadow-lg"></div>
+            <div className="absolute top-2/3 right-1/6 w-3 h-3 bg-gradient-to-br from-cyan-300 to-blue-500 rounded-full shadow-md"></div>
+            <div className="absolute bottom-1/6 left-2/3 w-5 h-5 bg-gradient-to-br from-purple-300 to-pink-500 rounded-full shadow-lg"></div>
+            
+            {/* 3D Hexagons */}
+            <div className="absolute top-1/2 left-1/8 w-20 h-20 transform rotate-30">
+              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)'}}></div>
+            </div>
+            <div className="absolute bottom-1/4 right-1/8 w-16 h-16 transform -rotate-15">
+              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)'}}></div>
+            </div>
+            
+            {/* 3D Triangles */}
+            <div className="absolute top-1/3 right-1/3 w-12 h-12 transform rotate-45">
+              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)'}}></div>
+            </div>
+            <div className="absolute bottom-1/3 left-1/2 w-10 h-10 transform -rotate-30">
+              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)'}}></div>
+            </div>
+            
+            {/* 3D Diamonds */}
+            <div className="absolute top-1/4 left-3/4 w-14 h-14 transform rotate-45">
+              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)'}}></div>
+            </div>
+            <div className="absolute bottom-1/4 left-1/8 w-18 h-18 transform -rotate-15">
+              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)'}}></div>
+            </div>
           </div>
         </div>
+        
+        {/* Subtle gradient overlay */}
+        <div className="absolute inset-0 bg-gradient-to-br from-transparent via-white/30 to-transparent"></div>
       </div>
-
-      {/* Stats Grid */}
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 mb-8">
-        {verificationStats.map((stat, index) => {
-          // Only the first card (Pending Verification) is clickable
-          const isClickable = index === 0;
-          
-          if (isClickable) {
-            return (
-              <motion.button
-                key={stat.name}
-                onClick={() => handleStatClick(stat.status)}
+      
+      <div className="max-w-full mx-auto relative z-10 px-2 sm:px-4">
+      {/* Welcome Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="mb-4 sm:mb-6"
+        >
+          <div className="rounded-2xl bg-white/85 backdrop-blur-sm border border-white/50 shadow-lg p-4 sm:p-6">
+            <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+              <div className="flex-1 w-full">
+                <h1 className="text-lg sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600 leading-tight">
+                  Welcome back, <span className="bg-gradient-to-r from-orange-500 to-pink-500 bg-clip-text text-transparent">{user?.name}</span>!
+                </h1>
+                <p className="mt-2 text-sm text-gray-600 max-w-xl">
+                  Here's an overview of leads requiring verification.
+                </p>
+              </div>
+              <motion.div
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
-                className={`bg-white overflow-hidden shadow-lg rounded-xl hover:shadow-xl transition-all duration-300 cursor-pointer ${
+                className="w-full sm:w-auto"
+              >
+                <div className="flex items-center justify-between sm:justify-center gap-3 px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="h-4 w-4" />
+                    <span className="text-xs uppercase tracking-wide">Today</span>
+                  </div>
+                  <p className="text-sm font-semibold">
+                    {format(new Date(), 'EEE, MMM d, yyyy')}
+                  </p>
+                </div>
+              </motion.div>
+            </div>
+          </div>
+        </motion.div>
+
+      {/* Stats Grid */}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.1 }}
+          className="mb-8 sm:mb-12"
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
+        {verificationStats.map((stat, index) => {
+              const isClickable = index === 0; // Only Pending Verification is clickable
+          
+            return (
+                <motion.div
+                key={stat.name}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3, delay: index * 0.1 }}
+                  className="relative"
+                >
+                  {/* Single tilted background card effect - gradient colors */}
+                  <div className={`absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 ${
+                    stat.name === 'Pending Verification' ? 'bg-gradient-to-br from-yellow-400 to-yellow-600' : 
+                    stat.name === 'Daily Verified' ? 'bg-gradient-to-br from-green-400 to-green-600' : 
+                    'bg-gradient-to-br from-blue-400 to-blue-600'
+                  } opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102`}></div>
+                  
+                  {isClickable ? (
+                    <motion.button
+                onClick={() => handleStatClick(stat.status)}
+                      whileHover={{ scale: 1.02, y: -2 }}
+                whileTap={{ scale: 0.98 }}
+                      className={`block relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)] hover:shadow-[0_12px_40px_rgba(0,0,0,0.18)] transition-all duration-300 transform hover:-translate-y-1 cursor-pointer group w-full ${
                   currentStatus === stat.status ? 'ring-2 ring-indigo-500' : ''
                 }`}
               >
-                <div className="p-6">
+                      <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
+                      <div className="relative p-3 sm:p-6">
                   <div className="flex items-center">
-                    <div className={`flex-shrink-0 p-3 rounded-xl ${stat.color}`}>
-                      <stat.icon className="h-6 w-6 text-white" />
+                          <div className={`flex-shrink-0 p-2 sm:p-3.5 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.1)]`}>
+                            <stat.icon className="h-4 w-4 sm:h-6 sm:w-6 text-white" />
                     </div>
-                    <div className="ml-5 w-0 flex-1">
+                          <div className="ml-2 sm:ml-4 w-0 flex-1">
                       <dl>
-                        <dt className="text-sm font-medium text-gray-900 truncate">
+                              <dt className="text-xs sm:text-sm font-medium text-gray-900 truncate">
                           {stat.name}
                         </dt>
-                        <dd className={`text-2xl font-bold ${stat.textColor}`}>
+                              <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
                           {stat.value}
+                        </dd>
+                              <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
+                                {stat.name === 'Pending Verification' ? 'Leads awaiting verification' : 
+                                 stat.name === 'Daily Verified' ? 'Verified today' : 'Verified this month'}
                         </dd>
                       </dl>
                     </div>
                   </div>
                 </div>
+                      <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/0 to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all duration-200 rounded-2xl" />
               </motion.button>
-            );
-          }
-          
-          // Non-clickable cards (Daily and Monthly)
-          return (
-            <motion.div
-              key={stat.name}
-              className="bg-white overflow-hidden shadow-lg rounded-xl"
-            >
-              <div className="p-6">
+                  ) : (
+                    <div className="block relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-300">
+                      <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
+                      <div className="relative p-3 sm:p-6">
                 <div className="flex items-center">
-                  <div className={`flex-shrink-0 p-3 rounded-xl ${stat.color}`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+                          <div className={`flex-shrink-0 p-2 sm:p-3.5 rounded-xl ${stat.color} transition-transform duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.1)]`}>
+                            <stat.icon className="h-4 w-4 sm:h-6 sm:w-6 text-white" />
                   </div>
-                  <div className="ml-5 w-0 flex-1">
+                          <div className="ml-2 sm:ml-4 w-0 flex-1">
                     <dl>
-                      <dt className="text-sm font-medium text-gray-900 truncate">
+                              <dt className="text-xs sm:text-sm font-medium text-gray-900 truncate">
                         {stat.name}
                       </dt>
-                      <dd className={`text-2xl font-bold ${stat.textColor}`}>
+                              <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
                         {stat.value}
+                      </dd>
+                              <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
+                                {stat.name === 'Daily Verified' ? 'Verified today' : 'Verified this month'}
                       </dd>
                     </dl>
                   </div>
                 </div>
               </div>
+                    </div>
+                  )}
             </motion.div>
           );
         })}
       </div>
+        </motion.div>
 
-        {/* Search and Filters */}
-        <div className="mb-6 flex flex-col sm:flex-row gap-4 items-center justify-between">
-          <div className="relative flex-1 max-w-md">
+        {/* Pending Verification Leads Section */}
+        {filteredLeads.length > 0 ? (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className="mt-8 sm:mt-12 relative"
+          >
+            {/* Tilted background card effect to match stats cards */}
+            <div className="absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 bg-gradient-to-br from-indigo-400 to-purple-600 opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102"></div>
+            
+            <div className="relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)] hover:shadow-[0_12px_40px_rgba(0,0,0,0.18)] transition-all duration-300 transform hover:-translate-y-1">
+              {/* Glassmorphism Background */}
+              <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
+              
+              {/* Enhanced Header with Modern Design - Mobile Optimized */}
+              <div className="relative px-4 sm:px-8 py-4 sm:py-6 bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 overflow-hidden">
+                {/* Background Pattern */}
+                <div className="absolute inset-0 opacity-10">
+                  <div className="absolute top-0 left-0 w-32 h-32 bg-white rounded-full -translate-x-16 -translate-y-16"></div>
+                  <div className="absolute top-0 right-0 w-24 h-24 bg-white rounded-full translate-x-12 -translate-y-12"></div>
+                  <div className="absolute bottom-0 left-0 w-20 h-20 bg-white rounded-full -translate-x-10 translate-y-10"></div>
+        </div>
+
+                <div className="relative flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                  <div className="flex items-center space-x-3 sm:space-x-4">
+                    <div className="p-2 sm:p-3 bg-white/20 backdrop-blur-sm rounded-xl sm:rounded-2xl shadow-lg">
+                      <Users className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg sm:text-2xl lg:text-3xl font-bold text-white flex items-center">
+            Pending Verification Leads
+          </h2>
+        </div>
+                  </div>
+                  <div className="w-full lg:w-auto flex flex-col sm:flex-row gap-3">
+                    <div className="relative flex-1 min-w-[280px]">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Search className="h-5 w-5 text-gray-400" />
+                        <Search className="h-5 w-5 text-white/70" />
             </div>
             <input
               type="text"
-              className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg leading-5 bg-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                        className="block w-full pl-10 pr-3 py-2 border border-white/30 rounded-xl leading-5 bg-white/15 backdrop-blur-sm placeholder-white/70 text-white focus:outline-none focus:ring-2 focus:ring-white/80 focus:border-white/80 sm:text-sm"
               placeholder="Search leads..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-          <div className="flex items-center space-x-4">
             <select
               value={pageSize}
               onChange={(e) => setPageSize(Number(e.target.value) as typeof PAGE_SIZES[number])}
-              className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-lg"
+                      className="w-full sm:w-44 pl-3 pr-10 py-2 text-sm border border-white/30 rounded-xl bg-white/15 backdrop-blur-sm text-white focus:outline-none focus:ring-2 focus:ring-white/80 focus:border-white/80"
             >
               {PAGE_SIZES.map((size) => (
-                <option key={size} value={size}>
+                        <option key={size} value={size} className="text-gray-900">
                   {size} per page
                 </option>
               ))}
             </select>
+                  </div>
           </div>
         </div>
 
-      {/* Lead Details Table */}
-      <div className="bg-white shadow-lg rounded-lg overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">
-            Pending Verification Leads
-          </h2>
+              {/* Enhanced Table Headers - Desktop Only */}
+              <div className="hidden sm:block relative px-6 py-5 bg-gradient-to-br from-indigo-50/90 via-purple-50/90 to-pink-50/90 backdrop-blur-sm border-b border-indigo-100/50">
+                <div className="grid grid-cols-12 gap-3">
+                  <div className="col-span-3">
+                    <div className="flex items-center space-x-1">
+                      <div className="p-2 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-lg">
+                        <User2 className="h-4 w-4 text-indigo-600" />
         </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Customer Name & Number
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Selected Number
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Group
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Language
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Created Date
-                </th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+                      <span className="text-sm font-bold text-indigo-700 uppercase tracking-wide">Customer Info</span>
+                    </div>
+                  </div>
+                  <div className="col-span-3 pl-6">
+                    <div className="flex items-center space-x-1">
+                      <div className="p-2 bg-gradient-to-br from-blue-100 to-cyan-100 rounded-lg">
+                        <Hash className="h-4 w-4 text-blue-600" />
+                      </div>
+                      <span className="text-sm font-bold text-blue-700 uppercase tracking-wide">Selected Number & Plan</span>
+                    </div>
+                  </div>
+                  <div className="col-span-1 pl-[111px]">
+                    <div className="flex items-center justify-center space-x-1">
+                      <div className="p-2 bg-gradient-to-br from-emerald-100 to-green-100 rounded-lg">
+                        <Package className="h-4 w-4 text-emerald-600" />
+                      </div>
+                      <span className="text-sm font-bold text-emerald-700 uppercase tracking-wide">Group</span>
+                    </div>
+                  </div>
+                  <div className="col-span-2 pl-[171px]">
+                    <div className="flex items-center justify-center space-x-1">
+                      <div className="p-2 bg-gradient-to-br from-amber-100 to-orange-100 rounded-lg">
+                        <Clock className="h-4 w-4 text-amber-600" />
+                      </div>
+                      <span className="text-sm font-bold text-amber-700 uppercase tracking-wide">Language</span>
+                    </div>
+                  </div>
+                  <div className="col-span-3 flex justify-center">
+                    <div className="flex items-center justify-center space-x-3 text-center pl-20">
+                      <div className="p-2 bg-gradient-to-br from-purple-100 to-pink-100 rounded-lg">
+                        <Eye className="h-4 w-4 text-purple-600" />
+                      </div>
+                      <span className="text-sm font-bold text-purple-700 uppercase tracking-wide">Actions</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Leads List */}
+              <div className="relative">
                 {paginatedLeads.length === 0 ? (
-                <tr>
-                    <td colSpan={6} className="px-6 py-4 text-center text-sm text-gray-500">
-                    No leads found for this status
-                  </td>
-                </tr>
+                  <div className="px-6 py-12 text-center">
+                    <div className="text-sm text-gray-500">No leads found for this status</div>
+                  </div>
               ) : (
-                  paginatedLeads.map((lead) => (
-                    <motion.tr
+                  paginatedLeads.map((lead, index) => {
+                    const primaryPlan = lead.plans?.[0];
+                    const primaryGroup = primaryPlan?.group;
+                    const primaryCategory = primaryPlan?.category;
+
+                    return (
+                    <motion.div
                       key={lead.id}
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3, delay: index * 0.1 }}
                       className={clsx(
-                        "hover:bg-gray-50",
-                        (lead as any).verificationMethod === 'whatsapp' &&
-                          "bg-gradient-to-r from-green-50 to-emerald-50"
+                        "group hover:bg-gradient-to-r hover:from-indigo-50/50 hover:to-purple-50/50 transition-all duration-200 relative",
+                        (lead as any).verificationMethod === 'whatsapp' && "bg-gradient-to-r from-emerald-50/50 to-transparent",
+                        index < paginatedLeads.length - 1 && "border-b border-gradient-to-r from-gray-200/60 via-indigo-200/40 to-purple-200/60"
                       )}
+                      style={{
+                        borderBottom: index < paginatedLeads.length - 1 ? '2px solid transparent' : 'none',
+                        backgroundImage: index < paginatedLeads.length - 1 
+                          ? 'linear-gradient(white, white), linear-gradient(90deg, rgba(156, 163, 175, 0.7), rgba(129, 140, 248, 0.6), rgba(196, 181, 253, 0.6), rgba(236, 72, 153, 0.5))'
+                          : 'none',
+                        backgroundOrigin: 'border-box',
+                        backgroundClip: 'padding-box, border-box'
+                      }}
                     >
-                    <td className="px-6 py-4">
-                      <div className="flex items-center">
-                        <div className="h-10 w-10 flex-shrink-0 rounded-full bg-gradient-to-br from-indigo-100 to-indigo-200 flex items-center justify-center">
+                      {/* WhatsApp Indicator */}
+                      {(lead as any).verificationMethod === 'whatsapp' && (
+                        <div className="absolute left-0 top-0 bottom-0 w-1 bg-emerald-500 z-10"></div>
+                      )}
+                      <div className="px-6 py-4">
+                        <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
+                          {/* Customer Information */}
+                          <div className="col-span-3 flex items-center">
+                            <div className="flex items-center space-x-2">
+                              <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
                           <User2 className="h-5 w-5 text-indigo-600" />
                         </div>
-                        <div className="ml-4">
-                          <div className="text-sm font-semibold text-gray-900">{lead.customerName}</div>
-                          <div className="text-sm text-gray-500 flex items-center">
-                            <Phone className="h-3.5 w-3.5 mr-1" />
+                              <div>
+                                <h3 className="text-sm font-semibold text-gray-900">
+                                  {lead.customerName || 'Unnamed Customer'}
+                                </h3>
+                                <div className="flex items-center text-s text-gray-500 mt-1">
+                                  <Phone className="h-3 w-3 mr-1.5" />
                       {lead.customerNumber}
                           </div>
+                                <div className="flex items-center text-xs text-gray-500 mt-1">
+                                  <Calendar className="h-3 w-3 mr-1.5" />
+                                  {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
                         </div>
                       </div>
-                    </td>
-                    <td className="px-6 py-4">
+                            </div>
+                          </div>
+
+                          {/* Selected Numbers & Plan */}
+                          <div className="col-span-3 pl-6">
                       <div className="flex flex-col space-y-2">
-                        {lead.plans?.map((plan, index) => (
-                          <div key={index} className="flex flex-col">
-                            <div className="flex items-center text-sm font-medium text-gray-900">
-                              <Phone className="h-4 w-4 mr-2 text-indigo-500" />
-                              {plan.number}
-                              <span className={clsx(
-                                "ml-2 px-2 py-0.5 text-xs rounded-full",
-                                plan.category === 'Gold' ? 'bg-yellow-100 text-yellow-800' :
-                                plan.category === 'Platinum' ? 'bg-purple-100 text-purple-800' :
-                                'bg-gray-100 text-gray-800'
-                              )}>
-                                {plan.category}
+                              {(lead.plans && lead.plans.length > 0)
+                                ? lead.plans.map((plan, planIndex) => (
+                                    <div key={planIndex} className="w-full flex flex-col space-y-1.5 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-2 rounded-lg shadow-sm">
+                                      {/* Number - Left aligned */}
+                                      <div className="flex items-center space-x-2">
+                                        <Hash className="h-4 w-4 text-indigo-500 flex-shrink-0" />
+                                        <span className="text-sm font-semibold text-gray-900">
+                                          {plan.number || ''}
                               </span>
                             </div>
-                            <div className="flex items-center text-sm text-gray-500 mt-1">
-                              <Package className="h-4 w-4 mr-2 text-indigo-400" />
-                              <span className={clsx(
-                                "ml-2 px-2 py-0.5 text-xs rounded-full",
-                                plan.plan === 'Premium' ? 'bg-purple-100 text-purple-800' :
-                                plan.plan === 'VIP' ? 'bg-yellow-100 text-yellow-800' :
-                                'bg-gray-100 text-gray-800'
-                              )}>
+                                      {/* Plan Details - Below number */}
+                                      <div className="flex flex-col space-y-1.5">
+                                        {/* Line 1: Plan Name */}
+                                        {plan.plan && (
+                                          <div className="flex items-center space-x-1.5">
+                                            <Package className="h-3 w-3 text-indigo-400 flex-shrink-0" />
+                                            <span className="text-xs font-semibold text-gray-900 leading-tight">
                                 {plan.plan}
                               </span>
                             </div>
-                          </div>
-                        ))}
-                        {!lead.plans?.length && (
-                          <div className="text-sm text-gray-500">No plans selected</div>
                         )}
                       </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {lead.plans?.map((plan, index) => (
-                        <div key={index} className="flex items-center">
+                          </div>
+                                  ))
+                                : <span className="text-sm font-medium text-gray-700"></span>
+                              }
+                      </div>
+                          </div>
+
+                          {/* Group */}
+                          <div className="col-span-1 pl-[111px]">
+                            <div className="flex flex-col space-y-2 items-center">
+                              {(lead.plans && lead.plans.length > 0)
+                                ? lead.plans.map((plan, planIndex) => (
+                                    <div key={planIndex} className="flex flex-col items-center justify-center space-y-1">
+                                      {/* Group Badge */}
                           <span className={clsx(
                             "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full",
                             plan.group === 'Group A' ? 'bg-blue-100 text-blue-800' :
@@ -1019,38 +1319,182 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                             plan.group === 'Group D' ? 'bg-yellow-100 text-yellow-800' :
                             'bg-gray-100 text-gray-800'
                           )}>
-                            {plan.group}
+                                        {plan.group || 'Unassigned'}
                           </span>
-                        </div>
-                      ))}
-                      {!lead.plans?.length && (
-                        <div className="text-sm text-gray-500">No group assigned</div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                      {/* Category Badge */}
+                                      {plan.category && (
+                                        <span className={clsx(
+                                          "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full",
+                                plan.category === 'Gold' ? 'bg-yellow-100 text-yellow-800' :
+                                plan.category === 'Platinum' ? 'bg-purple-100 text-purple-800' :
+                                          plan.category === 'Silver' ? 'bg-gray-100 text-gray-800' :
+                                          plan.category === 'Silver plus' ? 'bg-blue-100 text-blue-800' :
+                                          plan.category === 'Gold plus' ? 'bg-orange-100 text-orange-800' :
+                                          plan.category === 'Standard' ? 'bg-gray-100 text-gray-800' :
+                                'bg-gray-100 text-gray-800'
+                              )}>
+                                {plan.category}
+                              </span>
+                                      )}
+                            </div>
+                                  ))
+                                : <span className="text-sm font-medium text-gray-700"></span>
+                              }
+                            </div>
+                          </div>
+
+                          {/* Language */}
+                          <div className="col-span-2 pl-[171px] flex items-center justify-center">
                       <span className={clsx(
                         "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full",
                         lead.language === 'English' ? 'bg-blue-100 text-blue-800' :
                         lead.language === 'Arabic' ? 'bg-green-100 text-green-800' :
                         'bg-gray-100 text-gray-800'
                       )}>
-                        {lead.language}
+                              {lead.language || 'N/A'}
                       </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {format(lead.createdAt, 'MMM d, yyyy')}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <div className="flex items-center">
+                            </div>
+
+                          {/* Actions */}
+                          <div className="col-span-3 flex justify-end">
+                            <motion.div
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              className="relative z-20 flex items-center gap-2"
+                            >
+                              {(lead as any).verificationMethod === 'whatsapp' && (
                         <motion.button
                           whileHover={{ scale: 1.02, y: -1 }}
                           whileTap={{ scale: 0.98 }}
-                          onClick={() => navigate(`/dashboard/leads/${lead.id}`)}
-                          className="inline-flex items-center justify-center px-4 py-2.5 rounded-lg bg-indigo-50/80 text-indigo-600 border border-indigo-100 hover:bg-indigo-50 hover:border-indigo-200 transition-all duration-200"
-                        >
-                          <Eye className="h-4 w-4 mr-2" />
-                          <span className="font-medium">View Details</span>
+                                  onClick={() => {
+                                    setSelectedLead(lead);
+                                    setShowWhatsAppLogs(true);
+                                    const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
+                                    onSnapshot(query(logsCol, orderBy('createdAt', 'asc')), (snap) => {
+                                      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                                      setWhatsAppLogs(rows as any[]);
+                                    }, (error) => {
+                                      if (error.code === 'permission-denied') {
+                                        return;
+                                      }
+                                      console.error('Error in VerifierDashboard WhatsApp logs listener:', error);
+                                    });
+                                  }}
+                                  title="WhatsApp Verification"
+                                  className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
+                                >
+                                  <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true">
+                                    <path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/>
+                                  </svg>
                         </motion.button>
+                              )}
+                              <Link
+                                to={`/dashboard/leads/${lead.id}`}
+                                className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                              >
+                                <Eye className="h-4 w-4 mr-2" />
+                                View Details
+                                <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
+                              </Link>
+                            </motion.div>
+                          </div>
+                        </div>
+
+                        {/* Mobile Layout */}
+                        <div className="sm:hidden">
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-start space-x-3 flex-1">
+                              <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
+                                <User2 className="h-5 w-5 text-indigo-600" />
+                              </div>
+                              <div className="flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <h3 className="text-sm font-semibold text-gray-900">
+                                    {lead.customerName || 'Unnamed Customer'}
+                                  </h3>
+                                  {lead.language && (
+                                    <span className={clsx(
+                                      "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full flex-shrink-0",
+                                      lead.language === 'English' ? 'bg-blue-100 text-blue-800' :
+                                      lead.language === 'Arabic' ? 'bg-green-100 text-green-800' :
+                                      'bg-gray-100 text-gray-800'
+                                    )}>
+                                      {lead.language}
+                                    </span>
+                        )}
+                      </div>
+                                <div className="flex items-start justify-between mt-1 gap-3">
+                                  <div className="space-y-1 text-sm text-gray-500">
+                                    <div className="flex items-center">
+                                      <Phone className="h-3 w-3 mr-1.5" />
+                                      {lead.customerNumber}
+                                    </div>
+                                    <div className="flex items-center text-xs">
+                                      <Calendar className="h-3 w-3 mr-1.5" />
+                                      {format(lead.createdAt, 'MMM d, yyyy')}
+                                    </div>
+                                  </div>
+                                  {(primaryGroup || primaryCategory) && (
+                                    <div className="flex items-center gap-1.5 flex-wrap justify-end text-xs font-semibold">
+                                      {primaryGroup && (
+                                        <span className={clsx(
+                                          "px-2 py-1 inline-flex leading-5 rounded-full",
+                                          primaryGroup === 'Group A' ? 'bg-blue-100 text-blue-800' :
+                                          primaryGroup === 'Group B' ? 'bg-green-100 text-green-800' :
+                                          primaryGroup === 'Group C' ? 'bg-purple-100 text-purple-800' :
+                                          primaryGroup === 'Group D' ? 'bg-yellow-100 text-yellow-800' :
+                                          'bg-gray-100 text-gray-800'
+                                        )}>
+                                          {primaryGroup}
+                                        </span>
+                                      )}
+                                      {primaryCategory && (
+                                        <span className={clsx(
+                                          "px-2 py-1 inline-flex leading-5 rounded-full",
+                                          primaryCategory === 'Gold' ? 'bg-yellow-100 text-yellow-800' :
+                                          primaryCategory === 'Platinum' ? 'bg-purple-100 text-purple-800' :
+                                          primaryCategory === 'Silver' ? 'bg-gray-100 text-gray-800' :
+                                          primaryCategory === 'Silver plus' ? 'bg-blue-100 text-blue-800' :
+                                          primaryCategory === 'Gold plus' ? 'bg-orange-100 text-orange-800' :
+                                          primaryCategory === 'Standard' ? 'bg-gray-100 text-gray-800' :
+                                          'bg-gray-100 text-gray-800'
+                                        )}>
+                                          {primaryCategory}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Plan Details for Mobile */}
+                          <div className="mt-4 space-y-2">
+                            {(lead.plans?.map((plan, planIndex) => (
+                              <div key={planIndex} className="w-full flex flex-col space-y-1.5 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-2 rounded-lg shadow-sm">
+                                {/* Number - First line */}
+                                <div className="flex items-center space-x-2">
+                                  <Hash className="h-4 w-4 text-indigo-500 flex-shrink-0" />
+                                  <span className="text-sm font-semibold text-gray-900">
+                                    {plan.number || ''}
+                                  </span>
+                                </div>
+                                {/* Plan Name - Second line */}
+                                {plan.plan && (
+                                  <div className="flex items-center space-x-1.5 pl-6">
+                                    <Package className="h-3 w-3 text-indigo-400 flex-shrink-0" />
+                                    <span className="text-xs font-semibold text-gray-900 leading-tight">
+                                      {plan.plan}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            )))}
+                          </div>
+
+                          {/* Action Button for Mobile */}
+                          <div className="mt-4 flex items-center gap-2">
                         {(lead as any).verificationMethod === 'whatsapp' && (
                           <motion.button
                             whileHover={{ scale: 1.02, y: -1 }}
@@ -1063,49 +1507,64 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                 const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                                 setWhatsAppLogs(rows as any[]);
                               }, (error) => {
-                                // ✅ FIX: Handle permission errors gracefully during logout
                                 if (error.code === 'permission-denied') {
-                                  // User logged out or lost permissions - cleanup silently
                                   return;
                                 }
-                                
                                 console.error('Error in VerifierDashboard WhatsApp logs listener:', error);
                               });
                             }}
                             title="WhatsApp Verification"
-                            className="ml-2 inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
+                                className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
                           >
                             <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true">
                               <path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/>
                             </svg>
                           </motion.button>
                         )}
+                            <motion.div
+                              whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                              className="relative z-20 flex-1"
+                            >
+                              <Link
+                                to={`/dashboard/leads/${lead.id}`}
+                                className="inline-flex items-center justify-center w-full px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                        >
+                          <Eye className="h-4 w-4 mr-2" />
+                                View Details
+                                <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
+                              </Link>
+                            </motion.div>
                       </div>
-                    </td>
-                    </motion.tr>
-                ))
+                        </div>
+                      </div>
+                    </motion.div>
+                    );
+                  })
               )}
-            </tbody>
-          </table>
           </div>
 
           {/* Pagination */}
-          <div className="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+              <div className="bg-gradient-to-br from-indigo-50/90 via-purple-50/90 to-pink-50/90 backdrop-blur-sm px-4 py-3 flex items-center justify-between border-t border-indigo-100/50 sm:px-6">
             <div className="flex-1 flex justify-between sm:hidden">
-              <button
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
                 onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
                 disabled={currentPage === 1}
-                className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-xl text-gray-700 bg-white/95 backdrop-blur-sm hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               >
                 Previous
-              </button>
-              <button
+                  </motion.button>
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
                 onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
                 disabled={currentPage === totalPages}
-                className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-xl text-gray-700 bg-white/95 backdrop-blur-sm hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               >
                 Next
-              </button>
+                  </motion.button>
             </div>
             <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
               <div>
@@ -1118,42 +1577,70 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                 </p>
               </div>
               <div>
-                <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                  <button
+                    <nav className="relative z-0 inline-flex rounded-xl shadow-sm -space-x-px" aria-label="Pagination">
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                     onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
                     disabled={currentPage === 1}
-                    className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="relative inline-flex items-center px-2 py-2 rounded-l-xl border border-gray-300 bg-white/95 backdrop-blur-sm text-sm font-medium text-gray-500 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <span className="sr-only">Previous</span>
                     <ChevronLeft className="h-5 w-5" aria-hidden="true" />
-                  </button>
+                      </motion.button>
                   {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
-                    <button
+                        <motion.button
                       key={page}
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
                       onClick={() => setCurrentPage(page)}
                       className={clsx(
                         'relative inline-flex items-center px-4 py-2 border text-sm font-medium',
                         page === currentPage
                           ? 'z-10 bg-indigo-50 border-indigo-500 text-indigo-600'
-                          : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                              : 'bg-white/95 backdrop-blur-sm border-gray-300 text-gray-500 hover:bg-white'
                       )}
                     >
                       {page}
-                    </button>
+                        </motion.button>
                   ))}
-                  <button
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                     onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
                     disabled={currentPage === totalPages}
-                    className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="relative inline-flex items-center px-2 py-2 rounded-r-xl border border-gray-300 bg-white/95 backdrop-blur-sm text-sm font-medium text-gray-500 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <span className="sr-only">Next</span>
                     <ChevronRight className="h-5 w-5" aria-hidden="true" />
-                  </button>
+                      </motion.button>
                 </nav>
               </div>
             </div>
           </div>
         </div>
+          </motion.div>
+        ) : (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className="mt-8 sm:mt-12 relative"
+          >
+            <div className="relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
+              <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
+              <div className="relative px-6 py-12 text-center">
+                <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-inner">
+                  <Users className="w-8 h-8 text-indigo-400" />
+                </div>
+                <h3 className="text-xl font-bold text-gray-900 mb-2">No leads found</h3>
+                <p className="text-gray-500 max-w-sm mx-auto">
+                  {searchTerm ? 'No leads match your search criteria.' : 'No pending verification leads at the moment.'}
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
       </div>
 
       {/* Action Dialog */}
@@ -1594,13 +2081,36 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                   <div className="text-sm text-gray-500">No WhatsApp messages found for this lead.</div>
                 ) : (
                   whatsAppLogs.map((log) => {
-                    const created = (log.createdAt?.toDate?.() || log.createdAt) ? new Date(log.createdAt?.toDate?.() || log.createdAt) : null;
+                    const created = normalizeLogDate(log.createdAt);
                     const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
                     const fromDigits = (log.from || '').toString().replace(/\D/g, '');
                     const fromDisplay = fromDigits ? `+${fromDigits}` : '';
                     const firstPlan = selectedLead?.plans?.[0];
                     const planInfo = planDetails;
                     const isOutbound = log.direction === 'outbound';
+                    const createdTime = created?.getTime() ?? 0;
+                    const hasCustomerReplyAfter =
+                      isOutbound &&
+                      whatsAppLogs.some(other => {
+                        if (other.id === log.id || other.direction !== 'inbound') return false;
+                        const otherCreated = normalizeLogDate(other.createdAt);
+                        return (otherCreated?.getTime() ?? 0) > createdTime;
+                      });
+                    const deriveStatus = (): 'read' | 'delivered' | 'sent' | 'failed' | undefined => {
+                      if (!isOutbound) return undefined;
+                      if (log.status === 'failed') return 'failed';
+                      if (log.status === 'read' || hasCustomerReplyAfter) return 'read';
+                      if (log.status === 'delivered') return 'delivered';
+                      if (log.status === 'sent' || log.status === 'accepted') return 'sent';
+                      return log.status ? 'sent' : undefined;
+                    };
+                    const effectiveStatus = deriveStatus();
+                    const statusLabelMap: Record<string, string> = {
+                      read: 'Read',
+                      delivered: 'Delivered',
+                      sent: 'Sent',
+                      failed: 'Failed'
+                    };
                     const CONSENT_ORDER: Array<{ key: string; label: string }> = [
                       {
                         key: 'ownershipAfterContract',
@@ -1639,11 +2149,30 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                             <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
                               {isOutbound ? 'Outbound' : 'Inbound'}
                             </span>
-                            <span className="ml-2">
+                            <span className="ml-2 flex items-center gap-1.5">
                               {fromDisplay && (
                                 <span className="font-bold text-blue-600">From {fromDisplay}</span>
                               )}
                               {createdStr && ` · ${createdStr}`}
+                              {isOutbound && (
+                                <span
+                                  className="ml-1.5 inline-flex items-center"
+                                  title={effectiveStatus ? `Message ${statusLabelMap[effectiveStatus] || effectiveStatus}` : 'Message sent'}
+                                >
+                                  {effectiveStatus === 'read' && (
+                                    <CheckCheck className="w-4 h-4 text-green-500" />
+                                  )}
+                                  {effectiveStatus === 'delivered' && (
+                                    <CheckCheck className="w-4 h-4 text-gray-600" />
+                                  )}
+                                  {(!effectiveStatus || effectiveStatus === 'sent') && (
+                                    <Check className="w-3.5 h-3.5 text-gray-500" />
+                                  )}
+                                  {effectiveStatus === 'failed' && (
+                                    <XCircle className="w-4 h-4 text-red-500" />
+                                  )}
+                                </span>
+                              )}
                             </span>
                           </div>
                           {/* Summary only for the acceptance message (when consents are present) */}
@@ -1687,6 +2216,83 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                           )}
                           {log.messageText && (
                             <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
+                          )}
+                          {/* Show error message if status is failed */}
+                          {effectiveStatus === 'failed' && log.error && (() => {
+                            const errorObj = log.error as any;
+                            let errorText = '';
+                            let errorCode = '';
+                            let errorExplanation = '';
+                            
+                            if (typeof log.error === 'string') {
+                              errorText = log.error;
+                            } else if (errorObj) {
+                              // WhatsApp error structure: { code, title, message, error_data }
+                              const parts = [];
+                              if (errorObj.title) parts.push(errorObj.title);
+                              // Only add message if it's different from title (avoid duplication)
+                              if (errorObj.message && errorObj.message !== errorObj.title) {
+                                parts.push(errorObj.message);
+                              }
+                              errorText = parts.length > 0 ? parts.join(' - ') : '';
+                              errorCode = errorObj.code || '';
+                              
+                              // Provide user-friendly explanations for common error codes
+                              const errorExplanations: Record<string, string> = {
+                                '131026': 'The customer\'s phone number is not registered on WhatsApp or has blocked your business number.',
+                                '131047': 'The customer has not replied within the 24-hour messaging window. Send a template message to re-engage.',
+                                '131051': 'This type of message is not supported. Try using a different message format.',
+                                '131052': 'Media download failed. The media file may be corrupted or too large.',
+                                '131053': 'Media upload failed. Check the file format and size.',
+                                '133000': 'The phone number format is invalid. Use international format (e.g., 971XXXXXXXXX).',
+                                '133004': 'The template message was rejected. Verify the template name and parameters.',
+                                '133005': 'Template not found. Make sure the template is approved in Meta Business Manager.',
+                                '133006': 'Invalid template parameters. Check parameter count and format.',
+                                '133010': 'Message limit exceeded. You\'ve reached the messaging limit for this customer.',
+                                '130472': 'The customer has opted out of marketing messages. They must opt back in before you can send them marketing content.',
+                                '135000': 'Generic WhatsApp Business API error. Contact support if this persists.',
+                                '136000': 'Insufficient WhatsApp Business Account balance. Add funds to continue messaging.',
+                                '368': 'Temporarily blocked for spammy behavior. Reduce message frequency.',
+                                '131031': 'Rate limit exceeded. Too many messages sent in a short time. Wait before retrying.',
+                              };
+                              
+                              errorExplanation = errorExplanations[errorCode] || '';
+                            }
+                            
+                            return (
+                              <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-2.5">
+                                <div className="flex items-start gap-2">
+                                  <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                                  <div className="flex-1 text-xs text-red-800">
+                                    <div className="font-semibold mb-1">Message Failed</div>
+                                    {errorText && <div className="text-red-700 mb-1">{errorText}</div>}
+                                    {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
+                                    {errorExplanation && (
+                                      <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
+                                        <span className="font-semibold">💡 What to do: </span>
+                                        {errorExplanation}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                          {isOutbound && log.templateName && Array.isArray(log.parameters) && log.parameters.length > 0 && (
+                            <div className="mt-2 flex justify-end">
+                              <button
+                                onClick={() => handleResendVerificationMessage(log)}
+                                disabled={resendingLogId === log.id}
+                                className={clsx(
+                                  'inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium shadow-sm',
+                                  resendingLogId === log.id
+                                    ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
+                                    : 'bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500'
+                                )}
+                              >
+                                {resendingLogId === log.id ? 'Resending…' : 'Resend Message'}
+                              </button>
+                            </div>
                           )}
                           {accepted.length > 0 && (
                             <ol className="mt-1 space-y-2 text-sm">

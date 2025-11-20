@@ -42,6 +42,7 @@ import { db, processLeadRejectionFunction } from '../../lib/firebase';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { toast } from 'react-hot-toast';
 import { useAuthStore } from '../../store/authStore';
+import { incrementVerifierCounters } from '../../utils/verifierCounters';
 
 interface VerifyLeadModalProps {
   isOpen: boolean;
@@ -69,6 +70,11 @@ export function VerifyLeadModal({ isOpen, onClose, lead, onVerify }: VerifyLeadM
         verifiedBy: user?.id, // ✅ Add this field for dashboard metrics
         verifiedAt: serverTimestamp()
       });
+
+      // Increment verifier counters
+      if (user?.id) {
+        await incrementVerifierCounters(user.id);
+      }
 
       toast.success('Lead verified successfully');
       onVerify();
