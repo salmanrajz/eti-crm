@@ -78,7 +78,8 @@ import {
   X,
   Check,
   CheckCheck,
-  Calendar
+  Calendar,
+  ArrowRightLeft
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'react-hot-toast';
@@ -88,6 +89,7 @@ import React from 'react';
 import { dashboardPerf } from '../../utils/performance';
 import { leadsCache, userCache } from '../../utils/cache';
 import { AdvancedLeadSearch } from './AdvancedLeadSearch';
+import { TransferLeadModal } from './TransferLeadModal';
 
 // ✅ PERFORMANCE: Optimized load sizes for faster initial loading
 const INITIAL_LOAD_SIZE = (() => {
@@ -184,6 +186,8 @@ export function LeadList() {
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const whatsAppLogsUnsubscribeRef = useRef<(() => void) | null>(null);
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [selectedLeadForTransfer, setSelectedLeadForTransfer] = useState<Lead | null>(null);
 
   // Helper function to normalize log dates
   const normalizeLogDate = (value: any): Date | null => {
@@ -587,7 +591,7 @@ export function LeadList() {
 
     // ✅ PERFORMANCE: Group is always stored in lead document, no need to fetch from numberPool
     const agentIds = [...new Set(leadsData.map(lead => lead.agentId).filter((id): id is string => !!id))];
-    
+
     // ✅ PERFORMANCE: Pre-extract team IDs from leads (before agent info) for parallel fetching
     const leadTeamIds = [...new Set(leadsData.map(lead => lead.teamId as string).filter(Boolean))] as string[];
 
@@ -617,7 +621,7 @@ export function LeadList() {
         .map(agent => agent.teamId)
         .filter((id): id is string => Boolean(id) && !leadTeamIds.includes(id))
     )] as string[];
-    
+
     // ✅ PERFORMANCE: Fetch additional team info from agents if needed, then merge
     const teamInfoFromAgents = agentTeamIds.length > 0 
       ? await fetchTeamInfoOptimized(agentTeamIds)
@@ -969,6 +973,7 @@ export function LeadList() {
       const matchesSearch = !normalizedSearch || (
         lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+        lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.plans?.some(plan => 
           plan.number.toLowerCase().includes(normalizedSearch) ||
           plan.plan?.toLowerCase().includes(normalizedSearch)
@@ -1527,25 +1532,25 @@ export function LeadList() {
                 <div className="flex items-center space-x-3">
                   <div className="p-2 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-lg">
                     <User2 className="h-4 w-4 text-indigo-600" />
-                  </div>
+            </div>
                   <span className="text-sm font-bold text-indigo-700 uppercase tracking-wide">Customer Info</span>
-                </div>
-              </div>
+            </div>
+            </div>
               <div className="col-span-2 -ml-3">
                 <div className="flex items-center space-x-3">
                   <div className="p-2 bg-gradient-to-br from-blue-100 to-cyan-100 rounded-lg">
                     <Hash className="h-4 w-4 text-blue-600" />
-                  </div>
+            </div>
                   <span className="text-sm font-bold text-blue-700 uppercase tracking-wide">Selected Number</span>
-                </div>
               </div>
+            </div>
               <div className="col-span-4">
                 <div className="flex items-center space-x-3">
                   <div className="p-2 bg-gradient-to-br from-emerald-100 to-green-100 rounded-lg">
                     <Package className="h-4 w-4 text-emerald-600" />
-                  </div>
+            </div>
                   <span className="text-sm font-bold text-emerald-700 uppercase tracking-wide">Plan Details</span>
-                </div>
+          </div>
               </div>
               <div className="col-span-1 pr-8">
                 <div className="flex items-center space-x-3">
@@ -1566,7 +1571,7 @@ export function LeadList() {
             </div>
           </div>
 
-          {/* Leads List */}
+        {/* Leads List */}
           <div className="relative">
           <AnimatePresence>
             {currentLeads.map((lead, index) => (
@@ -1601,19 +1606,26 @@ export function LeadList() {
                       <div className="flex items-center space-x-2">
                         <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
                           <User2 className="h-5 w-5 text-indigo-600" />
-                        </div>
+                      </div>
                         <div>
                           <h3 className="text-sm font-semibold text-gray-900">
-                            {lead.customerName || 'Unnamed Customer'}
-                          </h3>
+                          {lead.customerName || 'Unnamed Customer'}
+                        </h3>
                           <div className="flex items-center text-xs text-gray-500 mt-1">
                             <Phone className="h-3 w-3 mr-1.5" />
-                            {lead.customerNumber}
-                          </div>
+                          {lead.customerNumber}
+                        </div>
                           <div className="flex items-center text-xs text-gray-500 mt-1">
                             <Calendar className="h-3 w-3 mr-1.5" />
                             {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
                           </div>
+                          {lead.leadNumber && (
+                            <div className="mt-1">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
+                                {lead.leadNumber}
+                              </span>
+                          </div>
+                        )}
                         </div>
                       </div>
                     </div>
@@ -1624,11 +1636,11 @@ export function LeadList() {
                         {(lead.plans && lead.plans.length > 0)
                           ? lead.plans.map((plan, planIndex) => (
                               <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
-                                <Hash className="h-4 w-4 text-indigo-500" />
-                                <span className="text-sm font-medium text-gray-700">
+                        <Hash className="h-4 w-4 text-indigo-500" />
+                        <span className="text-sm font-medium text-gray-700">
                                   {plan.number || ''}
-                                </span>
-                              </div>
+                            </span>
+                          </div>
                             ))
                           : <span className="text-sm font-medium text-gray-700"></span>
                         }
@@ -1641,11 +1653,11 @@ export function LeadList() {
                         {(lead.plans && lead.plans.length > 0)
                           ? lead.plans.map((plan, planIndex) => (
                               <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
-                                <Package className="h-4 w-4 text-indigo-500" />
-                                <span className="text-sm font-medium text-gray-700">
+                          <Package className="h-4 w-4 text-indigo-500" />
+                          <span className="text-sm font-medium text-gray-700">
                                   {plan.plan || ''}
-                                </span>
-                              </div>
+                          </span>
+                        </div>
                             ))
                           : <span className="text-sm font-medium text-gray-700"></span>
                         }
@@ -1709,20 +1721,34 @@ export function LeadList() {
                             </svg>
                           </motion.button>
                         )}
-                        <motion.div
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          className="relative z-20"
-                        >
-                          <Link
-                            to={`/dashboard/leads/${lead.id}`}
-                            className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                        {isAdmin() && (
+                          <motion.button
+                            whileHover={{ scale: 1.02, y: -1 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => {
+                              setSelectedLeadForTransfer(lead);
+                              setShowTransferModal(true);
+                            }}
+                            title="Transfer Lead"
+                            className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-blue-50/80 text-blue-700 border border-blue-100 hover:bg-blue-50 hover:border-blue-200 transition-all duration-200"
                           >
-                            <Eye className="h-4 w-4 mr-2" />
-                            View Details
-                            <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
-                          </Link>
-                        </motion.div>
+                            <ArrowRightLeft className="h-4 w-4" />
+                          </motion.button>
+                        )}
+                      <motion.div
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        className="relative z-20"
+                      >
+                        <Link
+                          to={`/dashboard/leads/${lead.id}`}
+                          className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                        >
+                          <Eye className="h-4 w-4 mr-2" />
+                          View Details
+                          <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
+                        </Link>
+                      </motion.div>
                       </div>
                     </div>
                   </div>
@@ -1742,9 +1768,16 @@ export function LeadList() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
                             <h3 className="text-lg font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors duration-200 truncate">
                               {lead.customerName || 'Unnamed Customer'}
                             </h3>
+                              {lead.leadNumber && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200 flex-shrink-0">
+                                  {lead.leadNumber}
+                                </span>
+                              )}
+                            </div>
                             <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200 mt-1">
                               <Phone className="h-4 w-4 mr-1.5 flex-shrink-0" />
                               <span className="truncate">{lead.customerNumber}</span>
@@ -1863,6 +1896,20 @@ export function LeadList() {
                           <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true">
                             <path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/>
                           </svg>
+                        </motion.button>
+                      )}
+                      {isAdmin() && (
+                        <motion.button
+                          whileHover={{ scale: 1.02, y: -1 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => {
+                            setSelectedLeadForTransfer(lead);
+                            setShowTransferModal(true);
+                          }}
+                          title="Transfer Lead"
+                          className="inline-flex items-center justify-center h-11 w-11 rounded-full bg-blue-50/80 text-blue-700 border border-blue-100 hover:bg-blue-50 hover:border-blue-200 transition-all duration-200 flex-shrink-0"
+                        >
+                          <ArrowRightLeft className="h-5 w-5" />
                         </motion.button>
                       )}
                       <motion.div
@@ -2256,6 +2303,22 @@ export function LeadList() {
         isVisible={showAdvancedSearch}
         onClose={() => setShowAdvancedSearch(false)}
       />
+
+      {/* Transfer Lead Modal */}
+      {selectedLeadForTransfer && (
+        <TransferLeadModal
+          lead={selectedLeadForTransfer}
+          isOpen={showTransferModal}
+          onClose={() => {
+            setShowTransferModal(false);
+            setSelectedLeadForTransfer(null);
+          }}
+          onTransferComplete={() => {
+            // Refresh leads list after transfer
+            loadLeads();
+          }}
+        />
+      )}
     </div>
   );
 }
