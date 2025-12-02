@@ -63,13 +63,28 @@ const SECONDARY_SCAN_LIMIT = 200; // broader scan to support substring matching
 const numberCategories = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'] as const;
 
 export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange }: QuickNumberSelectProps) {
-  const { user } = useAuthStore();
+  const { user, isAdmin } = useAuthStore();
   const [numbers, setNumbers] = useState<NumberPool[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [showCategories, setShowCategories] = useState(false);
   const [reservedNumbers, setReservedNumbers] = useState<NumberPool[]>([]);
   const debouncedSearch = useDebounce(searchTerm, SEARCH_DEBOUNCE);
+
+  // Visibility guard filter for team-restricted numbers based on user role
+  const filterByVisibility = useCallback((list: NumberPool[]): NumberPool[] => {
+    // Admin/manager/coordinator see everything
+    if (isAdmin() || user?.role === 'manager' || user?.role === 'coordinator') return list;
+    // Agents: if number has teamVisibility, it must match user's team; if missing, it's public
+    // Also hide activated numbers from agents (consistent with NumberPool)
+    if (user?.role === 'agent' && user.teamId) {
+      return list.filter(n => {
+        if (n.status === 'activated') return false;
+        return !n.teamVisibility || n.teamVisibility === user.teamId;
+      });
+    }
+    return list;
+  }, [isAdmin, user?.role, user?.teamId]);
 
   // Load reserved numbers for the current user
   const loadReservedNumbers = useCallback(async () => {
@@ -91,7 +106,8 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
           ...doc.data()
         })) as NumberPool[];
 
-        setReservedNumbers(reservedNumbers);
+        // Apply same visibility rules as NumberPool
+        setReservedNumbers(filterByVisibility(reservedNumbers));
       });
 
       return unsubscribe;
@@ -100,12 +116,12 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
     } finally {
       setLoading(false);
     }
-  }, [user, selectedCategory]);
+  }, [user, selectedCategory, filterByVisibility]);
 
   // Search numbers with cache-first approach and ngram support
   const searchNumbers = useCallback(async (term: string) => {
     if (!term || term.length < MIN_SEARCH_LENGTH) {
-      setNumbers(reservedNumbers);
+      setNumbers(filterByVisibility(reservedNumbers));
       return;
     }
 
@@ -124,7 +140,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
           ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
         );
         
-        await addStatusChecks(statusFiltered);
+        await addStatusChecks(filterByVisibility(statusFiltered));
         return;
       }
 
@@ -137,7 +153,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
             ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
           );
           
-          await addStatusChecks(statusFiltered);
+          await addStatusChecks(filterByVisibility(statusFiltered));
           return;
         }
 
@@ -145,7 +161,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
         try {
           const firebaseTokenResults = await searchFirebaseByTokens(tokens, selectedCategory);
           if (firebaseTokenResults && firebaseTokenResults.length > 0) {
-            await addStatusChecks(firebaseTokenResults);
+            await addStatusChecks(filterByVisibility(firebaseTokenResults));
             return;
           }
         } catch (error) {
@@ -158,7 +174,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
         try {
           const firebaseSingleTokenResults = await searchFirebaseBySingleToken(tokens[0], selectedCategory);
           if (firebaseSingleTokenResults && firebaseSingleTokenResults.length > 0) {
-            await addStatusChecks(firebaseSingleTokenResults);
+            await addStatusChecks(filterByVisibility(firebaseSingleTokenResults));
             return;
           }
         } catch (error) {
@@ -202,17 +218,17 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
         });
         const mergedList = Array.from(mergedMap.values()).slice(0, SEARCH_LIMIT);
 
-        await addStatusChecks(mergedList);
+        await addStatusChecks(filterByVisibility(mergedList));
       });
 
       return unsubscribe;
     } catch (error) {
       console.error('Error setting up search listener:', error);
-      setNumbers(reservedNumbers);
+      setNumbers(filterByVisibility(reservedNumbers));
     } finally {
       setLoading(false);
     }
-  }, [selectedCategory, reservedNumbers]);
+  }, [selectedCategory, reservedNumbers, filterByVisibility]);
 
   // Helper function to add status checks for G4/G5 numbers
   const addStatusChecks = async (numbers: NumberPool[]) => {
@@ -323,7 +339,8 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
         );
 
         unsubscribe = onSnapshot(initialQuery, (snapshot) => {
-          const available = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as NumberPool[];
+          const availableRaw = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as NumberPool[];
+          const available = filterByVisibility(availableRaw);
           // Combine: show user's reserved first, then fill with available non-duplicates up to INITIAL_LOAD_SIZE
           const combined: NumberPool[] = [];
           const seen = new Set<string>();
