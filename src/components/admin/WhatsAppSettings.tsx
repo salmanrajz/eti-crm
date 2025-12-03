@@ -217,30 +217,30 @@ export function WhatsAppSettings() {
           className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 border border-blue-100 shadow-sm"
         >
           <div className="flex items-start justify-between mb-4">
-            <div className="flex-1">
+          <div className="flex-1">
               <div className="flex items-center space-x-2 mb-2">
                 <Zap className="h-5 w-5 text-indigo-600" />
                 <h4 className="text-lg font-semibold text-gray-900">WhatsApp Verification</h4>
               </div>
-              <p className="text-sm text-gray-600">
-                Enable or disable the "Verify via WhatsApp" button in the create lead form
-              </p>
-            </div>
+            <p className="text-sm text-gray-600">
+              Enable or disable the "Verify via WhatsApp" button in the create lead form
+            </p>
+          </div>
             
-            <div className="ml-4">
+          <div className="ml-4">
               <label className="relative inline-flex items-center cursor-pointer group">
-                <input
-                  type="checkbox"
-                  checked={whatsappEnabled}
-                  onChange={(e) => setWhatsappEnabled(e.target.checked)}
-                  className="sr-only peer"
-                />
+              <input
+                type="checkbox"
+                checked={whatsappEnabled}
+                onChange={(e) => setWhatsappEnabled(e.target.checked)}
+                className="sr-only peer"
+              />
                 <motion.div 
                   className="w-14 h-7 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-indigo-600 peer-checked:to-purple-600 shadow-lg"
                   whileTap={{ scale: 0.95 }}
                 />
-              </label>
-            </div>
+            </label>
+          </div>
           </div>
         </motion.div>
 
@@ -482,7 +482,7 @@ export function WhatsAppSettings() {
                         placeholder={group === 'OTHER' ? 'verification_default' : `verification_${group.toLowerCase()}`}
                         className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 border transition-all"
                       />
-                    </div>
+        </div>
 
                     {/* Language Code */}
                     <div>
@@ -541,7 +541,7 @@ export function WhatsAppSettings() {
             )}
             
             <AnimatePresence mode="wait">
-              {saving ? (
+            {saving ? (
                 <motion.div
                   key="saving"
                   initial={{ opacity: 0, scale: 0.8 }}
@@ -552,7 +552,7 @@ export function WhatsAppSettings() {
                   <Loader2 className="h-5 w-5 animate-spin" />
                   <span>Saving Settings...</span>
                 </motion.div>
-              ) : loading ? (
+            ) : loading ? (
                 <motion.div
                   key="loading"
                   initial={{ opacity: 0, scale: 0.8 }}
@@ -592,7 +592,7 @@ export function WhatsAppSettings() {
                   <span>Save Settings</span>
                   <Sparkles className="h-4 w-4 group-hover:animate-pulse" />
                 </motion.div>
-              )}
+            )}
             </AnimatePresence>
           </motion.button>
         </motion.div>

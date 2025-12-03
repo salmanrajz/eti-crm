@@ -33,7 +33,7 @@
  */
 
 import { useEffect } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
@@ -91,6 +91,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             // ✅ FIX: Always allow session restoration if Firebase Auth is valid
             // Firebase Auth handles its own persistence reliably across all devices
             const userData = userDoc.data();
+            
+            // Check if user is active (default to true for backward compatibility)
+            const isActive = userData.isActive !== false;
+            if (!isActive) {
+              // User is inactive, sign them out and show error
+              // Check if this is a fresh login attempt (not just session restoration)
+              const isFreshLogin = sessionStorage.getItem('freshLogin') === 'true';
+              if (isFreshLogin) {
+                sessionStorage.removeItem('freshLogin'); // Clean up
+                // Show error message with longer duration
+                toast.error('Account deactivated, contact admin.', {
+                  duration: 5000,
+                  position: 'top-center'
+                });
+                // Wait a bit to ensure toast is visible before signing out
+                await new Promise(resolve => setTimeout(resolve, 100));
+              }
+              await signOut(auth);
+              setUser(null);
+              setLoading(false);
+              return;
+            }
+            
             setUser({
               id: firebaseUser.uid,
               email: userData.email,
@@ -101,6 +124,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               coordinatorType: userData.coordinatorType,
               verifierGroups: userData.verifierGroups,
               phoneNumbers: userData.phoneNumbers,
+              isActive: userData.isActive,
               // Handle potentially missing timestamp fields
               createdAt: userData.createdAt?.toDate() || new Date(),
               updatedAt: userData.updatedAt?.toDate() || new Date()

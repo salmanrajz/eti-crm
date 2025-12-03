@@ -256,9 +256,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     
     // Handle manager-assigned verified and follow_up leads - they should show when statusFilter is 'verified' (Unassigned Leads)
     if (!matchesStatus && statusFilter === 'verified') {
-      // Show manager-assigned verified and follow_up leads in the "verified" filter (Unassigned Leads)
+      // Show manager-assigned verified and follow_up leads, and assigned_to_cord leads in the "verified" filter (Unassigned Leads)
       matchesStatus = (lead.status === 'verified' && lead.managerAssigned === true) ||
-                      (lead.status === 'follow_up' && lead.managerAssigned === true);
+                      (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+                      (lead.status === 'assigned_to_cord');
     }
     
     if (!matchesStatus && statusFilter === 'yesterday') {
@@ -377,6 +378,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         lead => lead.status === 'follow_up' && lead.managerAssigned === true
       );
       
+      // Include leads with status='assigned_to_cord' (assigned by manager to coordinator)
+      const assignedToCordLeads = coordinatorLeads.filter(
+        lead => lead.status === 'assigned_to_cord'
+      );
+      
       // Include leads with scheduledFor matching today (marked "for later" by coordinator)
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -390,8 +396,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         return scheduledDate.getTime() === today.getTime();
       });
       
-      // Add manager-assigned verified and follow_up leads, plus scheduled leads to filtered list if not already present
-      [...managerAssignedVerifiedLeads, ...managerAssignedFollowUpLeads, ...scheduledForTodayLeads].forEach(lead => {
+      // Add manager-assigned verified and follow_up leads, assigned_to_cord leads, plus scheduled leads to filtered list if not already present
+      [...managerAssignedVerifiedLeads, ...managerAssignedFollowUpLeads, ...assignedToCordLeads, ...scheduledForTodayLeads].forEach(lead => {
         if (!filteredCoordinatorLeads.find(l => l.id === lead.id)) {
           filteredCoordinatorLeads.push(lead);
         }
@@ -417,10 +423,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       }, 0);
 
       // Calculate metrics from coordinator's leads only
-      // For "unassigned", count verified and follow_up leads with managerAssigned: true, plus leads scheduled for today
+      // For "unassigned", count verified and follow_up leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
       const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
         l => (l.status === 'verified' && l.managerAssigned === true) ||
              (l.status === 'follow_up' && l.managerAssigned === true) ||
+             (l.status === 'assigned_to_cord') ||
              (l.scheduledFor && (() => {
                const scheduledDate = l.scheduledFor instanceof Date 
                  ? l.scheduledFor 
@@ -450,10 +457,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         if (currentStatus === 'yesterday') {
           filteredLeads = filteredCoordinatorLeads.filter(lead => lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification');
         } else if (currentStatus === 'verified') {
-          // Show manager-assigned verified and follow_up leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
+          // Show manager-assigned verified and follow_up leads, assigned_to_cord leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
           filteredLeads = filteredCoordinatorLeads.filter(lead => 
             (lead.status === 'verified' && lead.managerAssigned === true) ||
             (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+            (lead.status === 'assigned_to_cord') ||
             (lead.scheduledFor && (() => {
               const scheduledDate = lead.scheduledFor instanceof Date 
                 ? lead.scheduledFor 
@@ -793,10 +801,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               <div className="p-2 bg-white/10 rounded-lg">
                 <CheckSquare className="h-6 w-6 text-white" />
               </div>
-              <div>
-                <h3 className="text-xl font-bold text-white">Status Check Requests</h3>
-                <p className="mt-1 text-blue-100 text-sm">Manage number status check requests</p>
-              </div>
+            <div>
+              <h3 className="text-xl font-bold text-white">Status Check Requests</h3>
+              <p className="mt-1 text-blue-100 text-sm">Manage number status check requests</p>
+            </div>
             </div>
             <motion.button
               whileHover={{ scale: 1.1 }}
@@ -928,8 +936,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               Welcome back, {user?.name}!
             </h1>
             <p className="mt-2 text-lg text-gray-600">
-              Here's an overview of leads requiring coordination.
-            </p>
+                Here's an overview of leads requiring coordination.
+              </p>
             <p className="mt-1 text-sm text-gray-500">
               {coordinatorType === 'g1' && 'You are assigned to handle leads with G1 group numbers only.'}
               {coordinatorType === 'g2' && 'You are assigned to handle leads with G2 group numbers only.'}
@@ -1107,23 +1115,44 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                             <Phone className="h-3.5 w-3.5 mr-1" />
                             {lead.customerNumber}
                           </div>
+                          {lead.leadNumber && (
+                            <div className="mt-1">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
+                                {lead.leadNumber}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-col space-y-2">
                         {lead.plans?.map((plan, index) => (
-                          <div key={index} className="flex items-center">
+                          <div
+                            key={index}
+                            className="flex flex-col bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm"
+                          >
+                            <div className="flex items-center">
                             <Phone className="h-4 w-4 mr-2 text-indigo-500" />
                             <span className="text-sm font-medium text-gray-900">{plan.number}</span>
-                            <span className={clsx(
+                              <span
+                                className={clsx(
                               "ml-2 px-2 py-0.5 text-xs rounded-full",
-                              plan.category === 'Gold' ? 'bg-yellow-100 text-yellow-800' :
-                              plan.category === 'Platinum' ? 'bg-purple-100 text-purple-800' :
-                              'bg-gray-100 text-gray-800'
-                            )}>
+                                  plan.category === 'Gold'
+                                    ? 'bg-yellow-100 text-yellow-800'
+                                    : plan.category === 'Platinum'
+                                    ? 'bg-purple-100 text-purple-800'
+                                    : 'bg-gray-100 text-gray-800'
+                                )}
+                              >
                               {plan.category}
                             </span>
+                            </div>
+                            {lead.etisalatLeadId && (
+                              <span className="mt-0.5 text-[11px] font-medium text-gray-500">
+                                Etisalat ID: {lead.etisalatLeadId}
+                              </span>
+                            )}
                           </div>
                         ))}
                         {!lead.plans?.length && (

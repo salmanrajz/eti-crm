@@ -50,7 +50,7 @@ import { useAuthStore } from '../../store/authStore';
 import { User, NumberPool, Lead } from '../../types';
 import { toast } from 'react-hot-toast';
 import { logNumberAction } from '../../utils/numberLogging';
-import { format } from 'date-fns';
+import { format, addMinutes } from 'date-fns';
 import { getPlanCategoriesWithPlans, PlanCategoryGroup, getPlans, Plan } from '../../utils/planService';
 // import { countries } from 'countries-list';
 import { FormSection } from './FormSection';
@@ -70,7 +70,8 @@ import {
   MessageSquare,
   Building2,
   XCircle,
-  Plus
+  Plus,
+  Mail
 } from 'lucide-react';
 import { QuickNumberSelect } from './QuickNumberSelect';
 import { countryList } from '../../utils/countries';
@@ -100,6 +101,7 @@ import { getWhatsAppVerificationEnabled } from '../../utils/configService';
  */
 const emirates = [
   'Abu Dhabi',
+  'Al Ain',
   'Dubai',
   'Sharjah',
   'Ajman',
@@ -123,7 +125,7 @@ const languages = ['Arabic', 'English', 'Hindi/Urdu'];
  * Product types for lead categorization
  * Distinguishes between new activations and port-in requests
  */
-const productTypes = ['New', 'MNP', 'Prepaid to postpaid'];
+const productTypes = ['New', 'MNP', 'Prepaid to postpaid', 'Home Wifi'];
 // const numberTypes = ['Gold', 'Gold Plus', 'Platinum', 'Silver', 'Silver Plus', 'Standard'];
 // const numberCategories = ['Standard', 'Silver', 'Silver Plus', 'Gold', 'Gold Plus', 'Platinum'] as const;
 
@@ -272,6 +274,8 @@ interface FormData {
   country: string;
   customerAge: string;
   productType: string;
+  homeWifiEmail?: string;
+  homeWifiId?: string;
   gender: string;
   emirate: string;
   hasEmirateId: boolean;
@@ -290,6 +294,8 @@ interface FormErrors {
   customerName?: string;
   customerNumber?: string;
   customerAge?: string;
+  homeWifiEmail?: string;
+  homeWifiId?: string;
   locationUrl?: string;
   plans?: string;
   selectedNumber?: string; // Error for number selection
@@ -477,13 +483,26 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     return grouped;
   }, [selectedCategory, allPlans]);
 
-  const [formData, setFormData] = useState<FormData>({
+  const [formData, setFormData] = useState<FormData>(() => {
+    const defaultStartDateTime = addMinutes(new Date(), 5);
+
+    const resolvedStartDate = initialData?.startDate
+      ? format(initialData.startDate, 'yyyy-MM-dd')
+      : (savedDraft?.formData?.startDate || format(defaultStartDateTime, 'yyyy-MM-dd'));
+
+    const resolvedStartTime = initialData?.startTime
+      ? initialData.startTime
+      : format(defaultStartDateTime, 'HH:mm');
+
+    return {
     customerName: initialData?.customerName || savedDraft?.formData?.customerName || '',
     customerNumber: initialData?.customerNumber || savedDraft?.formData?.customerNumber || '',
     customerAddress: initialData?.customerAddress || savedDraft?.formData?.customerAddress || '',
     country: initialData?.country || savedDraft?.formData?.country || 'AE',
     customerAge: initialData?.customerAge?.toString() || savedDraft?.formData?.customerAge || '',
     productType: initialData?.productType || savedDraft?.formData?.productType || 'New',
+    homeWifiEmail: initialData?.homeWifiEmail || savedDraft?.formData?.homeWifiEmail || '',
+    homeWifiId: initialData?.homeWifiId || savedDraft?.formData?.homeWifiId || '',
     gender: initialData?.gender || savedDraft?.formData?.gender || 'Male',
     emirate: initialData?.emirate || savedDraft?.formData?.emirate || 'Dubai',
     hasEmirateId: initialData?.hasEmirateId ?? savedDraft?.formData?.hasEmirateId ?? false,
@@ -492,14 +511,19 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     sharedWith: initialData?.sharedWith?.[0] || savedDraft?.formData?.sharedWith || '',
     locationUrl: initialData?.locationUrl || savedDraft?.formData?.locationUrl || '',
     confirmLocationUrl: initialData?.confirmLocationUrl ?? savedDraft?.formData?.confirmLocationUrl ?? false,
-    startDate: initialData?.startDate ? format(initialData.startDate, 'yyyy-MM-dd') : (savedDraft?.formData?.startDate || format(new Date(), 'yyyy-MM-dd')),
-    startTime: initialData?.startTime || savedDraft?.formData?.startTime || format(new Date(), 'HH:mm'),
+      startDate: resolvedStartDate,
+      startTime: resolvedStartTime,
     numberType: initialData?.numberType || savedDraft?.formData?.numberType || 'Standard',
     remarks: (initialData?.remarks && initialData.remarks.trim() !== '') ? initialData.remarks : (savedDraft?.formData?.remarks || 'Please Verify')
+    };
   });
 
   const isNoNumberProduct = useMemo(() => {
-    return formData.productType === 'MNP' || formData.productType === 'Prepaid to postpaid';
+    return (
+      formData.productType === 'MNP' ||
+      formData.productType === 'Prepaid to postpaid' ||
+      formData.productType === 'Home Wifi'
+    );
   }, [formData.productType]);
 
   useEffect(() => {
@@ -524,8 +548,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     if (isEditing) return; // Don't save when editing existing leads
     
     try {
+      const { startTime, ...formDataWithoutTime } = formData;
       const draftData = {
-        formData,
+        formData: formDataWithoutTime,
         selectedPlans,
         timestamp: new Date().toISOString()
       };
@@ -621,6 +646,38 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     });
   }, []);
 
+  const clearLocationUrlError = useCallback(() => {
+    setFormErrors(prev => {
+      if (!prev.locationUrl) return prev;
+      const { locationUrl, ...rest } = prev;
+      return rest;
+    });
+  }, []);
+
+  const handleLocationUrlChange = useCallback((value: string) => {
+    setFormData(prev => ({ ...prev, locationUrl: value }));
+    clearLocationUrlError();
+  }, [clearLocationUrlError]);
+
+  const handleLocationUrlBlur = useCallback((value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      clearLocationUrlError();
+      return;
+    }
+
+    try {
+      // eslint-disable-next-line no-new
+      new URL(trimmed);
+      clearLocationUrlError();
+    } catch {
+      setFormErrors(prev => ({
+        ...prev,
+        locationUrl: 'Please enter a valid URL'
+      }));
+    }
+  }, [clearLocationUrlError]);
+
   const handleAddPlan = useCallback(async () => {
     if (!currentPlan || currentPlan === '') {
       toast.error('Please select a plan');
@@ -639,8 +696,13 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
     // If product type does not require number, add a virtual entry
     if (isNoNumberProduct) {
-      const label = formData.productType === 'Prepaid to postpaid' ? 'P2P' : 'MNP';
-      const virtualId = `virtual-${label.toLowerCase()}`;
+      let label = 'MNP';
+      if (formData.productType === 'Prepaid to postpaid') {
+        label = 'P2P';
+      } else if (formData.productType === 'Home Wifi') {
+        label = 'Home Wifi';
+      }
+      const virtualId = `virtual-${formData.productType === 'Home Wifi' ? 'home-wifi' : label.toLowerCase()}`;
       const existingIndex = selectedPlans.findIndex(p => p.numberId === virtualId);
       if (existingIndex !== -1) {
         setSelectedPlans(prev => prev.map((p, idx) => idx === existingIndex ? { ...p, plan: planName, category: selectedCategory, group: 'G2' } : p));
@@ -681,7 +743,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         toast.success('Plan updated successfully');
         
       } else {
-         // TEMPORARILY DISABLED: Check number status before adding - verify it's not active
+        // TEMPORARILY DISABLED: Check number status before adding - verify it's not active
         // setIsCheckingNumber(true);
         // try {
         //   toast.loading('Checking number status...', { id: 'number-check' });
@@ -861,6 +923,18 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         errors.locationUrl = 'Please enter a valid URL';
       }
     }
+    // Extra required fields for Home Wifi
+    if (formData.productType === 'Home Wifi') {
+      if (!formData.homeWifiEmail || formData.homeWifiEmail.trim().length === 0) {
+        errors.homeWifiEmail = 'Email is required for Home Wifi';
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.homeWifiEmail.trim())) {
+        errors.homeWifiEmail = 'Please enter a valid email address';
+      }
+      if (!formData.homeWifiId || formData.homeWifiId.trim().length === 0) {
+        errors.homeWifiId = 'ID is required for Home Wifi';
+      }
+    }
+
     // Plans
     if (!selectedPlans.length) {
       errors.plans = 'At least one plan must be selected';
@@ -946,8 +1020,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         customerAddress: formData.customerAddress,
         customerAge: parseInt(formData.customerAge),
         plans: selectedPlans.map((plan) => {
-          // Default to G2 for MNP and Prepaid to postpaid
-          const defaultGroup = (formData.productType === 'MNP' || formData.productType === 'Prepaid to postpaid') 
+          // Default to G2 for MNP, Prepaid to postpaid and Home Wifi
+          const defaultGroup = (
+            formData.productType === 'MNP' ||
+            formData.productType === 'Prepaid to postpaid' ||
+            formData.productType === 'Home Wifi'
+          ) 
             ? 'G2' 
             : 'Standard';
           
@@ -1024,7 +1102,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               await updateDoc(numberRef, {
                 status: 'pending_verification',
                 lastStatusChange: new Date(),
-                leadId: docRef.id
+                leadId: docRef.id,
+                reservedBy: user?.id || null
               });
               
               // Log the lead creation action
@@ -1055,6 +1134,24 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               message: formData.remarks.trim(),
               createdAt: new Date()
             });
+            
+            // Send WhatsApp notification for the initial chat message
+            try {
+              // Fetch the created lead to get full lead data for notification
+              const leadDoc = await getDoc(doc(db, 'leads', docRef.id));
+              if (leadDoc.exists()) {
+                const leadData = { id: leadDoc.id, ...leadDoc.data() } as Lead;
+                const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
+                await sendChatMessageWhatsAppNotification(
+                  leadData,
+                  formData.remarks.trim(),
+                  user?.name || 'Unknown'
+                );
+              }
+            } catch (notificationError) {
+              console.error('Error sending WhatsApp notification for initial message:', notificationError);
+              // Don't fail lead creation if notification fails
+            }
           } catch (chatError) {
             console.error('Error creating initial chat message:', chatError);
             // Don't fail lead creation if chat message fails
@@ -1153,7 +1250,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           
           // Add the country code
           formattedNumber = `${countryCode}${formattedNumber}`;
-          
+
           // Write routing map to ensure inbound replies map to this lead
           try {
             const routeDoc = fbDoc(db, 'whatsappRouting', formattedNumber.replace(/\D/g, ''));
@@ -1168,41 +1265,41 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           
           if (selectedPlan) {
             // Query Firebase directly using the plan name - don't require match in planCategories
-            try {
-              const plansQuery = query(collection(db, 'plans'), where('name', '==', selectedPlan));
-              const plansSnapshot = await getDocs(plansQuery);
+              try {
+                const plansQuery = query(collection(db, 'plans'), where('name', '==', selectedPlan));
+                const plansSnapshot = await getDocs(plansQuery);
               
-              if (!plansSnapshot.empty) {
-                const planDoc = plansSnapshot.docs[0];
-                const planData = planDoc.data();
+                if (!plansSnapshot.empty) {
+                  const planDoc = plansSnapshot.docs[0];
+                  const planData = planDoc.data();
                 
-                planDetails = {
-                  amount: planData.amount || 'N/A',
-                  benefits: planData.benefits || 'N/A',
-                  duration: planData.duration || 'N/A'
-                };
-              }
-            } catch (error) {
+                  planDetails = {
+                    amount: planData.amount || 'N/A',
+                    benefits: planData.benefits || 'N/A',
+                    duration: planData.duration || 'N/A'
+                  };
+                }
+              } catch (error) {
               // Error fetching plan details from Firebase
             }
           }
           
           // If we have plan details, send WhatsApp message
           if (planDetails) {
-            const group = selectedPlans?.[0]?.group || undefined;
+              const group = selectedPlans?.[0]?.group || undefined;
             
             const { sendWhatsAppWithComponentsByGroup, resolveWhatsAppRoute } = await import('../../utils/whatsappRouter');
             const routeConfig = await resolveWhatsAppRoute(group);
             const { template } = routeConfig;
             const dynamicTemplateName = template.templateName;
 
-            const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
-            const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
+              const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+              const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
             const templateParameters = [
-              selectedPlans[0]?.number || 'N/A',
-              monthlyLabel,
-              planDetails.benefits,
-              planDetails.duration
+                  selectedPlans[0]?.number || 'N/A',
+                  monthlyLabel,
+                  planDetails.benefits,
+                  planDetails.duration
             ];
 
             try {
@@ -1462,6 +1559,33 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               error={formErrors.customerAge}
             />
 
+            {formData.productType === 'Home Wifi' && (
+              <>
+                <FormInput
+                  label="Email"
+                  icon={Mail}
+                  type="email"
+                  required
+                  value={formData.homeWifiEmail || ''}
+                  onChange={(e) =>
+                    setFormData((prev) => ({ ...prev, homeWifiEmail: e.target.value }))
+                  }
+                  error={formErrors.homeWifiEmail}
+                />
+                <FormInput
+                  label="ID"
+                  icon={Package}
+                  type="text"
+                  required
+                  value={formData.homeWifiId || ''}
+                  onChange={(e) =>
+                    setFormData((prev) => ({ ...prev, homeWifiId: e.target.value }))
+                  }
+                  error={formErrors.homeWifiId}
+                />
+              </>
+            )}
+
             <FormSelect
               label="Product Type"
               icon={Package}
@@ -1476,9 +1600,13 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 setCurrentNumber('');
                 setCurrentPlan('');
                 setCurrentNumberData(null);
-                setSelectedCategory('Standard');
-                // For MNP/P2P, clear selected plans to re-add plan-only entries
-                if (newType === 'MNP' || newType === 'Prepaid to postpaid') {
+                setSelectedCategory(newType === 'Home Wifi' ? 'Home Wifi' : 'Standard');
+                // For MNP/P2P/Home Wifi, clear selected plans to re-add plan-only entries
+                if (
+                  newType === 'MNP' ||
+                  newType === 'Prepaid to postpaid' ||
+                  newType === 'Home Wifi'
+                ) {
                   setSelectedPlans([]);
                 }
               }}
@@ -1573,7 +1701,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 type="url"
                 placeholder="https://maps.google.com/..."
                 value={formData.locationUrl}
-                onChange={(e) => setFormData(prev => ({ ...prev, locationUrl: e.target.value }))}
+                onChange={(e) => handleLocationUrlChange(e.target.value)}
+                onBlur={(e) => handleLocationUrlBlur(e.target.value)}
                 error={formErrors.locationUrl}
               />
             </div>
@@ -1614,15 +1743,23 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   <FormSelect
                     label="Category"
                     icon={Package}
-                    options={[
+                    options={
+                      formData.productType === 'Home Wifi'
+                        ? [{ value: 'Home Wifi', label: 'Home Wifi' }]
+                        : [
                       { value: 'Standard', label: 'Standard' },
                       { value: 'Silver', label: 'Silver' },
                       { value: 'Silver Plus', label: 'Silver Plus' },
                       { value: 'Gold', label: 'Gold' },
                       { value: 'Gold Plus', label: 'Gold Plus' },
                       { value: 'Platinum', label: 'Platinum' },
-                    ]}
-                    value={selectedCategory}
+                          ]
+                    }
+                    value={
+                      formData.productType === 'Home Wifi'
+                        ? 'Home Wifi'
+                        : selectedCategory
+                    }
                     onChange={(e) => setSelectedCategory(e.target.value)}
                   />
                 </div>
@@ -1817,19 +1954,19 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
             {/* Hide "Share With Team Member" field from verifier and coordinator roles */}
             {!isVerifier() && !isCoordinator() && (
-              <FormSelect
-                label="Share With Team Member"
-                icon={Users}
-                options={[
-                  { value: '', label: 'Select team member' },
-                  ...teamMembers.map(member => ({
-                    value: member.id,
-                    label: `${member.name} (${member.role})`
-                  }))
-                ]}
-                value={formData.sharedWith}
-                onChange={(e) => setFormData(prev => ({ ...prev, sharedWith: e.target.value }))}
-              />
+            <FormSelect
+              label="Share With Team Member"
+              icon={Users}
+              options={[
+                { value: '', label: 'Select team member' },
+                ...teamMembers.map(member => ({
+                  value: member.id,
+                  label: `${member.name} (${member.role})`
+                }))
+              ]}
+              value={formData.sharedWith}
+              onChange={(e) => setFormData(prev => ({ ...prev, sharedWith: e.target.value }))}
+            />
             )}
 
             <FormInput

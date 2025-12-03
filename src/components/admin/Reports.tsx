@@ -84,6 +84,10 @@ interface GroupCategoryMetrics {
   [group: string]: {
     [category: string]: number;
     total: number;
+    // Special metrics for G2 (Express Dial)
+    newActivations?: number;
+    mnpActivations?: number;
+    p2pActivations?: number; // Prepaid to postpaid
   };
 }
 
@@ -278,6 +282,9 @@ export function Reports() {
     groupsToInit.forEach(group => {
       groups[group] = {
         total: 0,
+        newActivations: 0,
+        mnpActivations: 0,
+        p2pActivations: 0,
       };
       
       // Initialize all categories for each group
@@ -370,7 +377,12 @@ export function Reports() {
 
           // Ensure group and category exist
           if (!metrics.teamWise[teamId].groups[group]) {
-            metrics.teamWise[teamId].groups[group] = { total: 0 };
+              metrics.teamWise[teamId].groups[group] = {
+                total: 0,
+                newActivations: 0,
+                mnpActivations: 0,
+                p2pActivations: 0,
+              };
             CATEGORIES.forEach(cat => {
               metrics.teamWise[teamId].groups[group][cat] = 0;
             });
@@ -391,6 +403,21 @@ export function Reports() {
             metrics.teamWise[teamId].groups[group].total++;
             metrics.teamWise[teamId].groups[group][category]++;
             metrics.teamWise[teamId].groupStatus[group].total++;
+
+            // Track New + MNP + Prepaid to postpaid activations specifically for G2
+            if (group === 'G2') {
+              const productType = (lead as any).productType;
+              if (productType === 'New') {
+                metrics.teamWise[teamId].groups[group].newActivations =
+                  (metrics.teamWise[teamId].groups[group].newActivations || 0) + 1;
+              } else if (productType === 'MNP') {
+                metrics.teamWise[teamId].groups[group].mnpActivations =
+                  (metrics.teamWise[teamId].groups[group].mnpActivations || 0) + 1;
+              } else if (productType === 'Prepaid to postpaid') {
+                metrics.teamWise[teamId].groups[group].p2pActivations =
+                  (metrics.teamWise[teamId].groups[group].p2pActivations || 0) + 1;
+              }
+            }
           });
         } else {
           // For other statuses: count leads (1 per lead), but distribute across groups
@@ -416,7 +443,7 @@ export function Reports() {
 
               // Ensure group and category exist
               if (!metrics.teamWise[teamId].groups[group]) {
-                metrics.teamWise[teamId].groups[group] = { total: 0 };
+                metrics.teamWise[teamId].groups[group] = { total: 0, mnpP2PActivations: 0 };
                 CATEGORIES.forEach(cat => {
                   metrics.teamWise[teamId].groups[group][cat] = 0;
                 });
@@ -551,14 +578,23 @@ export function Reports() {
     });
     
     monthActivated.forEach(lead => {
+      const productType = (lead as any).productType;
+
       (lead.plans || []).forEach(plan => {
         const grp = normalizeGroup(plan.group);
         const cat = normalizeCategory(plan.category);
         
-        // Count group activations
+        // For Express Dial (G2), only count "New" productType towards the group target/achieved
+        const shouldCountForGroup =
+          grp === 'G2'
+            ? productType === 'New'
+            : true;
+
+        if (shouldCountForGroup) {
         gCounts[grp] = (gCounts[grp] || 0) + 1;
+        }
         
-        // Count category activations
+        // Category targets remain based on all activations
         cCounts[cat] = (cCounts[cat] || 0) + 1;
       });
     });
@@ -664,7 +700,12 @@ export function Reports() {
 
           // Ensure group and category exist
           if (!metrics.teamWise[teamId].groups[group]) {
-            metrics.teamWise[teamId].groups[group] = { total: 0 };
+            metrics.teamWise[teamId].groups[group] = {
+              total: 0,
+              newActivations: 0,
+              mnpActivations: 0,
+              p2pActivations: 0,
+            };
             CATEGORIES.forEach(cat => {
               metrics.teamWise[teamId].groups[group][cat] = 0;
             });
@@ -678,6 +719,21 @@ export function Reports() {
           metrics.teamWise[teamId].total += planCount;
           metrics.teamWise[teamId].groups[group].total += planCount;
           metrics.teamWise[teamId].groups[group][category] += planCount;
+
+          // Track New + MNP + Prepaid to postpaid activations specifically for G2
+          if (group === 'G2') {
+            const productType = (lead as any).productType;
+            if (productType === 'New') {
+              metrics.teamWise[teamId].groups[group].newActivations =
+                (metrics.teamWise[teamId].groups[group].newActivations || 0) + 1;
+            } else if (productType === 'MNP') {
+              metrics.teamWise[teamId].groups[group].mnpActivations =
+                (metrics.teamWise[teamId].groups[group].mnpActivations || 0) + 1;
+            } else if (productType === 'Prepaid to postpaid') {
+              metrics.teamWise[teamId].groups[group].p2pActivations =
+                (metrics.teamWise[teamId].groups[group].p2pActivations || 0) + 1;
+            }
+          }
         });
       });
 
@@ -977,8 +1033,10 @@ export function Reports() {
                     return (
                       <th
                         key={group}
-                        colSpan={isExpanded ? CATEGORIES.length : 1}
-                        className={`px-4 py-4 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400 cursor-pointer hover:bg-indigo-700 transition-colors ${isExpanded ? 'bg-indigo-700' : ''}`}
+                        colSpan={isExpanded ? (group === 'G2' ? CATEGORIES.length + 2 : CATEGORIES.length) : 1}
+                        className={`${
+                          group === 'G2' ? 'px-6 min-w-[220px]' : 'px-4'
+                        } py-4 text-center text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400 cursor-pointer hover:bg-indigo-700 transition-colors ${isExpanded ? 'bg-indigo-700' : ''}`}
                         onClick={() => setExpandedGroup(isExpanded ? null : group)}
                       >
                         <div className="flex flex-col items-center gap-1">
@@ -1019,7 +1077,7 @@ export function Reports() {
                         // Show category labels for expanded group
                         return (
                           <React.Fragment key={group}>
-                            {CATEGORIES.map((category, catIdx) => (
+                            {CATEGORIES.map((category) => (
                               <th
                                 key={`${group}-${category}`}
                                 className="px-1 py-2 text-center border-r border-indigo-400 min-w-[50px]"
@@ -1030,6 +1088,38 @@ export function Reports() {
                                 </span>
                   </th>
                 ))}
+                            {/* Extra columns for G2 (Express Dial): New, MNP and P2P */}
+                            {group === 'G2' && (
+                              <>
+                                <th
+                                  key={`${group}-NEW`}
+                                  className="px-1 py-2 text-center border-r border-indigo-400 min-w-[60px]"
+                                  title="New Activations"
+                                >
+                                  <span className="px-1 py-0.5 bg-white/20 rounded text-[10px] font-medium text-white uppercase block whitespace-nowrap">
+                                    New
+                                  </span>
+                                </th>
+                                <th
+                                  key={`${group}-MNP`}
+                                  className="px-1 py-2 text-center border-r border-indigo-400 min-w-[60px]"
+                                  title="MNP Activations"
+                                >
+                                  <span className="px-1 py-0.5 bg-white/20 rounded text-[10px] font-medium text-white uppercase block whitespace-nowrap">
+                                    MNP
+                                  </span>
+                                </th>
+                                <th
+                                  key={`${group}-P2P`}
+                                  className="px-1 py-2 text-center border-r border-indigo-400 min-w-[80px]"
+                                  title="Prepaid to postpaid Activations"
+                                >
+                                  <span className="px-1 py-0.5 bg-white/20 rounded text-[10px] font-medium text-white uppercase block whitespace-nowrap">
+                                    P2P
+                                  </span>
+                                </th>
+                              </>
+                            )}
                           </React.Fragment>
                         );
                       } else {
@@ -1106,6 +1196,38 @@ export function Reports() {
                           </td>
                         );
                       })}
+                                {/* Extra data columns for G2: New, MNP and P2P activations */}
+                                {group === 'G2' && (
+                                  <>
+                                    <td
+                                      key={`${group}-NEW-data`}
+                                      className="px-1 py-2 text-center border-r border-gray-200 min-w-[60px] bg-indigo-50"
+                                      title="New Activations"
+                                    >
+                                      <span className="text-xs font-semibold text-indigo-700">
+                                        {groupData.newActivations || 0}
+                                      </span>
+                                    </td>
+                                    <td
+                                      key={`${group}-MNP-data`}
+                                      className="px-1 py-2 text-center border-r border-gray-200 min-w-[60px] bg-emerald-50"
+                                      title="MNP Activations"
+                                    >
+                                      <span className="text-xs font-semibold text-emerald-700">
+                                        {groupData.mnpActivations || 0}
+                                      </span>
+                                    </td>
+                                    <td
+                                      key={`${group}-P2P-data`}
+                                      className="px-1 py-2 text-center border-r border-gray-200 min-w-[80px] bg-sky-50"
+                                      title="Prepaid to postpaid Activations"
+                                    >
+                                      <span className="text-xs font-semibold text-sky-700">
+                                        {groupData.p2pActivations || 0}
+                                      </span>
+                                    </td>
+                                  </>
+                                )}
                               </React.Fragment>
                             );
                           } else {
@@ -1116,7 +1238,37 @@ export function Reports() {
                                 className={`px-3 py-2 whitespace-nowrap text-center border-r border-gray-200 font-bold ${groupColor.bg} ${groupColor.text} cursor-pointer hover:opacity-80 transition-opacity`}
                                 onClick={() => setExpandedGroup(group)}
                               >
-                        {groupTotal}
+                                <div className="flex flex-col items-center gap-0.5">
+                                  <span>{groupTotal}</span>
+                                  {group === 'G2' && (
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  <div className="flex flex-col items-center px-1 py-0.5 rounded bg-indigo-50">
+                                    <span className="text-[9px] font-semibold text-indigo-700 leading-none">
+                                      New
+                                    </span>
+                                    <span className="text-[10px] font-bold text-indigo-800 leading-none">
+                                      {groupData.newActivations || 0}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-col items-center px-1 py-0.5 rounded bg-emerald-50">
+                                    <span className="text-[9px] font-semibold text-emerald-700 leading-none">
+                                      MNP
+                                    </span>
+                                    <span className="text-[10px] font-bold text-emerald-800 leading-none">
+                                      {groupData.mnpActivations || 0}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-col items-center px-1 py-0.5 rounded bg-sky-50">
+                                    <span className="text-[9px] font-semibold text-sky-700 leading-none">
+                                      P2P
+                                    </span>
+                                    <span className="text-[10px] font-bold text-sky-800 leading-none">
+                                      {groupData.p2pActivations || 0}
+                                    </span>
+                                  </div>
+                                </div>
+                                  )}
+                                </div>
                               </td>
                             );
                           }
@@ -1150,6 +1302,18 @@ export function Reports() {
                   const groupData = team.groups[group] || { total: 0 };
                   return sum + (groupData.total || 0);
                 }, 0);
+                    const newTotal = sortedTeams.reduce((sum, team) => {
+                      const groupData = team.groups[group] || { total: 0 };
+                      return sum + (groupData.newActivations || 0);
+                    }, 0);
+                    const mnpTotal = sortedTeams.reduce((sum, team) => {
+                      const groupData = team.groups[group] || { total: 0 };
+                      return sum + (groupData.mnpActivations || 0);
+                    }, 0);
+                    const p2pTotal = sortedTeams.reduce((sum, team) => {
+                      const groupData = team.groups[group] || { total: 0 };
+                      return sum + (groupData.p2pActivations || 0);
+                    }, 0);
                     const isExpanded = expandedGroup === group;
                     
                     if (isExpanded) {
@@ -1171,6 +1335,32 @@ export function Reports() {
                               <span className="text-xs font-bold text-gray-700">{total}</span>
                       </td>
                     ))}
+                          {/* Extra total columns for G2: New, MNP and P2P */}
+                          {group === 'G2' && (
+                            <>
+                              <td
+                                key={`${group}-NEW-total`}
+                                className="px-1 py-2 text-center border-r border-gray-200 bg-indigo-100 min-w-[60px]"
+                                title="Total New Activations"
+                              >
+                                <span className="text-xs font-bold text-indigo-800">{newTotal}</span>
+                              </td>
+                              <td
+                                key={`${group}-MNP-total`}
+                                className="px-1 py-2 text-center border-r border-gray-200 bg-emerald-100 min-w-[60px]"
+                                title="Total MNP Activations"
+                              >
+                                <span className="text-xs font-bold text-emerald-800">{mnpTotal}</span>
+                              </td>
+                              <td
+                                key={`${group}-P2P-total`}
+                                className="px-1 py-2 text-center border-r border-gray-200 bg-sky-100 min-w-[80px]"
+                                title="Total Prepaid to postpaid Activations"
+                              >
+                                <span className="text-xs font-bold text-sky-800">{p2pTotal}</span>
+                              </td>
+                            </>
+                          )}
                         </React.Fragment>
                       );
                     } else {
@@ -1179,7 +1369,37 @@ export function Reports() {
                         key={group}
                         className={`px-3 py-2 whitespace-nowrap text-center border-r border-gray-200 font-bold ${groupColor.bg} ${groupColor.text}`}
                       >
-                      {groupTotal}
+                          <div className="flex flex-col items-center gap-0.5">
+                            <span>{groupTotal}</span>
+                            {group === 'G2' && (
+                              <div className="flex items-center gap-1 mt-0.5">
+                                <div className="flex flex-col items-center px-1 py-0.5 rounded bg-indigo-100">
+                                  <span className="text-[9px] font-semibold text-indigo-800 leading-none">
+                                    New
+                                  </span>
+                                  <span className="text-[10px] font-bold text-indigo-900 leading-none">
+                                    {newTotal}
+                                  </span>
+                                </div>
+                                <div className="flex flex-col items-center px-1 py-0.5 rounded bg-emerald-100">
+                                  <span className="text-[9px] font-semibold text-emerald-800 leading-none">
+                                    MNP
+                                  </span>
+                                  <span className="text-[10px] font-bold text-emerald-900 leading-none">
+                                    {mnpTotal}
+                                  </span>
+                                </div>
+                                <div className="flex flex-col items-center px-1 py-0.5 rounded bg-sky-100">
+                                  <span className="text-[9px] font-semibold text-sky-800 leading-none">
+                                    P2P
+                                  </span>
+                                  <span className="text-[10px] font-bold text-sky-900 leading-none">
+                                    {p2pTotal}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                     </td>
                 );
                     }

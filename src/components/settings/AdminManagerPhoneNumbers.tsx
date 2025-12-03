@@ -162,10 +162,10 @@ export function AdminManagerPhoneNumbers() {
       } else {
         // Regular user update
         const userRef = doc(db, 'users', userId);
-        await updateDoc(userRef, {
-          phoneNumbers: updatedPhoneNumbers,
-          updatedAt: new Date()
-        });
+      await updateDoc(userRef, {
+        phoneNumbers: updatedPhoneNumbers,
+        updatedAt: new Date()
+      });
       }
 
       // Reload users to get updated data
@@ -212,10 +212,10 @@ export function AdminManagerPhoneNumbers() {
       } else {
         // Regular user update
         const userRef = doc(db, 'users', userId);
-        await updateDoc(userRef, {
-          phoneNumbers: updatedPhoneNumbers,
-          updatedAt: new Date()
-        });
+      await updateDoc(userRef, {
+        phoneNumbers: updatedPhoneNumbers,
+        updatedAt: new Date()
+      });
       }
 
       // Reload users to get updated data
@@ -349,7 +349,7 @@ export function AdminManagerPhoneNumbers() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              <AnimatePresence>
+        <AnimatePresence>
                 {filteredUsers.map((user) => {
                   const RoleIcon = getRoleIcon(user.role);
                   return (
@@ -362,7 +362,7 @@ export function AdminManagerPhoneNumbers() {
                     >
                       {/* User Name */}
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex items-center space-x-3">
+                  <div className="flex items-center space-x-3">
                           <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
                             user.role === 'admin' ? 'bg-gradient-to-r from-red-500 via-orange-600 to-yellow-600' :
                             user.role === 'coordinator' ? 'bg-gradient-to-r from-purple-500 via-pink-600 to-rose-600' :
@@ -412,19 +412,19 @@ export function AdminManagerPhoneNumbers() {
                                 <div className="flex items-center space-x-2">
                                   <Phone className="h-4 w-4 text-green-500" />
                                   <span className="text-sm text-gray-900 font-medium">{phone}</span>
-                                </div>
-                                <button
+                        </div>
+                        <button
                                   onClick={() => handleRemovePhoneNumber(user.id, index)}
                                   disabled={isRemovingPhone === `${user.id}-${index}`}
                                   className="opacity-0 group-hover:opacity-100 p-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-all disabled:opacity-50"
-                                  title="Remove phone number"
-                                >
+                          title="Remove phone number"
+                        >
                                   {isRemovingPhone === `${user.id}-${index}` ? (
                                     <div className="w-3.5 h-3.5 border-2 border-red-600 border-t-transparent rounded-full animate-spin"></div>
-                                  ) : (
+                          ) : (
                                     <Trash2 className="h-3.5 w-3.5" />
-                                  )}
-                                </button>
+                          )}
+                        </button>
                               </div>
                             ))
                           ) : (
@@ -433,33 +433,33 @@ export function AdminManagerPhoneNumbers() {
                           
                           {/* Add Phone Number Input */}
                           <div className="flex items-center space-x-2 mt-2">
-                            <div className="flex-1 relative">
-                              <input
-                                type="tel"
+                      <div className="flex-1 relative">
+                        <input
+                          type="tel"
                                 value={phoneInputs[user.id] || ''}
                                 onChange={(e) => setPhoneInputs(prev => ({ ...prev, [user.id]: e.target.value }))}
                                 placeholder="+1234567890"
                                 className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all bg-white"
-                                onKeyPress={(e) => {
-                                  if (e.key === 'Enter') {
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter') {
                                     handleAddPhoneNumber(user.id);
-                                  }
-                                }}
-                              />
-                            </div>
-                            <button
+                            }
+                          }}
+                        />
+                      </div>
+                      <button
                               onClick={() => handleAddPhoneNumber(user.id)}
                               disabled={isAddingPhone[user.id] || !phoneInputs[user.id]?.trim()}
                               className="inline-flex items-center px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                            >
+                      >
                               {isAddingPhone[user.id] ? (
                                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                              ) : (
+                        ) : (
                                 <Plus className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                          </div>
-                        </div>
+                        )}
+                      </button>
+                    </div>
+                  </div>
                       </td>
 
                       {/* Actions / Status */}
@@ -472,13 +472,13 @@ export function AdminManagerPhoneNumbers() {
                           }`}>
                             <Phone className={`h-3 w-3 ${user.phoneNumbers.length > 0 ? 'text-green-500' : 'text-gray-400'}`} />
                             <span>{user.phoneNumbers.length}</span>
-                          </div>
-                        </div>
+                </div>
+              </div>
                       </td>
                     </motion.tr>
                   );
                 })}
-              </AnimatePresence>
+        </AnimatePresence>
 
               {filteredUsers.length === 0 && (
                 <tr>
@@ -486,32 +486,32 @@ export function AdminManagerPhoneNumbers() {
                     <div className="flex flex-col items-center">
                       <div className="w-16 h-16 bg-gradient-to-r from-gray-100 to-gray-200 rounded-full flex items-center justify-center mb-4">
                         <Search className="h-8 w-8 text-gray-400" />
-                      </div>
+            </div>
                       <h3 className="text-lg font-semibold text-gray-900 mb-2">
                         {searchTerm || roleFilter !== 'all' ? 'No users found' : 'No users available'}
-                      </h3>
+            </h3>
                       <p className="text-sm text-gray-500 mb-4">
                         {searchTerm || roleFilter !== 'all'
                           ? 'Try adjusting your search terms or filters'
                           : 'No users are currently registered in the system'
-                        }
-                      </p>
+              }
+            </p>
                       {(searchTerm || roleFilter !== 'all') && (
-                        <button
+              <button
                           onClick={() => {
                             setSearchTerm('');
                             setRoleFilter('all');
                           }}
                           className="inline-flex items-center px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
-                        >
-                          <XCircle className="h-4 w-4 mr-2" />
+              >
+                <XCircle className="h-4 w-4 mr-2" />
                           Clear Filters
-                        </button>
-                      )}
+              </button>
+            )}
                     </div>
                   </td>
                 </tr>
-              )}
+        )}
             </tbody>
           </table>
         </div>

@@ -72,34 +72,43 @@ export function MediaUpload({ leadId, onUploadComplete }: MediaUploadProps) {
     }
 
     setUploading(true);
-    const uploadPromises = files.map(async (file) => {
+
+    try {
+      const mediaFiles = await Promise.all(
+        files.map(async (file) => {
       const isPdf = file.type === 'application/pdf';
       const fileType = (isPdf ? 'pdf' : file.type.split('/')[0]) as 'image' | 'video' | 'audio' | 'pdf';
       const folder = isPdf ? 'pdf' : fileType;
       const storageRef = ref(storage, `leads/${leadId}/${folder}/${file.name}`);
+
+          const firebaseUploadPromise = (async () => {
       await uploadBytes(storageRef, file);
       return getDownloadURL(storageRef);
-    });
+          })();
 
-    try {
-      const urls = await Promise.all(uploadPromises);
-      const azureResults = await Promise.allSettled(files.map((file) => uploadVerificationFileToAzure(leadId, file)));
-      const mediaFiles = urls.map((url, index) => {
-        const file = files[index];
-        const isPdf = file.type === 'application/pdf';
-        const type = (isPdf ? 'pdf' : file.type.split('/')[0]) as 'image' | 'video' | 'audio' | 'pdf';
-        const azureUrl = (azureResults[index].status === 'fulfilled') ? (azureResults[index] as PromiseFulfilledResult<{ success: boolean; url: string; path: string }>).value.url : undefined;
+          const azureUploadPromise = uploadVerificationFileToAzure(leadId, file).catch((error) => {
+            console.error('Azure upload failed for file:', file.name, error);
+            return null;
+          });
+
+          const [url, azureResult] = await Promise.all([firebaseUploadPromise, azureUploadPromise]);
+
         return {
           url,
-          type,
+            type: fileType,
           name: file.name,
-          azureUrl
+            azureUrl: azureResult?.url,
         };
-      });
+        })
+      );
+
+      if (mediaFiles.some((file) => !file.url)) {
+        throw new Error('One or more uploads failed');
+      }
 
       // Update lead document with media files
       await updateDoc(doc(db, 'leads', leadId), {
-        verificationMedia: mediaFiles
+        verificationMedia: mediaFiles,
       });
 
       toast.success('Files uploaded successfully');

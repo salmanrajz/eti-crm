@@ -908,26 +908,31 @@ export function LeadList() {
       filtered = filtered.filter(lead => lead.agentId === user.id);
     }
 
-    // Coordinators should never see pending_verification leads
+    // Coordinators should never see pending_verification or follow_verification leads
     if (user?.role === 'coordinator') {
-      filtered = filtered.filter(lead => lead.status !== 'pending_verification');
+      filtered = filtered.filter(
+        lead => lead.status !== 'pending_verification' && lead.status !== 'follow_verification'
+      );
     }
 
     // Apply coordinator group filtering
     if (user?.role === 'coordinator' && user.coordinatorType && ['g1', 'g2', 'g3', 'all'].includes(user.coordinatorType)) {
       filtered = filtered.filter(lead => isLeadInCoordinatorGroup(lead, user.coordinatorType as CoordinatorType));
 
-      // For coordinators, hide pending_verification and pending_coordinator statuses
-      filtered = filtered.filter(lead => lead.status !== 'pending_verification');
+      // For coordinators, hide pending_verification, follow_verification and pending_coordinator statuses
+      filtered = filtered.filter(
+        lead => lead.status !== 'pending_verification' && lead.status !== 'follow_verification'
+      );
       if (user.coordinatorType !== 'all' && user.coordinatorType !== undefined) {
         filtered = filtered.filter(lead => lead.status !== 'pending_coordinator');
       }
       
-      // Include verified and follow_up leads that have been assigned by manager (these should appear as "unassigned" to coordinators)
-      // These leads have status='verified' or 'follow_up' and managerAssigned=true
+      // Include verified and follow_up leads that have been assigned by manager, and assigned_to_cord leads (these should appear as "unassigned" to coordinators)
+      // These leads have status='verified' or 'follow_up' and managerAssigned=true, or status='assigned_to_cord'
       const managerAssignedLeads = leads.filter(
         lead => ((lead.status === 'verified' && lead.managerAssigned === true) ||
-                 (lead.status === 'follow_up' && lead.managerAssigned === true)) &&
+                 (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+                 (lead.status === 'assigned_to_cord')) &&
                 isLeadInCoordinatorGroup(lead, user.coordinatorType as CoordinatorType)
       );
       
@@ -1166,6 +1171,8 @@ export function LeadList() {
         return 'bg-purple-100 text-purple-800';
       case 'assigned':
         return 'bg-indigo-100 text-indigo-800';
+      case 'assigned_to_cord':
+        return 'bg-teal-100 text-teal-800';
       case 'pending_assignment':
         return 'bg-cyan-100 text-cyan-800';
       case 'follow_verification':
@@ -1196,6 +1203,8 @@ export function LeadList() {
       case 'activated':
         return <Zap className="w-4 h-4 mr-1.5" />;
       case 'assigned':
+        return <User2 className="w-4 h-4 mr-1.5" />;
+      case 'assigned_to_cord':
         return <User2 className="w-4 h-4 mr-1.5" />;
       default:
         return null;
@@ -1635,11 +1644,21 @@ export function LeadList() {
                       <div className="flex flex-col space-y-2">
                         {(lead.plans && lead.plans.length > 0)
                           ? lead.plans.map((plan, planIndex) => (
-                              <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
+                              <div
+                                key={planIndex}
+                                className="flex flex-col bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm"
+                              >
+                                <div className="flex items-center space-x-2">
                         <Hash className="h-4 w-4 text-indigo-500" />
                         <span className="text-sm font-medium text-gray-700">
-                                  {plan.number || ''}
+                                    {plan.number || ''}
                             </span>
+                          </div>
+                                {lead.etisalatLeadId && (
+                                  <span className="mt-0.5 text-[11px] font-medium text-gray-500">
+                                    Etisalat ID: {lead.etisalatLeadId}
+                            </span>
+                                )}
                           </div>
                             ))
                           : <span className="text-sm font-medium text-gray-700"></span>
@@ -1832,6 +1851,11 @@ export function LeadList() {
                               <p className="text-base font-semibold text-gray-900 break-all">
                                     {plan.number || 'N/A'}
                               </p>
+                              {lead.etisalatLeadId && (
+                                <p className="mt-0.5 text-[11px] font-medium text-gray-500">
+                                  Etisalat ID: {lead.etisalatLeadId}
+                                </p>
+                              )}
                             </div>
                           </div>
                         </motion.div>

@@ -566,12 +566,6 @@ export function useStruckNumbers(userId: string) {
           number.status !== 'activated'
         );
 
-      console.log('[StruckNumbers] ⚡ Optimized fetch:', {
-        totalLeads: leadsSnapshot.size,
-        numbersInLeads: numberIds.size,
-        batches: Math.ceil(numberIds.size / BATCH_SIZE),
-        struckCount: struckNumbers.length
-      });
 
       // Cache the results
       try {
@@ -722,15 +716,15 @@ export function StruckNumbers({ struckNumbers, loading, onClose }: StruckNumbers
               >
                 <Shield className="h-7 w-7 text-white" />
               </motion.div>
-              <div>
-                <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                  <AlertTriangle className="h-6 w-6" />
-                  Struck Numbers
-                </h3>
-                <p className="mt-1 text-red-100 text-sm">
-                  Numbers from your leads have been struck by other agents. Please take immediate action to Activate them, or you risk losing these numbers.
-                </p>
-              </div>
+            <div>
+              <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                <AlertTriangle className="h-6 w-6" />
+                Struck Numbers
+              </h3>
+              <p className="mt-1 text-red-100 text-sm">
+                Numbers from your leads have been struck by other agents. Please take immediate action to Activate them, or you risk losing these numbers.
+              </p>
+            </div>
             </div>
             {onClose && (
               <motion.button
@@ -739,7 +733,7 @@ export function StruckNumbers({ struckNumbers, loading, onClose }: StruckNumbers
                 onClick={onClose}
                 className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors flex-shrink-0"
                 aria-label="Close"
-              >
+            >
                 <X className="h-5 w-5 text-white" />
               </motion.button>
             )}

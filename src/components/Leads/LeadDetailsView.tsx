@@ -64,6 +64,7 @@ import {
   MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
   MessageCircle, Check, CheckCheck, Paperclip, RefreshCw
 } from 'lucide-react';
+import { countryList } from '../../utils/countries';
 import type { Lead, UserRole } from '../../types';
 import { FormSection } from './FormSection';
 import { FormInput } from './FormInput';
@@ -222,6 +223,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [srImageFile, setSrImageFile] = useState<File | null>(null);
   const [editablePasscode, setEditablePasscode] = useState<string>('');
   const [editableCategory, setEditableCategory] = useState<string>('');
+  const [assignPasscode, setAssignPasscode] = useState<string>('');
 
   // New states for editable number and plan
   const [editableNumber, setEditableNumber] = useState<string>('');
@@ -272,6 +274,37 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     };
     prefill();
   }, [showCoordinatorDialog, coordinatorAction, lead]);
+
+  // Prefill number, category, group and passcode for Assign dialog (read-only display)
+  useEffect(() => {
+    const prefillAssign = async () => {
+      if (!showCoordinatorDialog || coordinatorAction !== 'assign') {
+        setAssignPasscode('');
+        return;
+      }
+
+      try {
+        const firstPlan = lead.plans?.[0];
+        if (firstPlan?.numberId && !firstPlan.numberId.startsWith('virtual-')) {
+          const numberRef = doc(db, 'numberPool', firstPlan.numberId);
+          const numberDoc = await getDoc(numberRef);
+          if (numberDoc.exists()) {
+            const numberData = numberDoc.data() as any;
+            setAssignPasscode(numberData.passcode || '');
+          } else {
+            setAssignPasscode('');
+          }
+        } else {
+          setAssignPasscode('');
+        }
+      } catch (error) {
+        console.error('Error pre-filling assign passcode:', error);
+        setAssignPasscode('');
+      }
+    };
+
+    prefillAssign();
+  }, [showCoordinatorDialog, coordinatorAction, lead.plans, lead.id]);
   const [verificationMedia, setVerificationMedia] = useState<LeadMediaItem[]>([]);
   const [sharedWithNames, setSharedWithNames] = useState<string[]>([]);
   const [rejecting, setRejecting] = useState(false);
@@ -356,6 +389,16 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   });
   const [plans, setPlans] = useState<any[]>([]);
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
+  const [planPasscodes, setPlanPasscodes] = useState<Record<string, string>>({});
+
+  const isUserCoordinator = isCoordinator();
+
+  const getCountryName = (code?: string | null) => {
+    if (!code) return '';
+    const upper = code.toUpperCase();
+    const match = countryList.find(c => c.code === upper || c.name.toUpperCase() === upper);
+    return match ? match.name : code;
+  };
 
   // Load plan details from Firebase when lead changes
   useEffect(() => {
@@ -387,6 +430,42 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     loadPlanDetails();
   }, [lead]);
 
+  // Load number passcodes for coordinator view
+  useEffect(() => {
+    const loadPasscodes = async () => {
+      if (!isUserCoordinator) {
+        setPlanPasscodes({});
+        return;
+      }
+
+      try {
+        const result: Record<string, string> = {};
+        const realPlans = (lead.plans || []).filter(
+          (p: any) => p?.numberId && typeof p.numberId === 'string' && !p.numberId.startsWith('virtual-')
+        );
+
+        for (const p of realPlans) {
+          try {
+            const numberRef = doc(db, 'numberPool', p.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (numberDoc.exists()) {
+              const numberData = numberDoc.data();
+              result[p.numberId] = numberData.passcode || 'N/A';
+            }
+          } catch (err) {
+            console.error('Error loading passcode for number', p.numberId, err);
+          }
+        }
+
+        setPlanPasscodes(result);
+      } catch (error) {
+        console.error('Error loading plan passcodes:', error);
+      }
+    };
+
+    loadPasscodes();
+  }, [lead.plans, isUserCoordinator, lead.id]);
+
   const canEdit = (
     lead.status === 'pending_verification' ||
     (user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification') ||
@@ -394,13 +473,18 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     isCoordinator()
   );
   const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'follow_verification' || lead.status === 'activated_non_verified');
-  const isUserCoordinator = isCoordinator();
   const isUserManager = isManager();
   // Manager can assign verified leads or follow_up leads that haven't been assigned yet
   const canManagerAssign = isUserManager && 
     ((lead.status === 'verified' && !lead.managerAssigned) || 
      (lead.status === 'follow_up' && !lead.managerAssigned)) && 
     user?.id === lead.managerId;
+  // Agent can also request assignment to coordinator for their own verified/follow_up leads
+  const canAgentAssignToCoordinator =
+    user?.role === 'agent' &&
+    user.id === lead.agentId &&
+    ((lead.status === 'verified' && !lead.managerAssigned) ||
+     (lead.status === 'follow_up' && !lead.managerAssigned));
 
   // Helper function to get service provider based on group
   const getServiceProvider = (group: string) => {
@@ -771,8 +855,9 @@ Language: ${lead.language || 'N/A'}`;
     setIsManagerActionProcessing(true);
     try {
       const leadRef = doc(db, 'leads', lead.id);
-      // Keep status as 'verified', only set managerAssigned and managerNotes
+      // Change status to 'assigned_to_cord' when manager assigns to coordinator
       await updateDoc(leadRef, {
+        status: 'assigned_to_cord',
         managerAssigned: true,
         managerNotes: managerNote.trim() || '',
         updatedAt: serverTimestamp()
@@ -1259,7 +1344,7 @@ Language: ${lead.language || 'N/A'}`;
           </p>
         </div>
         <div className="flex flex-wrap gap-2 sm:gap-3">
-          {canManagerAssign && (
+          {(canManagerAssign || canAgentAssignToCoordinator) && (
             <button
               onClick={() => setShowManagerAssignDialog(true)}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
@@ -1270,8 +1355,9 @@ Language: ${lead.language || 'N/A'}`;
           )}
           {isUserCoordinator && (
             <>
-              {(lead.status === 'verified' && lead.managerAssigned === true) || 
-               (lead.status === 'follow_up' && lead.managerAssigned === true) ? (
+              {(lead.status === 'verified') || 
+               (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+               (lead.status === 'assigned_to_cord') ? (
                 <>
                   <button
                     onClick={() => {
@@ -2123,6 +2209,49 @@ Language: ${lead.language || 'N/A'}`;
               )}
               {coordinatorAction === 'assign' && (
                 <>
+                  {/* Number, Category, Group & Passcode summary */}
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-900">Number</label>
+                        <input
+                          type="text"
+                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                          value={lead.plans?.[0]?.number || ''}
+                          readOnly
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-900">Category</label>
+                        <input
+                          type="text"
+                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                          value={lead.plans?.[0]?.category || ''}
+                          readOnly
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-900">Group</label>
+                        <input
+                          type="text"
+                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                          value={lead.plans?.[0]?.group || ''}
+                          readOnly
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                        <input
+                          type="text"
+                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                          value={assignPasscode}
+                          readOnly
+                          placeholder="Passcode from number pool"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Etisalat Lead ID */}
                   <div className="space-y-2">
                     <label className="block text-sm font-semibold text-gray-900">
@@ -2487,6 +2616,29 @@ Language: ${lead.language || 'N/A'}`;
       />
 
       <div className="px-2 sm:px-0 space-y-3 sm:space-y-4 md:space-y-6">
+        {(isAdmin() || isCoordinator()) && (
+          <FormSection
+            icon={Users}
+            title="Assignment Details"
+            description="Team and agent information"
+          >
+            <FormInput
+              label="Agent Name"
+              icon={User2}
+              type="text"
+              value={lead.agentName || 'N/A'}
+              readOnly
+            />
+            <FormInput
+              label="Team Name"
+              icon={Briefcase}
+              type="text"
+            value={lead.teamName || 'N/A'}
+              readOnly
+            />
+          </FormSection>
+        )}
+
         <FormSection
           icon={User2}
           title="Customer Information"
@@ -2506,6 +2658,31 @@ Language: ${lead.language || 'N/A'}`;
             value={lead.customerNumber}
             readOnly
           />
+          <FormInput
+            label="Nationality"
+            icon={Globe2}
+            type="text"
+            value={getCountryName(lead.country)}
+            readOnly
+          />
+          {lead.productType === 'Home Wifi' && (
+            <>
+              <FormInput
+                label="Email"
+                icon={Mail}
+                type="email"
+                value={(lead as any).homeWifiEmail || ''}
+                readOnly
+              />
+              <FormInput
+                label="ID"
+                icon={Package}
+                type="text"
+                value={(lead as any).homeWifiId || ''}
+                readOnly
+              />
+            </>
+          )}
           <FormInput
             label="Age"
             icon={User2}
@@ -2553,6 +2730,14 @@ Language: ${lead.language || 'N/A'}`;
                       <div>
                         <p className="text-lg font-semibold text-gray-900">{plan.number}</p>
                         <p className="text-sm text-gray-500">Category: {plan.category}</p>
+                        {isUserCoordinator && plan.numberId && typeof plan.numberId === 'string' && !plan.numberId.startsWith('virtual-') && (
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Passcode:{' '}
+                            {planPasscodes[plan.numberId]
+                              ? planPasscodes[plan.numberId]
+                              : 'Loading...'}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <div className="px-4 py-2 rounded-full text-sm font-semibold bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg">
@@ -2714,11 +2899,9 @@ Language: ${lead.language || 'N/A'}`;
             description="Additional notes and comments"
           >
             <div className="col-span-1 lg:col-span-2" ref={chatBoxRef}>
-              <textarea
-                rows={4}
-                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm"
-                value={lead.remarks}
-                readOnly
+              <div
+                className="block w-full rounded-lg border border-gray-300 shadow-sm bg-white p-3 text-sm whitespace-pre-wrap"
+                dangerouslySetInnerHTML={{ __html: lead.remarks.replace(/\n/g, '<br />') }}
               />
             </div>
           </FormSection>

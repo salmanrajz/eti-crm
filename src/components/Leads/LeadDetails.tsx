@@ -86,11 +86,9 @@ export function LeadDetails() {
 
   async function loadLead() {
     try {
-      //console.log('Loading lead with ID:', id);
       const leadDoc = await getDoc(doc(db, 'leads', id!));
       
       if (leadDoc.exists()) {
-        //console.log('Lead document exists:', leadDoc.data());
         const leadData = leadDoc.data();
         
         const startDate = leadData.startDate?.toDate?.() || leadData.startDate || new Date();
@@ -99,6 +97,9 @@ export function LeadDetails() {
         
         // Fetch manager data if managerId exists
         let managerData = null;
+        let resolvedAgentName = '';
+        let resolvedTeamName = '';
+
         if (leadData.managerId) {
           try {
             const managerRef = doc(db, 'users', leadData.managerId);
@@ -113,6 +114,38 @@ export function LeadDetails() {
             console.error('Error fetching manager data:', error);
           }
         }
+
+        // Fetch agent name from users collection
+        if (leadData.agentId) {
+          try {
+            const agentRef = doc(db, 'users', leadData.agentId);
+            const agentDoc = await getDoc(agentRef);
+            if (agentDoc.exists()) {
+              const agentData = agentDoc.data() as any;
+              resolvedAgentName =
+                agentData.name ||
+                agentData.fullName ||
+                agentData.displayName ||
+                '';
+            }
+          } catch (error) {
+            console.error('Error fetching agent data for lead:', id, error);
+          }
+        }
+
+        // Fetch team name from teams collection
+        if (leadData.teamId) {
+          try {
+            const teamRef = doc(db, 'teams', leadData.teamId);
+            const teamDoc = await getDoc(teamRef);
+            if (teamDoc.exists()) {
+              const teamData = teamDoc.data() as any;
+              resolvedTeamName = teamData.name || '';
+            }
+          } catch (error) {
+            console.error('Error fetching team data for lead:', id, error);
+          }
+        }
         
         const lead = {
           id: leadDoc.id,
@@ -123,10 +156,12 @@ export function LeadDetails() {
           plan: leadData.plan,
           status: leadData.status,
           agentId: leadData.agentId,
+          agentName: resolvedAgentName,
           verifierId: leadData.verifierId,
           coordinatorId: leadData.coordinatorId,
           assignmentId: leadData.assignmentId,
           teamId: leadData.teamId,
+          teamName: resolvedTeamName,
           managerId: leadData.managerId,
           manager: managerData,
           createdAt,
@@ -155,6 +190,8 @@ export function LeadDetails() {
           startTime: leadData.startTime || '',
           numberType: leadData.numberType || '',
           remarks: leadData.remarks || '',
+          homeWifiEmail: leadData.homeWifiEmail || '',
+          homeWifiId: leadData.homeWifiId || '',
           plans: leadData.plans || [],
           verificationMedia: leadData.verificationMedia || [],
           etisalatLeadId: leadData.etisalatLeadId || '',
@@ -162,7 +199,6 @@ export function LeadDetails() {
           managerNotes: leadData.managerNotes || ''
         } as Lead;
         
-       // console.log('Processed lead data:', lead);
         setLead(lead);
       } else {
         console.error('Lead document does not exist');

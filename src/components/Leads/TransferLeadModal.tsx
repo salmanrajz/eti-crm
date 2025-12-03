@@ -135,7 +135,12 @@ export function TransferLeadModal({ lead, isOpen, onClose, onTransferComplete }:
 
       const agentData = agentDoc.data();
       const selectedTeamDoc = await getDoc(doc(db, 'teams', selectedTeamId));
-      const selectedTeamData = selectedTeamDoc.exists() ? selectedTeamDoc.data() : null;
+      if (!selectedTeamDoc.exists()) {
+        toast.error('Selected team not found');
+        return;
+      }
+      const selectedTeamData = selectedTeamDoc.data();
+      const newManagerId = selectedTeamData?.managerId || null;
 
       // Get current agent name for remark
       const currentAgentName = currentAgent?.name || 'Unknown Agent';
@@ -162,6 +167,7 @@ export function TransferLeadModal({ lead, isOpen, onClose, onTransferComplete }:
       await updateDoc(leadRef, {
         agentId: selectedAgentId,
         teamId: selectedTeamId,
+        managerId: newManagerId,
         agentName: newAgentName,
         updatedAt: new Date(),
         updatedBy: user?.id || 'admin',
