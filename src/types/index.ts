@@ -90,7 +90,7 @@ export type NumberStatus =
   | 'later'                 // Marked for later action
   | 'rejected'              // Rejected during verification
   | 'claimed'               // Claimed by an agent
-  | 'follow_verification';   // Requires follow-up verification
+  | 'non_verified';   // Non verified (previously follow-up verification)
 
 export interface User {
   id: string;
@@ -102,6 +102,7 @@ export interface User {
   phoneNumbers?: string[]; // Array of phone numbers for managers
   coordinatorType?: CoordinatorType; // For coordinators - which groups they handle
   verifierGroups?: VerifierGroups; // For verifiers - which groups they handle (multiple groups)
+  isActive?: boolean; // User active status - inactive users cannot login (default: true)
   createdAt: Date;
   updatedAt: Date;
 }
@@ -129,6 +130,7 @@ export interface NumberPool {
   originalExpiresAt?: Date;
   reservationCount?: number; // Number of times this number has been reserved
   claimCount?: number; // Number of times this number has been claimed
+  leadId?: string; // Lead ID when number is assigned to a lead
   claimQueue?: {
     agentId: string;
     claimedAt: Date;
@@ -161,6 +163,7 @@ export interface NumberPoolType {
   originalExpiresAt?: Date;
   lastClaimedAt?: Date;
   claimedAt?: Date;
+  leadId?: string; // Lead ID when number is assigned to a lead
   claims?: Array<{
     userId: string;
     claimedAt: Date;
@@ -194,6 +197,7 @@ export interface Lead {
   status: string;
   agentId: string;
   agentName?: string;
+  teamName?: string;
   verifierId: string;
   coordinatorId: string;
   assignmentId: string;
@@ -234,6 +238,8 @@ export interface Lead {
   startTime: string;
   numberType: string;
   remarks: string;
+  homeWifiEmail?: string;
+  homeWifiId?: string;
   plans: {
     numberId: string;
     number: string;
@@ -247,6 +253,8 @@ export interface Lead {
   customerNumbers?: CustomerNumber[];
   etisalatLeadId?: string;
   scheduledFor?: Date; // Date when lead should appear in unassigned for coordinator
+  leadNumber?: string; // Sequential lead number in format: TEAMNAME-SEQUENCE-MMMYY (e.g., ETS-100-NOV25)
+  leadNumberGeneratedAt?: Date; // Timestamp when lead number was generated
 }
 
 export interface ChatMessage {

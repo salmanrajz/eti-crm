@@ -85,7 +85,9 @@ import {
   Key,
   Lock,
   UserCog,
-  Sparkles
+  Sparkles,
+  Power,
+  PowerOff
 } from 'lucide-react';
 import { useNavigate, Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -472,6 +474,22 @@ export function UserManagement() {
     } catch (error) {
       console.error('Error assigning team:', error);
       toast.error('Failed to assign team');
+    }
+  }
+
+  async function toggleUserActive(userId: string, currentStatus: boolean) {
+    try {
+      const userRef = doc(db, 'users', userId);
+      const newStatus = !currentStatus;
+      await updateDoc(userRef, {
+        isActive: newStatus,
+        updatedAt: new Date()
+      });
+      toast.success(`User ${newStatus ? 'activated' : 'deactivated'} successfully`);
+      loadUsers();
+    } catch (error) {
+      console.error('Error toggling user status:', error);
+      toast.error('Failed to update user status');
     }
   }
 
@@ -1093,6 +1111,9 @@ export function UserManagement() {
                     </th>
                         )}
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Status
+                    </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Actions
                     </th>
                   </tr>
@@ -1243,6 +1264,32 @@ export function UserManagement() {
                       </td>
                           )}
                           
+                          {/* Status */}
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <button
+                              onClick={() => toggleUserActive(user.id, user.isActive !== false)}
+                              disabled={user.id === currentUser?.id}
+                              className={clsx(
+                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed",
+                                user.isActive !== false ? 'bg-green-500' : 'bg-gray-300'
+                              )}
+                              title={user.isActive !== false ? 'Active - Click to deactivate' : 'Inactive - Click to activate'}
+                            >
+                              <span
+                                className={clsx(
+                                  "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                                  user.isActive !== false ? 'translate-x-6' : 'translate-x-1'
+                                )}
+                              />
+                            </button>
+                            <span className={clsx(
+                              "ml-2 text-xs font-medium",
+                              user.isActive !== false ? 'text-green-600' : 'text-gray-500'
+                            )}>
+                              {user.isActive !== false ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                          
                           {/* Actions */}
                           <td className="px-6 py-4 whitespace-nowrap">
                             <div className="flex items-center space-x-3">
@@ -1336,6 +1383,9 @@ export function UserManagement() {
                             Verifier Groups
                           </th>
                         )}
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Status
+                        </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Actions
                         </th>
@@ -1579,6 +1629,9 @@ export function UserManagement() {
                           </th>
                         )}
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Actions
                         </th>
                       </tr>
@@ -1728,6 +1781,32 @@ export function UserManagement() {
                               )}
                             </td>
                           )}
+                          
+                          {/* Status */}
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <button
+                              onClick={() => toggleUserActive(user.id, user.isActive !== false)}
+                              disabled={user.id === currentUser?.id}
+                              className={clsx(
+                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed",
+                                user.isActive !== false ? 'bg-green-500' : 'bg-gray-300'
+                              )}
+                              title={user.isActive !== false ? 'Active - Click to deactivate' : 'Inactive - Click to activate'}
+                            >
+                              <span
+                                className={clsx(
+                                  "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                                  user.isActive !== false ? 'translate-x-6' : 'translate-x-1'
+                                )}
+                              />
+                            </button>
+                            <span className={clsx(
+                              "ml-2 text-xs font-medium",
+                              user.isActive !== false ? 'text-green-600' : 'text-gray-500'
+                            )}>
+                              {user.isActive !== false ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
                           
                           {/* Actions */}
                           <td className="px-6 py-4 whitespace-nowrap">

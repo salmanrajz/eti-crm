@@ -93,9 +93,9 @@ export const db = (() => {
         localCache: memoryLocalCache()
       });
     } catch (error: any) {
-      // If initialization fails (already initialized), get existing instance
+        // If initialization fails (already initialized), get existing instance
       console.warn('Firestore already initialized, using existing instance');
-      _db = getFirestore(app);
+        _db = getFirestore(app);
     }
   }
   return _db;

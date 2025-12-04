@@ -98,48 +98,48 @@ async function getRoutesFromFirebase(): Promise<Record<GroupKey, RoutingConfig>>
     
     // Fallback to environment variables if Firebase fails
     const fallbackRoutes: Record<GroupKey, RoutingConfig> = {
-      G1: {
-        meta: {
-          businessPhoneId: import.meta.env.VITE_WA_G1_PHONE_ID || '',
-          accessToken: import.meta.env.VITE_WA_G1_TOKEN || ''
-        },
-        template: {
-          templateName: import.meta.env.VITE_WA_G1_TEMPLATE || 'verification_g1',
-          languageCode: import.meta.env.VITE_WA_LANG || 'en'
-        }
-      },
-      G2: {
-        meta: {
-          businessPhoneId: import.meta.env.VITE_WA_G2_PHONE_ID || '',
-          accessToken: import.meta.env.VITE_WA_G2_TOKEN || ''
-        },
-        template: {
-          templateName: import.meta.env.VITE_WA_G2_TEMPLATE || 'verification_g2',
-          languageCode: import.meta.env.VITE_WA_LANG || 'en'
-        }
-      },
-      G3: {
-        meta: {
-          businessPhoneId: import.meta.env.VITE_WA_G3_PHONE_ID || '',
-          accessToken: import.meta.env.VITE_WA_G3_TOKEN || ''
-        },
-        template: {
-          templateName: import.meta.env.VITE_WA_G3_TEMPLATE || 'verification_g3',
-          languageCode: import.meta.env.VITE_WA_LANG || 'en'
-        }
-      },
-      OTHER: {
-        meta: {
-          businessPhoneId: import.meta.env.VITE_WA_DEF_PHONE_ID || '',
-          accessToken: import.meta.env.VITE_WA_DEF_TOKEN || ''
-        },
-        template: {
-          templateName: import.meta.env.VITE_WA_DEF_TEMPLATE || 'verification_default',
-          languageCode: import.meta.env.VITE_WA_LANG || 'en'
-        }
-      }
-    };
-    
+  G1: {
+    meta: {
+      businessPhoneId: import.meta.env.VITE_WA_G1_PHONE_ID || '',
+      accessToken: import.meta.env.VITE_WA_G1_TOKEN || ''
+    },
+    template: {
+      templateName: import.meta.env.VITE_WA_G1_TEMPLATE || 'verification_g1',
+      languageCode: import.meta.env.VITE_WA_LANG || 'en'
+    }
+  },
+  G2: {
+    meta: {
+      businessPhoneId: import.meta.env.VITE_WA_G2_PHONE_ID || '',
+      accessToken: import.meta.env.VITE_WA_G2_TOKEN || ''
+    },
+    template: {
+      templateName: import.meta.env.VITE_WA_G2_TEMPLATE || 'verification_g2',
+      languageCode: import.meta.env.VITE_WA_LANG || 'en'
+    }
+  },
+  G3: {
+    meta: {
+      businessPhoneId: import.meta.env.VITE_WA_G3_PHONE_ID || '',
+      accessToken: import.meta.env.VITE_WA_G3_TOKEN || ''
+    },
+    template: {
+      templateName: import.meta.env.VITE_WA_G3_TEMPLATE || 'verification_g3',
+      languageCode: import.meta.env.VITE_WA_LANG || 'en'
+    }
+  },
+  OTHER: {
+    meta: {
+      businessPhoneId: import.meta.env.VITE_WA_DEF_PHONE_ID || '',
+      accessToken: import.meta.env.VITE_WA_DEF_TOKEN || ''
+    },
+    template: {
+      templateName: import.meta.env.VITE_WA_DEF_TEMPLATE || 'verification_default',
+      languageCode: import.meta.env.VITE_WA_LANG || 'en'
+    }
+  }
+};
+
     return fallbackRoutes;
   }
 }
@@ -235,18 +235,18 @@ export async function sendWhatsAppWithComponentsByGroup(options: {
   };
   
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${meta.accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${meta.accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
     
     const responseText = await res.text();
     
-    if (!res.ok) {
+  if (!res.ok) {
       let parsedError;
       try {
         parsedError = JSON.parse(responseText);
@@ -255,7 +255,7 @@ export async function sendWhatsAppWithComponentsByGroup(options: {
       }
       
       throw new Error(`WhatsApp send failed: ${res.status} ${res.statusText} ${JSON.stringify(parsedError)}`);
-    }
+  }
     
     let responseJson;
     try {

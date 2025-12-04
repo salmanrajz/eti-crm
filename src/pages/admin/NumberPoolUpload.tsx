@@ -191,24 +191,31 @@ export function NumberPoolUpload() {
     const errors: string[] = [];
     
     data.forEach((row, index) => {
-      if (!validateNumber(row.Number)) {
-        errors.push(`Row ${index + 1}: Invalid number format - ${row.Number}`);
+      // Coerce all fields to strings safely because Excel may give numbers or undefined
+      const numberVal = row.Number != null ? String(row.Number).trim() : '';
+      const categoryVal = row.Category != null ? String(row.Category).trim() : '';
+      const codeVal = row.Code != null ? String(row.Code).trim() : '';
+      const groupVal = row.Group != null ? String(row.Group).trim() : '';
+      const passcodeVal = row.Passcode != null ? String(row.Passcode).trim() : '';
+
+      if (!validateNumber(numberVal)) {
+        errors.push(`Row ${index + 1}: Invalid number format - "${row.Number}"`);
       }
 
-      const normalizedCategory = row.Category?.trim();
-      if (!numberCategories.includes(normalizedCategory as typeof numberCategories[number])) {
-        errors.push(`Row ${index + 1}: Invalid category - ${row.Category}`);
+      if (!numberCategories.includes(categoryVal as typeof numberCategories[number])) {
+        errors.push(`Row ${index + 1}: Invalid category - "${row.Category}" (must be one of: ${numberCategories.join(', ')})`);
       }
 
-      if (!row.Code.match(/^[A-Za-z0-9]+$/)) {
-        errors.push(`Row ${index + 1}: Invalid code format - ${row.Code}`);
+      // Code: now accepts any non-empty string (can include spaces, dashes, etc.)
+      if (!codeVal) {
+        errors.push(`Row ${index + 1}: Code is required`);
       }
 
-      if (!row.Group || row.Group.trim() === '') {
+      if (!groupVal) {
         errors.push(`Row ${index + 1}: Group is required`);
       }
 
-      if (!row.Passcode || row.Passcode.trim() === '') {
+      if (!passcodeVal) {
         errors.push(`Row ${index + 1}: Passcode is required`);
       }
     });
@@ -262,7 +269,9 @@ export function NumberPoolUpload() {
 
     // Accept any Excel file format
     if (!file.name.match(/\.(xlsx|xls|xlsm|xlsb)$/i)) {
-      toast.error('Please upload an Excel file');
+      const message = 'Please upload a valid Excel file (.xlsx, .xls, .xlsm, .xlsb).';
+      setExcelErrors([message]);
+      toast.error(message);
       return;
     }
 
@@ -284,8 +293,24 @@ export function NumberPoolUpload() {
       });
       
       const workbook = read(data);
-      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+
+      if (!worksheet) {
+        const message = 'No sheet found in Excel file. Please ensure the file has at least one worksheet.';
+        setExcelErrors([message]);
+        toast.error(message);
+        return;
+      }
+
       const jsonData = utils.sheet_to_json<ExcelRow>(worksheet);
+
+      if (!jsonData || jsonData.length === 0) {
+        const message = 'No data rows found. Please ensure the first sheet has headers in row 1 and data starting from row 2.';
+        setExcelErrors([message]);
+        toast.error(message);
+        return;
+      }
 
       // Validate headers
       const requiredHeaders = ['Number', 'Category', 'Code', 'Group', 'Passcode'];
@@ -296,7 +321,8 @@ export function NumberPoolUpload() {
       );
 
       if (missingHeaders.length > 0) {
-        setExcelErrors([`Missing required columns: ${missingHeaders.join(', ')}`]);
+        const message = `Missing required columns: ${missingHeaders.join(', ')}`;
+        setExcelErrors([message]);
         toast.error('Excel validation failed. Please check the errors below.');
         return;
       }
@@ -319,7 +345,12 @@ export function NumberPoolUpload() {
       }
     } catch (error) {
       console.error('Error parsing Excel:', error);
-      toast.error('Failed to parse Excel file');
+      const message =
+        error instanceof Error
+          ? `Failed to parse Excel file: ${error.message}`
+          : 'Failed to parse Excel file due to an unknown error.';
+      setExcelErrors([message]);
+      toast.error(message);
     }
   }, [validateExcelData]);
 
@@ -667,13 +698,13 @@ export function NumberPoolUpload() {
       }
 
       const numberData: any = {
-        number: row.Number,
-        category: row.Category.trim() as typeof numberCategories[number],
-        code: row.Code,
-        group: row.Group.trim(),
+        number: String(row.Number).trim(),
+        category: String(row.Category).trim() as typeof numberCategories[number],
+        code: String(row.Code).trim(),
+        group: String(row.Group).trim(),
         status: 'open',
         visibleToFreelancers: visibleToFreelancers,
-        passcode: row.Passcode.trim(),
+        passcode: String(row.Passcode ?? '').trim(),
         lastStatusChange: new Date('2025-07-05'), // Baseline for "never touched" numbers
         createdAt: new Date()
           // No bulkUpload flag - triggers run in parallel for immediate visibility

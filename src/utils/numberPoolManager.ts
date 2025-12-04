@@ -231,7 +231,7 @@ class NumberPoolManager {
    */
   private async validateCacheTimestamp(category: string): Promise<boolean> {
     // No cache with memory-only mode - always return false
-    return false;
+        return false;
   }
 
   // Initialize or get existing data
@@ -537,7 +537,7 @@ class NumberPoolManager {
 
     // 0) Category or Status searches (no n-grams)
     const categories = ['standard', 'silver', 'silver plus', 'gold', 'gold plus', 'platinum'];
-    const statuses = ['open', 'reserved', 'pending_verification', 'verified', 'assigned', 'activated', 'follow_up', 'rejected', 'claimed', 'follow_verification'];
+    const statuses = ['open', 'reserved', 'pending_verification', 'verified', 'assigned', 'activated', 'follow_up', 'rejected', 'claimed', 'non_verified'];
 
     // Category exact match (case-insensitive)
     if (categories.includes(lower)) {

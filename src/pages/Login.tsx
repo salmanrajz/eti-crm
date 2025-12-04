@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { auth } from '../lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../lib/firebase';
 import { toast } from 'react-hot-toast';
 import { LogIn, Mail, Lock, Eye, EyeOff, AlertCircle, CheckCircle2, Shield, MapPin, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -163,6 +165,52 @@ export function Login() {
       
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
+      
+      // Check if user is active before proceeding
+      try {
+        const userDocRef = doc(db, 'users', user.uid);
+        const userDoc = await getDoc(userDocRef);
+        
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          const isActive = userData.isActive !== false;
+          
+          if (!isActive) {
+            // User is inactive, sign them out and show error
+            const errorMessage = 'Account deactivated, contact admin.';
+            console.log('User is inactive, showing error:', errorMessage);
+            
+            // Clear the freshLogin flag so AuthProvider doesn't interfere
+            sessionStorage.removeItem('freshLogin');
+            
+            // Set error first
+            setErrors({ general: errorMessage });
+            
+            // Show toast with explicit styling - use a promise to ensure it's shown
+            const toastPromise = toast.error(errorMessage, {
+              duration: 6000,
+              position: 'top-center',
+              style: {
+                background: '#ef4444',
+                color: '#fff',
+                fontSize: '16px',
+                padding: '16px',
+                zIndex: 9999,
+              },
+            });
+            
+            // Wait a moment to ensure toast is rendered, then sign out
+            await new Promise(resolve => setTimeout(resolve, 200));
+            await signOut(auth);
+            
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (checkError) {
+        console.error('Error checking user status:', checkError);
+        // Continue with login if check fails (shouldn't happen)
+      }
       
       // Handle trusted device (only if location permission was granted)
       if (trustDevice && user && allowLocation) {

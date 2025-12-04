@@ -52,7 +52,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit } from 'firebase/firestore';
+import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { 
   getCachedPaginatedNumbers,
@@ -100,6 +100,8 @@ import {
   CheckCircle2,
   CheckCircle,
   X,
+  Copy,
+  FileWarning,
   Edit,
   RefreshCw
 } from 'lucide-react';
@@ -118,10 +120,12 @@ import { ChatBox } from '../../components/ChatBox';
  * 
  * Displays agent name and team information for number assignments.
  * Handles permission-based data access and loading states.
+ * Can fetch agent info directly via agentId or from a lead via leadId.
  * 
  * @param agentId - ID of the agent to display information for
+ * @param leadId - Optional lead ID to fetch agent info from if agentId is not available
  */
-const AgentTeamInfo = ({ agentId }: { agentId: string }) => {
+const AgentTeamInfo = ({ agentId, leadId }: { agentId?: string; leadId?: string }) => {
   const [agentInfo, setAgentInfo] = useState<{ name: string; teamName: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const { user, isAdmin } = useAuthStore();
@@ -130,7 +134,23 @@ const AgentTeamInfo = ({ agentId }: { agentId: string }) => {
     const fetchAgentInfo = async () => {
       try {
         setLoading(true);
-        const userDoc = await getDoc(doc(db, 'users', agentId));
+        
+        let resolvedAgentId = agentId;
+        
+        // If no agentId but we have leadId, fetch the lead to get the agentId
+        if (!resolvedAgentId && leadId) {
+          const leadDoc = await getDoc(doc(db, 'leads', leadId));
+          if (leadDoc.exists()) {
+            resolvedAgentId = leadDoc.data().agentId;
+          }
+        }
+        
+        if (!resolvedAgentId) {
+          setAgentInfo(null);
+          return;
+        }
+        
+        const userDoc = await getDoc(doc(db, 'users', resolvedAgentId));
         if (userDoc.exists()) {
           const userData = userDoc.data();
           const agentName = userData.name || userData.email || 'Unknown Agent';
@@ -150,6 +170,8 @@ const AgentTeamInfo = ({ agentId }: { agentId: string }) => {
           }
           
           setAgentInfo({ name: agentName, teamName });
+        } else {
+          setAgentInfo(null);
         }
       } catch (error) {
         setAgentInfo({ name: 'Error', teamName: 'Error' });
@@ -158,10 +180,12 @@ const AgentTeamInfo = ({ agentId }: { agentId: string }) => {
       }
     };
 
-    if (agentId) {
+    if (agentId || leadId) {
       fetchAgentInfo();
+    } else {
+      setLoading(false);
     }
-  }, [agentId, isAdmin, user?.role]);
+  }, [agentId, leadId, isAdmin, user?.role]);
 
   if (loading) {
     return (
@@ -420,6 +444,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showReserveLimitDialog, setShowReserveLimitDialog] = useState(false);
   const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
   const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
+  const [showReserveConflictDialog, setShowReserveConflictDialog] = useState(false);
+  const [reserveConflictInfo, setReserveConflictInfo] = useState<{ number: string; status?: string; reservedByName?: string | null } | null>(null);
   const [checkingReserveId, setCheckingReserveId] = useState<string | null>(null);
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [showClaimDialog, setShowClaimDialog] = useState(false);
@@ -437,6 +463,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [statusChecks, setStatusChecks] = useState<StatusCheck[]>([]);
   const [isCoordinator, setIsCoordinator] = useState(false);
   const [agentLeadNumberIds, setAgentLeadNumberIds] = useState<Set<string>>(new Set());
+  const [showDuplicateDialog, setShowDuplicateDialog] = useState(false);
+  const [duplicateNumbers, setDuplicateNumbers] = useState<Array<{ number: string; entries: NumberPoolType[] }>>([]);
+  const [checkingDuplicates, setCheckingDuplicates] = useState(false);
+  const [selectedDuplicateEntries, setSelectedDuplicateEntries] = useState<Set<string>>(new Set());
+  const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false);
+  const [showDeleteDuplicatesDialog, setShowDeleteDuplicatesDialog] = useState(false);
+
+  const formatStatusLabel = useCallback((status?: string) => {
+    if (!status) return 'Unknown';
+    return status
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, letter => letter.toUpperCase());
+  }, []);
   
   // ===============================================================================
   // PERFORMANCE OPTIMIZATION STATE
@@ -502,8 +541,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // Admin/manager/coordinator see everything
     if (isAdmin() || user?.role === 'manager' || user?.role === 'coordinator') return list;
     // Agents: if number has teamVisibility, it must match user's team; if missing, it's public
+    // Also hide activated numbers from agents
     if (user?.role === 'agent' && user.teamId) {
-      return list.filter(n => !n.teamVisibility || n.teamVisibility === user.teamId);
+      return list.filter(n => {
+        // Hide activated numbers
+        if (n.status === 'activated') return false;
+        // Filter by team visibility
+        return !n.teamVisibility || n.teamVisibility === user.teamId;
+      });
     }
     return list;
   }, [isAdmin, user?.role, user?.teamId]);
@@ -1108,9 +1153,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       if (isAdmin() || isCoordinator) {
         numberData.passcode = editPoolPasscode.trim();
       }
-      // Only add team visibility if it has a value
+      // Handle team visibility - set to empty string if cleared, or to the selected team ID
+      if (isAdmin() || isCoordinator) {
       if (editPoolTeamVisibility.trim()) {
         numberData.teamVisibility = editPoolTeamVisibility.trim();
+        } else {
+          // Clear team visibility to make it visible to all teams
+          numberData.teamVisibility = null;
+        }
       }
 
       
@@ -1138,6 +1188,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       );
       
       toast.success('Number updated successfully!');
+      await refreshNumberData(editingNumber.id);
       setShowEditDialog(false);
       setEditingNumber(null);
       // Reset form
@@ -1612,6 +1663,32 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
     
     setCheckingReserveId(null);
+
+    try {
+      const numberRef = doc(db, 'numberPool', number.id);
+      const latestSnapshot = await getDoc(numberRef);
+      if (latestSnapshot.exists()) {
+        const latestData = latestSnapshot.data();
+        const latestStatus = latestData.status as NumberStatus | undefined;
+        // Number is reservable if status is 'open' - reservedBy field doesn't matter for open numbers
+        const isReservable = latestStatus === 'open';
+
+        if (!isReservable) {
+          setReserveConflictInfo({
+            number: latestData.number || number.number,
+            status: latestStatus,
+            reservedByName: null
+          });
+          setShowReserveConflictDialog(true);
+          await refreshNumberData(number.id);
+          return;
+        }
+      }
+    } catch (error) {
+      console.error('Error validating latest number status before reserve:', error);
+    }
+
+    setReserveConflictInfo(null);
     setNumberToReserve(number);
     setShowReserveDialog(true);
   }
@@ -2012,6 +2089,153 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       toast.error('Failed to delete numbers');
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleCheckDuplicates = async () => {
+    if (!isAdmin()) {
+      toast.error('Only administrators can check for duplicates');
+      return;
+    }
+
+    try {
+      setCheckingDuplicates(true);
+      
+      // Fetch all numbers from Firestore
+      const numbersRef = collection(db, 'numberPool');
+      const numbersSnapshot = await getDocs(numbersRef);
+      
+      // Group numbers by their number value
+      const numberMap = new Map<string, NumberPoolType[]>();
+      
+      numbersSnapshot.forEach((doc) => {
+        const data = doc.data() as NumberPoolType;
+        const number = (data.number || '').trim();
+        
+        if (number) {
+          if (!numberMap.has(number)) {
+            numberMap.set(number, []);
+          }
+          numberMap.get(number)!.push({
+            ...data,
+            id: doc.id
+          });
+        }
+      });
+      
+      // Find duplicates (numbers that appear more than once)
+      const duplicates: Array<{ number: string; entries: NumberPoolType[] }> = [];
+      
+      numberMap.forEach((entries, number) => {
+        if (entries.length > 1) {
+          duplicates.push({ number, entries });
+        }
+      });
+      
+      // Sort by number of duplicates (most duplicates first)
+      duplicates.sort((a, b) => b.entries.length - a.entries.length);
+      
+      setDuplicateNumbers(duplicates);
+      setShowDuplicateDialog(true);
+      
+      if (duplicates.length === 0) {
+        toast.success('No duplicate numbers found!');
+      } else {
+        toast.success(`Found ${duplicates.length} duplicate number(s)`);
+      }
+    } catch (error) {
+      console.error('Error checking duplicates:', error);
+      toast.error('Failed to check for duplicates');
+    } finally {
+      setCheckingDuplicates(false);
+    }
+  };
+
+  const handleDeleteSelectedDuplicates = async () => {
+    if (!isAdmin()) {
+      toast.error('Only administrators can delete numbers');
+      return;
+    }
+
+    if (selectedDuplicateEntries.size === 0) {
+      toast.error('Please select entries to delete');
+      return;
+    }
+
+    try {
+      setIsDeletingDuplicates(true);
+      
+      const entriesToDelete = Array.from(selectedDuplicateEntries);
+      let deletedCount = 0;
+      
+      // Delete in batches of 30 (Firestore limit)
+      const batchSize = 30;
+      for (let i = 0; i < entriesToDelete.length; i += batchSize) {
+        const batch = writeBatch(db);
+        const chunk = entriesToDelete.slice(i, i + batchSize);
+        
+        for (const entryId of chunk) {
+          // Find the entry to get its details for logging
+          let entryToLog: NumberPoolType | null = null;
+          for (const duplicate of duplicateNumbers) {
+            const found = duplicate.entries.find(e => e.id === entryId);
+            if (found) {
+              entryToLog = found;
+              break;
+            }
+          }
+          
+          if (entryToLog) {
+            // Get old data for logging
+            const oldData = {
+              number: entryToLog.number,
+              category: entryToLog.category,
+              code: entryToLog.code,
+              group: entryToLog.group,
+              status: entryToLog.status
+            };
+            
+            // Delete the document
+            const docRef = doc(db, 'numberPool', entryId);
+            batch.delete(docRef);
+            
+            // Log the deletion
+            await logNumberAction(
+              entryId,
+              entryToLog.number || '',
+              'deleted',
+              oldData,
+              {},
+              `Deleted duplicate number: ${entryToLog.number}`
+            );
+          }
+        }
+        
+        await batch.commit();
+        deletedCount += chunk.length;
+      }
+      
+      toast.success(`Successfully deleted ${deletedCount} duplicate entry/entries`);
+      
+      // Remove deleted entries from local state
+      setDuplicateNumbers(prev => 
+        prev.map(duplicate => ({
+          ...duplicate,
+          entries: duplicate.entries.filter(e => !selectedDuplicateEntries.has(e.id))
+        })).filter(duplicate => duplicate.entries.length > 1) // Remove if no longer duplicate
+      );
+      
+      // Clear selection
+      setSelectedDuplicateEntries(new Set());
+      setShowDeleteDuplicatesDialog(false);
+      
+      // Refresh the numbers list
+      // The real-time listener will update automatically
+    } catch (error) {
+      console.error('Error deleting duplicates:', error);
+      toast.error('Failed to delete duplicate entries');
+    } finally {
+      setIsDeletingDuplicates(false);
     }
   };
 
@@ -2785,6 +3009,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
+                  onClick={handleCheckDuplicates}
+                  disabled={checkingDuplicates}
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center">
+                    <div className="bg-gradient-to-br from-orange-500 to-red-600 p-2 rounded-lg mr-3">
+                      {checkingDuplicates ? (
+                        <Loader2 className="w-5 h-5 text-white animate-spin" />
+                      ) : (
+                        <FileWarning className="w-5 h-5 text-white" />
+                      )}
+                    </div>
+                    <div>
+                      <span className="block text-sm font-semibold text-gray-900">
+                        {checkingDuplicates ? 'Checking...' : 'Check Duplicates'}
+                      </span>
+                    </div>
+                  </div>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
                   onClick={handleSelectAll}
                   className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
                 >
@@ -3366,17 +3612,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           toast.error('Passcode is required');
                           return;
                         }
-                        const existingNumber = numbers.find(n => (n.number || '').trim() === num);
-                        if (existingNumber) {
+                        
+                        // Check if number already exists in Firestore
+                        setAddingNumber(true);
+                        try {
+                          const numbersRef = collection(db, 'numberPool');
+                          const q = query(numbersRef, where('number', '==', num));
+                          const querySnapshot = await getDocs(q);
+                          
+                          if (!querySnapshot.empty) {
+                            // Number already exists
+                            const existingDoc = querySnapshot.docs[0];
+                            const existingData = existingDoc.data() as NumberPoolType;
                           setDuplicateNumberData({
-                            existingNumber: existingNumber.number || '',
+                              existingNumber: existingData.number || '',
                             newNumber: num
                           });
                           setShowDuplicateNumberDialog(true);
+                            setAddingNumber(false);
                           return;
                         }
-                        try {
-                          setAddingNumber(true);
+                          
+                          // Number doesn't exist, proceed with adding
                           const numberData: any = {
                             number: num,
                             category: cat,
@@ -3644,7 +3901,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             <option value="pending_verification" className="text-gray-900">Pending Verification</option>
                             <option value="verified" className="text-gray-900">Verified</option>
                             <option value="rejected" className="text-gray-900">Rejected</option>
-                            <option value="follow_verification" className="text-gray-900">Follow-up Verification</option>
+                            <option value="non_verified" className="text-gray-900">Non Verified</option>
                             <option value="activated" className="text-gray-900">Activated</option>
                           </select>
                           <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-purple-400 pointer-events-none">
@@ -3692,7 +3949,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         )}
 
                         {/* Team Visibility Field */}
-                        {isCoordinator && (
+                        {(isAdmin() || isCoordinator) && (
                           <div className="space-y-2">
                             <label className="text-sm font-semibold text-gray-700 flex items-center">
                               <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2"></span>
@@ -4002,7 +4259,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 {paginatedNumbers.map((number, index) => {
                 const isBeingClaimed = number.status === 'reserved' && number.claimingAgentId;
                 const getStatusStyle = (status: NumberStatus) => {
-                  if (status === 'follow_verification') {
+                  if (status === 'non_verified') {
                       return STATUS_STYLES.reserved;
                   }
                   return STATUS_STYLES[status as keyof typeof STATUS_STYLES];
@@ -4157,8 +4414,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       </td>
                     {(isAdmin() || isCoordinator) && (
         <td className="px-6 py-4 whitespace-nowrap">
-          {number.status !== 'open' && (number.reservedBy || number.claimingAgentId || number.originalAgentId) ? (
-            <AgentTeamInfo agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string} />
+          {number.status !== 'open' && (number.reservedBy || number.claimingAgentId || number.originalAgentId || number.leadId) ? (
+            <AgentTeamInfo 
+              agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string} 
+              leadId={number.leadId}
+            />
           ) : (
             <div className="text-sm text-gray-400">-</div>
           )}
@@ -4300,10 +4560,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </>
           )}
           {/* Edit button for coordinators and admins */}
-          {/* Edit is only available for: rejected, pending_verification, follow_verification, open, reserved */}
+          {/* Edit is only available for: rejected, pending_verification, non_verified, open, reserved */}
           {/* Edit is NOT available for: verified, activated, assigned, later */}
                         {(isAdmin() || isCoordinator) && 
-            ['rejected', 'pending_verification', 'follow_verification', 'open', 'reserved'].includes(number.status) && (
+            ['rejected', 'pending_verification', 'non_verified', 'open', 'reserved'].includes(number.status) && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
@@ -4478,6 +4738,39 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     setActiveNumberInfo(null);
                   }}
                   className="px-6 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reserve Conflict Dialog */}
+        {showReserveConflictDialog && reserveConflictInfo && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-amber-100">
+                  <AlertCircle className="h-8 w-8 text-amber-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Number Already Reserved
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                The number <span className="font-semibold text-gray-900">{reserveConflictInfo.number}</span> is currently{' '}
+                {formatStatusLabel(reserveConflictInfo.status)}.
+                <br />
+                We've refreshed the latest status so you can claim the number.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => {
+                    setShowReserveConflictDialog(false);
+                    setReserveConflictInfo(null);
+                  }}
+                  className="px-6 py-2 text-sm font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors"
                 >
                   OK
                 </button>
@@ -4691,6 +4984,297 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             />
           )}
         </AnimatePresence>
+
+        {/* Duplicate Numbers Dialog */}
+        {showDuplicateDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden"
+              >
+                {/* Header */}
+              <div className="bg-gradient-to-r from-orange-500 to-red-600 text-white p-6">
+                  <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-3">
+                    <FileWarning className="h-6 w-6" />
+                    <h2 className="text-2xl font-bold">Duplicate Numbers</h2>
+                    {duplicateNumbers.length > 0 && (
+                      <span className="bg-white bg-opacity-20 px-3 py-1 rounded-full text-sm">
+                        {duplicateNumbers.length} duplicate(s) found
+                      </span>
+                    )}
+                    </div>
+                  <button
+                    onClick={() => {
+                      setShowDuplicateDialog(false);
+                      setSelectedDuplicateEntries(new Set());
+                    }}
+                    className="text-white hover:bg-white hover:bg-opacity-20 p-2 rounded-lg transition-colors"
+                  >
+                    <X className="h-6 w-6" />
+                  </button>
+                  </div>
+                </div>
+
+                {/* Content */}
+              <div className="flex-1 overflow-y-auto p-6">
+                {duplicateNumbers.length === 0 ? (
+                  <div className="text-center py-12">
+                    <CheckCircle2 className="h-16 w-16 text-green-500 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                      No Duplicates Found
+                    </h3>
+                    <p className="text-gray-500">
+                      All numbers in the pool are unique.
+                    </p>
+                    </div>
+                ) : (
+                  <div className="space-y-6">
+                    {duplicateNumbers.map((duplicate, index) => (
+                      <motion.div
+                        key={duplicate.number}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: index * 0.1 }}
+                        className="bg-red-50 border-2 border-red-200 rounded-xl p-6"
+                      >
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center space-x-3">
+                            <div className="bg-red-100 p-2 rounded-lg">
+                              <FileWarning className="h-5 w-5 text-red-600" />
+                            </div>
+                            <div>
+                              <h3 className="text-lg font-bold text-gray-900">
+                                Number: {duplicate.number}
+                    </h3>
+                              <p className="text-sm text-gray-600">
+                                Found {duplicate.entries.length} duplicate entries
+                              </p>
+                            </div>
+                  </div>
+                </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-12">
+                                  <input
+                                    type="checkbox"
+                                    className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                    checked={duplicate.entries.every(e => selectedDuplicateEntries.has(e.id))}
+                                    onChange={(e) => {
+                                      const newSelected = new Set(selectedDuplicateEntries);
+                                      if (e.target.checked) {
+                                        duplicate.entries.forEach(entry => newSelected.add(entry.id));
+                                      } else {
+                                        duplicate.entries.forEach(entry => newSelected.delete(entry.id));
+                                      }
+                                      setSelectedDuplicateEntries(newSelected);
+                                    }}
+                                  />
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  ID
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Category
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Code
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Group
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Status
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Reserved By
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Created At
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {duplicate.entries.map((entry) => {
+                                const statusStyle = STATUS_STYLES[entry.status as keyof typeof STATUS_STYLES] || STATUS_STYLES.open;
+                                const StatusIcon = statusStyle?.icon || CheckCircle2;
+                                
+                                const isSelected = selectedDuplicateEntries.has(entry.id);
+                                
+                                return (
+                                  <tr key={entry.id} className={`hover:bg-gray-50 ${isSelected ? 'bg-indigo-50' : ''}`}>
+                                    <td className="px-4 py-3">
+                                      <input
+                                        type="checkbox"
+                                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                        checked={isSelected}
+                                        onChange={(e) => {
+                                          const newSelected = new Set(selectedDuplicateEntries);
+                                          if (e.target.checked) {
+                                            newSelected.add(entry.id);
+                                          } else {
+                                            newSelected.delete(entry.id);
+                                          }
+                                          setSelectedDuplicateEntries(newSelected);
+                                        }}
+                                      />
+                                    </td>
+                                    <td className="px-4 py-3 text-sm font-mono text-gray-900">
+                                      {entry.id.substring(0, 8)}...
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.category}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.code || 'N/A'}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.group || 'N/A'}
+                                    </td>
+                                    <td className="px-4 py-3">
+                                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${statusStyle.bg} ${statusStyle.text}`}>
+                                        <StatusIcon className="h-3 w-3 mr-1" />
+                                        {formatStatusLabel(entry.status)}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.reservedBy ? (
+                                        <span className="font-medium">{entry.reservedBy.substring(0, 8)}...</span>
+                                      ) : (
+                                        <span className="text-gray-400">None</span>
+                                      )}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-500">
+                                      {entry.createdAt ? (() => {
+                                        try {
+                                          let date: Date;
+                                          const createdAt = entry.createdAt as any;
+                                          
+                                          if (typeof createdAt?.toDate === 'function') {
+                                            // Firestore Timestamp
+                                            date = createdAt.toDate();
+                                          } else if (createdAt instanceof Date) {
+                                            // Already a Date object
+                                            date = createdAt;
+                                          } else if (createdAt?.seconds) {
+                                            // Firestore Timestamp with seconds
+                                            date = new Date(createdAt.seconds * 1000);
+                                          } else if (typeof createdAt === 'string') {
+                                            // ISO string
+                                            date = new Date(createdAt);
+                                          } else if (typeof createdAt === 'number') {
+                                            // Unix timestamp
+                                            date = new Date(createdAt);
+                                          } else {
+                                            return 'N/A';
+                                          }
+                                          
+                                          return date.toLocaleDateString();
+                                        } catch {
+                                          return 'N/A';
+                                        }
+                                      })() : 'N/A'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="border-t border-gray-200 p-6 bg-gray-50">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-gray-600">
+                    {selectedDuplicateEntries.size > 0 && (
+                      <span className="font-medium text-gray-900">
+                        {selectedDuplicateEntries.size} entry/entries selected
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-3">
+                    {selectedDuplicateEntries.size > 0 && (
+                      <button
+                        onClick={() => setShowDeleteDuplicatesDialog(true)}
+                        disabled={isDeletingDuplicates}
+                        className="px-6 py-2 text-sm font-medium text-white bg-gradient-to-r from-red-500 to-red-600 rounded-lg hover:from-red-600 hover:to-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center"
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete Selected ({selectedDuplicateEntries.size})
+                      </button>
+                    )}
+                    <button
+                    onClick={() => {
+                        setShowDuplicateDialog(false);
+                        setSelectedDuplicateEntries(new Set());
+                      }}
+                      className="px-6 py-2 text-sm font-medium text-white bg-gradient-to-r from-orange-500 to-red-600 rounded-lg hover:from-orange-600 hover:to-red-700 transition-colors"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Delete Duplicates Confirmation Dialog */}
+        {showDeleteDuplicatesDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl"
+            >
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-red-100">
+                  <Trash2 className="h-8 w-8 text-red-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Delete Selected Duplicates
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                Are you sure you want to delete <span className="font-semibold text-gray-900">{selectedDuplicateEntries.size}</span> duplicate entry/entries?
+                <br />
+                <span className="text-sm mt-2 block text-red-600">
+                  This action cannot be undone.
+                </span>
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowDeleteDuplicatesDialog(false)}
+                  disabled={isDeletingDuplicates}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                </button>
+                <button
+                  onClick={handleDeleteSelectedDuplicates}
+                  disabled={isDeletingDuplicates}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center"
+                >
+                  {isDeletingDuplicates && (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  )}
+                  {isDeletingDuplicates ? 'Deleting...' : 'Delete'}
+                </button>
+                </div>
+              </motion.div>
+          </div>
+          )}
         </motion.div>
       </div>
     </div>
