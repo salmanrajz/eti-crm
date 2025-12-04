@@ -477,11 +477,11 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   );
   const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified');
   const isUserManager = isManager();
-  // Manager can assign verified leads or follow_up leads that haven't been assigned yet
-  const canManagerAssign = isUserManager && 
-    ((lead.status === 'verified' && !lead.managerAssigned) || 
-     (lead.status === 'follow_up' && !lead.managerAssigned)) && 
-    user?.id === lead.managerId;
+  // Manager can assign any of their verified or follow_up leads to coordinator
+  // (even if previously managerAssigned) – UI should always show the option
+  const canManagerAssign = isUserManager &&
+    user?.id === lead.managerId &&
+    (lead.status === 'verified' || lead.status === 'follow_up');
   // Agent can also request assignment to coordinator for their own verified/follow_up leads
   const canAgentAssignToCoordinator =
     user?.role === 'agent' &&
@@ -493,9 +493,9 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const getServiceProvider = (group: string) => {
     switch (group?.toUpperCase()) {
       case 'G1':
-        return 'Express Dial';
+        return 'Connect';
       case 'G2':
-        return 'ConnectCC';
+        return 'Express Dial';
       case 'G3':
         return 'Telecon';
       default:
@@ -534,7 +534,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     }
 
     const partner = getServiceProvider(lead.plans?.[0]?.group || '');
-    const currentDate = new Date().toLocaleDateString();
+    // Format date as DD/MM/YYYY for coordinator view
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    const currentDate = `${day}/${month}/${year}`;
     
         return `Partner: ${partner}
 Date: ${currentDate}

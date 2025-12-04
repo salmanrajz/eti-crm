@@ -437,6 +437,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
              })())
       ).length;
       
+      const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified'];
+
       const metrics = {
         totalLeads: filteredCoordinatorLeads.length,
         verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
@@ -445,7 +447,13 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
         later: filteredCoordinatorLeads.filter(l => l.status === 'later').length,
         rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
-        yesterday: filteredCoordinatorLeads.filter(l => l.createdAt && l.createdAt >= yesterdayStart && l.createdAt <= yesterdayEnd && l.status !== 'pending_verification').length
+        yesterday: filteredCoordinatorLeads.filter(l => {
+          const ts = (l.updatedAt || l.createdAt);
+          return ts &&
+          ts >= yesterdayStart &&
+          ts <= yesterdayEnd &&
+          !yesterdayExcludedStatuses.includes(l.status)
+        }).length
       };
 
       setMetrics(metrics);
@@ -455,7 +463,13 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       let filteredLeads: Lead[] = filteredCoordinatorLeads;
       if (currentStatus !== 'all') {
         if (currentStatus === 'yesterday') {
-          filteredLeads = filteredCoordinatorLeads.filter(lead => lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification');
+          filteredLeads = filteredCoordinatorLeads.filter(lead => {
+            const ts = (lead.updatedAt || lead.createdAt);
+            return ts &&
+              ts >= yesterdayStart &&
+              ts <= yesterdayEnd &&
+              !yesterdayExcludedStatuses.includes(lead.status);
+          });
         } else if (currentStatus === 'verified') {
           // Show manager-assigned verified and follow_up leads, assigned_to_cord leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
           filteredLeads = filteredCoordinatorLeads.filter(lead => 
