@@ -381,7 +381,10 @@ export function LeadDetails() {
       }
 
       // Preserve the original agentId and other important fields
-      const isAgentResubmittingFollowUp = user.role === 'agent' && leadData.status === 'non_verified';
+      // Agent resubmission is allowed from both 'non_verified' and legacy 'follow_verification' statuses
+      const isAgentResubmittingFollowUp =
+        user.role === 'agent' &&
+        (leadData.status === 'non_verified' || leadData.status === 'follow_verification');
       const isCoordinatorEditingVerified = user.role === 'coordinator' && leadData.status === 'verified' && Object.keys(updates).length > 0;
       const nextStatus = isAgentResubmittingFollowUp ? 'pending_verification' : 
                         isCoordinatorEditingVerified ? 'pending_verification' : 
@@ -756,7 +759,8 @@ export function LeadDetails() {
                   const current = await getDoc(leadRef);
                   if (!current.exists()) return;
                   const data = current.data();
-                  if (user.role === 'agent' && data.status === 'non_verified') {
+                  // Allow agent resubmission for both 'non_verified' and legacy 'follow_verification' statuses
+                  if (user.role === 'agent' && (data.status === 'non_verified' || data.status === 'follow_verification')) {
                     await updateDoc(leadRef, {
                       status: 'pending_verification',
                       updatedAt: new Date(),

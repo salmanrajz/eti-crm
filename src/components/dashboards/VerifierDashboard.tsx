@@ -548,7 +548,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
     // Statuses to query based on current status
       const statusesToQuery = currentStatus === 'pending_verification' 
-        ? ['pending_verification', 'activated_non_verified']
+        ? ['pending_verification', 'activated_non_verified', 'non_verified']
         : [currentStatus];
       
     // Real-time listener for leads
@@ -604,7 +604,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     // Real-time listener for pending verification count
       const pendingQuery = query(
         collection(db, 'leads'),
-        where('status', 'in', ['pending_verification', 'activated_non_verified'])
+        where('status', 'in', ['pending_verification', 'activated_non_verified', 'non_verified'])
       );
 
     const pendingCountUnsubscribe = onSnapshot(pendingQuery, (snapshot) => {
