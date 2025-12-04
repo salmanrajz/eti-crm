@@ -423,7 +423,7 @@ export function Reports() {
           // For other statuses: count leads (1 per lead), but distribute across groups
           if (status === 'verified') {
             metrics.verified++;
-          } else if (status === 'follow_verification') {
+          } else if (status === 'non_verified') {
             metrics.followup++;
           } else if (status === 'assigned') {
             metrics.assignedForActivation++;
@@ -464,7 +464,7 @@ export function Reports() {
               // For simplicity, count 1 per group (if lead has multiple plans, it appears in multiple groups)
               if (status === 'verified') {
                 metrics.teamWise[teamId].groupStatus[group].verified++;
-              } else if (status === 'follow_verification') {
+              } else if (status === 'non_verified') {
                 metrics.teamWise[teamId].groupStatus[group].followup++;
               } else if (status === 'assigned') {
                 metrics.teamWise[teamId].groupStatus[group].assignedForActivation++;
@@ -1313,7 +1313,7 @@ export function Reports() {
                     const p2pTotal = sortedTeams.reduce((sum, team) => {
                       const groupData = team.groups[group] || { total: 0 };
                       return sum + (groupData.p2pActivations || 0);
-                    }, 0);
+                }, 0);
                     const isExpanded = expandedGroup === group;
                     
                     if (isExpanded) {

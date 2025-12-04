@@ -349,7 +349,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
           teamMetrics.pendingAssignment++;
         }
         if (lead.status === 'assigned') teamMetrics.assigned++;
-        if (lead.status === 'follow_verification') teamMetrics.nonVerified++;
+        if (lead.status === 'non_verified') teamMetrics.nonVerified++;
 
         // Monthly metrics - for most statuses, check if created in current month
         if (lead.createdAt && lead.createdAt >= startOfCurrentMonth && lead.createdAt <= endOfCurrentMonth) {
@@ -363,7 +363,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
             monthlyMetricsData.pendingAssignment++;
           }
           if (lead.status === 'assigned') monthlyMetricsData.assigned++;
-          if (lead.status === 'follow_verification') monthlyMetricsData.nonVerified++;
+          if (lead.status === 'non_verified') monthlyMetricsData.nonVerified++;
         }
       });
 
@@ -808,9 +808,9 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     },
     {
       name: 'Non-Verified Leads',
-      description: 'Follow-up verification required',
+      description: 'Non verified',
       value: metrics.nonVerified,
-      href: '/dashboard/leads?status=follow_verification',
+      href: '/dashboard/leads?status=non_verified',
       icon: AlertCircle,
       color: 'bg-gradient-to-br from-amber-500 to-amber-600',
       textColor: 'text-amber-600',

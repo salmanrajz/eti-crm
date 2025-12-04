@@ -786,7 +786,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       const leadRef = doc(db, 'leads', selectedLead.id);
       const newStatus = actionType === 'verify' ? 'verified' : 
                        actionType === 'reject' ? 'rejected' : 
-                       'follow_verification';
+                       'non_verified';
       
       // Update lead status
       await updateDoc(leadRef, {
@@ -808,7 +808,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       if (selectedLead.agentId) {
         const statusMessage = newStatus === 'verified' ? 'Lead Verified' : 
                             newStatus === 'rejected' ? 'Lead Rejected' : 
-                            'Lead Marked for Follow-up Verification';
+                            'Lead Marked as Non Verified';
         
         await addDoc(collection(db, 'notifications'), {
           userId: selectedLead.agentId,
@@ -873,6 +873,74 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
               // No claims in queue, just set to open
               await updateDoc(numberRef, {
                 status: 'open',
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: null,
+                claimingStartedAt: null,
+                claimingExpiresAt: null,
+                claimQueue: [],
+                leadId: selectedLead.id
+              });
+            }
+          } else if (newStatus === 'non_verified') {
+            // For non_verified leads, reserve the number for the original agent
+            const agentId = selectedLead.agentId;
+            const now = new Date();
+            const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
+            
+            // Check if there's a claim queue or existing claiming agent
+            const claimQueue = numberData?.claimQueue || [];
+            const existingClaimingAgentId = numberData?.claimingAgentId;
+            
+            if (claimQueue.length > 0) {
+              // Get the first claim in queue
+              const nextClaim = claimQueue[0];
+              
+              // Reserve for the original agent, but start the claim timer for the first claim
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                reservedBy: agentId,
+                reservedAt: serverTimestamp(),
+                expiresAt: expiresAt,
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: nextClaim.agentId,
+                claimingStartedAt: serverTimestamp(),
+                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                claimQueue: claimQueue.slice(1),
+                leadId: selectedLead.id
+              });
+
+              // If there's a second claim, send them notification
+              if (claimQueue.length > 1) {
+                await addDoc(collection(db, 'notifications'), {
+                  userId: claimQueue[1].agentId,
+                  type: 'number_claimed',
+                  title: 'Number Claim Started',
+                  message: `The number is now available for your claim. You have 20 minutes to take ownership.`,
+                  read: false,
+                  createdAt: serverTimestamp(),
+                  numberId: plan.numberId
+                });
+              }
+            } else if (existingClaimingAgentId) {
+              // No queue but there's an existing claiming agent, restart their timer
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                reservedBy: agentId,
+                reservedAt: serverTimestamp(),
+                expiresAt: expiresAt,
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: existingClaimingAgentId,
+                claimingStartedAt: serverTimestamp(),
+                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                leadId: selectedLead.id
+              });
+            } else {
+              // No claims in queue and no existing claiming agent, just reserve for the original agent
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                reservedBy: agentId,
+                reservedAt: serverTimestamp(),
+                expiresAt: expiresAt,
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: null,
                 claimingStartedAt: null,
@@ -989,11 +1057,11 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
               <div className="flex-1 w-full">
                 <h1 className="text-lg sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600 leading-tight">
                   Welcome back, <span className="bg-gradient-to-r from-orange-500 to-pink-500 bg-clip-text text-transparent">{user?.name}</span>!
-                </h1>
+            </h1>
                 <p className="mt-2 text-sm text-gray-600 max-w-xl">
-                  Here's an overview of leads requiring verification.
-                </p>
-              </div>
+              Here's an overview of leads requiring verification.
+            </p>
+          </div>
               <motion.div
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
@@ -1003,13 +1071,13 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                   <div className="flex items-center gap-2">
                     <Calendar className="h-4 w-4" />
                     <span className="text-xs uppercase tracking-wide">Today</span>
-                  </div>
+          </div>
                   <p className="text-sm font-semibold">
                     {format(new Date(), 'EEE, MMM d, yyyy')}
                   </p>
-                </div>
+        </div>
               </motion.div>
-            </div>
+      </div>
           </div>
         </motion.div>
 

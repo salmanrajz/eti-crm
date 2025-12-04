@@ -156,7 +156,7 @@ export function AdvancedLeadSearch({
   isVisible, 
   onClose 
 }: AdvancedLeadSearchProps) {
-  const { isAdmin } = useAuthStore();
+  const { isAdmin, isCoordinator } = useAuthStore();
   const [filters, setFilters] = useState<AdvancedSearchFilters>({
     // Customer Information
     customerName: '',
@@ -216,8 +216,8 @@ export function AdvancedLeadSearch({
   const [availablePlanNames, setAvailablePlanNames] = useState<string[]>([]);
   const [loadingPlans, setLoadingPlans] = useState(false);
 
-  // Don't render if user is not admin
-  if (!isAdmin) {
+  // Only render for admin and coordinator roles
+  if (!isAdmin() && !isCoordinator()) {
     return null;
   }
 
@@ -237,7 +237,9 @@ export function AdvancedLeadSearch({
           }
         });
         
-        setAvailablePlanNames(planNames.sort());
+        // Deduplicate plan names and sort
+        const uniquePlanNames = Array.from(new Set(planNames)).sort();
+        setAvailablePlanNames(uniquePlanNames);
       } catch (error) {
         console.error('Error fetching plan names:', error);
         toast.error('Failed to load plan names');
@@ -426,7 +428,7 @@ export function AdvancedLeadSearch({
               <Settings className="h-6 w-6" />
               <h2 className="text-2xl font-bold">Advanced Lead Search</h2>
               <span className="bg-white bg-opacity-20 px-3 py-1 rounded-full text-sm">
-                Admin Only
+                Admin &amp; Coordinator
               </span>
             </div>
             <button
@@ -479,9 +481,9 @@ export function AdvancedLeadSearch({
                       {/* Selected Plans */}
                       {filters.planName.length > 0 && (
                         <div className="flex flex-wrap gap-2 mb-3">
-                          {filters.planName.map(plan => (
+                          {filters.planName.map((plan, index) => (
                             <span
-                              key={plan}
+                              key={`selected-plan-${index}-${plan}`}
                               className="inline-flex items-center px-3 py-1 bg-blue-100 text-blue-800 text-sm rounded-full"
                             >
                               {plan}
@@ -513,8 +515,8 @@ export function AdvancedLeadSearch({
                           </option>
                           {availablePlanNames
                             .filter(planName => !filters.planName.includes(planName))
-                            .map(planName => (
-                              <option key={planName} value={planName}>{planName}</option>
+                            .map((planName, index) => (
+                              <option key={`plan-${index}-${planName}`} value={planName}>{planName}</option>
                             ))}
                         </select>
                         <ChevronDownIcon className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
@@ -766,6 +768,9 @@ export function AdvancedLeadSearch({
                       <thead className="bg-gray-50">
                         <tr>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Lead ID
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Customer
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -773,6 +778,15 @@ export function AdvancedLeadSearch({
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Status
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Team / Agent
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Etisalat ID
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Activation / SR
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Plans
@@ -789,8 +803,17 @@ export function AdvancedLeadSearch({
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {filteredLeads.map((lead) => (
+                        {filteredLeads.map((lead) => {
+                          const anyLead = lead as any;
+                          const activationDate = anyLead.activationDate;
+                          const srNumber = anyLead.srNumber || anyLead.srNo || anyLead.sr;
+
+                          return (
                           <tr key={lead.id} className="hover:bg-gray-50 transition-colors">
+                              {/* Lead ID */}
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                {lead.leadNumber || lead.id}
+                              </td>
                             {/* Customer Name */}
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div className="flex items-center">
@@ -824,6 +847,33 @@ export function AdvancedLeadSearch({
                                 {lead.status?.replace('_', ' ').toUpperCase() || 'UNKNOWN'}
                               </span>
                             </td>
+
+                              {/* Team / Agent */}
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <div className="text-sm font-medium text-gray-900">
+                                  {lead.agentName || 'Unknown Agent'}
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  {lead.teamName || lead.teamId || 'N/A'}
+                                </div>
+                              </td>
+
+                              {/* Etisalat ID */}
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                {lead.etisalatLeadId || 'N/A'}
+                              </td>
+
+                              {/* Activation Date / SR Number */}
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                <div>
+                                  <span className="font-medium">Activation:&nbsp;</span>
+                                  {activationDate ? new Date(activationDate).toLocaleDateString() : 'N/A'}
+                                </div>
+                                <div className="text-xs text-gray-600 mt-1">
+                                  <span className="font-medium">SR:&nbsp;</span>
+                                  {srNumber || 'N/A'}
+                                </div>
+                              </td>
 
                             {/* Plans Count */}
                             <td className="px-6 py-4 whitespace-nowrap">
@@ -866,7 +916,8 @@ export function AdvancedLeadSearch({
                               {lead.updatedAt ? new Date(lead.updatedAt).toLocaleDateString() : 'N/A'}
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

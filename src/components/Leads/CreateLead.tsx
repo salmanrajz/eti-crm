@@ -2083,7 +2083,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 >
                   {loading 
                     ? 'Saving Changes...'
-                    : (user?.role === 'agent' && initialData?.status === 'follow_verification' 
+                    : (user?.role === 'agent' && initialData?.status === 'non_verified' 
                         ? 'Save Changes and Resubmit' 
                         : 'Save Changes')}
                 </button>

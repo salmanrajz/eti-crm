@@ -199,7 +199,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const pageEndRef = useRef<HTMLDivElement>(null);
   const hasScrolledOnMountRef = useRef(false);
   const [showVerifyDialog, setShowVerifyDialog] = useState(false);
-  const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'follow_verification' | null>(null);
+  const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'non_verified' | null>(null);
   const [verificationNote, setVerificationNote] = useState('');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
@@ -468,11 +468,11 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
 
   const canEdit = (
     lead.status === 'pending_verification' ||
-    (user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification') ||
+    (user?.role === 'agent' && user.id === lead.agentId && lead.status === 'non_verified') ||
     isAdmin() ||
     isCoordinator()
   );
-  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'follow_verification' || lead.status === 'activated_non_verified');
+  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified');
   const isUserManager = isManager();
   // Manager can assign verified leads or follow_up leads that haven't been assigned yet
   const canManagerAssign = isUserManager && 
@@ -641,7 +641,7 @@ Language: ${lead.language || 'N/A'}`;
       let leadStatus = verifyAction === 'verify' ? 
                       (lead.status === 'activated_non_verified' ? 'activated' : 'verified') 
                       : verifyAction === 'reject' ? 'rejected'
-                      : 'follow_verification';
+                      : 'non_verified';
       
      // console.log('Setting lead status to:', leadStatus);
       
@@ -731,6 +731,103 @@ Language: ${lead.language || 'N/A'}`;
                 `Verifier ${user?.name || 'Unknown'} rejected lead, set number open`
               );
           }
+          } else if (leadStatus === 'non_verified') {
+            // For non_verified leads, reserve the number for the original agent
+            // Get the agentId from the lead
+            const agentId = lead.agentId;
+            const now = new Date();
+            const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
+            
+            // Check if there's a claim queue or existing claiming agent
+            const claimQueue = numberData?.claimQueue || [];
+            const existingClaimingAgentId = numberData?.claimingAgentId;
+            
+            if (claimQueue.length > 0) {
+              // Get the first claim in queue
+              const nextClaim = claimQueue[0];
+              
+              // Reserve for the original agent, but start the claim timer for the first claim
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                reservedBy: agentId,
+                reservedAt: serverTimestamp(),
+                expiresAt: expiresAt,
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: nextClaim.agentId,
+                claimingStartedAt: serverTimestamp(),
+                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                claimQueue: claimQueue.slice(1),
+                leadId: lead.id
+              });
+
+              // Log status change
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status },
+                { status: 'reserved', reservedBy: agentId, leadId: lead.id },
+                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentId}, claim timer started`
+              );
+
+              // If there's a second claim, send them notification
+              if (claimQueue.length > 1) {
+                await addDoc(collection(db, 'notifications'), {
+                  userId: claimQueue[1].agentId,
+                  type: 'number_claimed',
+                  title: 'Number Claim Started',
+                  message: `The number is now available for your claim. You have 20 minutes to take ownership.`,
+                  read: false,
+                  createdAt: serverTimestamp(),
+                  numberId: plan.numberId
+                });
+              }
+            } else if (existingClaimingAgentId) {
+              // No queue but there's an existing claiming agent, restart their timer
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                reservedBy: agentId,
+                reservedAt: serverTimestamp(),
+                expiresAt: expiresAt,
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: existingClaimingAgentId,
+                claimingStartedAt: serverTimestamp(),
+                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                leadId: lead.id
+              });
+
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status },
+                { status: 'reserved', reservedBy: agentId, leadId: lead.id },
+                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentId}, existing claim timer restarted`
+              );
+            } else {
+              // No claims in queue and no existing claiming agent, just reserve for the original agent
+              await updateDoc(numberRef, {
+                status: 'reserved',
+                reservedBy: agentId,
+                reservedAt: serverTimestamp(),
+                expiresAt: expiresAt,
+                lastStatusChange: serverTimestamp(),
+                claimingAgentId: null,
+                claimingStartedAt: null,
+                claimingExpiresAt: null,
+                claimQueue: [],
+                leadId: lead.id
+              });
+
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status },
+                { status: 'reserved', reservedBy: agentId, leadId: lead.id },
+                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentId}`
+              );
+            }
           } else {
             // For other verification actions, update normally
             await updateDoc(numberRef, {
@@ -763,7 +860,7 @@ Language: ${lead.language || 'N/A'}`;
       if (agentId) {
         const statusMessage = leadStatus === 'verified' ? 'Lead Verified' : 
                             leadStatus === 'rejected' ? 'Lead Rejected' : 
-                            'Lead Marked for Follow-up Verification';
+                            'Lead Marked as Non Verified';
         
         await addDoc(collection(db, 'notifications'), {
           userId: agentId,
@@ -771,7 +868,7 @@ Language: ${lead.language || 'N/A'}`;
           title: statusMessage,
           message: `${user?.name} has ${leadStatus === 'verified' ? 'verified' : 
                     leadStatus === 'rejected' ? 'rejected' : 
-                    'marked for follow-up'} your lead${verificationNote ? `: ${verificationNote}` : ''}`,
+                    'marked as non verified'} your lead${verificationNote ? `: ${verificationNote}` : ''}`,
           read: false,
           createdAt: new Date(),
           data: {
@@ -1515,11 +1612,11 @@ Language: ${lead.language || 'N/A'}`;
                 className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
               >
                 <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
-                {lead.status === 'follow_verification' ? 'Verify Follow-up' : 'Verify'}
+                {lead.status === 'non_verified' ? 'Verify Non Verified' : 'Verify'}
               </button>
               <button
                 onClick={() => {
-                  setVerifyAction('follow_verification');
+                  setVerifyAction('non_verified');
                   setShowVerifyDialog(true);
                 }}
                 className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
@@ -1534,10 +1631,10 @@ Language: ${lead.language || 'N/A'}`;
               onClick={onEdit}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
             >
-              {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification' ? 'Edit & Resubmit' : 'Edit Lead'}
+              {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'non_verified' ? 'Edit & Resubmit' : 'Edit Lead'}
             </button>
           )}
-          {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'follow_verification' && (
+          {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'non_verified' && (
             <button
               onClick={() => !isResubmitting && onResubmit && onResubmit()}
               disabled={isResubmitting}
@@ -1596,7 +1693,7 @@ Language: ${lead.language || 'N/A'}`;
             <h3 className="text-lg font-medium text-gray-900 mb-4">
               {verifyAction === 'verify' ? 'Verify Lead' :
                verifyAction === 'reject' ? 'Reject Lead' :
-               'Mark for Follow-up Verification'}
+               'Mark as Non Verified'}
             </h3>
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -2867,12 +2964,12 @@ Language: ${lead.language || 'N/A'}`;
                 'px-2.5 py-1 rounded-full text-xs font-medium',
                 lead.status === 'verified' ? 'bg-green-100 text-green-800' :
                 lead.status === 'rejected' ? 'bg-red-100 text-red-800' :
-                lead.status === 'follow_verification' ? 'bg-yellow-100 text-yellow-800' :
+                lead.status === 'non_verified' ? 'bg-yellow-100 text-yellow-800' :
                 lead.status === 'pending_coordinator' ? 'bg-blue-100 text-blue-800' :
                 lead.status === 'split' ? 'bg-purple-100 text-purple-800' :
                 'bg-gray-100 text-gray-800'
               )}>
-                {lead.status === 'follow_up' ? 'Follow-up Verification' : lead.status}
+                {lead.status === 'non_verified' ? 'Non Verified' : lead.status === 'follow_up' ? 'Follow-up' : lead.status}
               </div>
             </div>
           </div>
@@ -3289,7 +3386,7 @@ function getStatusColor(status: string | undefined) {
       return 'text-red-600 font-medium';
     case 'pending_verification':
       return 'text-yellow-600 font-medium';
-    case 'Follow-up Verification':
+    case 'Non Verified':
       return 'text-orange-600 font-medium';
     default:
       return 'text-gray-900';

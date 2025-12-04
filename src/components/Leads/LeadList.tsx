@@ -171,7 +171,7 @@ export function LeadList() {
   const [itemsPerPage, setItemsPerPage] = useState(10);
   const [hasMore, setHasMore] = useState(true);
   const [lastDoc, setLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const { user, isAdmin, isManager, isVerifier, isAgent } = useAuthStore();
+  const { user, isAdmin, isManager, isVerifier, isAgent, isCoordinator } = useAuthStore();
   const [searchParams] = useSearchParams();
   const [sortField, setSortField] = useState<string>('createdAt');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
@@ -908,10 +908,10 @@ export function LeadList() {
       filtered = filtered.filter(lead => lead.agentId === user.id);
     }
 
-    // Coordinators should never see pending_verification or follow_verification leads
+    // Coordinators should never see pending_verification or non_verified leads
     if (user?.role === 'coordinator') {
       filtered = filtered.filter(
-        lead => lead.status !== 'pending_verification' && lead.status !== 'follow_verification'
+        lead => lead.status !== 'pending_verification' && lead.status !== 'non_verified'
       );
     }
 
@@ -919,9 +919,9 @@ export function LeadList() {
     if (user?.role === 'coordinator' && user.coordinatorType && ['g1', 'g2', 'g3', 'all'].includes(user.coordinatorType)) {
       filtered = filtered.filter(lead => isLeadInCoordinatorGroup(lead, user.coordinatorType as CoordinatorType));
 
-      // For coordinators, hide pending_verification, follow_verification and pending_coordinator statuses
+      // For coordinators, hide pending_verification, non_verified and pending_coordinator statuses
       filtered = filtered.filter(
-        lead => lead.status !== 'pending_verification' && lead.status !== 'follow_verification'
+        lead => lead.status !== 'pending_verification' && lead.status !== 'non_verified'
       );
       if (user.coordinatorType !== 'all' && user.coordinatorType !== undefined) {
         filtered = filtered.filter(lead => lead.status !== 'pending_coordinator');
@@ -1020,31 +1020,58 @@ export function LeadList() {
   // Handle export results
   const handleExportResults = useCallback(async (filteredLeads: Lead[]) => {
     try {
+      // Enrich leads with agent/team names for export (reuses optimized helper)
+      const enrichedLeads = await processLeadsWithInfo(filteredLeads);
+
       // Dynamic import for xlsx to avoid bundle size issues
       const XLSX = await import('xlsx');
       
       // Prepare data for Excel export
-      const exportData = filteredLeads.map((lead, index) => {
+      const exportData = enrichedLeads.map((lead, index) => {
+        const anyLead = lead as any;
         const plans = lead.plans?.map(plan => `${plan.plan} (${plan.number})`).join('; ') || 'No Plans';
         const planCategories = lead.plans?.map(plan => plan.category).join('; ') || 'No Categories';
         const planGroups = lead.plans?.map(plan => plan.group).join('; ') || 'No Groups';
         const selectedNumbers = lead.plans?.map(plan => plan.number).join('; ') || 'No Numbers';
+        const rawActivationDate = anyLead.activationDate;
+        const srNumber = anyLead.srNumber || anyLead.srNo || anyLead.sr;
+        
+        // Normalize activation date from Firestore Timestamp / Date / string
+        let activationDateFormatted = 'N/A';
+        if (rawActivationDate) {
+          if (typeof rawActivationDate.toDate === 'function') {
+            // Firestore Timestamp
+            activationDateFormatted = rawActivationDate.toDate().toLocaleDateString();
+          } else if (rawActivationDate instanceof Date) {
+            activationDateFormatted = rawActivationDate.toLocaleDateString();
+          } else if (typeof rawActivationDate === 'string') {
+            const parsed = new Date(rawActivationDate);
+            activationDateFormatted = isNaN(parsed.getTime())
+              ? rawActivationDate
+              : parsed.toLocaleDateString();
+          } else {
+            activationDateFormatted = String(rawActivationDate);
+          }
+        }
         
         return {
           'S.No': index + 1,
+          'Lead ID': lead.leadNumber || lead.id,
           'Customer Name': lead.customerName || 'N/A',
           'Customer Phone': lead.customerNumber || lead.customerPhone || 'N/A',
           'Customer Address': lead.customerAddress || 'N/A',
           'Status': lead.status?.replace('_', ' ').toUpperCase() || 'N/A',
+          'Team Name': anyLead.teamName || lead.teamId || 'N/A',
+          'Agent Name': anyLead.agentName || 'Unknown Agent',
+          'Etisalat Lead ID': anyLead.etisalatLeadId || 'N/A',
+          'Activation Date': activationDateFormatted,
+          'SR Number': srNumber || 'N/A',
           'Selected Numbers': selectedNumbers,
           'Plans': plans,
           'Plan Categories': planCategories,
           'Plan Groups': planGroups,
           'Created Date': lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : 'N/A',
           'Updated Date': lead.updatedAt ? new Date(lead.updatedAt).toLocaleDateString() : 'N/A',
-          'Agent ID': lead.agentId || 'N/A',
-          'Coordinator ID': lead.coordinatorId || 'N/A',
-          'Verifier ID': lead.verifierId || 'N/A',
           'Emirate': lead.emirate || 'N/A',
           'Area': lead.area || 'N/A',
           'Country': lead.country || 'N/A',
@@ -1062,19 +1089,22 @@ export function LeadList() {
       // Set column widths
       const colWidths = [
         { wch: 5 },   // S.No
+        { wch: 18 },  // Lead ID
         { wch: 20 },  // Customer Name
         { wch: 15 },  // Customer Phone
         { wch: 30 },  // Customer Address
         { wch: 12 },  // Status
+        { wch: 18 },  // Team Name
+        { wch: 18 },  // Agent Name
+        { wch: 18 },  // Etisalat Lead ID
+        { wch: 14 },  // Activation Date
+        { wch: 14 },  // SR Number
         { wch: 25 },  // Selected Numbers
         { wch: 40 },  // Plans
         { wch: 20 },  // Plan Categories
         { wch: 15 },  // Plan Groups
         { wch: 12 },  // Created Date
         { wch: 12 },  // Updated Date
-        { wch: 15 },  // Agent ID
-        { wch: 18 },  // Coordinator ID
-        { wch: 15 },  // Verifier ID
         { wch: 15 },  // Emirate
         { wch: 15 },  // Area
         { wch: 15 },  // Country
@@ -1095,12 +1125,12 @@ export function LeadList() {
       // Save the file
       XLSX.writeFile(wb, filename);
 
-      toast.success(`Successfully exported ${filteredLeads.length} leads to ${filename}`);
+      toast.success(`Successfully exported ${enrichedLeads.length} leads to ${filename}`);
     } catch (error) {
       console.error('Export error:', error);
       toast.error('Failed to export leads. Please try again.');
     }
-  }, []);
+  }, [processLeadsWithInfo]);
 
   // Memoized sorted and filtered leads
   const sortedAndFilteredLeads = useMemo(() => {
@@ -1175,7 +1205,7 @@ export function LeadList() {
         return 'bg-teal-100 text-teal-800';
       case 'pending_assignment':
         return 'bg-cyan-100 text-cyan-800';
-      case 'follow_verification':
+      case 'non_verified':
         return 'bg-amber-100 text-amber-800';
       default:
         return 'bg-gray-100 text-gray-800';
@@ -1198,7 +1228,7 @@ export function LeadList() {
         return <Clock className="w-4 h-4 mr-1.5" />;
       case 'follow_up':
         return <ArrowRight className="w-4 h-4 mr-1.5" />;
-      case 'follow_verification':
+      case 'non_verified':
         return <ArrowRight className="w-4 h-4 mr-1.5" />;
       case 'activated':
         return <Zap className="w-4 h-4 mr-1.5" />;
@@ -1472,8 +1502,8 @@ export function LeadList() {
               <span className="text-sm font-medium text-gray-600">entries</span>
             </div>
 
-            {/* Advanced Search Button - Admin Only */}
-            {isAdmin() && (
+            {/* Advanced Search Button - Admin & Coordinator */}
+            {(isAdmin() || isCoordinator()) && (
               <button
                 onClick={() => setShowAdvancedSearch(true)}
                 className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-xl hover:from-purple-700 hover:to-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
@@ -1501,7 +1531,7 @@ export function LeadList() {
                   <option value="assigned">Assigned</option>
                   <option value="pending_assignment">Pending Assignment</option>
                   <option value="pending_coordinator">Pending Coordinator</option>
-                  <option value="follow_verification">Follow-up Verification</option>
+                  <option value="non_verified">Non Verified</option>
                 </select>
                 <div className="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none">
                   <ChevronDown className="h-4 w-4 text-gray-400" />

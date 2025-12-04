@@ -205,7 +205,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
         case 'assigned':
           acc.assigned++;
           break;
-        case 'follow_verification':
+        case 'non_verified':
           acc.nonVerified++;
           break;
       }
@@ -548,9 +548,9 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
     },
     {
       name: 'Non-Verified Leads',
-      description: 'Follow-up verification required',
+      description: 'Non verified',
       value: metrics.nonVerified,
-      href: '/dashboard/leads?status=follow_verification',
+      href: '/dashboard/leads?status=non_verified',
       icon: AlertCircle,
       color: 'bg-gradient-to-br from-amber-500 to-amber-600',
       textColor: 'text-amber-600',
