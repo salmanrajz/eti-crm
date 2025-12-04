@@ -468,7 +468,10 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
 
   const canEdit = (
     lead.status === 'pending_verification' ||
-    (user?.role === 'agent' && user.id === lead.agentId && lead.status === 'non_verified') ||
+    // Agents can edit & resubmit both 'non_verified' and legacy 'follow_verification' leads
+    (user?.role === 'agent' &&
+      user.id === lead.agentId &&
+      (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
     isAdmin() ||
     isCoordinator()
   );
@@ -1631,10 +1634,16 @@ Language: ${lead.language || 'N/A'}`;
               onClick={onEdit}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
             >
-              {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'non_verified' ? 'Edit & Resubmit' : 'Edit Lead'}
+              {user?.role === 'agent' &&
+              user.id === lead.agentId &&
+              (lead.status === 'non_verified' || lead.status === 'follow_verification')
+                ? 'Edit & Resubmit'
+                : 'Edit Lead'}
             </button>
           )}
-          {user?.role === 'agent' && user.id === lead.agentId && lead.status === 'non_verified' && (
+          {user?.role === 'agent' &&
+            user.id === lead.agentId &&
+            (lead.status === 'non_verified' || lead.status === 'follow_verification') && (
             <button
               onClick={() => !isResubmitting && onResubmit && onResubmit()}
               disabled={isResubmitting}
