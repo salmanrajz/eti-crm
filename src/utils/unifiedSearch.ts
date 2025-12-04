@@ -113,19 +113,42 @@ export class UnifiedSearch {
       }
     }
     
-    // Check if search term matches a status
+    // Check if search term matches or partially matches a status
+    // Supports exact terms (e.g. "reserved") and smart prefixes (e.g. "res" -> reserved, "non" -> non_verified)
     const statusTerms: Record<string, string> = {
+      // Core statuses
       'verified': 'verified',
+      'verif': 'verified',
       'reserved': 'reserved',
+      'reserv': 'reserved',
+      'res': 'reserved',
       'open': 'open',
       'pending': 'pending_verification',
+      'pend': 'pending_verification',
       'pending_verification': 'pending_verification',
       'assigned': 'assigned',
+      'activ': 'activated',
       'activated': 'activated',
+      'reject': 'rejected',
       'rejected': 'rejected',
+      // Follow-up / non-verified style statuses
       'follow_up': 'follow_up',
       'followup': 'follow_up',
       'follow-up': 'follow_up',
+      'follow': 'follow_up',
+      'non_verified': 'non_verified',
+      'nonverified': 'non_verified',
+      'non-verified': 'non_verified',
+      'non_verif': 'non_verified',
+      'nonverif': 'non_verified',
+      'non': 'non_verified',
+      // Legacy "follow verification" variants → search specifically for follow_verification
+      // (used to locate only records still having this legacy status)
+      'follow_verification': 'follow_verification',
+      'followverification': 'follow_verification',
+      'follow verification': 'follow_verification',
+      'follow verif': 'follow_verification',
+      // Additional lead-like statuses (kept for completeness)
       'in_progress': 'in_progress',
       'inprogress': 'in_progress',
       'manager_review': 'manager_review',
@@ -136,7 +159,14 @@ export class UnifiedSearch {
       'pendingassignment': 'pending_assignment'
     };
     
-    const matchedStatus = statusTerms[normalized] || statusTerms[term.toLowerCase()];
+    let matchedStatus = statusTerms[normalized] || statusTerms[term.toLowerCase()];
+    // If no direct match, try prefix-based matching over known keys
+    if (!matchedStatus) {
+      const statusKey = Object.keys(statusTerms).find(key => key.startsWith(normalized));
+      if (statusKey) {
+        matchedStatus = statusTerms[statusKey];
+      }
+    }
 
     try {
       // Build base query with category filter if needed

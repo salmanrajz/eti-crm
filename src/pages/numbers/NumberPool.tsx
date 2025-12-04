@@ -4560,10 +4560,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </>
           )}
           {/* Edit button for coordinators and admins */}
-          {/* Edit is only available for: rejected, pending_verification, non_verified, open, reserved */}
+          {/* Edit is only available for: rejected, pending_verification, non_verified, follow_up, follow_verification (legacy), open, reserved */}
           {/* Edit is NOT available for: verified, activated, assigned, later */}
                         {(isAdmin() || isCoordinator) && 
-            ['rejected', 'pending_verification', 'non_verified', 'open', 'reserved'].includes(number.status) && (
+            ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status) && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
