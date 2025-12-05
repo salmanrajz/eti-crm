@@ -385,7 +385,34 @@ export function LeadDetails() {
       const isAgentResubmittingFollowUp =
         user.role === 'agent' &&
         (leadData.status === 'non_verified' || leadData.status === 'follow_verification');
-      const isCoordinatorEditingVerified = user.role === 'coordinator' && leadData.status === 'verified' && Object.keys(updates).length > 0;
+      
+      // For coordinators editing verified leads: only trigger reverification if important fields are changed
+      // Customer name changes should NOT trigger reverification
+      let isCoordinatorEditingVerified = false;
+      if (user.role === 'coordinator' && leadData.status === 'verified' && Object.keys(updates).length > 0) {
+        // Exclude status field from check (status changes are handled separately)
+        const updatesWithoutStatus = { ...updates };
+        delete updatesWithoutStatus.status;
+        
+        if (Object.keys(updatesWithoutStatus).length > 0) {
+          // Check if only customer name is being changed (or other non-critical fields)
+          const criticalFields = ['customerNumber', 'customerPhone', 'plans', 'numberId', 'plan', 'customerAddress', 'emirate', 'area', 'country', 'gender', 'hasEmirateId', 'advancePayment', 'language'];
+          const changedFields = Object.keys(updatesWithoutStatus).filter(key => {
+            const oldValue = leadData[key];
+            const newValue = updatesWithoutStatus[key];
+            // Handle deep comparison for objects/arrays
+            if (typeof oldValue === 'object' && typeof newValue === 'object') {
+              return JSON.stringify(oldValue) !== JSON.stringify(newValue);
+            }
+            return oldValue !== newValue;
+          });
+          const hasCriticalChanges = changedFields.some(field => criticalFields.includes(field));
+          
+          // Only trigger reverification if critical fields are changed (not just customer name)
+          isCoordinatorEditingVerified = hasCriticalChanges;
+        }
+      }
+      
       const nextStatus = isAgentResubmittingFollowUp ? 'pending_verification' : 
                         isCoordinatorEditingVerified ? 'pending_verification' : 
                         (updates.status || leadData.status);

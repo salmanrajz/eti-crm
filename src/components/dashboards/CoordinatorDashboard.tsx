@@ -71,7 +71,7 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { clsx } from 'clsx';
-import type { Lead, User, CoordinatorType } from '../../types';
+import type { Lead, User, CoordinatorType, Team } from '../../types';
 import { motion } from 'framer-motion';
 import { StruckNumbers, useStruckNumbersForCoordinator } from './StruckNumbers';
 
@@ -138,11 +138,39 @@ const getCoordinatorGroupDisplay = (coordinatorType: CoordinatorType): string =>
   }
 };
 
-// Helper function to check if a lead belongs to coordinator's group
-const isLeadInCoordinatorGroup = (lead: Lead, coordinatorType: CoordinatorType): boolean => {
+// Helper function to check if a lead belongs to coordinator's scope
+// First checks coordinator's assigned teams (team-based routing),
+// then falls back to group-based coordinatorType if no coordinatorTeams configured.
+const isLeadInCoordinatorScope = (
+  lead: Lead,
+  coordinatorType: CoordinatorType,
+  coordinatorTeams?: string[]
+): boolean => {
+  // If coordinator has explicit team assignments, use ONLY those teams
+  if (coordinatorTeams && coordinatorTeams.length > 0) {
+    // Normalize team IDs for comparison (trim whitespace, handle null/undefined)
+    const normalizedCoordinatorTeams = coordinatorTeams
+      .map(tid => tid?.trim())
+      .filter(Boolean) as string[];
+    const normalizedLeadTeamId = lead.teamId?.trim();
+    
+    // If lead has a teamId, check if it matches any assigned team
+    if (normalizedLeadTeamId) {
+      const matches = normalizedCoordinatorTeams.some(teamId => 
+        teamId === normalizedLeadTeamId
+      );
+      if (matches) {
+        return true;
+      }
+      // If coordinator has team assignments and lead's teamId doesn't match, exclude it
+      return false;
+    }
+    // If coordinator has team assignments but lead has no teamId, exclude it
+    return false;
+  }
+
+  // Group-based routing (existing behaviour) - only used when no coordinatorTeams configured
   if (!lead.plans || lead.plans.length === 0) return false;
-  
-  // Get all unique groups from the lead's plans
   const leadGroups = new Set(lead.plans.map(plan => plan.group).filter(Boolean));
   
   switch (coordinatorType) {
@@ -153,7 +181,7 @@ const isLeadInCoordinatorGroup = (lead: Lead, coordinatorType: CoordinatorType):
     case 'g3':
       return leadGroups.has('G3');
     case 'all':
-      // All groups coordinator can handle any group
+      // All groups coordinator can handle any group / any team
       return true;
     default:
       return false;
@@ -163,6 +191,7 @@ const isLeadInCoordinatorGroup = (lead: Lead, coordinatorType: CoordinatorType):
 export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [loading, setLoading] = useState(true);
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [metrics, setMetrics] = useState({
     totalLeads: 0,
     verified: 0,
@@ -191,12 +220,364 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'verified';
   
-  // Get coordinator type from user
+  // Get coordinator type and team assignments from user
   const coordinatorType = user.coordinatorType || 'all';
+  const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
 
+  // Load teams for debug/logging (teamId -> teamName)
   useEffect(() => {
-    loadCoordinatorData();
-  }, [user, currentStatus, coordinatorType]);
+    const loadTeams = async () => {
+      try {
+        const snapshot = await getDocs(collection(db, 'teams'));
+        const teamList = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...(doc.data() as any)
+        })) as Team[];
+        setTeams(teamList);
+      } catch (error) {
+        console.error('[CoordinatorDashboard] Error loading teams for debug:', error);
+      }
+    };
+
+    loadTeams();
+  }, []);
+
+  // Debug: once teams are loaded, log mapping of team IDs to names and coordinator teams
+  useEffect(() => {
+    if (!coordinatorTeams || coordinatorTeams.length === 0) return;
+    if (!teams || teams.length === 0) {
+      console.log('[CoordinatorDashboard] Teams not loaded yet for debug');
+      return;
+    }
+
+    console.log(
+      '[CoordinatorDashboard] All teams (id -> name):',
+      teams.map(t => ({ id: t.id, name: t.name }))
+    );
+
+    const teamNameFromId = (id?: string | null) => {
+      if (!id) return 'Unknown';
+      const team = teams.find(t => t.id === id);
+      return team?.name || 'Unknown';
+    };
+
+    console.log(
+      '[CoordinatorDashboard] Coordinator teams (id -> name):',
+      coordinatorTeams.map(id => ({ id, name: teamNameFromId(id) }))
+    );
+  }, [coordinatorTeams, teams]);
+
+  // Real-time listener for coordinator leads so unassigned leads update automatically
+  useEffect(() => {
+    if (!user?.id) return;
+
+    setLoading(true);
+
+    const leadsQuery = query(
+      collection(db, 'leads'),
+      orderBy('createdAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(
+      leadsQuery,
+      (snapshot) => {
+        try {
+          const allLeadsData = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+            createdAt: doc.data().createdAt?.toDate(),
+            updatedAt: doc.data().updatedAt?.toDate(),
+            scheduledFor: doc.data().scheduledFor?.toDate
+              ? doc.data().scheduledFor.toDate()
+              : doc.data().scheduledFor
+          })) as Lead[];
+
+          // Filter leads based on coordinator's scope (teams first, then groups)
+          // Debug: Log sample lead teamIds / matches for troubleshooting
+          if (coordinatorTeams && coordinatorTeams.length > 0) {
+            const sampleLeads = allLeadsData.slice(0, 5);
+            sampleLeads.forEach(lead => {
+              console.log(
+                `[CoordinatorDashboard] Lead ${lead.id}: teamId="${lead.teamId}", matches=${coordinatorTeams.includes(lead.teamId || '')}`
+              );
+            });
+          }
+          const coordinatorLeads = allLeadsData.filter(lead =>
+            isLeadInCoordinatorScope(lead, coordinatorType, coordinatorTeams)
+          );
+
+          // For non-All Groups coordinators, exclude pending_coordinator status leads
+          let filteredCoordinatorLeads = (coordinatorType !== 'all' && coordinatorType !== undefined)
+            ? coordinatorLeads.filter(lead => lead.status !== 'pending_coordinator')
+            : coordinatorLeads;
+          
+          // Include verified leads that have been assigned by manager (these should appear as "unassigned")
+          // These are leads with status='verified' and managerAssigned=true
+          // EXCLUDE: follow_up, activated, rejected leads
+          const managerAssignedVerifiedLeads = coordinatorLeads.filter(
+            lead => lead.status === 'verified' && lead.managerAssigned === true
+          );
+          
+          // Include leads with status='assigned_to_cord' (assigned by manager to coordinator)
+          const assignedToCordLeads = coordinatorLeads.filter(
+            lead => lead.status === 'assigned_to_cord'
+          );
+          
+          // Debug: Log assigned_to_cord leads for ETS-10
+          if (coordinatorTeams && coordinatorTeams.includes('1QcXTOSGX7AobfOknLXw')) {
+            const ets10AssignedToCord = assignedToCordLeads.filter(
+              lead => lead.teamId === '1QcXTOSGX7AobfOknLXw'
+            );
+            console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord leads found: ${ets10AssignedToCord.length}`, ets10AssignedToCord.map(l => ({ id: l.id, teamId: l.teamId, status: l.status })));
+            console.log(`[CoordinatorDashboard] Total assigned_to_cord leads: ${assignedToCordLeads.length}`, assignedToCordLeads.map(l => ({ id: l.id, teamId: l.teamId, status: l.status })));
+          }
+          
+          // Include leads with scheduledFor matching today (marked "for later" by coordinator)
+          // BUT exclude later leads with scheduledFor date today or in the future
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          
+          const scheduledForTodayLeads = coordinatorLeads.filter(lead => {
+            if (!lead.scheduledFor) return false;
+            // Exclude later leads with scheduledFor date today or in the future
+            if (lead.status === 'later') {
+              const scheduledRaw: any = lead.scheduledFor;
+              const scheduledDate =
+                scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                  ? scheduledRaw.toDate()
+                  : scheduledRaw instanceof Date
+                    ? scheduledRaw
+                    : new Date(scheduledRaw);
+              scheduledDate.setHours(0, 0, 0, 0);
+              // Exclude if scheduledFor is today or in the future
+              if (scheduledDate.getTime() >= today.getTime()) {
+                return false;
+              }
+            }
+            const scheduledRaw: any = lead.scheduledFor;
+            const scheduledDate =
+              scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                ? scheduledRaw.toDate()
+                : scheduledRaw instanceof Date
+                  ? scheduledRaw
+                  : new Date(scheduledRaw);
+            scheduledDate.setHours(0, 0, 0, 0);
+            return scheduledDate.getTime() === today.getTime();
+          });
+          
+          // Add manager-assigned verified leads, assigned_to_cord leads, plus scheduled leads to filtered list if not already present
+          // EXCLUDE: follow_up, activated, rejected leads
+          [...managerAssignedVerifiedLeads, ...assignedToCordLeads, ...scheduledForTodayLeads].forEach(lead => {
+            // Double-check: exclude follow_up, activated, rejected, and later leads with future dates
+            if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'rejected') {
+              return; // Skip these leads
+            }
+            
+            // Exclude later leads with scheduledFor date today or in the future
+            if (lead.status === 'later' && lead.scheduledFor) {
+              const scheduledRaw: any = lead.scheduledFor;
+              const scheduledDate =
+                scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                  ? scheduledRaw.toDate()
+                  : scheduledRaw instanceof Date
+                    ? scheduledRaw
+                    : new Date(scheduledRaw);
+              scheduledDate.setHours(0, 0, 0, 0);
+              if (scheduledDate.getTime() >= today.getTime()) {
+                return; // Skip later leads with future dates
+              }
+            }
+            
+            if (!filteredCoordinatorLeads.find(l => l.id === lead.id)) {
+              filteredCoordinatorLeads.push(lead);
+            }
+          });
+          
+          // Debug: Log final filteredCoordinatorLeads for ETS-10
+          if (coordinatorTeams && coordinatorTeams.includes('1QcXTOSGX7AobfOknLXw')) {
+            const ets10InFiltered = filteredCoordinatorLeads.filter(l => l.teamId === '1QcXTOSGX7AobfOknLXw');
+            const ets10AssignedToCordInFiltered = ets10InFiltered.filter(l => l.status === 'assigned_to_cord');
+            console.log(`[CoordinatorDashboard] ETS-10 leads in filteredCoordinatorLeads: ${ets10InFiltered.length}`);
+            console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord in filteredCoordinatorLeads: ${ets10AssignedToCordInFiltered.length}`, ets10AssignedToCordInFiltered.map(l => ({ id: l.id, status: l.status })));
+          }
+
+          // Get current month's start and end dates
+          const now = new Date();
+          const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+          const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+          const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
+          const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
+
+          // Filter activated leads for current month and count each number as a separate activation
+          const currentMonthActivatedLeads = filteredCoordinatorLeads.filter(lead => 
+            lead.status === 'activated' && 
+            lead.updatedAt >= startOfMonth && 
+            lead.updatedAt <= endOfMonth
+          );
+
+          // Calculate total activations by counting the number of plans in each activated lead
+          const totalActivations = currentMonthActivatedLeads.reduce((count, lead) => {
+            return count + (lead.plans?.length || 0);
+          }, 0);
+
+          // Calculate metrics from coordinator's leads only
+          // For "unassigned", count verified leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
+          // EXCLUDE: follow_up, activated, rejected, and later leads with scheduledFor date today or in the future
+          const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
+            l => {
+              // Exclude follow_up, activated, rejected leads
+              if (l.status === 'follow_up' || l.status === 'activated' || l.status === 'rejected') {
+                return false;
+              }
+              
+              // Exclude later leads with scheduledFor date today or in the future
+              if (l.status === 'later' && l.scheduledFor) {
+                const scheduledRaw: any = l.scheduledFor;
+                const scheduledDate =
+                  scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                    ? scheduledRaw.toDate()
+                    : scheduledRaw instanceof Date
+                      ? scheduledRaw
+                      : new Date(scheduledRaw);
+                scheduledDate.setHours(0, 0, 0, 0);
+                const todayDate = new Date();
+                todayDate.setHours(0, 0, 0, 0);
+                // Exclude if scheduledFor is today or in the future
+                if (scheduledDate.getTime() >= todayDate.getTime()) {
+                  return false;
+                }
+              }
+              
+              // Include verified leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
+              return (l.status === 'verified' && l.managerAssigned === true) ||
+                     (l.status === 'assigned_to_cord') ||
+                     (l.scheduledFor && (() => {
+                       const scheduledRaw: any = l.scheduledFor;
+                       const scheduledDate =
+                         scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                           ? scheduledRaw.toDate()
+                           : scheduledRaw instanceof Date
+                             ? scheduledRaw
+                             : new Date(scheduledRaw);
+                       scheduledDate.setHours(0, 0, 0, 0);
+                       return scheduledDate.getTime() === today.getTime();
+                     })());
+            }
+          ).length;
+          
+          const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified'];
+
+          const computedMetrics = {
+            totalLeads: filteredCoordinatorLeads.length,
+            verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
+            assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Only actual assigned leads
+            activated: totalActivations, // Use the total number of activations
+            followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
+            later: filteredCoordinatorLeads.filter(l => l.status === 'later').length,
+            rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
+            yesterday: filteredCoordinatorLeads.filter(l => {
+              const ts = (l.updatedAt || l.createdAt);
+              return ts &&
+              ts >= yesterdayStart &&
+              ts <= yesterdayEnd &&
+              !yesterdayExcludedStatuses.includes(l.status)
+            }).length
+          };
+
+          setMetrics(computedMetrics);
+
+          // Then filter leads based on current status (including special 'yesterday')
+          // For "verified" status, show manager-assigned verified leads (these are "unassigned" to coordinators)
+          let nextLeads: Lead[] = filteredCoordinatorLeads;
+          if (currentStatus !== 'all') {
+            if (currentStatus === 'yesterday') {
+              nextLeads = filteredCoordinatorLeads.filter(lead => {
+                const ts = (lead.updatedAt || lead.createdAt);
+                return ts &&
+                  ts >= yesterdayStart &&
+                  ts <= yesterdayEnd &&
+                  !yesterdayExcludedStatuses.includes(lead.status);
+              });
+            } else if (currentStatus === 'verified') {
+              // Show manager-assigned verified leads, assigned_to_cord leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
+              // EXCLUDE: follow_up, activated, rejected, and later leads with scheduledFor date today or in the future
+              nextLeads = filteredCoordinatorLeads.filter(lead => {
+                // Exclude follow_up, activated, rejected leads
+                if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'rejected') {
+                  return false;
+                }
+                
+                // Exclude later leads with scheduledFor date today or in the future
+                if (lead.status === 'later' && lead.scheduledFor) {
+                  const scheduledRaw: any = lead.scheduledFor;
+                  const scheduledDate =
+                    scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                      ? scheduledRaw.toDate()
+                      : scheduledRaw instanceof Date
+                        ? scheduledRaw
+                        : new Date(scheduledRaw);
+                  scheduledDate.setHours(0, 0, 0, 0);
+                  const todayDate = new Date();
+                  todayDate.setHours(0, 0, 0, 0);
+                  // Exclude if scheduledFor is today or in the future
+                  if (scheduledDate.getTime() >= todayDate.getTime()) {
+                    return false;
+                  }
+                }
+                
+                // Include verified leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
+                return (lead.status === 'verified' && lead.managerAssigned === true) ||
+                       (lead.status === 'assigned_to_cord') ||
+                       (lead.scheduledFor && (() => {
+                         const scheduledRaw: any = lead.scheduledFor;
+                         const scheduledDate =
+                           scheduledRaw && typeof scheduledRaw.toDate === 'function'
+                             ? scheduledRaw.toDate()
+                             : scheduledRaw instanceof Date
+                               ? scheduledRaw
+                               : new Date(scheduledRaw);
+                         scheduledDate.setHours(0, 0, 0, 0);
+                         return scheduledDate.getTime() === today.getTime();
+                       })());
+              });
+              
+              // Debug: Log what's being shown in verified tab
+              if (coordinatorTeams && coordinatorTeams.includes('1QcXTOSGX7AobfOknLXw')) {
+                const ets10InVerifiedTab = nextLeads.filter(l => l.teamId === '1QcXTOSGX7AobfOknLXw');
+                const ets10AssignedToCordInTab = ets10InVerifiedTab.filter(l => l.status === 'assigned_to_cord');
+                console.log(`[CoordinatorDashboard] Current tab: "${currentStatus}"`);
+                console.log(`[CoordinatorDashboard] ETS-10 leads in verified tab: ${ets10InVerifiedTab.length}`, ets10InVerifiedTab.map(l => ({ id: l.id, status: l.status })));
+                console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord in verified tab: ${ets10AssignedToCordInTab.length}`, ets10AssignedToCordInTab.map(l => ({ id: l.id, status: l.status })));
+              }
+            } else {
+              nextLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
+            }
+          }
+
+          setLeads(nextLeads);
+          setLoading(false);
+        } catch (error) {
+          console.error('Error processing coordinator data:', error);
+          toast.error('Failed to load dashboard data');
+          setLoading(false);
+        }
+      },
+      (error: any) => {
+        // Handle permission errors gracefully (e.g., during logout)
+        if (error.code === 'permission-denied') {
+          setLoading(false);
+          return;
+        }
+        console.error('Error in coordinator leads listener:', error);
+        toast.error('Failed to load dashboard data');
+        setLoading(false);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [user?.id, currentStatus, coordinatorType]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -247,10 +628,16 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   // Filter leads based on search term and status
   // For coordinators, manager-assigned verified leads (status='verified' && managerAssigned=true) should show when filtering by 'verified'
   const filteredLeads = leads.filter(lead => {
-    const matchesSearch = searchTerm === '' || 
-      lead.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      lead.customerNumber.includes(searchTerm) ||
-      lead.plans?.some(plan => plan.number.includes(searchTerm));
+    const normalizedSearch = searchTerm.trim().toLowerCase();
+    const matchesSearch =
+      normalizedSearch === '' ||
+      lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+      lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
+      lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
+      lead.etisalatLeadId?.toLowerCase().includes(normalizedSearch) ||
+      lead.plans?.some(plan =>
+        plan.number?.toLowerCase().includes(normalizedSearch)
+      );
     
     let matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
     
@@ -338,167 +725,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     }
   ];
 
-  async function loadCoordinatorData() {
-    try {
-      setLoading(true);
-      
-      // Query for all leads to get accurate counts
-      const allLeadsQuery = query(
-        collection(db, 'leads'),
-        orderBy('createdAt', 'desc')
-      );
-      const allLeadsSnapshot = await getDocs(allLeadsQuery);
-      const allLeadsData = allLeadsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate(),
-        updatedAt: doc.data().updatedAt?.toDate(),
-        scheduledFor: doc.data().scheduledFor?.toDate ? doc.data().scheduledFor.toDate() : doc.data().scheduledFor
-      })) as Lead[];
 
-      // Filter leads based on coordinator's group assignment
-      const coordinatorLeads = allLeadsData.filter(lead => 
-        isLeadInCoordinatorGroup(lead, coordinatorType)
-      );
-
-      // For non-All Groups coordinators, exclude pending_coordinator status leads
-      let filteredCoordinatorLeads = (coordinatorType !== 'all' && coordinatorType !== undefined)
-        ? coordinatorLeads.filter(lead => lead.status !== 'pending_coordinator')
-        : coordinatorLeads;
-      
-      // Include verified leads that have been assigned by manager (these should appear as "unassigned")
-      // These are leads with status='verified' and managerAssigned=true
-      const managerAssignedVerifiedLeads = coordinatorLeads.filter(
-        lead => lead.status === 'verified' && lead.managerAssigned === true
-      );
-      
-      // Include follow_up leads that have been assigned by manager (these should also appear as "unassigned")
-      // These are leads with status='follow_up' and managerAssigned=true
-      const managerAssignedFollowUpLeads = coordinatorLeads.filter(
-        lead => lead.status === 'follow_up' && lead.managerAssigned === true
-      );
-      
-      // Include leads with status='assigned_to_cord' (assigned by manager to coordinator)
-      const assignedToCordLeads = coordinatorLeads.filter(
-        lead => lead.status === 'assigned_to_cord'
-      );
-      
-      // Include leads with scheduledFor matching today (marked "for later" by coordinator)
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      const scheduledForTodayLeads = coordinatorLeads.filter(lead => {
-        if (!lead.scheduledFor) return false;
-        const scheduledDate = lead.scheduledFor instanceof Date 
-          ? lead.scheduledFor 
-          : lead.scheduledFor.toDate ? lead.scheduledFor.toDate() : new Date(lead.scheduledFor);
-        scheduledDate.setHours(0, 0, 0, 0);
-        return scheduledDate.getTime() === today.getTime();
-      });
-      
-      // Add manager-assigned verified and follow_up leads, assigned_to_cord leads, plus scheduled leads to filtered list if not already present
-      [...managerAssignedVerifiedLeads, ...managerAssignedFollowUpLeads, ...assignedToCordLeads, ...scheduledForTodayLeads].forEach(lead => {
-        if (!filteredCoordinatorLeads.find(l => l.id === lead.id)) {
-          filteredCoordinatorLeads.push(lead);
-        }
-      });
-
-      // Get current month's start and end dates
-      const now = new Date();
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
-      const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
-
-      // Filter activated leads for current month and count each number as a separate activation
-      const currentMonthActivatedLeads = filteredCoordinatorLeads.filter(lead => 
-        lead.status === 'activated' && 
-        lead.updatedAt >= startOfMonth && 
-        lead.updatedAt <= endOfMonth
-      );
-
-      // Calculate total activations by counting the number of plans in each activated lead
-      const totalActivations = currentMonthActivatedLeads.reduce((count, lead) => {
-        return count + (lead.plans?.length || 0);
-      }, 0);
-
-      // Calculate metrics from coordinator's leads only
-      // For "unassigned", count verified and follow_up leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
-      const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
-        l => (l.status === 'verified' && l.managerAssigned === true) ||
-             (l.status === 'follow_up' && l.managerAssigned === true) ||
-             (l.status === 'assigned_to_cord') ||
-             (l.scheduledFor && (() => {
-               const scheduledDate = l.scheduledFor instanceof Date 
-                 ? l.scheduledFor 
-                 : l.scheduledFor.toDate ? l.scheduledFor.toDate() : new Date(l.scheduledFor);
-               scheduledDate.setHours(0, 0, 0, 0);
-               return scheduledDate.getTime() === today.getTime();
-             })())
-      ).length;
-      
-      const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified'];
-
-      const metrics = {
-        totalLeads: filteredCoordinatorLeads.length,
-        verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
-        assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Only actual assigned leads
-        activated: totalActivations, // Use the total number of activations
-        followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
-        later: filteredCoordinatorLeads.filter(l => l.status === 'later').length,
-        rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
-        yesterday: filteredCoordinatorLeads.filter(l => {
-          const ts = (l.updatedAt || l.createdAt);
-          return ts &&
-          ts >= yesterdayStart &&
-          ts <= yesterdayEnd &&
-          !yesterdayExcludedStatuses.includes(l.status)
-        }).length
-      };
-
-      setMetrics(metrics);
-
-      // Then filter leads based on current status (including special 'yesterday')
-      // For "verified" status, show manager-assigned verified leads (these are "unassigned" to coordinators)
-      let filteredLeads: Lead[] = filteredCoordinatorLeads;
-      if (currentStatus !== 'all') {
-        if (currentStatus === 'yesterday') {
-          filteredLeads = filteredCoordinatorLeads.filter(lead => {
-            const ts = (lead.updatedAt || lead.createdAt);
-            return ts &&
-              ts >= yesterdayStart &&
-              ts <= yesterdayEnd &&
-              !yesterdayExcludedStatuses.includes(lead.status);
-          });
-        } else if (currentStatus === 'verified') {
-          // Show manager-assigned verified and follow_up leads, assigned_to_cord leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
-          filteredLeads = filteredCoordinatorLeads.filter(lead => 
-            (lead.status === 'verified' && lead.managerAssigned === true) ||
-            (lead.status === 'follow_up' && lead.managerAssigned === true) ||
-            (lead.status === 'assigned_to_cord') ||
-            (lead.scheduledFor && (() => {
-              const scheduledDate = lead.scheduledFor instanceof Date 
-                ? lead.scheduledFor 
-                : lead.scheduledFor.toDate ? lead.scheduledFor.toDate() : new Date(lead.scheduledFor);
-              scheduledDate.setHours(0, 0, 0, 0);
-              return scheduledDate.getTime() === today.getTime();
-            })())
-          );
-        } else {
-          filteredLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
-        }
-      }
-
-      setLeads(filteredLeads);
-    } catch (error) {
-      console.error('Error loading coordinator data:', error);
-      toast.error('Failed to load dashboard data');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleLeadAction(lead: Lead, action: 'assign' | 'activate' | 'followup') {
+  async function handleLeadAction(lead: Lead, action: 'assign' | 'activate' | 'followup' | 'assign_verifier') {
     setSelectedLead(lead);
     setActionType(action);
     setActionNote('');
@@ -575,7 +803,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         };
         
         // When marking as follow_up, reset managerAssigned to false so manager can see it in unassigned section
-        if (actionType === 'follow_up') {
+        if (actionType === 'followup') {
           updates.managerAssigned = false;
         }
       }
@@ -743,7 +971,6 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       );
 
       setShowActionDialog(false);
-      loadCoordinatorData();
     } catch (error) {
       console.error('Error updating lead:', error);
       toast.error('Failed to update lead');

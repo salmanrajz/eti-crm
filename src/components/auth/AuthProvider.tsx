@@ -122,6 +122,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               teamId: userData.teamId,
               managerId: userData.managerId,
               coordinatorType: userData.coordinatorType,
+              // NEW: coordinator team-based scope for coordinators
+              ...(userData.coordinatorTeams ? { coordinatorTeams: userData.coordinatorTeams } : {}),
               verifierGroups: userData.verifierGroups,
               phoneNumbers: userData.phoneNumbers,
               isActive: userData.isActive,

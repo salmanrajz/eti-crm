@@ -51,7 +51,7 @@ import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, CoordinatorType, VerifierGroups } from '../../types';
 import { Link, useSearchParams } from 'react-router-dom';
-import { format } from 'date-fns';
+import { format, formatDistanceToNow, formatDistance } from 'date-fns';
 import { 
   Plus, 
   Search, 
@@ -92,10 +92,7 @@ import { AdvancedLeadSearch } from './AdvancedLeadSearch';
 import { TransferLeadModal } from './TransferLeadModal';
 
 // ✅ PERFORMANCE: Optimized load sizes for faster initial loading
-const INITIAL_LOAD_SIZE = (() => {
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  return isMobile ? 50 : 100; // Reduced for faster loading
-})();
+const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
 const PAGINATION_SIZE = (() => {
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
   return isMobile ? 20 : 50; // Optimized for better performance
@@ -135,11 +132,98 @@ const teamInfoCache = new PerformanceCache<Map<string, string>>({
 // ✅ OPTIMIZED: Active listeners tracker to prevent duplicate listeners
 const activeListeners: Map<string, () => void> = new Map();
 
-// Helper function to check if a lead belongs to coordinator's group
-const isLeadInCoordinatorGroup = (lead: Lead, coordinatorType: CoordinatorType): boolean => {
-  if (!lead.plans || lead.plans.length === 0) return false;
+// Helper function to calculate duration from assigned_to_cord to assigned
+const getAssignmentDuration = (lead: Lead): string | null => {
+  if (lead.status !== 'assigned') return null;
   
-  // Get all unique groups from the lead's plans
+  try {
+    const assignedToCordAt = (lead as any).assignedToCordAt;
+    const assignedAt = (lead as any).assignedAt;
+    
+    // If timestamps don't exist, return null (for leads assigned before this feature was added)
+    if (!assignedToCordAt || !assignedAt) {
+      return null;
+    }
+    
+    // Convert Firestore timestamps to Date if needed
+    let startDate: Date;
+    if (assignedToCordAt?.toDate && typeof assignedToCordAt.toDate === 'function') {
+      startDate = assignedToCordAt.toDate();
+    } else if (assignedToCordAt instanceof Date) {
+      startDate = assignedToCordAt;
+    } else if (typeof assignedToCordAt === 'string' || typeof assignedToCordAt === 'number') {
+      startDate = new Date(assignedToCordAt);
+    } else {
+      return null;
+    }
+    
+    let endDate: Date;
+    if (assignedAt?.toDate && typeof assignedAt.toDate === 'function') {
+      endDate = assignedAt.toDate();
+    } else if (assignedAt instanceof Date) {
+      endDate = assignedAt;
+    } else if (typeof assignedAt === 'string' || typeof assignedAt === 'number') {
+      endDate = new Date(assignedAt);
+    } else {
+      return null;
+    }
+    
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) return null;
+    
+    const durationMs = endDate.getTime() - startDate.getTime();
+    if (durationMs < 0) return null; // Invalid if end is before start
+    
+    // Format duration
+    const minutes = Math.floor(durationMs / 60000);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) {
+      return `${days}d ${hours % 24}h`;
+    } else if (hours > 0) {
+      return `${hours}h ${minutes % 60}m`;
+    } else {
+      return `${minutes}m`;
+    }
+  } catch (error) {
+    console.error('Error calculating assignment duration:', error);
+    return null;
+  }
+};
+
+// Helper function to check if a lead belongs to coordinator's scope
+// First checks coordinator's assigned teams (team-based routing),
+// then falls back to group-based coordinatorType if no coordinatorTeams configured.
+const isLeadInCoordinatorScope = (
+  lead: Lead,
+  coordinatorType: CoordinatorType,
+  coordinatorTeams?: string[]
+): boolean => {
+  // If coordinator has explicit team assignments, use ONLY those teams
+  if (coordinatorTeams && coordinatorTeams.length > 0) {
+    // Normalize team IDs for comparison (trim whitespace, handle null/undefined)
+    const normalizedCoordinatorTeams = coordinatorTeams
+      .map(tid => tid?.trim())
+      .filter(Boolean) as string[];
+    const normalizedLeadTeamId = lead.teamId?.trim();
+    
+    // If lead has a teamId, check if it matches any assigned team
+    if (normalizedLeadTeamId) {
+      const matches = normalizedCoordinatorTeams.some(teamId => 
+        teamId === normalizedLeadTeamId
+      );
+      if (matches) {
+        return true;
+      }
+      // If coordinator has team assignments and lead's teamId doesn't match, exclude it
+      return false;
+    }
+    // If coordinator has team assignments but lead has no teamId, exclude it
+    return false;
+  }
+
+  // Group-based routing (existing behaviour) - only used when no coordinatorTeams configured
+  if (!lead.plans || lead.plans.length === 0) return false;
   const leadGroups = new Set(lead.plans.map(plan => plan.group).filter(Boolean));
   
   switch (coordinatorType) {
@@ -150,7 +234,7 @@ const isLeadInCoordinatorGroup = (lead: Lead, coordinatorType: CoordinatorType):
     case 'g3':
       return leadGroups.has('G3');
     case 'all':
-      // All groups coordinator can handle any group
+      // All groups coordinator can handle any group / any team
       return true;
     default:
       return false;
@@ -164,6 +248,8 @@ export function LeadList() {
   const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [firebaseSearchResults, setFirebaseSearchResults] = useState<Lead[]>([]);
+  const [isSearchingFirebase, setIsSearchingFirebase] = useState(false);
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
@@ -426,12 +512,29 @@ export function LeadList() {
           try {
             // ✅ PERFORMANCE: Process data efficiently with early filtering
             const maxDocs = isMobile ? Math.min(snapshot.docs.length, 100) : snapshot.docs.length;
-            let leadsData = snapshot.docs.slice(0, maxDocs).map(doc => ({
+            let leadsData = snapshot.docs.slice(0, maxDocs).map(doc => {
+              const data = doc.data();
+              // Helper to convert Firestore timestamp to Date
+              const convertTimestamp = (ts: any): Date | undefined => {
+                if (!ts) return undefined;
+                if (ts.toDate && typeof ts.toDate === 'function') return ts.toDate();
+                if (ts instanceof Date) return ts;
+                if (typeof ts === 'string' || typeof ts === 'number') {
+                  const date = new Date(ts);
+                  return isNaN(date.getTime()) ? undefined : date;
+                }
+                return undefined;
+              };
+              
+              return {
               id: doc.id,
-              ...doc.data(),
-              createdAt: doc.data().createdAt?.toDate(),
-              updatedAt: doc.data().updatedAt?.toDate()
-            })) as Lead[];
+                ...data,
+                createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+                updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : data.updatedAt,
+                assignedToCordAt: convertTimestamp(data.assignedToCordAt),
+                assignedAt: convertTimestamp(data.assignedAt)
+              };
+            }) as Lead[];
 
             // ✅ PERFORMANCE: Apply date range filtering early to reduce processing
             if (dateRange.from || dateRange.to) {
@@ -525,12 +628,29 @@ export function LeadList() {
       } else {
         // For pagination, use getDocs to append data
         const snapshot = await getDocs(q);
-        let leadsData = snapshot.docs.map(doc => ({
+        let leadsData = snapshot.docs.map(doc => {
+          const data = doc.data();
+          // Helper to convert Firestore timestamp to Date
+          const convertTimestamp = (ts: any): Date | undefined => {
+            if (!ts) return undefined;
+            if (ts.toDate && typeof ts.toDate === 'function') return ts.toDate();
+            if (ts instanceof Date) return ts;
+            if (typeof ts === 'string' || typeof ts === 'number') {
+              const date = new Date(ts);
+              return isNaN(date.getTime()) ? undefined : date;
+            }
+            return undefined;
+          };
+          
+          return {
           id: doc.id,
-          ...doc.data(),
-          createdAt: doc.data().createdAt?.toDate(),
-          updatedAt: doc.data().updatedAt?.toDate()
-        })) as Lead[];
+            ...data,
+            createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+            updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : data.updatedAt,
+            assignedToCordAt: convertTimestamp(data.assignedToCordAt),
+            assignedAt: convertTimestamp(data.assignedAt)
+          };
+        }) as Lead[];
 
         // ✅ SECURITY: Defense-in-depth - Freelancers must ONLY see their own leads
         if (user?.role === 'freelancer' && user?.id) {
@@ -899,6 +1019,121 @@ export function LeadList() {
     };
   }, [user?.id, user?.role, isMobile]);
 
+  // Firebase search function - searches Firebase when not found in loaded leads
+  const searchFirebase = useCallback(async (searchTerm: string) => {
+    if (!user || !searchTerm.trim()) {
+      setFirebaseSearchResults([]);
+      return;
+    }
+
+    setIsSearchingFirebase(true);
+    try {
+      const normalizedSearch = searchTerm.trim().toLowerCase();
+      let baseQuery = collection(db, 'leads');
+      let constraints: any[] = [];
+
+      // Add role-based filters
+      if (user.role === 'agent' || user.role === 'freelancer') {
+        constraints.push(where('agentId', '==', user.id));
+      } else if (isVerifier()) {
+        constraints.push(
+          where('status', 'in', [
+            'pending_verification',
+            'activated_non_verified'
+          ])
+        );
+      } else if (isManager() && user.teamId) {
+        constraints.push(where('teamId', '==', user.teamId));
+      }
+
+      // Search in multiple fields - we'll fetch and filter in memory for complex searches
+      constraints.push(orderBy('createdAt', 'desc'));
+      constraints.push(limit(500)); // Get more results for search
+
+      const q = query(baseQuery, ...constraints);
+      const snapshot = await getDocs(q);
+
+      let searchResults = snapshot.docs
+        .map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+            updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : data.updatedAt,
+            assignedToCordAt: data.assignedToCordAt?.toDate ? data.assignedToCordAt.toDate() : data.assignedToCordAt,
+            assignedAt: data.assignedAt?.toDate ? data.assignedAt.toDate() : data.assignedAt
+          };
+        })
+        .filter((lead: any) => {
+          const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
+          return (
+            lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
+            lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+            lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
+            lead.plans?.some((plan: any) => 
+              plan.number?.toLowerCase().includes(normalizedSearch) ||
+              plan.plan?.toLowerCase().includes(normalizedSearch)
+            ) ||
+            lead.status?.toLowerCase().includes(normalizedSearch) ||
+            lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+            (canSearchEtisalatId && (
+              lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
+              (lead.etisalatLeadIds && Array.isArray(lead.etisalatLeadIds) 
+                ? lead.etisalatLeadIds.some((id: string) => id?.toString?.().toLowerCase().includes(normalizedSearch))
+                : false) ||
+              (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
+            ))
+          );
+        }) as Lead[];
+
+      // Apply role-based filtering (same as filteredLeads)
+      if (user?.role === 'freelancer' && user?.id) {
+        searchResults = searchResults.filter(lead => lead.agentId === user.id);
+      }
+
+      if (user?.role === 'coordinator') {
+        searchResults = searchResults.filter(
+          lead => lead.status !== 'pending_verification' && lead.status !== 'non_verified'
+        );
+      }
+
+      // Apply coordinator scope filtering
+      if (user?.role === 'coordinator' && user.coordinatorType && ['g1', 'g2', 'g3', 'all'].includes(user.coordinatorType)) {
+        const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
+        searchResults = searchResults.filter(lead => 
+          isLeadInCoordinatorScope(lead, user.coordinatorType as CoordinatorType, coordinatorTeams)
+        );
+      }
+
+      // Apply verifier group filtering
+      if (user?.role === 'verifier' && user.verifierGroups && user.verifierGroups.length > 0) {
+        const hasAllGroups = user.verifierGroups.includes('all');
+        if (!hasAllGroups) {
+          searchResults = searchResults.filter(lead => {
+            const hasMatchingGroup = lead.plans?.some(plan => {
+              const planGroup = (plan.group || '').toLowerCase();
+              return (user.verifierGroups as VerifierGroups)?.some((verifierGroup: string) => {
+                const normalizedVerifierGroup = verifierGroup.toLowerCase();
+                return planGroup === normalizedVerifierGroup;
+              }) || false;
+          }) || false;
+            return hasMatchingGroup;
+          });
+        }
+      }
+
+      // Process with agent/team info
+      const enrichedResults = await processLeadsWithInfo(searchResults);
+      setFirebaseSearchResults(enrichedResults);
+    } catch (error) {
+      console.error('Firebase search error:', error);
+      setFirebaseSearchResults([]);
+    } finally {
+      setIsSearchingFirebase(false);
+    }
+  }, [user, isVerifier, isManager, processLeadsWithInfo, isLeadInCoordinatorScope]);
+
   // Memoized filtered leads with optimized search
   const filteredLeads = useMemo(() => {
     let filtered = leads;
@@ -915,9 +1150,13 @@ export function LeadList() {
       );
     }
 
-    // Apply coordinator group filtering
+    // Apply coordinator scope filtering (team-based first, then group-based)
     if (user?.role === 'coordinator' && user.coordinatorType && ['g1', 'g2', 'g3', 'all'].includes(user.coordinatorType)) {
-      filtered = filtered.filter(lead => isLeadInCoordinatorGroup(lead, user.coordinatorType as CoordinatorType));
+      const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
+      
+      filtered = filtered.filter(lead => 
+        isLeadInCoordinatorScope(lead, user.coordinatorType as CoordinatorType, coordinatorTeams)
+      );
 
       // For coordinators, hide pending_verification, non_verified and pending_coordinator statuses
       filtered = filtered.filter(
@@ -933,7 +1172,7 @@ export function LeadList() {
         lead => ((lead.status === 'verified' && lead.managerAssigned === true) ||
                  (lead.status === 'follow_up' && lead.managerAssigned === true) ||
                  (lead.status === 'assigned_to_cord')) &&
-                isLeadInCoordinatorGroup(lead, user.coordinatorType as CoordinatorType)
+                isLeadInCoordinatorScope(lead, user.coordinatorType as CoordinatorType, coordinatorTeams)
       );
       
       // Add manager-assigned leads to filtered list if not already present
@@ -985,7 +1224,13 @@ export function LeadList() {
         ) ||
         lead.status?.toLowerCase().includes(normalizedSearch) ||
         lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
-        (canSearchEtisalatId && lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch))
+        (canSearchEtisalatId && (
+          lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
+          ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
+            ? (lead as any).etisalatLeadIds.some((id: string) => id?.toString?.().toLowerCase().includes(normalizedSearch))
+            : false) ||
+          (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
+        ))
       );
       
       let matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
@@ -999,6 +1244,72 @@ export function LeadList() {
       return matchesSearch && matchesStatus;
     });
   }, [leads, searchTerm, statusFilter, user?.role, user?.coordinatorType, user?.verifierGroups]);
+
+  // Combine loaded leads with Firebase search results when searching
+  const finalFilteredLeads = useMemo(() => {
+    if (searchTerm.trim() && filteredLeads.length === 0 && firebaseSearchResults.length > 0) {
+      // Use Firebase search results if no results in loaded leads
+      // Apply status filter to Firebase results
+      if (statusFilter === 'all') {
+        return firebaseSearchResults;
+      }
+      return firebaseSearchResults.filter(lead => {
+        let matchesStatus = lead.status === statusFilter;
+        if (!matchesStatus && statusFilter === 'pending_assignment' && isManager()) {
+          matchesStatus = lead.status === 'pending_assignment' || 
+                         (lead.status === 'follow_up' && !lead.managerAssigned);
+        }
+        return matchesStatus;
+      });
+    }
+    return filteredLeads;
+  }, [filteredLeads, firebaseSearchResults, searchTerm, statusFilter, isManager]);
+
+  // Search Firebase when search term changes and no results in loaded leads
+  useEffect(() => {
+    const debounceTimer = setTimeout(() => {
+      if (searchTerm.trim()) {
+        // Check if search term matches any leads in the loaded set (before status filter)
+        const normalizedSearch = searchTerm.trim().toLowerCase();
+        const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
+        
+        // First check if any loaded leads match the search term
+        const hasMatchesInLoaded = leads.some(lead => {
+          return (
+            lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
+            lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+            lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
+            lead.plans?.some(plan => 
+              plan.number?.toLowerCase().includes(normalizedSearch) ||
+              plan.plan?.toLowerCase().includes(normalizedSearch)
+            ) ||
+            lead.status?.toLowerCase().includes(normalizedSearch) ||
+            lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+            (canSearchEtisalatId && (
+              lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
+              ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
+                ? (lead as any).etisalatLeadIds.some((id: string) => id?.toString?.().toLowerCase().includes(normalizedSearch))
+                : false) ||
+              (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
+            ))
+          );
+        });
+
+        // If no matches in loaded leads, search Firebase
+        if (!hasMatchesInLoaded && filteredLeads.length === 0) {
+          searchFirebase(searchTerm);
+        } else {
+          // Clear Firebase search results if we have matches in loaded leads
+          setFirebaseSearchResults([]);
+        }
+      } else {
+        // Clear Firebase search results when search is cleared
+        setFirebaseSearchResults([]);
+      }
+    }, 500); // Debounce Firebase search
+
+    return () => clearTimeout(debounceTimer);
+  }, [searchTerm, filteredLeads.length, leads, user?.role, searchFirebase]);
 
   // Add sorting function
   const handleSort = useCallback((field: string) => {
@@ -1026,50 +1337,57 @@ export function LeadList() {
       // Dynamic import for xlsx to avoid bundle size issues
       const XLSX = await import('xlsx');
       
-      // Prepare data for Excel export
-      const exportData = enrichedLeads.map((lead, index) => {
+      // Prepare data for Excel export - create one row per plan/number
+      const exportData: any[] = [];
+      let rowIndex = 0;
+      
+      enrichedLeads.forEach((lead) => {
         const anyLead = lead as any;
-        const plans = lead.plans?.map(plan => `${plan.plan} (${plan.number})`).join('; ') || 'No Plans';
-        const planCategories = lead.plans?.map(plan => plan.category).join('; ') || 'No Categories';
-        const planGroups = lead.plans?.map(plan => plan.group).join('; ') || 'No Groups';
-        const selectedNumbers = lead.plans?.map(plan => plan.number).join('; ') || 'No Numbers';
+        const plans = lead.plans || [];
+        
+        // Get activation dates and SR numbers arrays (for multiple number activation)
+        const activationDates = anyLead.activationDates || [];
+        const srNumbers = anyLead.srNumbers || [];
+        const serviceOrderNumbers = anyLead.serviceOrderNumbers || [];
+        const activationGroups = anyLead.activationGroups || [];
+        
+        // Legacy single activation date/SR number (for backward compatibility)
         const rawActivationDate = anyLead.activationDate;
         const srNumber = anyLead.srNumber || anyLead.srNo || anyLead.sr;
         
-        // Normalize activation date from Firestore Timestamp / Date / string
-        let activationDateFormatted = 'N/A';
-        if (rawActivationDate) {
-          if (typeof rawActivationDate.toDate === 'function') {
-            // Firestore Timestamp
-            activationDateFormatted = rawActivationDate.toDate().toLocaleDateString();
-          } else if (rawActivationDate instanceof Date) {
-            activationDateFormatted = rawActivationDate.toLocaleDateString();
-          } else if (typeof rawActivationDate === 'string') {
-            const parsed = new Date(rawActivationDate);
-            activationDateFormatted = isNaN(parsed.getTime())
-              ? rawActivationDate
-              : parsed.toLocaleDateString();
+        // Helper function to normalize activation date
+        const normalizeActivationDate = (rawDate: any): string => {
+          if (!rawDate) return 'N/A';
+          if (typeof rawDate.toDate === 'function') {
+            return rawDate.toDate().toLocaleDateString();
+          } else if (rawDate instanceof Date) {
+            return rawDate.toLocaleDateString();
+          } else if (typeof rawDate === 'string') {
+            const parsed = new Date(rawDate);
+            return isNaN(parsed.getTime()) ? rawDate : parsed.toLocaleDateString();
           } else {
-            activationDateFormatted = String(rawActivationDate);
+            return String(rawDate);
           }
-        }
+        };
         
-        return {
-          'S.No': index + 1,
-          'Lead ID': lead.leadNumber || lead.id,
+        // If lead has no plans, create one row with N/A for plan fields
+        if (plans.length === 0) {
+          exportData.push({
+            'S.No': ++rowIndex,
+            'Lead ID': lead.leadNumber || lead.id,
           'Customer Name': lead.customerName || 'N/A',
           'Customer Phone': lead.customerNumber || lead.customerPhone || 'N/A',
           'Customer Address': lead.customerAddress || 'N/A',
           'Status': lead.status?.replace('_', ' ').toUpperCase() || 'N/A',
-          'Team Name': anyLead.teamName || lead.teamId || 'N/A',
-          'Agent Name': anyLead.agentName || 'Unknown Agent',
-          'Etisalat Lead ID': anyLead.etisalatLeadId || 'N/A',
-          'Activation Date': activationDateFormatted,
-          'SR Number': srNumber || 'N/A',
-          'Selected Numbers': selectedNumbers,
-          'Plans': plans,
-          'Plan Categories': planCategories,
-          'Plan Groups': planGroups,
+            'Team Name': anyLead.teamName || lead.teamId || 'N/A',
+            'Agent Name': anyLead.agentName || 'Unknown Agent',
+            'Etisalat Lead ID': anyLead.etisalatLeadId || 'N/A',
+            'Activation Date': normalizeActivationDate(rawActivationDate),
+            'SR Number': srNumber || 'N/A',
+            'Selected Numbers': 'No Numbers',
+            'Plans': 'No Plans',
+            'Plan Categories': 'No Categories',
+            'Plan Groups': 'No Groups',
           'Created Date': lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : 'N/A',
           'Updated Date': lead.updatedAt ? new Date(lead.updatedAt).toLocaleDateString() : 'N/A',
           'Emirate': lead.emirate || 'N/A',
@@ -1079,7 +1397,60 @@ export function LeadList() {
           'Language': lead.language || 'N/A',
           'Advance Payment': lead.advancePayment ? 'Yes' : 'No',
           'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No'
-        };
+          });
+        } else {
+          // Create one row for each plan/number
+          plans.forEach((plan: any, planIndex: number) => {
+            // Get plan-specific Etisalat ID
+            const planEtisalatId = plan.etisalatLeadId || 
+              ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
+                ? (lead as any).etisalatLeadIds[planIndex] 
+                : null) ||
+              (planIndex === 0 ? anyLead.etisalatLeadId : null);
+            
+            // Get plan-specific activation date (from array or legacy single value)
+            const planActivationDate = activationDates[planIndex] || 
+              (planIndex === 0 ? rawActivationDate : null);
+            
+            // Get plan-specific SR number (from array or legacy single value)
+            const planSrNumber = srNumbers[planIndex] || 
+              (planIndex === 0 ? srNumber : null);
+            
+            // Get plan-specific service order number
+            const planServiceOrderNumber = serviceOrderNumbers[planIndex] || 'N/A';
+            
+            // Get plan-specific activation group
+            const planActivationGroup = activationGroups[planIndex] || plan.group || 'N/A';
+            
+            exportData.push({
+              'S.No': ++rowIndex,
+              'Lead ID': lead.leadNumber || lead.id,
+              'Customer Name': lead.customerName || 'N/A',
+              'Customer Phone': lead.customerNumber || lead.customerPhone || 'N/A',
+              'Customer Address': lead.customerAddress || 'N/A',
+              'Status': lead.status?.replace('_', ' ').toUpperCase() || 'N/A',
+              'Team Name': anyLead.teamName || lead.teamId || 'N/A',
+              'Agent Name': anyLead.agentName || 'Unknown Agent',
+              'Etisalat Lead ID': planEtisalatId || 'N/A',
+              'Activation Date': normalizeActivationDate(planActivationDate),
+              'SR Number': planSrNumber || 'N/A',
+              'Service Order Number': planServiceOrderNumber,
+              'Selected Numbers': plan.number || 'N/A',
+              'Plans': `${plan.plan || 'N/A'} (${plan.number || 'N/A'})`,
+              'Plan Categories': plan.category || 'N/A',
+              'Plan Groups': planActivationGroup,
+              'Created Date': lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : 'N/A',
+              'Updated Date': lead.updatedAt ? new Date(lead.updatedAt).toLocaleDateString() : 'N/A',
+              'Emirate': lead.emirate || 'N/A',
+              'Area': lead.area || 'N/A',
+              'Country': lead.country || 'N/A',
+              'Gender': lead.gender || 'N/A',
+              'Language': lead.language || 'N/A',
+              'Advance Payment': lead.advancePayment ? 'Yes' : 'No',
+              'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No'
+            });
+          });
+        }
       });
 
       // Create workbook and worksheet
@@ -1099,7 +1470,8 @@ export function LeadList() {
         { wch: 18 },  // Etisalat Lead ID
         { wch: 14 },  // Activation Date
         { wch: 14 },  // SR Number
-        { wch: 25 },  // Selected Numbers
+        { wch: 18 },  // Service Order Number
+        { wch: 15 },  // Selected Numbers
         { wch: 40 },  // Plans
         { wch: 20 },  // Plan Categories
         { wch: 15 },  // Plan Groups
@@ -1125,7 +1497,7 @@ export function LeadList() {
       // Save the file
       XLSX.writeFile(wb, filename);
 
-      toast.success(`Successfully exported ${enrichedLeads.length} leads to ${filename}`);
+      toast.success(`Successfully exported ${exportData.length} rows (${enrichedLeads.length} leads) to ${filename}`);
     } catch (error) {
       console.error('Export error:', error);
       toast.error('Failed to export leads. Please try again.');
@@ -1134,7 +1506,7 @@ export function LeadList() {
 
   // Memoized sorted and filtered leads
   const sortedAndFilteredLeads = useMemo(() => {
-    return [...filteredLeads].sort((a, b) => {
+    return [...finalFilteredLeads].sort((a, b) => {
       let comparison = 0;
       
       switch (sortField) {
@@ -1166,7 +1538,7 @@ export function LeadList() {
 
       return sortDirection === 'asc' ? comparison : -comparison;
     });
-  }, [filteredLeads, sortField, sortDirection]);
+  }, [finalFilteredLeads, sortField, sortDirection]);
 
   // Pagination calculations
   const totalPages = Math.ceil(sortedAndFilteredLeads.length / itemsPerPage);
@@ -1650,6 +2022,12 @@ export function LeadList() {
                           <h3 className="text-sm font-semibold text-gray-900">
                           {lead.customerName || 'Unnamed Customer'}
                         </h3>
+                          {isManager() && (lead as any).agentName && (
+                            <div className="flex items-center text-xs text-gray-600 mt-1 font-medium">
+                              <User2 className="h-3 w-3 mr-1.5" />
+                              Agent: {(lead as any).agentName}
+                            </div>
+                          )}
                           <div className="flex items-center text-xs text-gray-500 mt-1">
                             <Phone className="h-3 w-3 mr-1.5" />
                           {lead.customerNumber}
@@ -1673,24 +2051,32 @@ export function LeadList() {
                     <div className="col-span-2 -ml-3">
                       <div className="flex flex-col space-y-2">
                         {(lead.plans && lead.plans.length > 0)
-                          ? lead.plans.map((plan, planIndex) => (
-                              <div
-                                key={planIndex}
-                                className="flex flex-col bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm"
-                              >
-                                <div className="flex items-center space-x-2">
+                          ? lead.plans.map((plan, planIndex) => {
+                              // Get Etisalat ID for this specific plan
+                              const planEtisalatId = (plan as any).etisalatLeadId || 
+                                ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
+                                  ? (lead as any).etisalatLeadIds[planIndex] 
+                                  : (planIndex === 0 ? lead.etisalatLeadId : null));
+                              
+                              return (
+                                <div
+                                  key={planIndex}
+                                  className="flex flex-col bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm"
+                                >
+                                  <div className="flex items-center space-x-2">
                         <Hash className="h-4 w-4 text-indigo-500" />
                         <span className="text-sm font-medium text-gray-700">
-                                    {plan.number || ''}
+                                      {plan.number || ''}
                             </span>
                           </div>
-                                {lead.etisalatLeadId && (
-                                  <span className="mt-0.5 text-[11px] font-medium text-gray-500">
-                                    Etisalat ID: {lead.etisalatLeadId}
+                                  {planEtisalatId && (
+                                    <span className="mt-0.5 text-[11px] font-medium text-gray-500">
+                                      Etisalat ID: {planEtisalatId}
                             </span>
-                                )}
+                                  )}
                           </div>
-                            ))
+                              );
+                            })
                           : <span className="text-sm font-medium text-gray-700"></span>
                         }
                       </div>
@@ -1715,6 +2101,7 @@ export function LeadList() {
 
                     {/* Status */}
                     <div className="col-span-1 pr-8">
+                      <div className="flex flex-col space-y-1 items-start">
                       <motion.span
                         whileHover={{ scale: 1.05 }}
                         className={clsx(
@@ -1726,6 +2113,19 @@ export function LeadList() {
                         {getStatusIcon(lead.status)}
                         {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                       </motion.span>
+                        {lead.status === 'assigned' && (() => {
+                          const duration = getAssignmentDuration(lead);
+                          if (duration) {
+                            return (
+                              <div className="flex items-center text-[10px] text-indigo-600 mt-1 px-2 py-0.5 bg-indigo-50 rounded border border-indigo-200 whitespace-nowrap">
+                                <Clock className="h-3 w-3 mr-1 flex-shrink-0" />
+                                <span className="font-semibold">Assigned in: {duration}</span>
+                              </div>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
                     </div>
 
                     {/* Actions */}
@@ -1827,6 +2227,12 @@ export function LeadList() {
                                 </span>
                               )}
                             </div>
+                            {isManager() && (lead as any).agentName && (
+                              <div className="flex items-center text-sm text-gray-600 font-medium mt-1">
+                                <User2 className="h-4 w-4 mr-1.5 flex-shrink-0" />
+                                <span>Agent: {(lead as any).agentName}</span>
+                              </div>
+                            )}
                             <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200 mt-1">
                               <Phone className="h-4 w-4 mr-1.5 flex-shrink-0" />
                               <span className="truncate">{lead.customerNumber}</span>

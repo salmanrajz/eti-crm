@@ -203,19 +203,30 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [verificationNote, setVerificationNote] = useState('');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
-  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | 'later' | 'reject' | null>(null);
+  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | 'later' | 'reject' | 'reassign' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
   const [scheduledForDate, setScheduledForDate] = useState<string>('');
   const [showManagerAssignDialog, setShowManagerAssignDialog] = useState(false);
   const [managerNote, setManagerNote] = useState('');
+  const [managerLocationUrl, setManagerLocationUrl] = useState('');
   const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
   const [etisalatLeadId, setEtisalatLeadId] = useState('');
+  const [etisalatLeadIds, setEtisalatLeadIds] = useState<string[]>([]); // Array for multiple numbers
   const [selectedEmirate, setSelectedEmirate] = useState('');
   const [showAssignmentMessage, setShowAssignmentMessage] = useState(false);
   const [assignmentMessage, setAssignmentMessage] = useState('');
   const [isCopied, setIsCopied] = useState(false);
   const [showSplitLead, setShowSplitLead] = useState(false);
   // Activation form fields for coordinator 'activate' action
+  // Support multiple numbers - use arrays for each field
+  const [activationDates, setActivationDates] = useState<string[]>([]);
+  const [srNumbers, setSrNumbers] = useState<string[]>([]);
+  const [serviceOrderNumbers, setServiceOrderNumbers] = useState<string[]>([]);
+  const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
+  const [srImageFiles, setSrImageFiles] = useState<(File | null)[]>([]);
+  const [editablePasscodes, setEditablePasscodes] = useState<string[]>([]);
+  const [editableCategories, setEditableCategories] = useState<string[]>([]);
+  // Legacy single values for backward compatibility (will be removed)
   const [activationDate, setActivationDate] = useState<string>('');
   const [srNumber, setSrNumber] = useState<string>('');
   const [serviceOrderNumber, setServiceOrderNumber] = useState<string>('');
@@ -224,6 +235,13 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [editablePasscode, setEditablePasscode] = useState<string>('');
   const [editableCategory, setEditableCategory] = useState<string>('');
   const [assignPasscode, setAssignPasscode] = useState<string>('');
+  const [allPlansWithPasscodes, setAllPlansWithPasscodes] = useState<Array<{
+    number: string;
+    category: string;
+    group: string;
+    passcode: string;
+    plan: string;
+  }>>([]);
 
   // New states for editable number and plan
   const [editableNumber, setEditableNumber] = useState<string>('');
@@ -239,72 +257,175 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     const prefill = async () => {
       if (!showCoordinatorDialog || coordinatorAction !== 'activate') return;
       try {
-        const firstPlan = lead.plans?.[0];
-        setEditableCategory(firstPlan?.category || '');
-        setSelectedGroup(firstPlan?.group || '');
+        const plans = lead.plans || [];
         
-        // Set editable number and plan (and store originals)
-        const planNumber = firstPlan?.number || '';
-        const planName = firstPlan?.plan || '';
-        setEditableNumber(planNumber);
-        setEditableNumberId(firstPlan?.numberId || '');
-        setEditablePlan(planName);
-        setOriginalNumber(planNumber);
-        setOriginalPlan(planName);
+        // Initialize arrays for all plans
+        const passcodes: string[] = [];
+        const categories: string[] = [];
+        const groups: string[] = [];
+        const activationDatesArray: string[] = [];
+        const srNumbersArray: string[] = [];
+        const serviceOrderNumbersArray: string[] = [];
+        const selectedGroupsArray: string[] = [];
+        const srImageFilesArray: (File | null)[] = [];
         
-        if (firstPlan?.numberId && !firstPlan.numberId.startsWith('virtual-')) {
-          const numberRef = doc(db, 'numberPool', firstPlan.numberId);
-          const numberDoc = await getDoc(numberRef);
-          if (numberDoc.exists()) {
-            const numberData = numberDoc.data();
-            setEditablePasscode(numberData?.passcode || '');
+        // Fetch passcodes and set defaults for each plan
+        for (const plan of plans) {
+          categories.push(plan.category || '');
+          groups.push(plan.group || '');
+          activationDatesArray.push('');
+          srNumbersArray.push('');
+          serviceOrderNumbersArray.push('');
+          selectedGroupsArray.push(plan.group || '');
+          srImageFilesArray.push(null);
+          
+          if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+            try {
+              const numberRef = doc(db, 'numberPool', plan.numberId);
+              const numberDoc = await getDoc(numberRef);
+              if (numberDoc.exists()) {
+                const numberData = numberDoc.data();
+                passcodes.push(numberData?.passcode || '');
+              } else {
+                passcodes.push('');
+              }
+            } catch {
+              passcodes.push('');
+            }
           } else {
-            setEditablePasscode('');
+            passcodes.push('');
           }
-        } else {
-          setEditablePasscode('');
+        }
+        
+        setEditablePasscodes(passcodes);
+        setEditableCategories(categories);
+        setSelectedGroups(selectedGroupsArray);
+        setActivationDates(activationDatesArray);
+        setSrNumbers(srNumbersArray);
+        setServiceOrderNumbers(serviceOrderNumbersArray);
+        setSrImageFiles(srImageFilesArray);
+        
+        // Also set first plan values for backward compatibility
+        const firstPlan = plans[0];
+        if (firstPlan) {
+          setEditableCategory(firstPlan.category || '');
+          setSelectedGroup(firstPlan.group || '');
+          setEditableNumber(firstPlan.number || '');
+          setEditableNumberId(firstPlan.numberId || '');
+          setEditablePlan(firstPlan.plan || '');
+          setOriginalNumber(firstPlan.number || '');
+          setOriginalPlan(firstPlan.plan || '');
+          setEditablePasscode(passcodes[0] || '');
         }
         
         // Load all plans for the dropdown
-        const plans = await getPlans();
-        setAllPlans(plans);
+        const allPlansData = await getPlans();
+        setAllPlans(allPlansData);
       } catch (_) {
-        setEditablePasscode('');
+        // Reset on error
+        setEditablePasscodes([]);
+        setEditableCategories([]);
+        setSelectedGroups([]);
+        setActivationDates([]);
+        setSrNumbers([]);
+        setServiceOrderNumbers([]);
+        setSrImageFiles([]);
       }
     };
     prefill();
   }, [showCoordinatorDialog, coordinatorAction, lead]);
 
-  // Prefill number, category, group and passcode for Assign dialog (read-only display)
+  // Prefill number, category, group and passcode for Assign/Reassign dialog (read-only display)
   useEffect(() => {
     const prefillAssign = async () => {
-      if (!showCoordinatorDialog || coordinatorAction !== 'assign') {
+      if (!showCoordinatorDialog || (coordinatorAction !== 'assign' && coordinatorAction !== 'reassign')) {
         setAssignPasscode('');
+        setAllPlansWithPasscodes([]);
         return;
       }
 
       try {
-        const firstPlan = lead.plans?.[0];
-        if (firstPlan?.numberId && !firstPlan.numberId.startsWith('virtual-')) {
-          const numberRef = doc(db, 'numberPool', firstPlan.numberId);
-          const numberDoc = await getDoc(numberRef);
-          if (numberDoc.exists()) {
-            const numberData = numberDoc.data() as any;
-            setAssignPasscode(numberData.passcode || '');
-          } else {
-            setAssignPasscode('');
-          }
+        // Fetch passcodes for all plans
+        const plansWithPasscodes = await Promise.all(
+          (lead.plans || []).map(async (plan) => {
+            let passcode = '';
+            if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+              try {
+                const numberRef = doc(db, 'numberPool', plan.numberId);
+                const numberDoc = await getDoc(numberRef);
+                if (numberDoc.exists()) {
+                  const numberData = numberDoc.data() as any;
+                  passcode = numberData.passcode || '';
+                }
+              } catch (error) {
+                console.error('Error fetching passcode for plan:', error);
+              }
+            }
+            return {
+              number: plan.number || '',
+              category: plan.category || '',
+              group: plan.group || '',
+              passcode: passcode,
+              plan: plan.plan || ''
+            };
+          })
+        );
+        
+        setAllPlansWithPasscodes(plansWithPasscodes);
+        
+        // Set assignPasscode for backward compatibility (first plan's passcode)
+        if (plansWithPasscodes.length > 0) {
+          setAssignPasscode(plansWithPasscodes[0].passcode);
         } else {
           setAssignPasscode('');
         }
       } catch (error) {
-        console.error('Error pre-filling assign passcode:', error);
+        console.error('Error pre-filling assign passcodes:', error);
         setAssignPasscode('');
+        setAllPlansWithPasscodes([]);
       }
     };
 
     prefillAssign();
   }, [showCoordinatorDialog, coordinatorAction, lead.plans, lead.id]);
+
+  // Prefill Google Maps URL when opening manager/agent assign dialog
+  useEffect(() => {
+    if (showManagerAssignDialog) {
+      setManagerLocationUrl(((lead as any).url as string) || '');
+    }
+  }, [showManagerAssignDialog, lead]);
+
+  // Initialize Etisalat Lead IDs array when dialog opens for assign/reassign
+  useEffect(() => {
+    if (showCoordinatorDialog && (coordinatorAction === 'assign' || coordinatorAction === 'reassign')) {
+      const plansCount = lead.plans?.length || 0;
+      if (plansCount > 0) {
+        // Check if lead has etisalatLeadIds array (multiple IDs)
+        const hasMultipleIds = (lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds);
+        
+        if (hasMultipleIds && (lead as any).etisalatLeadIds.length === plansCount) {
+          // Use existing array of Etisalat IDs
+          setEtisalatLeadIds((lead as any).etisalatLeadIds);
+          setEtisalatLeadId((lead as any).etisalatLeadIds[0] || '');
+        } else {
+          // Initialize array with existing Etisalat IDs from plans or lead
+          const initialIds = lead.plans?.map((plan: any, index: number) => {
+            // Check if plan has its own etisalatLeadId, otherwise use lead's etisalatLeadId for first, empty for others
+            return plan.etisalatLeadId || (index === 0 ? (lead.etisalatLeadId || '') : '');
+          }) || [];
+          setEtisalatLeadIds(initialIds);
+          // Also set single etisalatLeadId for backward compatibility (first one)
+          setEtisalatLeadId(initialIds[0] || lead.etisalatLeadId || '');
+        }
+      } else {
+        setEtisalatLeadIds([]);
+        setEtisalatLeadId(lead.etisalatLeadId || '');
+      }
+    } else {
+      setEtisalatLeadIds([]);
+    }
+  }, [showCoordinatorDialog, coordinatorAction, lead.plans, lead.etisalatLeadId]);
   const [verificationMedia, setVerificationMedia] = useState<LeadMediaItem[]>([]);
   const [sharedWithNames, setSharedWithNames] = useState<string[]>([]);
   const [rejecting, setRejecting] = useState(false);
@@ -504,21 +625,29 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   };
 
   // Helper function to generate formatted assignment message
-  const generateAssignmentMessage = async (lead: Lead, etisalatId: string, emirate: string) => {
-    // Get the actual passcode from number pool
-    let passcode = 'N/A';
-    if (lead.plans?.[0]?.numberId && !lead.plans[0].numberId.startsWith('virtual-')) {
-      try {
-        const numberRef = doc(db, 'numberPool', lead.plans[0].numberId);
-        const numberDoc = await getDoc(numberRef);
-        if (numberDoc.exists()) {
-          const numberData = numberDoc.data();
-          passcode = numberData.passcode || 'N/A';
+  const generateAssignmentMessage = async (lead: Lead, etisalatId: string | string[], emirate: string) => {
+    // Get passcodes for all numbers from number pool
+    const plansWithPasscodes = await Promise.all(
+      (lead.plans || []).map(async (plan) => {
+        let passcode = 'N/A';
+        if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+          try {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (numberDoc.exists()) {
+              const numberData = numberDoc.data();
+              passcode = numberData.passcode || 'N/A';
+            }
+          } catch (error) {
+            console.error('Error fetching number passcode:', error);
+          }
         }
-      } catch (error) {
-        console.error('Error fetching number passcode:', error);
-      }
-    }
+        return {
+          ...plan,
+          passcode
+        };
+      })
+    );
 
     // Get the actual agent name
     let agentName = 'N/A';
@@ -533,7 +662,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
       console.error('Error fetching agent name:', error);
     }
 
-    const partner = getServiceProvider(lead.plans?.[0]?.group || '');
     // Format date as DD/MM/YYYY for coordinator view
     const now = new Date();
     const day = String(now.getDate()).padStart(2, '0');
@@ -541,15 +669,21 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     const year = now.getFullYear();
     const currentDate = `${day}/${month}/${year}`;
     
-        return `Partner: ${partner}
+    // Build the message with all numbers
+    // For multiple numbers, show each number's details separately
+    if (plansWithPasscodes.length === 1) {
+      // Single number format (backward compatible)
+      const plan = plansWithPasscodes[0];
+      const partner = getServiceProvider(plan.group || '');
+      return `Partner: ${partner}
 Date: ${currentDate}
 Etisalat Portal ID: ${etisalatId}
 Customer Details
 Customer Name: ${lead.customerName}
 Customer Number: ${lead.customerNumber}
-Selected Number: ${lead.plans?.[0]?.number || 'N/A'}
-Passcode: ${passcode}
-Plan Selected: ${lead.plans?.[0]?.plan || 'N/A'}
+Selected Number: ${plan.number || 'N/A'}
+Passcode: ${plan.passcode}
+Plan Selected: ${plan.plan || 'N/A'}
 Additional Details
 Gender: ${lead.gender || 'N/A'}
 Paid or Free: ${lead.advancePayment ? 'Paid' : 'Free'}
@@ -558,6 +692,39 @@ Address: ${lead.customerAddress || 'N/A'}
 Nationality: ${lead.country || 'N/A'}
 Sales Person: ${agentName}
 Language: ${lead.language || 'N/A'}`;
+    } else {
+      // Multiple numbers format - show details for each number
+      const etisalatIds = Array.isArray(etisalatId) ? etisalatId : [etisalatId];
+      let message = `Date: ${currentDate}
+Customer Details
+Customer Name: ${lead.customerName}
+Customer Number: ${lead.customerNumber}`;
+
+      // Add details for each number/plan with its own Etisalat ID
+      plansWithPasscodes.forEach((plan, index) => {
+        const partner = getServiceProvider(plan.group || '');
+        const planEtisalatId = etisalatIds[index] || (plan as any).etisalatLeadId || 'N/A';
+        message += `
+Number ${index + 1} Details
+Partner: ${partner}
+Etisalat Portal ID: ${planEtisalatId}
+Selected Number: ${plan.number || 'N/A'}
+Passcode: ${plan.passcode}
+Plan Selected: ${plan.plan || 'N/A'}`;
+      });
+
+      message += `
+Additional Details
+Gender: ${lead.gender || 'N/A'}
+Paid or Free: ${lead.advancePayment ? 'Paid' : 'Free'}
+Emirates: ${emirate}
+Address: ${lead.customerAddress || 'N/A'}
+Nationality: ${lead.country || 'N/A'}
+Sales Person: ${agentName}
+Language: ${lead.language || 'N/A'}`;
+
+      return message;
+    }
   };
 
   useEffect(() => {
@@ -960,13 +1127,23 @@ Language: ${lead.language || 'N/A'}`;
     setIsManagerActionProcessing(true);
     try {
       const leadRef = doc(db, 'leads', lead.id);
+      const trimmedLocationUrl = managerLocationUrl.trim();
+
       // Change status to 'assigned_to_cord' when manager assigns to coordinator
-      await updateDoc(leadRef, {
+      const updatePayload: any = {
         status: 'assigned_to_cord',
         managerAssigned: true,
         managerNotes: managerNote.trim() || '',
-        updatedAt: serverTimestamp()
-      });
+        updatedAt: serverTimestamp(),
+        assignedToCordAt: serverTimestamp() // Track when assigned to coordinator
+      };
+
+      // Only set URL if provided to avoid clearing existing data
+      if (trimmedLocationUrl) {
+        updatePayload.url = trimmedLocationUrl;
+      }
+
+      await updateDoc(leadRef, updatePayload);
 
       // Note: Coordinators will see this lead in their unassigned list via filtering
       // No need to send notification as coordinators check for verified leads with managerAssigned: true
@@ -994,6 +1171,7 @@ Language: ${lead.language || 'N/A'}`;
       toast.success('Lead assigned to coordinator successfully');
       setShowManagerAssignDialog(false);
       setManagerNote('');
+      setManagerLocationUrl(trimmedLocationUrl || '');
       
       // Reload the lead data
       const leadDoc = await getDoc(leadRef);
@@ -1014,11 +1192,22 @@ Language: ${lead.language || 'N/A'}`;
   };
 
   const handleCoordinatorAction = async () => {
-    // Validate required fields for assignment
-    if (coordinatorAction === 'assign') {
-      if (!etisalatLeadId.trim()) {
-        toast.error('Etisalat Lead ID is required');
-        return;
+    // Validate required fields for assignment / reassignment
+    if (coordinatorAction === 'assign' || coordinatorAction === 'reassign') {
+      const plansCount = lead.plans?.length || 0;
+      if (plansCount > 1) {
+        // Multiple numbers - validate all Etisalat IDs
+        const missingIds = etisalatLeadIds.filter((id, index) => !id.trim());
+        if (missingIds.length > 0) {
+          toast.error(`Etisalat Lead ID is required for all ${plansCount} numbers`);
+          return;
+        }
+      } else {
+        // Single number - use single Etisalat ID
+        if (!etisalatLeadId.trim()) {
+          toast.error('Etisalat Lead ID is required');
+          return;
+        }
       }
       if (!selectedEmirate) {
         toast.error('Please select an Emirates');
@@ -1026,21 +1215,45 @@ Language: ${lead.language || 'N/A'}`;
       }
     }
     if (coordinatorAction === 'activate') {
-      if (!activationDate) {
-        toast.error('Activation Date is required');
-        return;
-      }
-      if (!srNumber.trim()) {
-        toast.error('SR No. is required');
-        return;
-      }
-      if (!serviceOrderNumber.trim()) {
-        toast.error('Service Order number is required');
-        return;
-      }
-      if (!selectedGroup) {
-        toast.error('Please select a Group');
-        return;
+      const plansCount = lead.plans?.length || 0;
+      if (plansCount > 1) {
+        // Multiple numbers - validate all activation fields
+        for (let i = 0; i < plansCount; i++) {
+          if (!activationDates[i]) {
+            toast.error(`Activation Date is required for Number ${i + 1}`);
+            return;
+          }
+          if (!srNumbers[i]?.trim()) {
+            toast.error(`SR No. is required for Number ${i + 1}`);
+            return;
+          }
+          if (!serviceOrderNumbers[i]?.trim()) {
+            toast.error(`Service Order number is required for Number ${i + 1}`);
+            return;
+          }
+          if (!selectedGroups[i]) {
+            toast.error(`Please select a Group for Number ${i + 1}`);
+            return;
+          }
+        }
+      } else {
+        // Single number - use legacy validation
+        if (!activationDate) {
+          toast.error('Activation Date is required');
+          return;
+        }
+        if (!srNumber.trim()) {
+          toast.error('SR No. is required');
+          return;
+        }
+        if (!serviceOrderNumber.trim()) {
+          toast.error('Service Order number is required');
+          return;
+        }
+        if (!selectedGroup) {
+          toast.error('Please select a Group');
+          return;
+        }
       }
     }
     if (coordinatorAction === 'later') {
@@ -1059,77 +1272,177 @@ Language: ${lead.language || 'N/A'}`;
       const planChanged = coordinatorAction === 'activate' && editablePlan !== originalPlan;
       const hasChanges = numberChanged || planChanged;
       
-      const updateData: Partial<Lead> = {
-        status: coordinatorAction === 'assign' ? 'assigned' : 
-                coordinatorAction === 'activate' ? (hasChanges ? 'activated_non_verified' : 'activated') : 
-                coordinatorAction === 'later' ? 'later' : 
-                coordinatorAction === 'reject' ? 'rejected' : 'follow_up',
-        coordinatorNotes: coordinatorNote,
-        updatedAt: new Date()
-      };
+    const updateData: Partial<Lead> = {
+      coordinatorNotes: coordinatorNote,
+      updatedAt: new Date()
+    };
 
-      if (coordinatorAction === 'assign') {
+    // Status changes:
+    // - 'assign' always moves lead to 'assigned'
+    // - 'activate' moves to activated / activated_non_verified
+    // - 'later' moves to 'later'
+    // - 'reject' moves to 'rejected'
+    // - 'followup' moves to 'follow_up'
+    // - 'reassign' normally keeps status, but for 'later' leads we treat it as assigning again
+    if (coordinatorAction === 'assign') {
+      updateData.status = 'assigned';
+      // Track when assigned (for calculating duration from assigned_to_cord to assigned)
+      // Only set assignedAt if it doesn't already exist (first assignment only)
+      const currentAssignedAt = (lead as any).assignedAt;
+      if (!currentAssignedAt) {
+        (updateData as any).assignedAt = serverTimestamp();
+      }
+    } else if (coordinatorAction === 'activate') {
+      updateData.status = hasChanges ? 'activated_non_verified' : 'activated';
+    } else if (coordinatorAction === 'later') {
+      updateData.status = 'later';
+    } else if (coordinatorAction === 'reject') {
+      updateData.status = 'rejected';
+    } else if (coordinatorAction === 'followup') {
+      updateData.status = 'follow_up';
+    } else if (coordinatorAction === 'reassign' && lead.status === 'later') {
+      // When reassigning a 'later' lead, move it back to 'assigned'
+      // BUT don't reset assignedAt - keep the original first assignment timestamp
+      updateData.status = 'assigned';
+      // Do NOT set assignedAt here - preserve the original first assignment time
+    }
+
+    if (coordinatorAction === 'assign' || coordinatorAction === 'reassign') {
         updateData.coordinatorId = user!.id;
-        // Store additional assignment data
-        updateData.etisalatLeadId = etisalatLeadId;
+      // Store additional assignment data (including reassignment updates)
+        const plansCount = lead.plans?.length || 0;
+        if (plansCount > 1 && etisalatLeadIds.length > 0) {
+          // Multiple numbers - store Etisalat IDs in plans array and as separate field
+          updateData.etisalatLeadId = etisalatLeadIds[0] || ''; // Keep first one for backward compatibility
+          (updateData as any).etisalatLeadIds = etisalatLeadIds; // Store array
+          // Also update plans with individual Etisalat IDs
+          if (lead.plans) {
+            (updateData as any).plans = lead.plans.map((plan: any, index: number) => ({
+              ...plan,
+              etisalatLeadId: etisalatLeadIds[index] || ''
+            }));
+          }
+        } else {
+          // Single number - use single Etisalat ID
+          updateData.etisalatLeadId = etisalatLeadId;
+        }
         updateData.emirate = selectedEmirate;
       }
       if (coordinatorAction === 'activate') {
-        (updateData as any).activationDate = new Date(activationDate);
-        (updateData as any).srNumber = srNumber.trim();
-        (updateData as any).serviceOrderNumber = serviceOrderNumber.trim();
+        const plansCount = lead.plans?.length || 0;
         
-        // Update existing plan with new number/plan if changed
-        if (selectedGroup) {
+        if (plansCount > 1) {
+          // Multiple numbers - store activation data for each
+          (updateData as any).activationDates = activationDates.map(date => new Date(date));
+          (updateData as any).srNumbers = srNumbers.map(sr => sr.trim());
+          (updateData as any).serviceOrderNumbers = serviceOrderNumbers.map(so => so.trim());
+          (updateData as any).activationGroups = selectedGroups;
+          
+          // Update plans with activation data
           const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
-          (updateData as any).plans = currentPlans.map((p: any, index: number) => {
-            // Update first plan with potentially new number and plan
-            if (index === 0) {
-              return {
+          (updateData as any).plans = currentPlans.map((p: any, index: number) => ({
             ...p,
-                number: editableNumber,
-                numberId: editableNumberId,
-                plan: editablePlan,
-                category: editableCategory,
-            group: selectedGroup
-              };
+            group: selectedGroups[index] || p.group,
+            activationDate: activationDates[index] ? new Date(activationDates[index]) : null,
+            srNumber: srNumbers[index]?.trim() || null,
+            serviceOrderNumber: serviceOrderNumbers[index]?.trim() || null
+          }));
+          
+          // Store passcodes and categories for all numbers
+          (updateData as any).activationPasscodes = editablePasscodes.map(p => p.trim());
+          (updateData as any).activationCategories = editableCategories.map(c => c.trim());
+          
+          // Handle SR images for all numbers
+          const srImagePromises = srImageFiles.map(async (file, imgIndex) => {
+            if (file) {
+              const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve((reader.result as string) || '');
+                reader.onerror = reject;
+                reader.readAsDataURL(f);
+              });
+              try {
+                const dataUrl = await toDataUrl(file);
+                return { dataUrl, name: file.name, index: imgIndex };
+              } catch (_) {
+                return null;
+              }
             }
-            return {
+            return null;
+          });
+          
+          const srImageResults = await Promise.all(srImagePromises);
+          const srImages = srImageResults.filter((r): r is { dataUrl: string; name: string; index: number } => r !== null);
+          if (srImages.length > 0) {
+            (updateData as any).srImages = srImages.map(img => ({
+              dataUrl: img.dataUrl,
+              name: img.name,
+              numberIndex: img.index
+            }));
+          }
+          
+          // For backward compatibility, also set first number's data
+          (updateData as any).activationDate = activationDates[0] ? new Date(activationDates[0]) : null;
+          (updateData as any).srNumber = srNumbers[0]?.trim() || '';
+          (updateData as any).serviceOrderNumber = serviceOrderNumbers[0]?.trim() || '';
+        } else {
+          // Single number - use existing logic
+          (updateData as any).activationDate = new Date(activationDate);
+          (updateData as any).srNumber = srNumber.trim();
+          (updateData as any).serviceOrderNumber = serviceOrderNumber.trim();
+          
+          // Update existing plan with new number/plan if changed
+          if (selectedGroup) {
+            const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
+            (updateData as any).plans = currentPlans.map((p: any, index: number) => {
+              // Update first plan with potentially new number and plan
+              if (index === 0) {
+                return {
               ...p,
+                  number: editableNumber,
+                  numberId: editableNumberId,
+                  plan: editablePlan,
+                  category: editableCategory,
               group: selectedGroup
+                };
+              }
+              return {
+                ...p,
+                group: selectedGroup
+              };
+            });
+          }
+          
+          if (editablePasscode) (updateData as any).activationPasscode = editablePasscode.trim();
+          if (editableCategory) (updateData as any).activationCategory = editableCategory.trim();
+          
+          // If number or plan changed, store metadata
+          if (hasChanges) {
+            (updateData as any).changesAtActivation = {
+              numberChanged,
+              planChanged,
+              originalNumber: numberChanged ? originalNumber : null,
+              originalPlan: planChanged ? originalPlan : null,
+              newNumber: numberChanged ? editableNumber : null,
+              newPlan: planChanged ? editablePlan : null,
+              changedAt: new Date(),
+              changedBy: user!.id
             };
-          });
-        }
-        
-        if (editablePasscode) (updateData as any).activationPasscode = editablePasscode.trim();
-        if (editableCategory) (updateData as any).activationCategory = editableCategory.trim();
-        
-        // If number or plan changed, store metadata
-        if (hasChanges) {
-          (updateData as any).changesAtActivation = {
-            numberChanged,
-            planChanged,
-            originalNumber: numberChanged ? originalNumber : null,
-            originalPlan: planChanged ? originalPlan : null,
-            newNumber: numberChanged ? editableNumber : null,
-            newPlan: planChanged ? editablePlan : null,
-            changedAt: new Date(),
-            changedBy: user!.id
-          };
-        }
-        
-        if (srImageFile) {
-          const toDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve((reader.result as string) || '');
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
-          try {
-            const dataUrl = await toDataUrl(srImageFile);
-            (updateData as any).srImageDataUrl = dataUrl;
-            (updateData as any).srImageName = srImageFile.name;
-          } catch (_) {}
+          }
+          
+          if (srImageFile) {
+            const toDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve((reader.result as string) || '');
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            });
+            try {
+              const dataUrl = await toDataUrl(srImageFile);
+              (updateData as any).srImageDataUrl = dataUrl;
+              (updateData as any).srImageName = srImageFile.name;
+            } catch (_) {}
+          }
         }
       }
       
@@ -1231,33 +1544,34 @@ Language: ${lead.language || 'N/A'}`;
         }
       } else {
         // Normal flow - Update all numbers in the lead's plans (skip virtual entries like virtual-mnp)
-      if (lead.plans && lead.plans.length > 0) {
-        const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
-        const updatePromises = realPlans.map(async (plan) => {
-          const numberRef = doc(db, 'numberPool', plan.numberId);
-          const numberDoc = await getDoc(numberRef);
-          if (!numberDoc.exists()) {
-            return;
-          }
-          const numberData = numberDoc.data();
-          await updateDoc(numberRef, {
-            status: updateData.status,
-            lastStatusChange: new Date(),
-            leadId: lead.id,
-            ...(selectedGroup ? { group: selectedGroup } : {})
-          });
+        // Only update numberPool status when a new status is defined
+        if (lead.plans && lead.plans.length > 0 && updateData.status) {
+          const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+          const updatePromises = realPlans.map(async (plan) => {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) {
+              return;
+            }
+            const numberData = numberDoc.data();
+            await updateDoc(numberRef, {
+              status: updateData.status,
+              lastStatusChange: new Date(),
+              leadId: lead.id,
+              ...(selectedGroup ? { group: selectedGroup } : {})
+            });
 
-          await logNumberAction(
-            plan.numberId,
-            plan.number || '',
-            'status_changed',
-            { status: numberData?.status },
-            { status: updateData.status, leadId: lead.id },
-            `Coordinator ${user?.name || 'Unknown'} performed ${coordinatorAction}`
-          );
-        });
-        
-        await Promise.all(updatePromises);
+            await logNumberAction(
+              plan.numberId,
+              plan.number || '',
+              'status_changed',
+              { status: numberData?.status },
+              { status: updateData.status, leadId: lead.id },
+              `Coordinator ${user?.name || 'Unknown'} performed ${coordinatorAction}`
+            );
+          });
+          
+          await Promise.all(updatePromises);
         }
       }
 
@@ -1272,7 +1586,8 @@ Language: ${lead.language || 'N/A'}`;
           title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
                  coordinatorAction === 'activate' ? (hasChanges ? 'Lead Activated - Pending Verification' : 'Lead Activated') : 
                  coordinatorAction === 'later' ? 'Lead Marked for Later' : 
-                 coordinatorAction === 'reject' ? 'Lead Rejected' : 'Lead Marked for Follow-up',
+                 coordinatorAction === 'reject' ? 'Lead Rejected' :
+                 coordinatorAction === 'reassign' ? 'Lead Reassigned' : 'Lead Marked for Follow-up',
           message: coordinatorAction === 'assign' ? 
             'Your lead has been assigned by the coordinator' : 
             coordinatorAction === 'activate' ?
@@ -1283,6 +1598,8 @@ Language: ${lead.language || 'N/A'}`;
             'Your lead has been marked for later by the coordinator' :
             coordinatorAction === 'reject' ?
             'Your lead has been rejected by the coordinator' :
+            coordinatorAction === 'reassign' ?
+            'Your lead Etisalat ID / routing details have been updated by the coordinator' :
             'Your lead has been marked for follow-up by the coordinator',
           read: false,
           createdAt: new Date(),
@@ -1343,20 +1660,27 @@ Language: ${lead.language || 'N/A'}`;
         }
       }
 
-      if (coordinatorAction === 'assign') {
-        const message = await generateAssignmentMessage(lead, etisalatLeadId, selectedEmirate);
+      if (coordinatorAction === 'assign' || coordinatorAction === 'reassign') {
+        const plansCount = lead.plans?.length || 0;
+        const etisalatIdsForMessage = plansCount > 1 && etisalatLeadIds.length > 0 
+          ? etisalatLeadIds 
+          : etisalatLeadId;
+        const message = await generateAssignmentMessage(lead, etisalatIdsForMessage, selectedEmirate);
         setAssignmentMessage(message);
         setShowAssignmentMessage(true);
         setShowCoordinatorDialog(false);
         setCoordinatorNote('');
         setCoordinatorAction(null);
-        toast.success('Lead assigned successfully');
+        toast.success(coordinatorAction === 'assign' ? 'Lead assigned successfully' : 'Lead reassigned successfully');
       } else {
         toast.success(
-          coordinatorAction === 'activate' ? 'Lead activated successfully' :
-          coordinatorAction === 'later' ? 'Lead marked for later' :
-          coordinatorAction === 'reject' ? 'Lead rejected successfully' :
-          'Lead marked for follow-up'
+          coordinatorAction === 'activate'
+            ? 'Lead activated successfully'
+            : coordinatorAction === 'later'
+            ? 'Lead marked for later'
+            : coordinatorAction === 'reject'
+            ? 'Lead rejected successfully'
+            : 'Lead marked for follow-up'
         );
         setShowCoordinatorDialog(false);
         setCoordinatorNote('');
@@ -1483,6 +1807,26 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
+                      setCoordinatorAction('followup');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                  >
+                    <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Follow-up
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('later');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+                  >
+                    <Clock className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Later
+                  </button>
+                  <button
+                    onClick={() => {
                       setCoordinatorAction('reject');
                       setShowCoordinatorDialog(true);
                     }}
@@ -1599,6 +1943,16 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
+                      setCoordinatorAction('followup');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                  >
+                    <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Follow-up
+                  </button>
+                  <button
+                    onClick={() => {
                       setCoordinatorAction('reject');
                       setShowCoordinatorDialog(true);
                     }}
@@ -1609,6 +1963,42 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                 </>
               )}
+              {/* Reassignment option: available for coordinators, but NOT when Assign button is visible, and NOT for activated/rejected leads */}
+              {(() => {
+                // Check if Assign button is visible
+                const isAssignButtonVisible = 
+                  (lead.status === 'verified') || 
+                  (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+                  (lead.status === 'assigned_to_cord') ||
+                  (lead.status === 'follow_up' && !lead.managerAssigned);
+                
+                // Don't show Reassign if Assign is visible, or if lead is activated/rejected
+                const shouldShowReassign = !isAssignButtonVisible && 
+                                           lead.status !== 'activated' && 
+                                           lead.status !== 'rejected';
+                
+                if (!shouldShowReassign) return null;
+                
+                return (
+                  <button
+                    onClick={() => {
+                      // Prefill Etisalat Lead ID and Emirates if they exist
+                      if (lead.etisalatLeadId) {
+                        setEtisalatLeadId(lead.etisalatLeadId);
+                      }
+                      if (lead.emirate) {
+                        setSelectedEmirate(lead.emirate);
+                      }
+                      setCoordinatorAction('reassign');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+                  >
+                    <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Reassign
+                  </button>
+                );
+              })()}
             </>
           )}
           {canVerify && (
@@ -2045,7 +2435,7 @@ Language: ${lead.language || 'N/A'}`;
 
       {showCoordinatorDialog && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-3xl w-full mx-4 overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-6xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
             {/* Header */}
             <div className={`px-6 py-4 ${
               coordinatorAction === 'reject' ? 'bg-gradient-to-r from-red-500 to-red-600' :
@@ -2053,7 +2443,7 @@ Language: ${lead.language || 'N/A'}`;
             }`}>
               <div className="flex items-center space-x-3">
                 <div className="p-2 bg-white/20 rounded-lg">
-                  {coordinatorAction === 'assign' ? (
+                  {coordinatorAction === 'assign' || coordinatorAction === 'reassign' ? (
                     <User2 className="h-5 w-5 text-white" />
                   ) : coordinatorAction === 'activate' ? (
                     <CheckCircle className="h-5 w-5 text-white" />
@@ -2068,12 +2458,14 @@ Language: ${lead.language || 'N/A'}`;
                 <div>
                   <h3 className="text-lg font-semibold text-white">
                     {coordinatorAction === 'assign' ? 'Assign Lead' :
+                     coordinatorAction === 'reassign' ? 'Reassign Lead' :
                      coordinatorAction === 'activate' ? 'Activate Lead' : 
                      coordinatorAction === 'later' ? 'Mark for Later' : 
                      coordinatorAction === 'reject' ? 'Reject Lead' : 'Mark for Follow-up'}
                   </h3>
                   <p className="text-indigo-100 text-sm">
                     {coordinatorAction === 'assign' ? 'Assign this lead to Etisalat system' :
+                     coordinatorAction === 'reassign' ? 'Update Etisalat Lead ID and assignment details' :
                      coordinatorAction === 'activate' ? 'Activate the lead and mark as complete' :
                      coordinatorAction === 'later' ? 'Mark this lead for later action' :
                      coordinatorAction === 'reject' ? 'Reject this lead and set number status to open' :
@@ -2084,146 +2476,284 @@ Language: ${lead.language || 'N/A'}`;
             </div>
 
             {/* Form Content */}
-            <div className="p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
               {coordinatorAction === 'activate' && (
                 <>
-                  {/* Number & Plan & Passcode & Category */}
-                  <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Number</label>
-                        <div className="flex gap-2 mt-1">
-                      <input
-                        type="text"
-                            className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                            value={editableNumber}
-                        readOnly
-                      />
-                          <button
-                            type="button"
-                            onClick={() => setShowNumberSelector(!showNumberSelector)}
-                            className="px-3 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors"
-                          >
-                            {showNumberSelector ? 'Cancel' : 'Change'}
-                          </button>
+                  {lead.plans && lead.plans.length > 1 ? (
+                    // Multiple numbers - show separate form for each
+                    <div className="space-y-6">
+                      {lead.plans.map((plan, index) => (
+                        <div key={index} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                          <div className="mb-4 pb-3 border-b border-gray-200">
+                            <h4 className="text-sm font-semibold text-gray-700">Number {index + 1} - {plan.number}</h4>
+                          </div>
+                          
+                          {/* Number & Plan & Passcode & Category */}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Number</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={plan.number || ''}
+                                readOnly
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Plan</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={plan.plan || ''}
+                                readOnly
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={editablePasscodes[index] || ''}
+                                readOnly
+                                placeholder="Passcode from number pool"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Category</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={editableCategories[index] || ''}
+                                readOnly
+                              />
+                            </div>
+                          </div>
+
+                          {/* Activation Details */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
+                              <input
+                                type="date"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={activationDates[index] || ''}
+                                onChange={(e) => {
+                                  const newDates = [...activationDates];
+                                  newDates[index] = e.target.value;
+                                  setActivationDates(newDates);
+                                }}
+                                required
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">SR No. <span className="text-red-500">*</span></label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={srNumbers[index] || ''}
+                                onChange={(e) => {
+                                  const newSrNumbers = [...srNumbers];
+                                  newSrNumbers[index] = e.target.value;
+                                  setSrNumbers(newSrNumbers);
+                                }}
+                                placeholder="Enter SR number"
+                                required
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Service Order number <span className="text-red-500">*</span></label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={serviceOrderNumbers[index] || ''}
+                                onChange={(e) => {
+                                  const newServiceOrderNumbers = [...serviceOrderNumbers];
+                                  newServiceOrderNumbers[index] = e.target.value;
+                                  setServiceOrderNumbers(newServiceOrderNumbers);
+                                }}
+                                placeholder="Enter Service Order number"
+                                required
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Select Activation Group <span className="text-red-500">*</span></label>
+                              <select
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={selectedGroups[index] || ''}
+                                onChange={(e) => {
+                                  const newGroups = [...selectedGroups];
+                                  newGroups[index] = e.target.value;
+                                  setSelectedGroups(newGroups);
+                                }}
+                                required
+                              >
+                                <option value="">Select group</option>
+                                {['G1','G2','G3','G4','G5'].map(g => (
+                                  <option key={g} value={g}>{g}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          {/* SR Image (optional) */}
+                          <div className="mt-4">
+                            <label className="block text-sm font-semibold text-gray-900">SR Image (optional)</label>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="mt-1 block w-full text-sm text-gray-900 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                              onChange={(e) => {
+                                const newFiles = [...srImageFiles];
+                                newFiles[index] = e.target.files?.[0] || null;
+                                setSrImageFiles(newFiles);
+                              }}
+                            />
+                          </div>
                         </div>
+                      ))}
                     </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Plan</label>
-                        <select
-                          className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                          value={editablePlan}
-                          onChange={(e) => setEditablePlan(e.target.value)}
-                        >
-                          <option value="">Select plan</option>
-                          {allPlans.map((plan) => (
-                            <option key={plan.id} value={plan.name}>
-                              {plan.name} ({plan.category})
-                            </option>
-                          ))}
-                        </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Passcode</label>
-                      <input
-                        type="text"
-                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={editablePasscode}
-                        readOnly
-                        placeholder="Passcode from number pool"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Category</label>
-                      <input
-                        type="text"
-                        className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={editableCategory}
-                        readOnly
-                      />
-                    </div>
-                    </div>
-                    
-                    {/* Number Selector */}
-                    {showNumberSelector && (
-                      <div className="border border-gray-200 rounded-xl p-4 bg-gray-50">
-                        <QuickNumberSelect
-                          onSelect={async (numberData) => {
-                            setEditableNumber(numberData.number);
-                            setEditableNumberId(numberData.id);
-                            setEditablePasscode(numberData.passcode || '');
-                            setEditableCategory(numberData.category || '');
-                            setShowNumberSelector(false);
-                          }}
-                          selectedCategory={editableCategory}
-                          onCategoryChange={(category) => setEditableCategory(category)}
+                  ) : (
+                    // Single number - use existing form
+                    <>
+                      {/* Number & Plan & Passcode & Category */}
+                      <div className="space-y-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Number</label>
+                            <div className="flex gap-2 mt-1">
+                          <input
+                            type="text"
+                                className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                                value={editableNumber}
+                            readOnly
+                          />
+                              <button
+                                type="button"
+                                onClick={() => setShowNumberSelector(!showNumberSelector)}
+                                className="px-3 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors"
+                              >
+                                {showNumberSelector ? 'Cancel' : 'Change'}
+                              </button>
+                            </div>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Plan</label>
+                            <select
+                              className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                              value={editablePlan}
+                              onChange={(e) => setEditablePlan(e.target.value)}
+                            >
+                              <option value="">Select plan</option>
+                              {allPlans.map((plan) => (
+                                <option key={plan.id} value={plan.name}>
+                                  {plan.name} ({plan.category})
+                                </option>
+                              ))}
+                            </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={editablePasscode}
+                            readOnly
+                            placeholder="Passcode from number pool"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Category</label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={editableCategory}
+                            readOnly
+                          />
+                        </div>
+                        </div>
+                        
+                        {/* Number Selector */}
+                        {showNumberSelector && (
+                          <div className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                            <QuickNumberSelect
+                              onSelect={async (numberData) => {
+                                setEditableNumber(numberData.number);
+                                setEditableNumberId(numberData.id);
+                                setEditablePasscode(numberData.passcode || '');
+                                setEditableCategory(numberData.category || '');
+                                setShowNumberSelector(false);
+                              }}
+                              selectedCategory={editableCategory}
+                              onCategoryChange={(category) => setEditableCategory(category)}
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Activation Details */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
+                          <input
+                            type="date"
+                            className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={activationDate}
+                            onChange={(e) => setActivationDate(e.target.value)}
+                            required
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">SR No. <span className="text-red-500">*</span></label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={srNumber}
+                            onChange={(e) => setSrNumber(e.target.value)}
+                            placeholder="Enter SR number"
+                            required
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Service Order number <span className="text-red-500">*</span></label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={serviceOrderNumber}
+                            onChange={(e) => setServiceOrderNumber(e.target.value)}
+                            placeholder="Enter Service Order number"
+                            required
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Select Activation Group <span className="text-red-500">*</span></label>
+                          <select
+                            className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
+                            value={selectedGroup}
+                            onChange={(e) => setSelectedGroup(e.target.value)}
+                            required
+                          >
+                            <option value="">Select group</option>
+                            {['G1','G2','G3','G4','G5'].map(g => (
+                              <option key={g} value={g}>{g}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* SR Image (optional) */}
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-900">SR Image (optional)</label>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="mt-1 block w-full text-sm text-gray-900 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                          onChange={(e) => setSrImageFile(e.target.files?.[0] || null)}
                         />
                       </div>
-                    )}
-                  </div>
+                    </>
+                  )}
 
-                  {/* Activation Details */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
-                      <input
-                        type="date"
-                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={activationDate}
-                        onChange={(e) => setActivationDate(e.target.value)}
-                        required
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">SR No. <span className="text-red-500">*</span></label>
-                      <input
-                        type="text"
-                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={srNumber}
-                        onChange={(e) => setSrNumber(e.target.value)}
-                        placeholder="Enter SR number"
-                        required
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Service Order number <span className="text-red-500">*</span></label>
-                      <input
-                        type="text"
-                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={serviceOrderNumber}
-                        onChange={(e) => setServiceOrderNumber(e.target.value)}
-                        placeholder="Enter Service Order number"
-                        required
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-900">Select Activation Group <span className="text-red-500">*</span></label>
-                      <select
-                        className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                        value={selectedGroup}
-                        onChange={(e) => setSelectedGroup(e.target.value)}
-                        required
-                      >
-                        <option value="">Select group</option>
-                        {['G1','G2','G3','G4','G5'].map(g => (
-                          <option key={g} value={g}>{g}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* SR Image (optional) */}
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-900">SR Image (optional)</label>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="mt-1 block w-full text-sm text-gray-900 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                      onChange={(e) => setSrImageFile(e.target.files?.[0] || null)}
-                    />
-                  </div>
-
-                  {/* Notes for Activate action */}
+                  {/* Notes for Activate action (shared for all numbers) */}
                   <div className="space-y-2">
                     <label className="block text-sm font-semibold text-gray-900">
                       Notes (Optional)
@@ -2318,71 +2848,177 @@ Language: ${lead.language || 'N/A'}`;
                   </div>
                 </>
               )}
-              {coordinatorAction === 'assign' && (
+              {(coordinatorAction === 'assign' || coordinatorAction === 'reassign') && (
                 <>
-                  {/* Number, Category, Group & Passcode summary */}
+                  {/* Number, Category, Group & Passcode summary - Show all numbers */}
                   <div className="space-y-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-900">Number</label>
-                        <input
-                          type="text"
-                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                          value={lead.plans?.[0]?.number || ''}
-                          readOnly
-                        />
+                    {allPlansWithPasscodes.length > 0 ? (
+                      allPlansWithPasscodes.map((planData, index) => (
+                        <div key={index} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                          {allPlansWithPasscodes.length > 1 && (
+                            <div className="mb-3 pb-2 border-b border-gray-200">
+                              <h4 className="text-sm font-semibold text-gray-700">Number {index + 1}</h4>
+                            </div>
+                          )}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Number</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={planData.number}
+                                readOnly
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Category</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={planData.category}
+                                readOnly
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Group</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={planData.group}
+                                readOnly
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                              <input
+                                type="text"
+                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                value={planData.passcode}
+                                readOnly
+                                placeholder="Passcode from number pool"
+                              />
+                            </div>
+                            {planData.plan && (
+                              <div className="col-span-2 sm:col-span-4">
+                                <label className="block text-sm font-semibold text-gray-900">Plan Selected</label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={planData.plan}
+                                  readOnly
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      // Fallback to first plan if allPlansWithPasscodes is empty
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Number</label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                            value={lead.plans?.[0]?.number || ''}
+                            readOnly
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Category</label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                            value={lead.plans?.[0]?.category || ''}
+                            readOnly
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Group</label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                            value={lead.plans?.[0]?.group || ''}
+                            readOnly
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                          <input
+                            type="text"
+                            className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                            value={assignPasscode}
+                            readOnly
+                            placeholder="Passcode from number pool"
+                          />
+                        </div>
                       </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-900">Category</label>
-                        <input
-                          type="text"
-                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                          value={lead.plans?.[0]?.category || ''}
-                          readOnly
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-900">Group</label>
-                        <input
-                          type="text"
-                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                          value={lead.plans?.[0]?.group || ''}
-                          readOnly
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-900">Passcode</label>
-                        <input
-                          type="text"
-                          className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900"
-                          value={assignPasscode}
-                          readOnly
-                          placeholder="Passcode from number pool"
-                        />
-                      </div>
-                    </div>
+                    )}
                   </div>
 
-                  {/* Etisalat Lead ID */}
-                  <div className="space-y-2">
-                    <label className="block text-sm font-semibold text-gray-900">
-                      Etisalat Lead ID <span className="text-red-500">*</span>
-                    </label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <div className="w-2 h-2 bg-red-500 rounded-full"></div>
-                      </div>
-                      <input
-                        type="text"
-                        className="w-full pl-8 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500"
-                        value={etisalatLeadId}
-                        onChange={(e) => setEtisalatLeadId(e.target.value)}
-                        placeholder="Enter Etisalat Lead ID"
-                        required
-                      />
+                  {/* Etisalat Lead ID - Show separate fields for each number */}
+                  {allPlansWithPasscodes.length > 1 ? (
+                    <div className="space-y-4">
+                      {allPlansWithPasscodes.map((planData, index) => (
+                        <div key={index} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                          <div className="mb-3 pb-2 border-b border-gray-200">
+                            <h4 className="text-sm font-semibold text-gray-700">Number {index + 1} - Etisalat Lead ID</h4>
+                          </div>
+                          <div className="space-y-2">
+                            <label className="block text-sm font-semibold text-gray-900">
+                              Etisalat Lead ID <span className="text-red-500">*</span>
+                            </label>
+                            <div className="relative">
+                              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <div className="w-2 h-2 bg-red-500 rounded-full"></div>
+                              </div>
+                              <input
+                                type="text"
+                                className="w-full pl-8 pr-4 py-3 bg-white border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 text-sm"
+                                value={etisalatLeadIds[index] || ''}
+                                onChange={(e) => {
+                                  const newIds = [...etisalatLeadIds];
+                                  newIds[index] = e.target.value;
+                                  setEtisalatLeadIds(newIds);
+                                  // Also update single etisalatLeadId for backward compatibility
+                                  if (index === 0) {
+                                    setEtisalatLeadId(e.target.value);
+                                  }
+                                }}
+                                placeholder={`Enter Etisalat Lead ID for ${planData.number}`}
+                                required
+                              />
+                            </div>
+                            <p className="text-xs text-gray-500">This ID will be used for tracking number {planData.number} in Etisalat system</p>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <p className="text-xs text-gray-500">This ID will be used for tracking in Etisalat system</p>
-                  </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <label className="block text-sm font-semibold text-gray-900">
+                        Etisalat Lead ID <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                          <div className="w-2 h-2 bg-red-500 rounded-full"></div>
+                        </div>
+                        <input
+                          type="text"
+                          className="w-full pl-8 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500"
+                          value={etisalatLeadId}
+                          onChange={(e) => {
+                            setEtisalatLeadId(e.target.value);
+                            // Also update array for consistency
+                            setEtisalatLeadIds([e.target.value]);
+                          }}
+                          placeholder="Enter Etisalat Lead ID"
+                          required
+                        />
+                      </div>
+                      <p className="text-xs text-gray-500">This ID will be used for tracking in Etisalat system</p>
+                    </div>
+                  )}
                   
                   {/* Emirates */}
                   <div className="space-y-2">
@@ -2451,7 +3087,7 @@ Language: ${lead.language || 'N/A'}`;
                   onClick={handleCoordinatorAction}
                   disabled={isCoordinatorActionProcessing}
                   className={`px-6 py-2.5 text-sm font-medium text-white rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm ${
-                    coordinatorAction === 'assign' ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 focus:ring-indigo-100' :
+                    coordinatorAction === 'assign' || coordinatorAction === 'reassign' ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 focus:ring-indigo-100' :
                     coordinatorAction === 'activate' ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 focus:ring-green-100' :
                     coordinatorAction === 'later' ? 'bg-gradient-to-r from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700 focus:ring-yellow-100' :
                     coordinatorAction === 'reject' ? 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 focus:ring-red-100' :
@@ -2472,6 +3108,11 @@ Language: ${lead.language || 'N/A'}`;
                         <>
                           <User2 className="h-4 w-4 mr-2" />
                           Assign Lead
+                        </>
+                      ) : coordinatorAction === 'reassign' ? (
+                        <>
+                          <User2 className="h-4 w-4 mr-2" />
+                          Reassign Lead
                         </>
                       ) : coordinatorAction === 'activate' ? (
                         <>
@@ -2668,6 +3309,23 @@ Language: ${lead.language || 'N/A'}`;
 
             {/* Form Content */}
             <div className="p-6 space-y-6">
+              {/* Location URL */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-900">
+                  Google Maps Location URL (Optional)
+                </label>
+                <input
+                  type="url"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-purple-300 focus:ring-2 focus:ring-purple-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500"
+                  value={managerLocationUrl}
+                  onChange={(e) => setManagerLocationUrl(e.target.value)}
+                  placeholder="Paste Google Maps link to the customer location"
+                />
+                <p className="text-xs text-gray-500">
+                  This link will be saved on the lead for coordinators to access.
+                </p>
+              </div>
+
               {/* Comment Box */}
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-gray-900">
@@ -2690,6 +3348,7 @@ Language: ${lead.language || 'N/A'}`;
                   onClick={() => {
                     setShowManagerAssignDialog(false);
                     setManagerNote('');
+                    setManagerLocationUrl(((lead as any).url as string) || '');
                   }}
                   disabled={isManagerActionProcessing}
                   className="px-6 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -2769,6 +3428,15 @@ Language: ${lead.language || 'N/A'}`;
             value={lead.customerNumber}
             readOnly
           />
+          {(lead as any).url && (
+            <FormInput
+              label="Location URL"
+              icon={MapPin}
+              type="text"
+              value={(lead as any).url || ''}
+              readOnly
+            />
+          )}
           <FormInput
             label="Nationality"
             icon={Globe2}

@@ -186,12 +186,12 @@ const REALTIME_UPDATE_INTERVAL = 2 * 60 * 1000; // 2 minutes for realtime update
  * Cache key constants for different data types
  * Versioned to handle cache schema changes gracefully
  */
-const ADMIN_CACHE_KEY = 'admin_dashboard_v3';
-const ADMIN_LEADS_CACHE_KEY = 'admin_leads_v3';
-const ADMIN_TEAMS_CACHE_KEY = 'admin_teams_v3';
-const ADMIN_TEAM_METRICS_CACHE_KEY = 'admin_team_metrics_v3';
-const ADMIN_METRICS_CACHE_KEY = 'admin_metrics_v3';
-const CACHE_VERSION = 'v3'; // Updated version for new cache strategy
+const ADMIN_CACHE_KEY = 'admin_dashboard_v4';
+const ADMIN_LEADS_CACHE_KEY = 'admin_leads_v4';
+const ADMIN_TEAMS_CACHE_KEY = 'admin_teams_v4';
+const ADMIN_TEAM_METRICS_CACHE_KEY = 'admin_team_metrics_v4';
+const ADMIN_METRICS_CACHE_KEY = 'admin_metrics_v4';
+const CACHE_VERSION = 'v4'; // Updated version for new cache strategy
 
 /**
  * Interface for cached data structure
@@ -877,7 +877,11 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         lead.updatedAt <= currentMonthEnd
       );
         
-      const verifiedCount = allLeads.filter(l => l.status === 'verified').length;
+      // Historical verified count: any lead that has ever been verified,
+      // based ONLY on presence of verifiedAt (regardless of current status)
+      const verifiedCount = allLeads.filter(
+        l => (l as any).verifiedAt
+      ).length;
       
       // Calculate activated leads for current month
       const currentMonthActivatedLeads = currentMonthLeads.filter(lead => 
@@ -905,7 +909,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         rejected: currentMonthLeads.filter(l => l.status === 'rejected').length,
         activated: monthlyActivated, // Current month
         totalActivated: totalActivated, // All-time
-        pendingAssignment: verifiedCount,
+        pendingAssignment: allLeads.filter(l => l.status === 'verified').length,
         assigned: allLeads.filter(l => l.status === 'assigned').length
       };
 
@@ -981,10 +985,13 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           return count + (lead.plans?.length || 0);
         }, 0);
 
-        // Calculate other team metrics (total counts regardless of date)
+        // Calculate other team metrics
         teamLeads.forEach(lead => {
           if (lead.status === 'pending_verification') teamMetric.pendingVerification++;
-          if (lead.status === 'verified') teamMetric.verified++;
+          // Historical verified count per team: any lead with verifiedAt
+          if ((lead as any).verifiedAt) {
+            teamMetric.verified++;
+          }
           if (lead.status === 'rejected') teamMetric.rejected++;
           if (lead.status === 'pending_assignment') teamMetric.pendingAssignment++;
           if (lead.status === 'assigned') teamMetric.assigned++;
@@ -1002,7 +1009,10 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
           // Get agent's leads
           const agentLeads = allLeads.filter(lead => lead.agentId === member.id);
-          const verified = agentLeads.filter(lead => lead.status === 'verified').length;
+          // Historical verified count per agent: any lead with verifiedAt
+          const verified = agentLeads.filter(
+            lead => (lead as any).verifiedAt
+          ).length;
           
           // Calculate activated leads for the agent in current month
           const agentActivatedLeads = agentLeads.filter(lead => 

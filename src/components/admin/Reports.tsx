@@ -329,8 +329,33 @@ export function Reports() {
       })) as Lead[];
 
       const filteredLeads = allLeads.filter(lead => {
-        const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
-        return updated >= start && updated <= end;
+        // For "daily" metrics, align with admin dashboard:
+        // - Activated / other statuses use updatedAt range
+        // - Verified uses verifiedAt specifically
+        const updatedRaw: any = lead.updatedAt;
+        const updated =
+          updatedRaw && typeof updatedRaw.toDate === 'function'
+            ? updatedRaw.toDate()
+            : updatedRaw instanceof Date
+              ? updatedRaw
+              : new Date(updatedRaw);
+
+        const verifiedRaw: any = (lead as any).verifiedAt;
+        const verifiedAt =
+          verifiedRaw && typeof verifiedRaw.toDate === 'function'
+            ? verifiedRaw.toDate()
+            : verifiedRaw instanceof Date
+              ? verifiedRaw
+              : verifiedRaw
+                ? new Date(verifiedRaw)
+                : null;
+
+        const inUpdatedRange = updated >= start && updated <= end;
+        const inVerifiedRange = verifiedAt ? verifiedAt >= start && verifiedAt <= end : false;
+
+        // Keep leads that either changed today (for non-verified stats)
+        // or have verifiedAt today (for verified stats)
+        return inUpdatedRange || inVerifiedRange;
       });
 
       const metrics: DailyMetrics = {
@@ -354,6 +379,16 @@ export function Reports() {
         const teamId = lead.teamId || 'unknown';
         const team = teams.find(t => t.id === teamId);
         const status = lead.status;
+        const verifiedRaw: any = (lead as any).verifiedAt;
+        const verifiedAt =
+          verifiedRaw && typeof verifiedRaw.toDate === 'function'
+            ? verifiedRaw.toDate()
+            : verifiedRaw instanceof Date
+              ? verifiedRaw
+              : verifiedRaw
+                ? new Date(verifiedRaw)
+                : null;
+        const inVerifiedRange = verifiedAt ? verifiedAt >= start && verifiedAt <= end : false;
         
         // Initialize team if not exists
         if (!metrics.teamWise[teamId]) {
@@ -421,9 +456,7 @@ export function Reports() {
           });
         } else {
           // For other statuses: count leads (1 per lead), but distribute across groups
-          if (status === 'verified') {
-            metrics.verified++;
-          } else if (status === 'non_verified') {
+          if (status === 'non_verified') {
             metrics.followup++;
           } else if (status === 'assigned') {
             metrics.assignedForActivation++;
@@ -462,9 +495,7 @@ export function Reports() {
 
               // Count lead per group (distribute evenly or count once per group)
               // For simplicity, count 1 per group (if lead has multiple plans, it appears in multiple groups)
-              if (status === 'verified') {
-                metrics.teamWise[teamId].groupStatus[group].verified++;
-              } else if (status === 'non_verified') {
+              if (status === 'non_verified') {
                 metrics.teamWise[teamId].groupStatus[group].followup++;
               } else if (status === 'assigned') {
                 metrics.teamWise[teamId].groupStatus[group].assignedForActivation++;
@@ -481,6 +512,29 @@ export function Reports() {
           } else {
             // If no plans, skip group assignment - no hardcoded default group
             // Groups must be explicitly defined in Firestore
+          }
+        }
+
+        // After status-specific logic, handle verified metrics purely by verifiedAt
+        if (inVerifiedRange) {
+          metrics.verified++;
+          if (plans.length > 0) {
+            plans.forEach(plan => {
+              const group = normalizeGroup(plan.group);
+              // Ensure groupStatus exists
+              if (!metrics.teamWise[teamId].groupStatus[group]) {
+                metrics.teamWise[teamId].groupStatus[group] = {
+                  activated: 0,
+                  verified: 0,
+                  followup: 0,
+                  nonVerified: 0,
+                  assignedForActivation: 0,
+                  pendingVerification: 0,
+                  total: 0,
+                };
+              }
+              metrics.teamWise[teamId].groupStatus[group].verified++;
+            });
           }
         }
       });
