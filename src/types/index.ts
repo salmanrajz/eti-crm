@@ -60,6 +60,12 @@ export type UserRole = 'agent' | 'verifier' | 'coordinator' | 'manager' | 'admin
 export type CoordinatorType = 'g1' | 'g2' | 'g3' | 'all';
 
 /**
+ * Optional list of team IDs a coordinator is responsible for.
+ * When set, coordinator can see leads from these teams regardless of number group.
+ */
+export type CoordinatorTeams = string[];
+
+/**
  * Defines verifier group types that determine which number groups
  * a verifier can process
  */
@@ -101,6 +107,7 @@ export interface User {
   managerId?: string; // For agents
   phoneNumbers?: string[]; // Array of phone numbers for managers
   coordinatorType?: CoordinatorType; // For coordinators - which groups they handle
+  coordinatorTeams?: CoordinatorTeams; // For coordinators - which teams' leads they can see
   verifierGroups?: VerifierGroups; // For verifiers - which groups they handle (multiple groups)
   isActive?: boolean; // User active status - inactive users cannot login (default: true)
   createdAt: Date;

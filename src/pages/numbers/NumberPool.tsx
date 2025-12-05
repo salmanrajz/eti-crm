@@ -3066,7 +3066,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 )}
               </div>
             )}
-            {isCoordinator && (
+            {(isCoordinator || isAdmin()) && (
               <div className="flex items-center gap-4">
                 <motion.button
                   whileHover={{ scale: 1.02 }}
@@ -4560,10 +4560,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </>
           )}
           {/* Edit button for coordinators and admins */}
-          {/* Edit is only available for: rejected, pending_verification, non_verified, follow_up, follow_verification (legacy), open, reserved */}
-          {/* Edit is NOT available for: verified, activated, assigned, later */}
-                        {(isAdmin() || isCoordinator) && 
-            ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status) && (
+          {/* Admin can edit all numbers; coordinator limited by status */}
+                        {(
+              isAdmin() ||
+              (isCoordinator &&
+                ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
+            ) && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}

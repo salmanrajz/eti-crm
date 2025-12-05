@@ -64,6 +64,7 @@ export class UnifiedSearch {
   /**
    * Main search method - Always fetches fresh data from Firebase
    * Optimized for speed with parallel queries
+   * Supports multi-column search: "050 04DECGOLG3" searches for numbers with "050" AND code with "04DECGOLG3"
    */
   async search(
     searchTerm: string,
@@ -71,16 +72,109 @@ export class UnifiedSearch {
   ): Promise<SearchResult> {
     const { category = 'all', limit: maxResults = 200 } = options;
     const rawTerm = searchTerm.trim();
-    const term = rawTerm.toLowerCase();
 
-    if (!term) {
+    if (!rawTerm) {
       return { data: [], totalItems: 0, source: 'firebase', isComplete: true };
     }
 
-    // Always fetch fresh data from Firebase (no cache)
+    // Parse multiple search terms (separated by spaces)
+    // Example: "050 04DECGOLG3" -> ["050", "04DECGOLG3"]
+    const searchTerms = rawTerm.split(/\s+/).filter(t => t.length > 0);
+    
+    // If multiple terms, use multi-column search
+    if (searchTerms.length > 1) {
+      return await this.performMultiColumnSearch(searchTerms, category, maxResults);
+    }
+
+    // Single term - use existing fast search
+    const term = rawTerm.toLowerCase();
     const result = await this.performFastFirebaseSearch(term, rawTerm, category, maxResults);
 
     return result;
+  }
+
+  /**
+   * Performs multi-column search where ALL terms must match (AND logic)
+   * Each term can match different columns (number, code, plan, category)
+   * Example: "050 04DECGOLG3" finds numbers with "050" in number AND "04DECGOLG3" in code
+   */
+  private async performMultiColumnSearch(
+    searchTerms: string[],
+    category: string,
+    maxResults: number
+  ): Promise<SearchResult> {
+    const results = new Map<string, NumberPool>();
+
+    try {
+      // Build base query with category filter if needed
+      let base = query(collection(db, 'numberPool'));
+      if (category !== 'all') {
+        base = query(base, where('category', '==', category));
+      }
+
+      // For multi-column search, we need to fetch a larger dataset and filter in memory
+      // This is because Firestore doesn't support complex AND queries across multiple fields
+      const snapshot = await getDocs(query(base, limit(5000))); // Get a large batch for filtering
+      
+      // Helper to normalize strings for case-insensitive and punctuation-insensitive comparison
+      const normalize = (value: any) => (value || '').toString().toLowerCase();
+      const normalizeLoose = (value: any) =>
+        normalize(value).replace(/[^a-z0-9]/g, ''); // remove spaces/punctuation for fuzzy matches
+
+      // Pre-normalize search terms to ensure strict case-insensitive matching
+      const normalizedTerms = searchTerms.map(term => {
+        const termLower = term.toLowerCase();
+        const termLoose = termLower.replace(/[^a-z0-9]/g, '');
+        return { termLower, termLoose };
+      });
+
+      // Filter numbers where ALL search terms match in ANY column (AND logic)
+      snapshot.docs.forEach(doc => {
+        const number = doc.data() as NumberPool;
+        const numberStr = normalize(number.number);
+        const codeStr = normalize(number.code);
+        const planStr = normalize(number.plan);
+        const categoryStr = normalize(number.category);
+        const groupStr = normalize(number.group);
+
+        const numberLoose = normalizeLoose(number.number);
+        const codeLoose = normalizeLoose(number.code);
+        const planLoose = normalizeLoose(number.plan);
+        const categoryLoose = normalizeLoose(number.category);
+        const groupLoose = normalizeLoose(number.group);
+        
+        // Check if ALL search terms match in ANY column (AND logic)
+        const allTermsMatch = normalizedTerms.every(({ termLower, termLoose }) => {
+
+          const matchesField = (field: string, looseField: string) =>
+            field.includes(termLower) || (termLoose ? looseField.includes(termLoose) : false);
+
+          return (
+            matchesField(numberStr, numberLoose) ||
+            matchesField(codeStr, codeLoose) ||
+            matchesField(planStr, planLoose) ||
+            matchesField(categoryStr, categoryLoose) ||
+            matchesField(groupStr, groupLoose)
+          );
+        });
+        
+        if (allTermsMatch && results.size < maxResults) {
+          results.set(doc.id, { id: doc.id, ...number });
+        }
+      });
+      
+    } catch (error) {
+      console.error('[UnifiedSearch] Multi-column search error:', error);
+    }
+    
+    const finalResults = Array.from(results.values()).slice(0, maxResults);
+    
+    return {
+      data: finalResults,
+      totalItems: finalResults.length,
+      source: 'firebase',
+      isComplete: true
+    };
   }
 
   /**
@@ -95,8 +189,8 @@ export class UnifiedSearch {
     const results = new Map<string, NumberPool>();
 
     // Determine search strategy based on term type (moved outside try block for scope)
-    const isNumeric = /^\d+$/.test(term);
-    const normalized = term.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+      const isNumeric = /^\d+$/.test(term);
+      const normalized = term.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
     
     // Check if search term is a pattern with wildcards (x or X)
     const isPattern = /[xX]/.test(term);

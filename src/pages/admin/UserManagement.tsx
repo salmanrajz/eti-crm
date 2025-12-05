@@ -57,7 +57,7 @@ import { collection, query, getDocs, doc, updateDoc, where, orderBy } from 'fire
 import { db, deleteUsers, createUserWithDocument } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
-import { User, UserRole, Team, CoordinatorType, VerifierType, VerifierGroups } from '../../types';
+import { User, UserRole, Team, CoordinatorType, VerifierType, VerifierGroups, CoordinatorTeams } from '../../types';
 import { 
   Users, 
   CheckCircle, 
@@ -118,6 +118,7 @@ export function UserManagement() {
   const [showVerifierGroupsModal, setShowVerifierGroupsModal] = useState(false);
   const [selectedUserForGroups, setSelectedUserForGroups] = useState<User | null>(null);
   const [selectedGroups, setSelectedGroups] = useState<VerifierGroups>([]);
+  const [selectedCoordinatorTeams, setSelectedCoordinatorTeams] = useState<CoordinatorTeams>([]);
   const [createUserForm, setCreateUserForm] = useState({
     email: '',
     password: '',
@@ -425,6 +426,7 @@ export function UserManagement() {
   function openVerifierGroupsModal(user: User) {
     setSelectedUserForGroups(user);
     setSelectedGroups(user.verifierGroups || []);
+    setSelectedCoordinatorTeams((user as any).coordinatorTeams || []);
     setShowVerifierGroupsModal(true);
   }
 
@@ -435,10 +437,23 @@ export function UserManagement() {
 
   function handleSaveVerifierGroups() {
     if (selectedUserForGroups) {
+      // Update verifier groups
       updateVerifierGroups(selectedUserForGroups.id, selectedGroups);
+      // Update coordinator teams (for coordinators only)
+      if (selectedUserForGroups.role === 'coordinator') {
+        const userRef = doc(db, 'users', selectedUserForGroups.id);
+        updateDoc(userRef, {
+          coordinatorTeams: selectedCoordinatorTeams,
+          updatedAt: new Date()
+        }).catch((error) => {
+          console.error('Error updating coordinator teams:', error);
+          toast.error('Failed to update coordinator teams');
+        });
+      }
       setShowVerifierGroupsModal(false);
       setSelectedUserForGroups(null);
       setSelectedGroups([]);
+      setSelectedCoordinatorTeams([]);
     }
   }
 
@@ -1207,8 +1222,8 @@ export function UserManagement() {
                             )}
                       </td>
                           
-                          {/* Coordinator Type - Only visible to verifiers and coordinators */}
-                          {(currentUser?.role === 'verifier' || currentUser?.role === 'coordinator') && (
+                          {/* Coordinator Type - Visible to admin, verifiers and coordinators */}
+                          {(currentUser?.role === 'admin' || currentUser?.role === 'verifier' || currentUser?.role === 'coordinator') && (
                             <td className="px-6 py-4 whitespace-nowrap">
                         {user.role === 'coordinator' ? (
                           <select
@@ -1231,8 +1246,8 @@ export function UserManagement() {
                       </td>
                           )}
                           
-                          {/* Verifier Groups - Only visible to verifiers and coordinators */}
-                          {(currentUser?.role === 'verifier' || currentUser?.role === 'coordinator') && (
+                          {/* Verifier Groups / Coordinator Teams - Visible to admin, verifiers and coordinators */}
+                          {(currentUser?.role === 'admin' || currentUser?.role === 'verifier' || currentUser?.role === 'coordinator') && (
                             <td className="px-6 py-4 whitespace-nowrap">
                         {user.role === 'verifier' ? (
                           <div className="flex items-center space-x-2">
@@ -1257,6 +1272,37 @@ export function UserManagement() {
                             >
                                     <Settings className="h-4 w-4" />
                             </button>
+                          </div>
+                        ) : user.role === 'coordinator' ? (
+                          <div className="flex flex-col space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold text-gray-500">Coordinator Teams</span>
+                              <button
+                                onClick={() => openVerifierGroupsModal(user)}
+                                className="text-indigo-600 hover:text-indigo-800 p-1 rounded hover:bg-indigo-50 transition-colors"
+                                title="Edit coordinator teams"
+                              >
+                                <Settings className="h-4 w-4" />
+                              </button>
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              {(user as any).coordinatorTeams && (user as any).coordinatorTeams.length > 0 ? (
+                                (user as any).coordinatorTeams.map((teamId: string) => {
+                                  const team = teams.find(t => t.id === teamId);
+                                  const label = team?.name || teamId;
+                                  return (
+                                    <span
+                                      key={teamId}
+                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800"
+                                    >
+                                      {label}
+                                    </span>
+                                  );
+                                })
+                              ) : (
+                                <span className="text-gray-400 italic text-xs">No teams</span>
+                              )}
+                            </div>
                           </div>
                         ) : (
                                 <span className="text-sm text-gray-400 italic">Not applicable</span>
@@ -1720,6 +1766,37 @@ export function UserManagement() {
                             {teams.find(t => t.managerId === user.id)?.name || 'No team managed'}
                                 </span>
                           </div>
+                            ) : user.role === 'coordinator' ? (
+                              <div className="flex flex-col space-y-1">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-semibold text-gray-500">Coordinator Teams</span>
+                                  <button
+                                    onClick={() => openVerifierGroupsModal(user)}
+                                    className="text-indigo-600 hover:text-indigo-800 p-1 rounded hover:bg-indigo-50 transition-colors"
+                                    title="Edit coordinator teams"
+                                  >
+                                    <Settings className="h-4 w-4" />
+                                  </button>
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {(user as any).coordinatorTeams && (user as any).coordinatorTeams.length > 0 ? (
+                                    (user as any).coordinatorTeams.map((teamId: string) => {
+                                      const team = teams.find(t => t.id === teamId);
+                                      const label = team?.name || teamId;
+                                      return (
+                                        <span
+                                          key={teamId}
+                                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800"
+                                        >
+                                          {label}
+                                        </span>
+                                      );
+                                    })
+                                  ) : (
+                                    <span className="text-gray-400 italic text-xs">No teams</span>
+                                  )}
+                                </div>
+                              </div>
                             ) : (
                               <span className="text-sm text-gray-400 italic">Not applicable</span>
                         )}
@@ -1860,7 +1937,7 @@ export function UserManagement() {
         )}
       </motion.div>
 
-      {/* Verifier Groups Modal */}
+      {/* Verifier Groups / Coordinator Teams Modal */}
       {showVerifierGroupsModal && selectedUserForGroups && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
@@ -1872,17 +1949,24 @@ export function UserManagement() {
               </div>
             </div>
             <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
-              Edit Verifier Groups
+              {selectedUserForGroups.role === 'coordinator'
+                ? 'Edit Coordinator Scope'
+                : 'Edit Verifier Groups'}
             </h3>
             <p className="text-gray-500 text-center mb-6">
-              Select the groups that <strong>{selectedUserForGroups.name}</strong> should handle
+              {selectedUserForGroups.role === 'coordinator'
+                ? <>Select <strong>teams and groups</strong> that <strong>{selectedUserForGroups.name}</strong> should handle</>
+                : <>Select the verification groups that <strong>{selectedUserForGroups.name}</strong> should handle</>}
             </p>
-            <div className="space-y-3 mb-6">
+
+            {/* Verifier group selection */}
+            <div className="space-y-3 mb-6 border-b border-gray-200 pb-4">
+              <h4 className="text-sm font-semibold text-gray-800">Verifier Groups</h4>
               {verifierTypes.map((type) => (
                 <div key={type} className="flex items-center">
                   <input
                     type="checkbox"
-                    id={`modal-${type}`}
+                    id={`modal-group-${type}`}
                     checked={selectedGroups.includes(type)}
                     onChange={(e) => {
                       const checked = e.target.checked;
@@ -1896,7 +1980,7 @@ export function UserManagement() {
                     }}
                     className="h-5 w-5 text-green-600 focus:ring-green-500 border-gray-300 rounded"
                   />
-                  <label htmlFor={`modal-${type}`} className="ml-3 text-sm font-medium text-gray-700">
+                  <label htmlFor={`modal-group-${type}`} className="ml-3 text-sm font-medium text-gray-700">
                     {type === 'g1' ? 'Group G1' :
                      type === 'g2' ? 'Group G2' :
                      type === 'g3' ? 'Group G3' :
@@ -1905,6 +1989,44 @@ export function UserManagement() {
                 </div>
               ))}
             </div>
+
+            {/* Coordinator team selection (only for coordinators) */}
+            {selectedUserForGroups.role === 'coordinator' && (
+              <div className="space-y-3 mb-6">
+                <h4 className="text-sm font-semibold text-gray-800">Coordinator Teams</h4>
+                <p className="text-xs text-gray-500">
+                  Select the <strong>teams</strong> whose leads this coordinator should see, regardless of number group.
+                </p>
+                <div className="max-h-56 overflow-y-auto border border-gray-100 rounded-xl p-3 bg-gray-50/50">
+                  {teams.map((team) => (
+                    <div key={team.id} className="flex items-center py-1">
+                      <input
+                        type="checkbox"
+                        id={`coord-team-${team.id}`}
+                        checked={selectedCoordinatorTeams.includes(team.id)}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setSelectedCoordinatorTeams(prev => {
+                            if (checked) {
+                              return [...prev, team.id];
+                            } else {
+                              return prev.filter(tid => tid !== team.id);
+                            }
+                          });
+                        }}
+                        className="h-5 w-5 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                      />
+                      <label htmlFor={`coord-team-${team.id}`} className="ml-3 text-sm font-medium text-gray-700">
+                        {team.name || 'Unnamed Team'}
+                      </label>
+                    </div>
+                  ))}
+                  {teams.length === 0 && (
+                    <p className="text-xs text-gray-400">No teams found. Create teams first in Team Management.</p>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="flex justify-end space-x-3">
               <button
                 onClick={() => {
