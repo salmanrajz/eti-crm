@@ -129,16 +129,28 @@ export async function sendChatMessageWhatsAppNotification(
       }
     }
 
+    // Determine lead group (from first plan)
+    const leadGroup = getLeadGroup(latestLead) || 'N/A';
+    const primaryPlan = Array.isArray(latestLead?.plans) && latestLead.plans.length > 0 ? latestLead.plans[0] : null;
+    const primaryNumber = primaryPlan?.number || "N/A";
+
+    const formatStatus = (status?: string) => {
+      if (!status) return 'N/A';
+      return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    };
+
     // Format the message according to the specified format
     const formattedMessage = `*Lead Notification:*
+
+🔢 Lead Number: *${latestLead?.leadNumber || "N/A"}*
 
 👤 Customer Name: *${latestLead?.customerName || "N/A"}*
 
 📞 Customer Number: *${latestLead?.customerNumber || "N/A"}*
 
-🔢 Selected Number: *${latestLead?.plans?.[0]?.number || "N/A"}*
+🔢 Selected Number: *${primaryNumber}* (${leadGroup})
 
-📊 Lead Status: *${latestLead?.status || "N/A"}*
+📊 Lead Status: *${formatStatus(latestLead?.status)}*
 
 📝 Remarks: *${messageText}* by *${senderName || "N/A"}*
 

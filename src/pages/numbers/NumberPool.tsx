@@ -255,9 +255,9 @@ const CATEGORIES = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'P
 const PAGE_SIZES = [10, 20, 40, 80, 120] as const;
 
 /**
- * Maximum time (20 minutes) for number claims before auto-release
+ * Maximum time (15 minutes) for number claims before auto-release
  */
-const CLAIM_TIMEOUT = 20 * 60 * 1000; // 20 minutes in milliseconds
+const CLAIM_TIMEOUT = 15 * 60 * 1000; // 15 minutes in milliseconds
 
 /**
  * Maximum number of concurrent reservations per user
@@ -378,6 +378,15 @@ interface StatusCheck {
  * @param propSelectedCategory - Optional pre-selected category
  * @param onCategoryChange - Optional callback for category changes
  */
+
+// Helper function to check if current time is within claim hours (9 AM - 8 PM UAE time)
+const isWithinClaimHours = (): boolean => {
+  const now = new Date();
+  const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
+  const currentHour = uaeTime.getHours();
+  return currentHour >= 9 && currentHour < 20; // 9 AM to 8 PM (20:00)
+};
+
 export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCategory, onCategoryChange }: NumberPoolProps = {}) {
   // ===============================================================================
   // STATE MANAGEMENT
@@ -389,6 +398,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showPool, setShowPool] = useState(true);
   const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
   const { user, isAdmin } = useAuthStore();
+  
+  // Track claim hours state for real-time updates
+  const [isWithinClaimWindow, setIsWithinClaimWindow] = useState(isWithinClaimHours());
+  
+  // Update claim window status every minute
+  useEffect(() => {
+    const updateClaimWindow = () => {
+      setIsWithinClaimWindow(isWithinClaimHours());
+    };
+    
+    updateClaimWindow(); // Initial check
+    const interval = setInterval(updateClaimWindow, 60000); // Update every minute
+    
+    return () => clearInterval(interval);
+  }, []);
   
   // Reservation and number management state
   const [hasReservation, setHasReservation] = useState(false);
@@ -418,11 +442,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const fullSearchResultsRef = useRef<NumberPoolType[]>([]);
   const recoveryAttemptedRef = useRef(false);
   const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [searchCurrentPage, setSearchCurrentPage] = useState(1);
   const [searchTotalPages, setSearchTotalPages] = useState(0);
   const [searchTotalItems, setSearchTotalItems] = useState(0);
   const [searchHasNextPage, setSearchHasNextPage] = useState(false);
   const [searchHasPreviousPage, setSearchHasPreviousPage] = useState(false);
+  const [searchLastDoc, setSearchLastDoc] = useState<any>(null);
+  const [searchHasMore, setSearchHasMore] = useState(false);
   
   // ===============================================================================
   // UI STATE AND DIALOGS
@@ -526,8 +553,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   // Debounced search term for performance optimization
-  // Optimized debounce: 200ms for faster search feel (reduced from 300ms)
-  const debouncedSearchTerm = useDebounce(searchTerm, 200);
+  // Debounce search input to 400ms to reduce redundant queries
+  const debouncedSearchTerm = useDebounce(searchTerm, 400);
 
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
@@ -763,9 +790,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const hasCachedResults = fullSearchResultsRef.current.length > 0;
     const lastSearchTerm = (fullSearchResultsRef.current as any).lastSearchTerm;
     const lastCategory = (fullSearchResultsRef.current as any).lastCategory;
-    const searchTermChanged = hasCachedResults && debouncedSearchTerm !== lastSearchTerm;
-    const categoryChanged = hasCachedResults && lastCategory !== selectedCategory;
-
+    
+    // Determine if search term or category changed
+    const searchTermChanged = debouncedSearchTerm !== lastSearchTerm;
+    const categoryChanged = selectedCategory !== lastCategory;
+    
+    // IMPORTANT: If we have cached results and search term/category haven't changed,
+    // ONLY re-paginate - DO NOT call performSearch() which would reset everything
     if (hasCachedResults && !searchTermChanged && !categoryChanged) {
       // Use cached results - just re-slice for new pageSize/page
       const filteredResults = fullSearchResultsRef.current;
@@ -779,21 +810,45 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       setSearchHasNextPage(endIndex < filteredResults.length);
       setSearchHasPreviousPage(searchCurrentPage > 1);
       setIsSearching(false);
-      return;
+      setIsLoadingMore(false);
+      return; // CRITICAL: Return early to prevent performSearch() from being called
     }
 
-    const performSearch = async () => {
+    // Only perform new search if we don't have cached results OR search term/category changed
+    // This prevents resetting results when only page changes
+    if (!hasCachedResults || searchTermChanged || categoryChanged) {
+      // Reset to page 1 when search term or category changes
+      if (searchTermChanged || categoryChanged) {
+        setSearchCurrentPage(1);
+      }
+      performSearch();
+    }
+  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize]);
+
+  // Perform search function - accessible for "Load More" button
+  const performSearch = useCallback(async (loadMore: boolean = false) => {
+    if (loadMore) {
+      setIsLoadingMore(true);
+    } else {
       setIsSearching(true);
+      // Reset results when starting new search
+      setSearchResults([]);
+      fullSearchResultsRef.current = [];
+      setSearchLastDoc(null);
+      setSearchHasMore(false);
+    }
+    
       const termAtStart = debouncedSearchTerm;
       
       try {
         // Use unified search for consistent results
-        // Always fetch 200 results regardless of page size for comprehensive search
-        const searchLimit = 200;
+      // Initially fetch 200 results for faster loading, "Load More" will fetch additional batches
+      const searchLimit = 200;
         
         const result = await unifiedSearch.search(debouncedSearchTerm, {
           category: selectedCategory || 'all',
           limit: searchLimit,
+        startAfter: loadMore ? searchLastDoc : null,
           includeStale: false
         });
         
@@ -801,13 +856,33 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         if (termAtStart === debouncedSearchTerm) {
           const filteredResults = filterByVisibility(result.data);
           
-          // Store full filtered results for fast re-pagination
+        if (loadMore) {
+          // Append new results to existing ones
+          const combinedResults = [...fullSearchResultsRef.current, ...filteredResults];
+          fullSearchResultsRef.current = combinedResults;
+          // Preserve search metadata for pagination checks
+          (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+          (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+          
+          // Update pagination
+          const startIndex = (searchCurrentPage - 1) * pageSize;
+          const endIndex = startIndex + pageSize;
+          const paginatedResults = combinedResults.slice(startIndex, endIndex);
+          
+          setSearchResults(paginatedResults);
+          setSearchTotalPages(Math.ceil(combinedResults.length / pageSize));
+          setSearchTotalItems(combinedResults.length);
+          setSearchHasNextPage(endIndex < combinedResults.length);
+          setSearchHasPreviousPage(searchCurrentPage > 1);
+        } else {
+          // New search - replace results
           fullSearchResultsRef.current = filteredResults;
           (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           
-          // Calculate pagination for current page
-          const startIndex = (searchCurrentPage - 1) * pageSize;
+          // For new searches, always start at page 1
+          const pageForNewSearch = 1;
+          const startIndex = (pageForNewSearch - 1) * pageSize;
           const endIndex = startIndex + pageSize;
           const paginatedResults = filteredResults.slice(startIndex, endIndex);
           
@@ -815,7 +890,15 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
           setSearchTotalItems(filteredResults.length);
           setSearchHasNextPage(endIndex < filteredResults.length);
-          setSearchHasPreviousPage(searchCurrentPage > 1);
+          setSearchHasPreviousPage(false); // Always false for page 1
+          
+          // Ensure we're on page 1 for new searches
+          setSearchCurrentPage(1);
+        }
+        
+        // Store cursor and hasMore for "Load More" button
+        setSearchLastDoc(result.lastDoc);
+        setSearchHasMore(result.hasMore);
           
           // Search complete - results ready for display
         }
@@ -825,12 +908,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       } finally {
         if (termAtStart === debouncedSearchTerm) {
           setIsSearching(false);
+        setIsLoadingMore(false);
         }
       }
-    };
-
-    performSearch();
-  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize]);
+  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize, searchLastDoc]);
 
   // DISABLED: Real-time listeners for search results
   // Search already fetches fresh data, no need for additional real-time listeners
@@ -1148,6 +1229,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         status: editPoolStatus,
         lastStatusChange: serverTimestamp()
       };
+
+      // If status is being set to 'open', clear all reserved data (for admin or coordinator)
+      if (editPoolStatus === 'open' && (isAdmin() || isCoordinator || user?.role === 'coordinator')) {
+        numberData.reservedBy = null;
+        numberData.reservedAt = null;
+        numberData.expiresAt = null;
+        numberData.claimingAgentId = null;
+        numberData.claimingStartedAt = null;
+        numberData.claimingExpiresAt = null;
+        numberData.claimQueue = [];
+        numberData.originalAgentId = null;
+        numberData.originalReservedAt = null;
+        numberData.originalExpiresAt = null;
+      }
 
       // Add passcode for admin/coordinator
       if (isAdmin() || isCoordinator) {
@@ -3120,9 +3215,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       >
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="flex items-center space-x-3 sm:space-x-4">
-                          <div className="h-10 w-10 sm:h-12 sm:w-12 flex-shrink-0 rounded-lg bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center ring-2 ring-white shadow-sm">
-                            <Hash className="h-5 w-5 sm:h-6 sm:w-6 text-indigo-600" />
-            </div>
           <div>
                             <h4 className="text-base sm:text-base font-semibold text-gray-900">{number.number}</h4>
                             <span className="text-xs sm:text-sm text-gray-500">{number.category}</span>
@@ -4175,6 +4267,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     />
                   </th>
                 )}
+                <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  S.No.
+                </th>
                 <th 
                     className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
                   onClick={() => handleSort('number')}
@@ -4268,6 +4363,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 const statusStyle = getStatusStyle(number.status);
                 const StatusIcon = statusStyle?.icon || CheckCircle2; 
 
+  const serialNumber = (displayPagination.currentPage - 1) * pageSize + index + 1;
+
   return (
     <motion.tr 
                       key={number.id}
@@ -4292,14 +4389,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           />
         </td>
       )}
+      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-500">
+        {serialNumber}
+      </td>
       <td className="px-6 py-4 whitespace-nowrap">
-        <div className="flex items-center">
-          <div className="h-8 w-8 flex-shrink-0 rounded-full bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center ring-2 ring-white shadow-sm mr-3">
-            <Hash className="h-4 w-4 text-indigo-600" />
-          </div>
           <div className="text-sm font-medium text-gray-900 group-hover:text-indigo-600 transition-colors">
             {number.number}
-          </div>
         </div>
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
@@ -4489,10 +4584,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               Striked
             </motion.span>
           )}
-          {/* Claim button - Only visible to agents */}
+          {/* Claim button - Only visible to agents and only between 9 AM - 8 PM UAE time */}
           {user?.role === 'agent' && number.status === 'reserved' && 
                            number.reservedBy !== user?.id && 
-                           number.claimingAgentId !== user?.id && (
+                           number.claimingAgentId !== user?.id &&
+                           isWithinClaimWindow && (
             <motion.button
                               whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
                               whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
@@ -4668,12 +4764,38 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   whileTap={{ scale: 0.95 }}
                   onClick={() => debouncedSearchTerm.trim() ? goToSearchPage(displayPagination.totalPages) : goToPage(displayPagination.totalPages)}
                   disabled={displayPagination.currentPage === displayPagination.totalPages || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
                   title="Last Page"
                 >
                   <ChevronRight className="h-4 w-4" />
                   <ChevronRight className="h-4 w-4 -ml-1" />
                 </motion.button>
+
+                {/* Load More Button - Only show on last page when searching and more results available */}
+                {debouncedSearchTerm.trim() && 
+                 searchHasMore && 
+                 displayPagination.currentPage === displayPagination.totalPages && (
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => performSearch(true)}
+                    disabled={isLoadingMore || isSearching}
+                    className="inline-flex items-center px-3 py-2 text-xs font-medium text-white bg-indigo-600 border border-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0 ml-1"
+                    title="Load More Results"
+                  >
+                    {isLoadingMore ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                        Loading...
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="h-3 w-3 mr-1" />
+                        Load More
+                      </>
+                    )}
+                  </motion.button>
+                )}
                 </div>
               </div>
             </div>
