@@ -1613,6 +1613,21 @@ export function LeadList() {
     }
   }, []);
 
+  const getStatusDisplayText = useCallback((status: string) => {
+    // Convert "assigned" to "Processed with Etisalat" for UI display only
+    if (status === 'assigned') {
+      return 'Processed with Etisalat';
+    }
+    // Convert "assigned_to_cord" to "Assigned to Activation" for UI display only
+    if (status === 'assigned_to_cord') {
+      return 'Assigned to Activation';
+    }
+    // Handle other statuses
+    if (status === 'non_verified') return 'Non Verified';
+    if (status === 'follow_up') return 'Follow-up';
+    return status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+  }, []);
+
   // Load more function for infinite scroll (optional)
   const loadMoreLeads = useCallback(() => {
     if (!loadingMore && hasMore) {
@@ -2067,6 +2082,11 @@ export function LeadList() {
                         <Hash className="h-4 w-4 text-indigo-500" />
                         <span className="text-sm font-medium text-gray-700">
                                       {plan.number || ''}
+                                      {plan.group && (
+                                        <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-700">
+                                          {plan.group}
+                                        </span>
+                                      )}
                             </span>
                           </div>
                                   {planEtisalatId && (
@@ -2111,7 +2131,7 @@ export function LeadList() {
                         )}
                       >
                         {getStatusIcon(lead.status)}
-                        {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        {getStatusDisplayText(lead.status)}
                       </motion.span>
                         {lead.status === 'assigned' && (() => {
                           const duration = getAssignmentDuration(lead);
@@ -2261,7 +2281,7 @@ export function LeadList() {
                               )}
                             >
                               {getStatusIcon(lead.status)}
-                              {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                              {getStatusDisplayText(lead.status)}
                             </motion.span>
                           </motion.div>
                         </div>
@@ -2286,6 +2306,11 @@ export function LeadList() {
                               <p className="text-xs font-medium text-gray-500">Selected Number</p>
                               <p className="text-base font-semibold text-gray-900 break-all">
                                     {plan.number || 'N/A'}
+                                    {plan.group && (
+                                      <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-700">
+                                        {plan.group}
+                                      </span>
+                                    )}
                               </p>
                               {lead.etisalatLeadId && (
                                 <p className="mt-0.5 text-[11px] font-medium text-gray-500">

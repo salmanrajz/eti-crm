@@ -505,8 +505,16 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
             );
           })
         ) : (
-          <div className="text-center py-4 text-sm text-gray-500">
-            {searchTerm ? 'No numbers found matching your search' : 'No numbers available'}
+          <div className="text-center py-4">
+            {searchTerm ? (
+              <p className="text-sm text-gray-500">No numbers found matching your search</p>
+            ) : (
+              <p className="text-sm">
+                <span className="text-gray-600">You don't have any number reserved from the </span>
+                <span className="font-semibold text-indigo-600">{selectedCategory}</span>
+                <span className="text-gray-600"> category</span>
+              </p>
+            )}
           </div>
         )}
       </div>

@@ -110,6 +110,22 @@ interface VerifierDashboardProps {
 
 const PAGE_SIZES = [10, 20, 40, 80] as const;
 
+function getStatusDisplayText(status: string | undefined): string {
+  if (!status) return 'Unknown';
+  // Convert "assigned" to "Processed with Etisalat" for UI display only
+  if (status === 'assigned') {
+    return 'Processed with Etisalat';
+  }
+  // Convert "assigned_to_cord" to "Assigned to Activation" for UI display only
+  if (status === 'assigned_to_cord') {
+    return 'Assigned to Activation';
+  }
+  // Handle other statuses
+  if (status === 'non_verified') return 'Non Verified';
+  if (status === 'follow_up') return 'Follow-up';
+  return status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
+
 const VERIFY_CHECKLIST = [
   {
     header: 'Number & Rental Explained',
@@ -548,7 +564,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
     // Statuses to query based on current status
       const statusesToQuery = currentStatus === 'pending_verification' 
-        ? ['pending_verification', 'activated_non_verified']
+        ? ['pending_verification', 'activated_non_verified', 'reverification']
         : [currentStatus];
       
     // Real-time listener for leads
@@ -604,7 +620,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     // Real-time listener for pending verification count
       const pendingQuery = query(
         collection(db, 'leads'),
-        where('status', 'in', ['pending_verification', 'activated_non_verified'])
+        where('status', 'in', ['pending_verification', 'activated_non_verified', 'reverification'])
       );
 
     const pendingCountUnsubscribe = onSnapshot(pendingQuery, (snapshot) => {
@@ -726,10 +742,53 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     currentPage * pageSize
   );
 
+  const renderStatusBadge = (status?: string) => {
+    const normalized = (status || '').toLowerCase();
+    const config: Record<string, { bg: string; text: string; label: string; border?: string }> = {
+      pending_verification: {
+        bg: 'bg-yellow-100',
+        text: 'text-yellow-800',
+        border: 'border border-yellow-200',
+        label: 'Pending Verification'
+      },
+      reverification: {
+        bg: 'bg-blue-100',
+        text: 'text-blue-800',
+        border: 'border border-blue-200',
+        label: 'Reverification'
+      },
+      activated_non_verified: {
+        bg: 'bg-orange-100',
+        text: 'text-orange-800',
+        border: 'border border-orange-200',
+        label: 'Activated - Pending Verification'
+      },
+      non_verified: {
+        bg: 'bg-amber-100',
+        text: 'text-amber-800',
+        border: 'border border-amber-200',
+        label: 'Non Verified'
+      }
+    };
+
+    const cfg = config[normalized] || {
+      bg: 'bg-gray-100',
+      text: 'text-gray-800',
+      border: 'border border-gray-200',
+      label: getStatusDisplayText(status)
+    };
+
+    return (
+      <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${cfg.bg} ${cfg.text} ${cfg.border || ''}`}>
+        {cfg.label}
+      </span>
+    );
+  };
+
 
   const verificationStats = [
     {
-      name: 'Pending Verification',
+      name: 'Pending / Reverification',
       value: verificationMetrics.pendingVerificationCount,
       icon: Clock,
       color: 'bg-gradient-to-br from-yellow-500 to-yellow-600',
@@ -904,7 +963,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: nextClaim.agentId,
                 claimingStartedAt: serverTimestamp(),
-                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                claimingExpiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes claim timer
                 claimQueue: claimQueue.slice(1),
                 leadId: selectedLead.id
               });
@@ -915,7 +974,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                   userId: claimQueue[1].agentId,
                   type: 'number_claimed',
                   title: 'Number Claim Started',
-                  message: `The number is now available for your claim. You have 20 minutes to take ownership.`,
+                  message: `The number is now available for your claim. You have 15 minutes to take ownership.`,
                   read: false,
                   createdAt: serverTimestamp(),
                   numberId: plan.numberId
@@ -931,7 +990,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: existingClaimingAgentId,
                 claimingStartedAt: serverTimestamp(),
-                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                claimingExpiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes claim timer
                 leadId: selectedLead.id
               });
             } else {
@@ -1102,7 +1161,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                 >
                   {/* Single tilted background card effect - gradient colors */}
                   <div className={`absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 ${
-                    stat.name === 'Pending Verification' ? 'bg-gradient-to-br from-yellow-400 to-yellow-600' : 
+                    stat.name === 'Pending / Reverification' ? 'bg-gradient-to-br from-yellow-400 to-yellow-600' : 
                     stat.name === 'Daily Verified' ? 'bg-gradient-to-br from-green-400 to-green-600' : 
                     'bg-gradient-to-br from-blue-400 to-blue-600'
                   } opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102`}></div>
@@ -1131,7 +1190,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                           {stat.value}
                         </dd>
                               <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
-                                {stat.name === 'Pending Verification' ? 'Leads awaiting verification' : 
+                                {stat.name === 'Pending / Reverification' ? 'Leads awaiting verification or reverification' : 
                                  stat.name === 'Daily Verified' ? 'Verified today' : 'Verified this month'}
                         </dd>
                       </dl>
@@ -1171,7 +1230,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       </div>
         </motion.div>
 
-        {/* Pending Verification Leads Section */}
+        {/* Pending / Reverification Leads Section */}
         {filteredLeads.length > 0 ? (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -1202,7 +1261,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                     </div>
                     <div>
                       <h2 className="text-lg sm:text-2xl lg:text-3xl font-bold text-white flex items-center">
-            Pending Verification Leads
+            Pending / Reverification Leads
           </h2>
         </div>
                   </div>
@@ -1328,6 +1387,9 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                 <h3 className="text-sm font-semibold text-gray-900">
                                   {lead.customerName || 'Unnamed Customer'}
                                 </h3>
+                                <div className="mt-1">
+                                  {renderStatusBadge(lead.status)}
+                                </div>
                                 <div className="flex items-center text-s text-gray-500 mt-1">
                                   <Phone className="h-3 w-3 mr-1.5" />
                       {lead.customerNumber}
@@ -1480,6 +1542,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                   <h3 className="text-sm font-semibold text-gray-900">
                                     {lead.customerName || 'Unnamed Customer'}
                                   </h3>
+                                    {renderStatusBadge(lead.status)}
                                   {lead.language && (
                                     <span className={clsx(
                                       "px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full flex-shrink-0",

@@ -203,7 +203,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [verificationNote, setVerificationNote] = useState('');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
-  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'followup' | 'later' | 'reject' | 'reassign' | null>(null);
+  const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'activate_non_verified' | 'followup' | 'later' | 'reject' | 'reassign' | 'reverification' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
   const [scheduledForDate, setScheduledForDate] = useState<string>('');
   const [showManagerAssignDialog, setShowManagerAssignDialog] = useState(false);
@@ -255,7 +255,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   // Prefill passcode, category, group, number, and plan when opening Activate dialog
   useEffect(() => {
     const prefill = async () => {
-      if (!showCoordinatorDialog || coordinatorAction !== 'activate') return;
+      if (!showCoordinatorDialog || (coordinatorAction !== 'activate' && coordinatorAction !== 'activate_non_verified')) return;
       try {
         const plans = lead.plans || [];
         
@@ -508,6 +508,14 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     }
     return baseExpanded;
   });
+  const handleSelectAllChecklist = () => {
+    const baseChecklist = VERIFY_CHECKLIST.map(() => true);
+    if (showPostpaidCampaignChecklist) {
+      setVerifyChecklist([...baseChecklist, true]);
+    } else {
+      setVerifyChecklist(baseChecklist);
+    }
+  };
   const [plans, setPlans] = useState<any[]>([]);
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const [planPasscodes, setPlanPasscodes] = useState<Record<string, string>>({});
@@ -588,7 +596,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   }, [lead.plans, isUserCoordinator, lead.id]);
 
   const canEdit = (
-    lead.status === 'pending_verification' ||
+    // Verifiers can edit pending verification, activated_non_verified, and reverification leads
+    (isVerifier() && (
+      lead.status === 'pending_verification' ||
+      lead.status === 'activated_non_verified' ||
+      lead.status === 'reverification'
+    )) ||
     // Agents can edit & resubmit both 'non_verified' and legacy 'follow_verification' leads
     (user?.role === 'agent' &&
       user.id === lead.agentId &&
@@ -596,8 +609,9 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     isAdmin() ||
     isCoordinator()
   );
-  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified');
+  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified' || lead.status === 'reverification');
   const isUserManager = isManager();
+  const isActivationDialog = coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified';
   // Manager can assign any of their verified or follow_up leads to coordinator
   // (even if previously managerAssigned) – UI should always show the option
   const canManagerAssign = isUserManager &&
@@ -820,12 +834,19 @@ Language: ${lead.language || 'N/A'}`;
       
      // console.log('Setting lead status to:', leadStatus);
       
+      // Ensure plan statuses stay aligned with lead status on verification
+      const updatedPlans = (lead.plans || []).map((p: any) => ({
+        ...p,
+        status: leadStatus
+      }));
+
       await updateDoc(leadRef, {
         status: leadStatus,
         verifierId: user?.id,
         verifiedBy: user?.id, // ✅ Add this field for dashboard metrics
         verificationNotes: verificationNote,
         verificationMedia: verificationMedia,
+        plans: updatedPlans,
         updatedAt: serverTimestamp(),
         ...(leadStatus === 'verified' || leadStatus === 'activated' ? { verifiedAt: serverTimestamp() } : {})
       });
@@ -930,7 +951,7 @@ Language: ${lead.language || 'N/A'}`;
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: nextClaim.agentId,
                 claimingStartedAt: serverTimestamp(),
-                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                claimingExpiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes claim timer
                 claimQueue: claimQueue.slice(1),
                 leadId: lead.id
               });
@@ -951,7 +972,7 @@ Language: ${lead.language || 'N/A'}`;
                   userId: claimQueue[1].agentId,
                   type: 'number_claimed',
                   title: 'Number Claim Started',
-                  message: `The number is now available for your claim. You have 20 minutes to take ownership.`,
+                  message: `The number is now available for your claim. You have 15 minutes to take ownership.`,
                   read: false,
                   createdAt: serverTimestamp(),
                   numberId: plan.numberId
@@ -967,7 +988,7 @@ Language: ${lead.language || 'N/A'}`;
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: existingClaimingAgentId,
                 claimingStartedAt: serverTimestamp(),
-                claimingExpiresAt: new Date(Date.now() + 20 * 60 * 1000), // 20 minutes claim timer
+                claimingExpiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes claim timer
                 leadId: lead.id
               });
 
@@ -1214,7 +1235,9 @@ Language: ${lead.language || 'N/A'}`;
         return;
       }
     }
-    if (coordinatorAction === 'activate') {
+    const isActivationAction = coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified';
+
+    if (isActivationAction) {
       const plansCount = lead.plans?.length || 0;
       if (plansCount > 1) {
         // Multiple numbers - validate all activation fields
@@ -1268,8 +1291,8 @@ Language: ${lead.language || 'N/A'}`;
       const leadRef = doc(db, 'leads', lead.id);
       
       // Check if number or plan was changed during activation
-      const numberChanged = coordinatorAction === 'activate' && editableNumber !== originalNumber;
-      const planChanged = coordinatorAction === 'activate' && editablePlan !== originalPlan;
+      const numberChanged = isActivationAction && editableNumber !== originalNumber;
+      const planChanged = isActivationAction && editablePlan !== originalPlan;
       const hasChanges = numberChanged || planChanged;
       
     const updateData: Partial<Lead> = {
@@ -1294,6 +1317,10 @@ Language: ${lead.language || 'N/A'}`;
       }
     } else if (coordinatorAction === 'activate') {
       updateData.status = hasChanges ? 'activated_non_verified' : 'activated';
+    } else if (coordinatorAction === 'activate_non_verified') {
+      updateData.status = 'activated_non_verified';
+    } else if (coordinatorAction === 'reverification') {
+      updateData.status = 'reverification';
     } else if (coordinatorAction === 'later') {
       updateData.status = 'later';
     } else if (coordinatorAction === 'reject') {
@@ -1328,7 +1355,7 @@ Language: ${lead.language || 'N/A'}`;
         }
         updateData.emirate = selectedEmirate;
       }
-      if (coordinatorAction === 'activate') {
+      if (isActivationAction) {
         const plansCount = lead.plans?.length || 0;
         
         if (plansCount > 1) {
@@ -1459,7 +1486,7 @@ Language: ${lead.language || 'N/A'}`;
       await updateDoc(leadRef, updateData);
 
       // Handle number pool updates for activation with number change
-      if (coordinatorAction === 'activate' && numberChanged) {
+      if (isActivationAction && numberChanged) {
         // Release the old number (set back to available/open)
         const oldNumberId = lead.plans?.[0]?.numberId;
         if (oldNumberId && !oldNumberId.startsWith('virtual-')) {
@@ -1491,7 +1518,9 @@ Language: ${lead.language || 'N/A'}`;
           const newNumberDoc = await getDoc(newNumberRef);
           if (newNumberDoc.exists()) {
             await updateDoc(newNumberRef, {
-              status: hasChanges ? 'activated_non_verified' : 'activated',
+              status: coordinatorAction === 'activate_non_verified'
+                ? 'activated_non_verified'
+                : (hasChanges ? 'activated_non_verified' : 'activated'),
               lastStatusChange: new Date(),
               leadId: lead.id,
               ...(selectedGroup ? { group: selectedGroup } : {})
@@ -1502,7 +1531,9 @@ Language: ${lead.language || 'N/A'}`;
               editableNumber,
               'status_changed',
               { status: newNumberDoc.data()?.status },
-              { status: hasChanges ? 'activated_non_verified' : 'activated', leadId: lead.id },
+              { status: coordinatorAction === 'activate_non_verified'
+                  ? 'activated_non_verified'
+                  : (hasChanges ? 'activated_non_verified' : 'activated'), leadId: lead.id },
               `Coordinator ${user?.name || 'Unknown'} activated with number change`
             );
           }
@@ -1584,7 +1615,9 @@ Language: ${lead.language || 'N/A'}`;
           userId: lead.agentId,
           type: 'lead_update',
           title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
-                 coordinatorAction === 'activate' ? (hasChanges ? 'Lead Activated - Pending Verification' : 'Lead Activated') : 
+                 coordinatorAction === 'activate' ? (hasChanges ? 'Lead Activated - Pending Verification' : 'Lead Activated') :
+                 coordinatorAction === 'activate_non_verified' ? 'Lead Activated - Pending Verification' :
+                 coordinatorAction === 'reverification' ? 'Lead Sent for Reverification' :
                  coordinatorAction === 'later' ? 'Lead Marked for Later' : 
                  coordinatorAction === 'reject' ? 'Lead Rejected' :
                  coordinatorAction === 'reassign' ? 'Lead Reassigned' : 'Lead Marked for Follow-up',
@@ -1594,6 +1627,10 @@ Language: ${lead.language || 'N/A'}`;
             (hasChanges ? 
               `Your lead has been activated with changes (${numberChanged ? 'number' : ''}${numberChanged && planChanged ? ' and ' : ''}${planChanged ? 'plan' : ''}) - pending verifier approval` :
               'Your lead has been activated by the coordinator') :
+            coordinatorAction === 'activate_non_verified' ?
+              'Your lead has been activated - pending verifier approval' :
+            coordinatorAction === 'reverification' ?
+            'Your lead has been sent for reverification by the coordinator' :
             coordinatorAction === 'later' ?
             'Your lead has been marked for later by the coordinator' :
             coordinatorAction === 'reject' ?
@@ -1617,12 +1654,18 @@ Language: ${lead.language || 'N/A'}`;
             type: 'lead_update',
             title: coordinatorAction === 'assign' ? 'Lead Assigned' : 
                    coordinatorAction === 'activate' ? 'Lead Activated' : 
+                   coordinatorAction === 'activate_non_verified' ? 'Lead Activated - Pending Verification' :
+                   coordinatorAction === 'reverification' ? 'Lead Sent for Reverification' :
                    coordinatorAction === 'later' ? 'Lead Marked for Later' : 
                    coordinatorAction === 'reject' ? 'Lead Rejected' : 'Lead Marked for Follow-up',
             message: coordinatorAction === 'assign' ? 
               'A lead has been assigned by the coordinator' : 
               coordinatorAction === 'activate' ?
-              'A lead has been activated by the coordinator' :
+                'A lead has been activated by the coordinator' :
+                coordinatorAction === 'activate_non_verified' ?
+                'A lead has been activated and is pending verifier approval' :
+              coordinatorAction === 'reverification' ?
+              'A lead has been sent back for reverification by the coordinator' :
               coordinatorAction === 'later' ?
               'A lead has been marked for later by the coordinator' :
               coordinatorAction === 'reject' ?
@@ -1676,6 +1719,10 @@ Language: ${lead.language || 'N/A'}`;
         toast.success(
           coordinatorAction === 'activate'
             ? 'Lead activated successfully'
+            : coordinatorAction === 'activate_non_verified'
+            ? 'Lead activated (pending verification)'
+            : coordinatorAction === 'reverification'
+            ? 'Lead sent for reverification'
             : coordinatorAction === 'later'
             ? 'Lead marked for later'
             : coordinatorAction === 'reject'
@@ -1741,9 +1788,24 @@ Language: ${lead.language || 'N/A'}`;
     }
   };
 
+  const watermarkText = getStatusWatermarkText(lead.status);
+  const watermarkGradient = getStatusGradient(lead.status);
+
   return (
-    <div className="space-y-4 sm:space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div className="relative min-h-screen">
+      {/* Full-page watermark overlay - on top of all layers */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 flex items-center justify-center z-[9999] select-none"
+        style={{ opacity: 0.25 }}
+      >
+        <div className={`text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-br ${watermarkGradient}`}>
+          {watermarkText}
+        </div>
+      </div>
+
+      <div className="space-y-4 sm:space-y-6 relative z-0">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div
           className="flex items-center gap-2 cursor-pointer group"
           onClick={() => navigate('/dashboard')}
@@ -1817,6 +1879,16 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
+                      setCoordinatorAction('reverification');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                  >
+                    <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Send for Reverification
+                  </button>
+                  <button
+                    onClick={() => {
                       setCoordinatorAction('later');
                       setShowCoordinatorDialog(true);
                     }}
@@ -1848,6 +1920,16 @@ Language: ${lead.language || 'N/A'}`;
                   >
                     <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Activate
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('activate_non_verified');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
+                  >
+                    <AlertTriangle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Activate (Pending Verification)
                   </button>
                   <button
                     onClick={() => {
@@ -1895,6 +1977,16 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
+                      setCoordinatorAction('activate_non_verified');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
+                  >
+                    <AlertTriangle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Activate (Pending Verification)
+                  </button>
+                  <button
+                    onClick={() => {
                       setCoordinatorAction('followup');
                       setShowCoordinatorDialog(true);
                     }}
@@ -1902,6 +1994,16 @@ Language: ${lead.language || 'N/A'}`;
                   >
                     <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Follow-up
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('reverification');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                  >
+                    <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Send for Reverification
                   </button>
                   <button
                     onClick={() => {
@@ -2057,7 +2159,7 @@ Language: ${lead.language || 'N/A'}`;
               )}
             </button>
           )}
-           {user?.id === lead.agentId && !['pending_verification', 'activated', 'rejected'].includes(localStatus) && (
+          {user?.role === 'agent' && user?.id === lead.agentId && !['pending_verification', 'activated', 'rejected'].includes(localStatus) && (
             <button
               onClick={() => setShowRejectDialog(true)}
               disabled={rejecting}
@@ -2171,6 +2273,18 @@ Language: ${lead.language || 'N/A'}`;
                 className="text-gray-400 hover:text-gray-500 p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-xs text-gray-600">
+                Progress: <span className="font-semibold text-indigo-600">{verifyChecklist.filter(Boolean).length}/{verifyChecklist.length}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleSelectAllChecklist}
+                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors"
+              >
+                Select all Verification Checklist
               </button>
             </div>
 
@@ -2445,8 +2559,10 @@ Language: ${lead.language || 'N/A'}`;
                 <div className="p-2 bg-white/20 rounded-lg">
                   {coordinatorAction === 'assign' || coordinatorAction === 'reassign' ? (
                     <User2 className="h-5 w-5 text-white" />
-                  ) : coordinatorAction === 'activate' ? (
+                  ) : isActivationDialog ? (
                     <CheckCircle className="h-5 w-5 text-white" />
+                  ) : coordinatorAction === 'reverification' ? (
+                    <RefreshCw className="h-5 w-5 text-white" />
                   ) : coordinatorAction === 'later' ? (
                     <Clock className="h-5 w-5 text-white" />
                   ) : coordinatorAction === 'reject' ? (
@@ -2459,14 +2575,16 @@ Language: ${lead.language || 'N/A'}`;
                   <h3 className="text-lg font-semibold text-white">
                     {coordinatorAction === 'assign' ? 'Assign Lead' :
                      coordinatorAction === 'reassign' ? 'Reassign Lead' :
-                     coordinatorAction === 'activate' ? 'Activate Lead' : 
+                     isActivationDialog ? 'Activate Lead (Pending Verification)' : 
+                     coordinatorAction === 'reverification' ? 'Send for Reverification' :
                      coordinatorAction === 'later' ? 'Mark for Later' : 
                      coordinatorAction === 'reject' ? 'Reject Lead' : 'Mark for Follow-up'}
                   </h3>
                   <p className="text-indigo-100 text-sm">
                     {coordinatorAction === 'assign' ? 'Assign this lead to Etisalat system' :
                      coordinatorAction === 'reassign' ? 'Update Etisalat Lead ID and assignment details' :
-                     coordinatorAction === 'activate' ? 'Activate the lead and mark as complete' :
+                     isActivationDialog ? 'Activate the lead; status stays Pending Verification until verifier approves' :
+                     coordinatorAction === 'reverification' ? 'Send this lead back to verification review' :
                      coordinatorAction === 'later' ? 'Mark this lead for later action' :
                      coordinatorAction === 'reject' ? 'Reject this lead and set number status to open' :
                      'Mark this lead for follow-up action'}
@@ -2477,7 +2595,7 @@ Language: ${lead.language || 'N/A'}`;
 
             {/* Form Content */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
-              {coordinatorAction === 'activate' && (
+              {isActivationDialog && (
                 <>
                   {lead.plans && lead.plans.length > 1 ? (
                     // Multiple numbers - show separate form for each
@@ -3065,7 +3183,23 @@ Language: ${lead.language || 'N/A'}`;
                 </>
               )}
               
-              {/* Notes for other coordinator actions (activate, followup) removed as requested */}
+              {/* Notes for reverification (sent to chat) */}
+              {coordinatorAction === 'reverification' && (
+                <div className="space-y-2">
+                  <label className="block text-sm font-semibold text-gray-900">
+                    Notes to Verifier (sent to chat)
+                  </label>
+                  <div className="relative">
+                    <textarea
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                      rows={4}
+                      value={coordinatorNote}
+                      onChange={(e) => setCoordinatorNote(e.target.value)}
+                      placeholder="Explain why this needs reverification..."
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Footer Actions */}
@@ -3088,7 +3222,8 @@ Language: ${lead.language || 'N/A'}`;
                   disabled={isCoordinatorActionProcessing}
                   className={`px-6 py-2.5 text-sm font-medium text-white rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm ${
                     coordinatorAction === 'assign' || coordinatorAction === 'reassign' ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 focus:ring-indigo-100' :
-                    coordinatorAction === 'activate' ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 focus:ring-green-100' :
+                    isActivationDialog ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 focus:ring-green-100' :
+                    coordinatorAction === 'reverification' ? 'bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 focus:ring-blue-100' :
                     coordinatorAction === 'later' ? 'bg-gradient-to-r from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700 focus:ring-yellow-100' :
                     coordinatorAction === 'reject' ? 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 focus:ring-red-100' :
                     'bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-700 hover:to-amber-700 focus:ring-orange-100'
@@ -3114,10 +3249,15 @@ Language: ${lead.language || 'N/A'}`;
                           <User2 className="h-4 w-4 mr-2" />
                           Reassign Lead
                         </>
-                      ) : coordinatorAction === 'activate' ? (
+                      ) : isActivationDialog ? (
                         <>
                           <CheckCircle className="h-4 w-4 mr-2" />
                           Activate Lead
+                        </>
+                      ) : coordinatorAction === 'reverification' ? (
+                        <>
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                          Send for Reverification
                         </>
                       ) : coordinatorAction === 'later' ? (
                         <>
@@ -3507,7 +3647,14 @@ Language: ${lead.language || 'N/A'}`;
                         <Package className="w-5 h-5 text-white" />
                       </div>
                       <div>
-                        <p className="text-lg font-semibold text-gray-900">{plan.number}</p>
+                        <p className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                          {plan.number}
+                          {plan.group && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-700">
+                              {plan.group}
+                            </span>
+                          )}
+                        </p>
                         <p className="text-sm text-gray-500">Category: {plan.category}</p>
                         {isUserCoordinator && plan.numberId && typeof plan.numberId === 'string' && !plan.numberId.startsWith('virtual-') && (
                           <p className="text-xs text-gray-500 mt-0.5">
@@ -3647,11 +3794,12 @@ Language: ${lead.language || 'N/A'}`;
                 lead.status === 'verified' ? 'bg-green-100 text-green-800' :
                 lead.status === 'rejected' ? 'bg-red-100 text-red-800' :
                 lead.status === 'non_verified' ? 'bg-yellow-100 text-yellow-800' :
+                lead.status === 'assigned' ? 'bg-blue-100 text-blue-800' :
                 lead.status === 'pending_coordinator' ? 'bg-blue-100 text-blue-800' :
                 lead.status === 'split' ? 'bg-purple-100 text-purple-800' :
                 'bg-gray-100 text-gray-800'
               )}>
-                {lead.status === 'non_verified' ? 'Non Verified' : lead.status === 'follow_up' ? 'Follow-up' : lead.status}
+                {getStatusDisplayText(lead.status)}
               </div>
             </div>
           </div>
@@ -4056,6 +4204,7 @@ Language: ${lead.language || 'N/A'}`;
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -4077,4 +4226,59 @@ function getStatusColor(status: string | undefined) {
 
 function getBooleanColor(value: string | undefined) {
   return value === 'Yes' ? 'text-green-600 font-medium' : 'text-red-600 font-medium';
+}
+
+function getStatusDisplayText(status: string | undefined): string {
+  if (!status) return 'Status';
+  // Convert "assigned" to "Processed with Etisalat" for UI display only
+  if (status === 'assigned') {
+    return 'Processed with Etisalat';
+  }
+  // Convert "assigned_to_cord" to "Assigned to Activation" for UI display only
+  if (status === 'assigned_to_cord') {
+    return 'Assigned to Activation';
+  }
+  // Handle other statuses
+  if (status === 'non_verified') return 'Non Verified';
+  if (status === 'follow_up') return 'Follow-up';
+  return status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
+
+function getStatusWatermarkText(status: string | undefined): string {
+  if (!status) return 'STATUS';
+  // Convert "assigned" to "PROCESSED WITH ETISALAT" for watermark
+  if (status === 'assigned') {
+    return 'PROCESSED WITH ETISALAT';
+  }
+  // Convert "assigned_to_cord" to "ASSIGNED TO ACTIVATION" for watermark
+  if (status === 'assigned_to_cord') {
+    return 'ASSIGNED TO ACTIVATION';
+  }
+  return status.replace(/_/g, ' ').toUpperCase();
+}
+
+function getStatusGradient(status: string | undefined): string {
+  switch (status) {
+    case 'verified':
+      return 'from-emerald-500/40 via-green-500/35 to-teal-500/40';
+    case 'pending_verification':
+      return 'from-amber-500/40 via-yellow-500/35 to-orange-500/40';
+    case 'reverification':
+      return 'from-orange-500/40 via-amber-500/35 to-yellow-500/40';
+    case 'assigned':
+    case 'assigned_to_cord':
+      return 'from-blue-500/40 via-indigo-500/35 to-purple-500/40';
+    case 'activated':
+      return 'from-green-500/40 via-emerald-500/35 to-teal-500/40';
+    case 'activated_non_verified':
+      return 'from-cyan-500/40 via-blue-500/35 to-indigo-500/40';
+    case 'rejected':
+      return 'from-red-500/40 via-rose-500/35 to-pink-500/40';
+    case 'follow_up':
+      return 'from-purple-500/40 via-violet-500/35 to-fuchsia-500/40';
+    case 'later':
+      return 'from-slate-500/40 via-gray-500/35 to-zinc-500/40';
+    default:
+      return 'from-indigo-500/40 via-purple-500/35 to-pink-500/40';
+  }
 }

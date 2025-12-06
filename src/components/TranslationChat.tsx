@@ -50,6 +50,7 @@ import { Switch } from '@headlessui/react';
 import { toast } from 'react-hot-toast';
 import { FiCopy, FiSend, FiX, FiMessageSquare, FiUser, FiPackage, FiCalendar, FiCheckCircle, FiAlertCircle, FiExternalLink } from 'react-icons/fi';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../lib/firebase';
 import { useAuthStore } from '../store/authStore';
 import { NumberPool, Lead } from '../types';
@@ -261,6 +262,10 @@ const TranslationChat: React.FC = () => {
   const navigate = useNavigate();
   const [copiedEnIndex, setCopiedEnIndex] = useState<number | null>(null);
   const [copiedArIndex, setCopiedArIndex] = useState<number | null>(null);
+  
+  // Initialize Firebase Functions
+  const functions = getFunctions();
+  const translateTextFunction = httpsCallable(functions, 'translateText');
 
   // Helper: check if a string contains Arabic script characters
   const containsArabic = (text: string): boolean => /[\u0600-\u06FF]/.test(text);
@@ -450,32 +455,18 @@ const TranslationChat: React.FC = () => {
           };
         }
       } else {
-        // Handle translation request
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_OPENAI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: 'gpt-4',
-            messages: [
-              {
-                role: 'system',
-                content: effectiveTranslateToArabic
-                  ? 'You are a precise translator. Output exactly two lines with no labels or extra words. Line 1: the requested English phrase only. Line 2: the Arabic translation only. Do not include text like "in Arabic", numbering, punctuation labels, or explanations. No extra lines.'
-                  : 'You are a precise editor. If input is English, return the corrected English phrase only. If input is Arabic and user wants English, return only the English translation text. Do not add phrases like "in Arabic" or explanations.',
-              },
-              {
-                role: 'user',
-                content: inputText,
-              },
-            ],
-          }),
+        // Handle translation request using secure cloud function
+        const result = await translateTextFunction({
+          text: inputText,
+          translateToArabic: effectiveTranslateToArabic,
         });
-
-        const data = await response.json();
-        const rawText: string = data?.choices?.[0]?.message?.content || '';
+        
+        const data = result.data as { success: boolean; text: string };
+        if (!data.success || !data.text) {
+          throw new Error('Translation failed');
+        }
+        
+        const rawText: string = data.text;
         let finalText = rawText;
         if (effectiveTranslateToArabic) {
           // Post-process to ensure exactly two clean lines without labels/numbering

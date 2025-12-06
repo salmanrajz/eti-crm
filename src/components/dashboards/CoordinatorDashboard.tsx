@@ -41,7 +41,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { collection, query, where, getDocs, getDoc, doc, updateDoc, orderBy, addDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, getDoc, doc, updateDoc, orderBy, addDoc, onSnapshot, serverTimestamp, limit } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
@@ -74,6 +74,22 @@ import { clsx } from 'clsx';
 import type { Lead, User, CoordinatorType, Team } from '../../types';
 import { motion } from 'framer-motion';
 import { StruckNumbers, useStruckNumbersForCoordinator } from './StruckNumbers';
+
+function getStatusDisplayText(status: string | undefined): string {
+  if (!status) return 'Status';
+  // Convert "assigned" to "Processed with Etisalat" for UI display only
+  if (status === 'assigned') {
+    return 'Processed with Etisalat';
+  }
+  // Convert "assigned_to_cord" to "Assigned to Activation" for UI display only
+  if (status === 'assigned_to_cord') {
+    return 'Assigned to Activation';
+  }
+  // Handle other statuses
+  if (status === 'non_verified') return 'Non Verified';
+  if (status === 'follow_up') return 'Follow-up';
+  return status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+}
 
 interface CoordinatorDashboardProps {
   user: User;
@@ -216,6 +232,13 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [showStatusChecks, setShowStatusChecks] = useState(false);
   const [showStruckNumbers, setShowStruckNumbers] = useState(false);
   const { struckNumbers, loading: struckLoading } = useStruckNumbersForCoordinator();
+  // Global verified lead search (regardless of group) for assign-to-cord
+  const [assignSearchTerm, setAssignSearchTerm] = useState('');
+  const [assignResults, setAssignResults] = useState<Lead[]>([]);
+  const [assignSearching, setAssignSearching] = useState(false);
+  const [assignError, setAssignError] = useState('');
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [assignDebounce, setAssignDebounce] = useState<number | undefined>(undefined);
 
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'verified';
@@ -223,6 +246,89 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   // Get coordinator type and team assignments from user
   const coordinatorType = user.coordinatorType || 'all';
   const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
+
+  const searchVerifiedLeadsForAssign = async () => {
+    const term = assignSearchTerm.trim().toLowerCase();
+    if (!term) {
+      setAssignResults([]);
+      setAssignError('');
+      return;
+    }
+    setAssignError('');
+    setAssignSearching(true);
+    try {
+      const verifiedQuery = query(
+        collection(db, 'leads'),
+        where('status', '==', 'verified'),
+        orderBy('createdAt', 'desc'),
+        limit(500)
+      );
+      const snapshot = await getDocs(verifiedQuery);
+      const mapped = snapshot.docs.map(docSnap => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+        createdAt: docSnap.data().createdAt?.toDate?.() || docSnap.data().createdAt,
+        updatedAt: docSnap.data().updatedAt?.toDate?.() || docSnap.data().updatedAt
+      })) as Lead[];
+      const filtered = mapped.filter(l => {
+        const num = (l.customerNumber || '').toLowerCase();
+        const leadNum = (l.leadNumber || '').toLowerCase();
+        const name = (l.customerName || '').toLowerCase();
+        const planNumbers = (l.plans || []).some((p: any) => (p.number || '').toLowerCase().includes(term));
+        return num.includes(term) || leadNum.includes(term) || name.includes(term) || planNumbers;
+      });
+      setAssignResults(filtered);
+      if (filtered.length === 0) {
+        setAssignError('No verified leads found for this search.');
+      }
+    } catch (error) {
+      console.error('[CoordinatorDashboard] Error searching verified leads:', error);
+      setAssignError('Failed to search verified leads');
+      toast.error('Failed to search verified leads');
+    } finally {
+      setAssignSearching(false);
+    }
+  };
+
+  // Auto search with debounce on input change
+  useEffect(() => {
+    if (assignDebounce) {
+      clearTimeout(assignDebounce);
+    }
+    const term = assignSearchTerm.trim();
+    if (!term) {
+      setAssignResults([]);
+      setAssignError('');
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      searchVerifiedLeadsForAssign();
+    }, 400);
+    setAssignDebounce(handle);
+    return () => clearTimeout(handle);
+  }, [assignSearchTerm]);
+
+  const handleAssignToCoordinator = async (lead: Lead) => {
+    try {
+      setAssigningId(lead.id);
+      const leadRef = doc(db, 'leads', lead.id);
+      await updateDoc(leadRef, {
+        status: 'assigned_to_cord',
+        managerAssigned: true,
+        assignedToCordAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      toast.success('Lead assigned to coordinator');
+      // Update local lists
+      setAssignResults(prev => prev.map(l => l.id === lead.id ? { ...l, status: 'assigned_to_cord', managerAssigned: true } : l));
+      setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, status: 'assigned_to_cord', managerAssigned: true } : l));
+    } catch (error) {
+      console.error('[CoordinatorDashboard] Failed to assign lead to coordinator:', error);
+      toast.error('Failed to assign lead');
+    } finally {
+      setAssigningId(null);
+    }
+  };
 
   // Load teams for debug/logging (teamId -> teamName)
   useEffect(() => {
@@ -421,16 +527,18 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           }, 0);
 
           // Calculate metrics from coordinator's leads only
-          // For "unassigned", count verified leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
-          // EXCLUDE: follow_up, activated, rejected, and later leads with scheduledFor date today or in the future
+          // For "unassigned", count verified leads with managerAssigned: true, assigned_to_cord leads, plus later leads scheduled for today
+          // EXCLUDE: follow_up, activated, rejected, assigned leads, and later leads with scheduledFor date in the future
+          const todayDate = new Date();
+          todayDate.setHours(0, 0, 0, 0);
           const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
             l => {
-              // Exclude follow_up, activated, rejected leads
-              if (l.status === 'follow_up' || l.status === 'activated' || l.status === 'rejected') {
+              // Exclude follow_up, activated, rejected, and assigned leads
+              if (l.status === 'follow_up' || l.status === 'activated' || l.status === 'rejected' || l.status === 'assigned') {
                 return false;
               }
               
-              // Exclude later leads with scheduledFor date today or in the future
+              // Handle later leads: only include if scheduledFor date is today
               if (l.status === 'later' && l.scheduledFor) {
                 const scheduledRaw: any = l.scheduledFor;
                 const scheduledDate =
@@ -440,32 +548,22 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                       ? scheduledRaw
                       : new Date(scheduledRaw);
                 scheduledDate.setHours(0, 0, 0, 0);
-                const todayDate = new Date();
-                todayDate.setHours(0, 0, 0, 0);
-                // Exclude if scheduledFor is today or in the future
-                if (scheduledDate.getTime() >= todayDate.getTime()) {
-                  return false;
-                }
+                // Only include if scheduledFor is today, exclude if in the future
+                return scheduledDate.getTime() === todayDate.getTime();
               }
               
-              // Include verified leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
+              // Exclude later leads without scheduledFor or with scheduledFor not today
+              if (l.status === 'later') {
+                return false;
+              }
+              
+              // Include verified leads with managerAssigned: true, assigned_to_cord leads
               return (l.status === 'verified' && l.managerAssigned === true) ||
-                     (l.status === 'assigned_to_cord') ||
-                     (l.scheduledFor && (() => {
-                       const scheduledRaw: any = l.scheduledFor;
-                       const scheduledDate =
-                         scheduledRaw && typeof scheduledRaw.toDate === 'function'
-                           ? scheduledRaw.toDate()
-                           : scheduledRaw instanceof Date
-                             ? scheduledRaw
-                             : new Date(scheduledRaw);
-                       scheduledDate.setHours(0, 0, 0, 0);
-                       return scheduledDate.getTime() === today.getTime();
-                     })());
+                     (l.status === 'assigned_to_cord');
             }
           ).length;
           
-          const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified'];
+          const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified', 'follow_up', 'later'];
 
           const computedMetrics = {
             totalLeads: filteredCoordinatorLeads.length,
@@ -499,15 +597,17 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                   !yesterdayExcludedStatuses.includes(lead.status);
               });
             } else if (currentStatus === 'verified') {
-              // Show manager-assigned verified leads, assigned_to_cord leads, plus leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
-              // EXCLUDE: follow_up, activated, rejected, and later leads with scheduledFor date today or in the future
+              // Show manager-assigned verified leads, assigned_to_cord leads, plus later leads scheduled for today (these appear in "Unassigned Leads" for coordinators)
+              // EXCLUDE: follow_up, activated, rejected, assigned leads, and later leads with scheduledFor date in the future
+              const todayDateForFilter = new Date();
+              todayDateForFilter.setHours(0, 0, 0, 0);
               nextLeads = filteredCoordinatorLeads.filter(lead => {
-                // Exclude follow_up, activated, rejected leads
-                if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'rejected') {
+                // Exclude follow_up, activated, rejected, and assigned leads
+                if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'rejected' || lead.status === 'assigned') {
                   return false;
                 }
                 
-                // Exclude later leads with scheduledFor date today or in the future
+                // Handle later leads: only include if scheduledFor date is today
                 if (lead.status === 'later' && lead.scheduledFor) {
                   const scheduledRaw: any = lead.scheduledFor;
                   const scheduledDate =
@@ -517,28 +617,18 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                         ? scheduledRaw
                         : new Date(scheduledRaw);
                   scheduledDate.setHours(0, 0, 0, 0);
-                  const todayDate = new Date();
-                  todayDate.setHours(0, 0, 0, 0);
-                  // Exclude if scheduledFor is today or in the future
-                  if (scheduledDate.getTime() >= todayDate.getTime()) {
-                    return false;
-                  }
+                  // Only include if scheduledFor is today, exclude if in the future
+                  return scheduledDate.getTime() === todayDateForFilter.getTime();
                 }
                 
-                // Include verified leads with managerAssigned: true, assigned_to_cord leads, plus leads scheduled for today
+                // Exclude later leads without scheduledFor or with scheduledFor not today
+                if (lead.status === 'later') {
+                  return false;
+                }
+                
+                // Include verified leads with managerAssigned: true, assigned_to_cord leads
                 return (lead.status === 'verified' && lead.managerAssigned === true) ||
-                       (lead.status === 'assigned_to_cord') ||
-                       (lead.scheduledFor && (() => {
-                         const scheduledRaw: any = lead.scheduledFor;
-                         const scheduledDate =
-                           scheduledRaw && typeof scheduledRaw.toDate === 'function'
-                             ? scheduledRaw.toDate()
-                             : scheduledRaw instanceof Date
-                               ? scheduledRaw
-                               : new Date(scheduledRaw);
-                         scheduledDate.setHours(0, 0, 0, 0);
-                         return scheduledDate.getTime() === today.getTime();
-                       })());
+                       (lead.status === 'assigned_to_cord');
               });
               
               // Debug: Log what's being shown in verified tab
@@ -653,7 +743,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       const now = new Date();
       const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
       const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
-      matchesStatus = !!(lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification');
+      matchesStatus = !!(lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification' && lead.status !== 'follow_up' && lead.status !== 'later');
     }
     
     return matchesSearch && matchesStatus;
@@ -1261,6 +1351,86 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         ))}
       </div>
 
+      {/* Global Verified Leads search & assign to coordinator */}
+      <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-6 mb-8">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-4">
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Search verified leads (any group)</label>
+            <div className="relative">
+              <Search className="h-5 w-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Enter customer number, lead number, or number"
+                value={assignSearchTerm}
+                onChange={(e) => setAssignSearchTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    searchVerifiedLeadsForAssign();
+                  }
+                }}
+                className="pl-10 pr-4 py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+            </div>
+              <div className="text-xs text-gray-500 mt-1">
+                Only verified leads are shown. Search by customer number, lead number, or plan number.
+              </div>
+          </div>
+          <button
+            onClick={searchVerifiedLeadsForAssign}
+            disabled={assignSearching || !assignSearchTerm.trim()}
+            className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {assignSearching ? 'Searching...' : 'Search'}
+          </button>
+        </div>
+
+        {assignError && !assignSearching && (
+          <div className="mt-4 text-sm text-red-600">{assignError}</div>
+        )}
+
+        {assignResults.length > 0 && (
+          <div className="mt-6 space-y-3">
+            {assignResults.map(lead => (
+              <div key={lead.id} className="flex flex-col md:flex-row md:items-center justify-between gap-3 border border-gray-100 rounded-xl p-4 hover:border-indigo-200 transition">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">{lead.customerName || 'No name'}</div>
+                  <div className="text-sm text-gray-600">Customer: {lead.customerNumber || 'N/A'} · Lead: {lead.leadNumber || lead.id}</div>
+                      <div className="text-xs">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                          lead.status === 'verified' ? 'bg-green-100 text-green-700' :
+                          lead.status === 'assigned_to_cord' ? 'bg-indigo-100 text-indigo-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {getStatusDisplayText(lead.status)}
+                        </span>
+                      </div>
+                <div className="text-xs text-gray-500">
+                  {(() => {
+                    const primaryPlan: any = Array.isArray(lead.plans) && lead.plans.length > 0 ? lead.plans[0] : null;
+                    const number = primaryPlan?.number || 'N/A';
+                    const group = primaryPlan?.group || 'N/A';
+                    return `Number: ${number} · Group: ${group}`;
+                  })()}
+                </div>
+                </div>
+                <button
+                  onClick={() => handleAssignToCoordinator(lead)}
+                  disabled={lead.status === 'assigned_to_cord' || assigningId === lead.id}
+                  className="inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed gap-2"
+                >
+                  {assigningId === lead.id ? 'Assigning...' : (lead.status === 'assigned_to_cord' ? 'Already Assigned' : 'Assign to Coordinator')}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!assignSearching && assignResults.length === 0 && assignSearchTerm.trim().length > 0 && !assignError && (
+          <div className="mt-4 text-sm text-gray-500">No results found.</div>
+        )}
+      </div>
+
       {/* Filters */}
       <div className="mb-8 grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="relative">
@@ -1450,7 +1620,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                         STATUS_STYLES[lead.status]?.text || 'text-gray-800'
                       )}>
                         <StatusIcon className="h-3.5 w-3.5 mr-1.5" />
-                        {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        {getStatusDisplayText(lead.status)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">

@@ -360,6 +360,34 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
   const [isCheckingNumber, setIsCheckingNumber] = useState(false);
 
+  // Helper functions to convert between 24-hour (HH:mm) and 12-hour (h:mm AM/PM) formats
+  const convertTo12Hour = (time24: string): string => {
+    if (!time24 || !time24.includes(':')) return '';
+    const [hours, minutes] = time24.split(':').map(Number);
+    if (isNaN(hours) || isNaN(minutes)) return '';
+    const period = hours >= 12 ? 'PM' : 'AM';
+    const hours12 = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
+    return `${hours12}:${minutes.toString().padStart(2, '0')} ${period}`;
+  };
+
+  const convertTo24Hour = (time12: string): string => {
+    if (!time12) return '';
+    // Match patterns like "12:34 PM" or "1:23 AM"
+    const match = time12.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!match) return time12; // Return as-is if doesn't match 12-hour format
+    let hours = parseInt(match[1], 10);
+    const minutes = match[2];
+    const period = match[3].toUpperCase();
+    
+    if (period === 'PM' && hours !== 12) {
+      hours += 12;
+    } else if (period === 'AM' && hours === 12) {
+      hours = 0;
+    }
+    
+    return `${hours.toString().padStart(2, '0')}:${minutes}`;
+  };
+
   // Helper to normalize category names for comparison
   const normalizeCategory = useCallback((cat?: string): string => {
     if (!cat) return '';
@@ -787,8 +815,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       setCurrentPlan('');
       setCurrentNumberData(null);
       setSelectedCategory('Standard');
-      // Reset number pool visibility so user can add more numbers
-      setShowNumberPool(true);
+      // Hide number pool initially, show "Add Another Number" button first
+      setShowNumberPool(false);
     } else {
       // If no number is selected, check if we have existing plans
       // Allow updating plan for the first existing plan if no number is selected
@@ -899,19 +927,30 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       
       if (selectedDate < today) {
         errors.startDate = 'Date cannot be in the past';
-      } else if (selectedDate.getTime() === today.getTime() && formData.startTime) {
-        // If date is today, check if time is in the past
-        const [hours, minutes] = formData.startTime.split(':').map(Number);
-        const selectedDateTime = new Date();
-        selectedDateTime.setHours(hours, minutes, 0, 0);
-        const now = new Date();
-        
-        if (selectedDateTime < now) {
-          errors.startTime = 'Time cannot be in the past';
+      } else if (!isEditing && selectedDate.getTime() === today.getTime() && formData.startTime) {
+        // Only validate "time cannot be in the past" when NOT editing
+        // Handle both 24-hour format (HH:mm) and 12-hour format (h:mm AM/PM)
+        let time24 = formData.startTime;
+        if (time24.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
+          // It's in 12-hour format, convert it
+          time24 = convertTo24Hour(time24);
+        }
+        if (time24 && time24.includes(':')) {
+          const [hours, minutes] = time24.split(':').map(Number);
+          if (!isNaN(hours) && !isNaN(minutes)) {
+            const selectedDateTime = new Date();
+            selectedDateTime.setHours(hours, minutes, 0, 0);
+            const now = new Date();
+            
+            if (selectedDateTime < now) {
+              errors.startTime = 'Time cannot be in the past';
+            }
+          }
         }
       }
     }
-    if (!formData.startTime) {
+    // Time is only required when NOT editing
+    if (!isEditing && !formData.startTime) {
       errors.startTime = 'Time is required';
     }
     // Optional URL validation
@@ -1015,6 +1054,11 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         Object.entries(formData).filter(([_, value]) => value !== undefined)
       );
 
+    // Preserve existing status when editing; new leads default to pending_verification
+    const currentStatus = isEditing
+      ? (initialData?.status || 'pending_verification')
+      : 'pending_verification';
+
       const leadData: Partial<Lead> = {
         ...cleanedFormData,
         customerAddress: formData.customerAddress,
@@ -1050,19 +1094,35 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         ...(isEditing ? {} : { createdAt: new Date() }),
         updatedAt: new Date(),
         startDate: new Date(formData.startDate),
+      status: currentStatus,
         sharedWith: formData.sharedWith ? [formData.sharedWith] : [],
         remarks: formData.remarks || 'Please Verify'
       };
 
       // Remove any remaining undefined values
-      const finalLeadData = Object.fromEntries(
+      let finalLeadData = Object.fromEntries(
         Object.entries(leadData).filter(([_, value]) => value !== undefined)
       ) as Partial<Lead>;
       
+      // For coordinators editing, only include allowed fields: customerName, customerAddress, customerAge
+      if (isCoordinatorEditing && isEditing) {
+        finalLeadData = {
+          customerName: formData.customerName,
+          customerAddress: formData.customerAddress,
+          customerAge: parseInt(formData.customerAge, 10),
+          updatedAt: new Date()
+        };
+      }
 
       if (isEditing && onSave) {
-        
+        try {
         await onSave(finalLeadData);
+        } catch (error) {
+          console.error('Error saving lead:', error);
+          toast.error(error instanceof Error ? error.message : 'Failed to save lead. Please try again.');
+          setLoading(false);
+          return;
+        }
       } else {
         
         const docRef = await addDoc(collection(db, 'leads'), finalLeadData);
@@ -1384,6 +1444,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     }
   };
 
+  // Helper: Check if coordinator is editing - only allow name, address, age
+  const isCoordinatorEditing = isCoordinator() && isEditing;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
       {/* Header - Now scrolls with page content */}
@@ -1420,6 +1483,13 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
       {/* Main Content */}
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {isCoordinatorEditing && (
+          <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <p className="text-sm text-yellow-800">
+              <strong>Note:</strong> As a coordinator, you can only edit Customer Name, Address, and Age. All other fields are locked.
+            </p>
+          </div>
+        )}
         <form onSubmit={(e) => handleSubmit(e)} className="space-y-8">
           <div className="grid grid-cols-1 gap-8">
           <FormSection
@@ -1455,6 +1525,33 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   inputMode="numeric"
                   placeholder="XXXXXXXX"
                   value={formData.customerNumber.replace(/^05/, '')}
+                  disabled={isCoordinatorEditing}
+                  onPaste={(e) => {
+                    e.preventDefault();
+                    const pastedText = e.clipboardData.getData('text');
+                    // Remove all non-digits
+                    const digitsOnly = pastedText.replace(/\D/g, '');
+                    
+                    // If pasted text is 10 digits and starts with "05", remove "05" and keep 8 digits
+                    if (digitsOnly.length === 10 && digitsOnly.startsWith('05')) {
+                      const remainingDigits = digitsOnly.slice(2); // Remove "05", keep remaining 8 digits
+                      const fullNumber = '05' + remainingDigits;
+                      setFormData(prev => ({ ...prev, customerNumber: fullNumber }));
+                      
+                      // Clear error if valid
+                      if (/^05\d{8}$/.test(fullNumber)) {
+                        setFormErrors(prev => {
+                          const { customerNumber, ...rest } = prev;
+                          return rest;
+                        });
+                      }
+                    } else {
+                      // For other cases, use normal onChange logic
+                      const value = digitsOnly.slice(0, 8);
+                      const fullNumber = '05' + value;
+                      setFormData(prev => ({ ...prev, customerNumber: fullNumber }));
+                    }
+                  }}
                   onChange={(e) => {
                     // Only allow numeric input and max 8 digits (after "05")
                     const value = e.target.value.replace(/\D/g, '').slice(0, 8);
@@ -1528,6 +1625,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 label: country.name
               }))}
               value={formData.country}
+              disabled={isCoordinatorEditing}
               onChange={(e) => setFormData(prev => ({ ...prev, country: e.target.value }))}
             />
 
@@ -1567,6 +1665,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   type="email"
                   required
                   value={formData.homeWifiEmail || ''}
+                  disabled={isCoordinatorEditing}
                   onChange={(e) =>
                     setFormData((prev) => ({ ...prev, homeWifiEmail: e.target.value }))
                   }
@@ -1578,6 +1677,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   type="text"
                   required
                   value={formData.homeWifiId || ''}
+                  disabled={isCoordinatorEditing}
                   onChange={(e) =>
                     setFormData((prev) => ({ ...prev, homeWifiId: e.target.value }))
                   }
@@ -1591,7 +1691,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               icon={Package}
               options={productTypes.map(type => ({ value: type, label: type }))}
               value={formData.productType}
-              disabled={!!isEditing}
+              disabled={!!isEditing || isCoordinatorEditing}
               onChange={(e) => {
                 if (isEditing) return; // Lock product type when editing existing lead
                 const newType = e.target.value;
@@ -1621,6 +1721,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 { value: 'Other', label: 'Other' }
               ]}
               value={formData.gender}
+              disabled={isCoordinatorEditing}
               onChange={(e) => setFormData(prev => ({ ...prev, gender: e.target.value }))}
             />
           </FormSection>
@@ -1635,6 +1736,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               icon={MapPin}
               options={emirates.map(emirate => ({ value: emirate, label: emirate }))}
               value={formData.emirate}
+              disabled={isCoordinatorEditing}
               onChange={(e) => {
                 const newEmirate = e.target.value;
                 setFormData(prev => ({
@@ -1662,6 +1764,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     type="checkbox"
                       className="h-5 w-5 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
                     checked={formData.hasEmirateId}
+                    disabled={isCoordinatorEditing}
                     onChange={(e) => setFormData(prev => ({ 
                       ...prev, 
                       hasEmirateId: e.target.checked 
@@ -1680,6 +1783,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     type="checkbox"
                       className="h-5 w-5 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
                     checked={formData.advancePayment}
+                    disabled={isCoordinatorEditing}
                     onChange={(e) => setFormData(prev => ({ 
                       ...prev, 
                       advancePayment: e.target.checked 
@@ -1701,6 +1805,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 type="url"
                 placeholder="https://maps.google.com/..."
                 value={formData.locationUrl}
+                disabled={isCoordinatorEditing}
                 onChange={(e) => handleLocationUrlChange(e.target.value)}
                 onBlur={(e) => handleLocationUrlBlur(e.target.value)}
                 error={formErrors.locationUrl}
@@ -1714,31 +1819,142 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             description="Select numbers and assign plans"
           >
             <div className="col-span-2 space-y-6">
+              {/* Step 1: Number Selection */}
               {!isNoNumberProduct && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="col-span-3">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                        <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold">1</span>
+                        Select Number
+                      </h3>
+                    </div>
+                    {currentNumber && !isEditing && (
+                      <motion.button
+                        type="button"
+                        onClick={() => setShowNumberPool(true)}
+                        disabled={isCoordinatorEditing}
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        className="px-4 py-2 text-xs font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center gap-2"
+                      >
+                        <Phone className="w-4 h-4" />
+                        Change Number
+                      </motion.button>
+                    )}
+                  </div>
+                  
                     {showNumberPool ? (
+                    <div className={isCoordinatorEditing ? 'pointer-events-none opacity-50' : ''}>
                         <QuickNumberSelect 
                           onSelect={handleNumberSelect}
                         selectedCategory={selectedCategory}
                         onCategoryChange={(category) => setSelectedCategory(category)}
                       />
+                    </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() => setShowNumberPool(true)}
-                        className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                      >
-                        {isEditing ? 'Add Another Number' : 'Select Another Number'}
-                      </button>
+                    /* Only show button when no current number is selected (to avoid showing it when user is in the process of adding) */
+                    !currentNumber && (() => {
+                      // Helper function to get ordinal number (1st, 2nd, 3rd, etc.)
+                      const getOrdinal = (n: number): string => {
+                        const s = ['th', 'st', 'nd', 'rd'];
+                        const v = n % 100;
+                        return n + (s[(v - 20) % 10] || s[v] || s[0]);
+                      };
+                      
+                      const nextNumber = selectedPlans.length + 1;
+                      const buttonText = selectedPlans.length > 0 
+                        ? `Add ${getOrdinal(nextNumber)} Number`
+                        : (isEditing ? 'Add Another Number' : 'Select Number');
+                      
+                      return (
+                        <motion.button
+                          type="button"
+                          onClick={() => setShowNumberPool(true)}
+                          disabled={isCoordinatorEditing}
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="w-full px-4 py-3 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-2"
+                        >
+                          <Phone className="w-5 h-5" />
+                          {buttonText}
+                        </motion.button>
+                      );
+                    })()
+                  )}
+                  
+              {formErrors.selectedNumber && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="p-3 bg-red-50 border border-red-200 rounded-lg"
+                    >
+                      <p className="text-sm text-red-600 flex items-center gap-2">
+                        <XCircle className="w-4 h-4" />
+                  {formErrors.selectedNumber}
+                      </p>
+                    </motion.div>
+              )}
+                  
+              {currentNumber && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="bg-gradient-to-r from-indigo-50 to-purple-50 p-4 rounded-lg border-2 border-indigo-200 shadow-sm"
+                    >
+                  <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="flex items-center justify-center w-10 h-10 rounded-full bg-indigo-100">
+                            <Phone className="w-5 h-5 text-indigo-600" />
+                          </div>
+                    <div>
+                            <p className="text-base font-semibold text-gray-900">{currentNumber}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                                {selectedCategory}
+                              </span>
+                            </div>
+                          </div>
+                    </div>
+                    {!isEditing && (
+                          <motion.button
+                      type="button"
+                      onClick={() => {
+                        setCurrentNumber('');
+                        setCurrentNumberData(null);
+                        setSelectedCategory('Standard');
+                        setCurrentPlan('');
+                              setShowNumberPool(true);
+                      }}
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            className="p-2 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors duration-200"
+                            title="Clear and select another number"
+                    >
+                            <XCircle className="w-5 h-5" />
+                          </motion.button>
                     )}
                   </div>
+                    </motion.div>
+                  )}
                 </div>
               )}
+              
+              {/* No Number Product Category Selection */}
               {isNoNumberProduct && (
                 <div className="space-y-3">
-                  <div className="p-3 rounded-md bg-yellow-50 text-yellow-800 text-sm border border-yellow-200">
-                    Number attachment is not required for {formData.productType}. Please choose a category and then select a plan.
+                  <div className="p-4 rounded-lg bg-yellow-50 border border-yellow-200 flex items-start gap-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <div className="w-5 h-5 rounded-full bg-yellow-500 flex items-center justify-center">
+                        <span className="text-white text-xs font-bold">!</span>
+                      </div>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-yellow-900">No Number Required</p>
+                      <p className="text-xs text-yellow-700 mt-1">
+                        Number attachment is not required for <span className="font-semibold">{formData.productType}</span>. Please choose a category and then select a plan.
+                      </p>
+                    </div>
                   </div>
                   <FormSelect
                     label="Category"
@@ -1760,40 +1976,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                         ? 'Home Wifi'
                         : selectedCategory
                     }
+                    disabled={isCoordinatorEditing}
                     onChange={(e) => setSelectedCategory(e.target.value)}
                   />
                 </div>
               )}
-              {formErrors.selectedNumber && (
-                <div className="mt-1 text-sm text-red-600">
-                  {formErrors.selectedNumber}
-                </div>
-              )}
-              {currentNumber && (
-                <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">{currentNumber}</p>
-                      <p className="text-sm text-gray-500">{selectedCategory}</p>
-                    </div>
-                    {!isEditing && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCurrentNumber('');
-                        setCurrentNumberData(null);
-                        setSelectedCategory('Standard');
-                        setCurrentPlan('');
-                      }}
-                      className="text-sm font-medium text-red-600 hover:text-red-700"
-                    >
-                      Clear Selection
-                    </button>
-                    )}
-                  </div>
-                </div>
-              )}
               
+              {/* Step 2: Plan Selection */}
+              <div className="space-y-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    <span className="flex items-center justify-center w-6 h-6 rounded-full bg-purple-100 text-purple-600 text-xs font-bold">2</span>
+                    Select Plan
+                  </h3>
+                </div>
               <div ref={planErrorRef} />
               <FormSelect
                 label="Plan"
@@ -1810,6 +2006,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     ])
                 ]}
                 value={currentPlan}
+                  disabled={isCoordinatorEditing}
                   onChange={(e) => {
                     const selectedValue = e.target.value;
                     // Prevent selection of category headers or empty value
@@ -1826,14 +2023,62 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   }}
                   error={formErrors.plans}
               />
+              </div>
+
+              {/* Hint message when number and plan are selected */}
+              {currentPlan && (currentNumber || isNoNumberProduct) && !isCoordinatorEditing && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-2"
+                >
+                  <motion.div 
+                    className="flex-shrink-0 mt-0.5"
+                    animate={{ 
+                      scale: [1, 1.2, 1],
+                    }}
+                    transition={{ 
+                      duration: 1.5,
+                      repeat: Infinity,
+                      ease: "easeInOut"
+                    }}
+                  >
+                    <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center">
+                      <span className="text-white text-xs font-bold">!</span>
+                    </div>
+                  </motion.div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-blue-900">
+                      Ready to add?
+                    </p>
+                    <p className="text-xs text-blue-700 mt-1">
+                      Click the{' '}
+                      <motion.span
+                        className="font-bold text-red-600"
+                        animate={{ 
+                          scale: [1, 1.1, 1],
+                        }}
+                        transition={{ 
+                          duration: 1.2,
+                          repeat: Infinity,
+                          ease: "easeInOut"
+                        }}
+                      >
+                        {isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}
+                      </motion.span>
+                      {' '}button below to add {isNoNumberProduct ? 'this plan' : 'this number with plan'} to your lead.
+                    </p>
+                  </div>
+                </motion.div>
+              )}
 
               <motion.button
                 type="button"
                 onClick={handleAddPlan}
-                disabled={isCheckingNumber || !currentPlan || (!currentNumber && !isNoNumberProduct)}
+                disabled={isCoordinatorEditing || isCheckingNumber || !currentPlan || (!currentNumber && !isNoNumberProduct)}
                 whileHover={!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) ? { scale: 1.02 } : {}}
                 whileTap={!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) ? { scale: 0.98 } : {}}
-                className="relative w-full px-5 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 overflow-hidden shadow-lg shadow-indigo-500/25 group"
+                className="relative w-full px-5 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 overflow-hidden shadow-lg shadow-indigo-500/25 group mt-4"
               >
                 <AnimatePresence mode="wait">
                   {isCheckingNumber ? (
@@ -1891,7 +2136,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                               <label htmlFor={`plan-select-${plan.numberId}`} className="sr-only">Change Plan</label>
                               <select
                                 id={`plan-select-${plan.numberId}`}
-                                className="block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                                className="block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                                disabled={isCoordinatorEditing}
                                 value={(() => {
                                   // Determine current value by matching id|name when possible
                                   const catNorm = normalizeCategory(plan.category);
@@ -1927,7 +2173,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                         <button
                           type="button"
                           onClick={() => handleRemovePlan(plan.numberId)}
-                          className="ml-4 text-sm font-medium text-red-600 hover:text-red-700"
+                          disabled={isCoordinatorEditing}
+                          className="ml-4 text-sm font-medium text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Remove
                         </button>
@@ -1949,6 +2196,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               icon={Languages}
               options={languages.map(lang => ({ value: lang, label: lang }))}
               value={formData.language}
+              disabled={isCoordinatorEditing}
               onChange={(e) => setFormData(prev => ({ ...prev, language: e.target.value }))}
             />
 
@@ -1975,27 +2223,38 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               type="date"
               required
               value={formData.startDate}
+              disabled={isCoordinatorEditing}
               onChange={(e) => {
                 const selectedDate = e.target.value;
                 setFormData(prev => ({ ...prev, startDate: selectedDate }));
                 
-                // If date is changed to today, validate time
-                if (selectedDate) {
+                // Only validate time if NOT editing
+                if (!isEditing && selectedDate) {
                   const date = new Date(selectedDate);
                   const today = new Date();
                   today.setHours(0, 0, 0, 0);
                   date.setHours(0, 0, 0, 0);
                   
                   if (date.getTime() === today.getTime() && formData.startTime) {
-                    const [hours, minutes] = formData.startTime.split(':').map(Number);
-                    const selectedDateTime = new Date();
-                    selectedDateTime.setHours(hours, minutes, 0, 0);
-                    const now = new Date();
-                    
-                    if (selectedDateTime < now) {
-                      setFormErrors(prev => ({ ...prev, startTime: 'Time cannot be in the past' }));
-                    } else {
-                      setFormErrors(prev => ({ ...prev, startTime: '' }));
+                    // Handle both 24-hour format (HH:mm) and 12-hour format (h:mm AM/PM)
+                    let time24 = formData.startTime;
+                    if (time24.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
+                      // It's in 12-hour format, convert it
+                      time24 = convertTo24Hour(time24);
+                    }
+                    if (time24 && time24.includes(':')) {
+                      const [hours, minutes] = time24.split(':').map(Number);
+                      if (!isNaN(hours) && !isNaN(minutes)) {
+                        const selectedDateTime = new Date();
+                        selectedDateTime.setHours(hours, minutes, 0, 0);
+                        const now = new Date();
+                        
+                        if (selectedDateTime < now) {
+                          setFormErrors(prev => ({ ...prev, startTime: 'Time cannot be in the past' }));
+                        } else {
+                          setFormErrors(prev => ({ ...prev, startTime: '' }));
+                        }
+                      }
                     }
                   }
                 }
@@ -2007,22 +2266,26 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             <FormInput
               label="Time"
               icon={Calendar}
-              type="time"
-              required
-              value={formData.startTime}
+              type="text"
+              required={!isEditing}
+              placeholder="12:34 PM"
+              value={convertTo12Hour(formData.startTime)}
+              disabled={isCoordinatorEditing}
               onChange={(e) => {
-                const selectedTime = e.target.value;
-                setFormData(prev => ({ ...prev, startTime: selectedTime }));
+                const inputValue = e.target.value;
+                // Convert 12-hour format input to 24-hour format for storage
+                const time24 = convertTo24Hour(inputValue);
+                setFormData(prev => ({ ...prev, startTime: time24 || inputValue }));
                 
-                // If date is today, validate that time is not in the past
-                if (formData.startDate && selectedTime) {
+                // Only validate "time cannot be in the past" when NOT editing
+                if (!isEditing && formData.startDate && inputValue) {
                   const selectedDate = new Date(formData.startDate);
                   const today = new Date();
                   today.setHours(0, 0, 0, 0);
                   selectedDate.setHours(0, 0, 0, 0);
                   
-                  if (selectedDate.getTime() === today.getTime()) {
-                    const [hours, minutes] = selectedTime.split(':').map(Number);
+                  if (selectedDate.getTime() === today.getTime() && time24 && time24.includes(':')) {
+                    const [hours, minutes] = time24.split(':').map(Number);
                     const selectedDateTime = new Date();
                     selectedDateTime.setHours(hours, minutes, 0, 0);
                     const now = new Date();
@@ -2035,6 +2298,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                   } else {
                     setFormErrors(prev => ({ ...prev, startTime: '' }));
                   }
+                } else {
+                  // Clear errors when editing
+                  setFormErrors(prev => ({ ...prev, startTime: '' }));
                 }
               }}
               error={formErrors.startTime}
@@ -2054,9 +2320,10 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 <div className="p-4">
               <textarea
                 rows={4}
-                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                  className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm disabled:bg-gray-100 disabled:cursor-not-allowed"
                 placeholder="Add any additional notes or remarks..."
                 value={formData.remarks}
+                disabled={isCoordinatorEditing}
                 onChange={(e) => setFormData(prev => ({ ...prev, remarks: e.target.value }))}
               />
                 </div>

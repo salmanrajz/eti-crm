@@ -59,6 +59,7 @@ export function FormInput({ label, icon: Icon, error, hint, className, ...props 
             error 
               ? 'border-red-300 focus:border-red-500 focus:ring-red-500' 
               : 'border-gray-300 focus:border-indigo-500 focus:ring-indigo-500',
+            props.disabled && 'bg-gray-100 cursor-not-allowed opacity-60',
             className
           )}
           {...props}

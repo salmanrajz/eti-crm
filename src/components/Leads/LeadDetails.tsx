@@ -260,6 +260,16 @@ export function LeadDetails() {
   async function sendMessage(e: React.FormEvent) {
     e.preventDefault();
     if (!newMessage.trim() || !user || !id) return;
+    
+    // Prevent sending messages for rejected or activated leads
+    if (lead?.status === 'rejected') {
+      toast.error('Cannot send messages to rejected leads');
+      return;
+    }
+    if (lead?.status === 'activated') {
+      toast.error('Cannot send messages to activated leads');
+      return;
+    }
 
       // Create a temporary message ID
       const tempId = `temp-${Date.now()}`;
@@ -346,7 +356,9 @@ export function LeadDetails() {
   }
 
   async function handleLeadUpdate(updates: Partial<Lead>) {
-    if (!id || !user) return;
+    if (!id || !user) {
+      throw new Error('Missing lead ID or user information');
+    }
 
     try {
       // If verifier, build change list and show confirmation prior to save
@@ -368,16 +380,18 @@ export function LeadDetails() {
       const leadDoc = await getDoc(leadRef);
       
       if (!leadDoc.exists()) {
-        toast.error('Lead not found');
-        return;
+        const errorMessage = 'Lead not found';
+        toast.error(errorMessage);
+        throw new Error(errorMessage);
       }
 
       const leadData = leadDoc.data();
       
       // If lead is verified, only allow updates from admin, manager, or coordinator
       if (leadData.status === 'verified' && !['admin', 'manager', 'coordinator'].includes(user.role)) {
-        toast.error('Cannot update verified lead');
-        return;
+        const errorMessage = 'Cannot update verified lead';
+        toast.error(errorMessage);
+        throw new Error(errorMessage);
       }
 
       // Preserve the original agentId and other important fields
@@ -386,39 +400,48 @@ export function LeadDetails() {
         user.role === 'agent' &&
         (leadData.status === 'non_verified' || leadData.status === 'follow_verification');
       
-      // For coordinators editing verified leads: only trigger reverification if important fields are changed
-      // Customer name changes should NOT trigger reverification
+      // For coordinators: only allow editing name, address, and age - no reverification, status remains unchanged
       let isCoordinatorEditingVerified = false;
-      if (user.role === 'coordinator' && leadData.status === 'verified' && Object.keys(updates).length > 0) {
-        // Exclude status field from check (status changes are handled separately)
-        const updatesWithoutStatus = { ...updates };
-        delete updatesWithoutStatus.status;
+      if (user.role === 'coordinator') {
+        // Exclude status and system fields from check (these are handled separately)
+        const updatesWithoutSystemFields = { ...updates };
+        delete updatesWithoutSystemFields.status;
+        delete updatesWithoutSystemFields.updatedAt;
+        delete updatesWithoutSystemFields.updatedBy;
         
-        if (Object.keys(updatesWithoutStatus).length > 0) {
-          // Check if only customer name is being changed (or other non-critical fields)
-          const criticalFields = ['customerNumber', 'customerPhone', 'plans', 'numberId', 'plan', 'customerAddress', 'emirate', 'area', 'country', 'gender', 'hasEmirateId', 'advancePayment', 'language'];
-          const changedFields = Object.keys(updatesWithoutStatus).filter(key => {
-            const oldValue = leadData[key];
-            const newValue = updatesWithoutStatus[key];
-            // Handle deep comparison for objects/arrays
-            if (typeof oldValue === 'object' && typeof newValue === 'object') {
-              return JSON.stringify(oldValue) !== JSON.stringify(newValue);
-            }
-            return oldValue !== newValue;
-          });
-          const hasCriticalChanges = changedFields.some(field => criticalFields.includes(field));
-          
-          // Only trigger reverification if critical fields are changed (not just customer name)
-          isCoordinatorEditingVerified = hasCriticalChanges;
+        // Allowed fields for coordinators: customerName, customerAddress, customerAge
+        const allowedCoordinatorFields = ['customerName', 'customerAddress', 'customerAge'];
+        
+        // Check if coordinator is trying to edit non-allowed fields
+        const attemptedFields = Object.keys(updatesWithoutSystemFields);
+        const disallowedFields = attemptedFields.filter(field => !allowedCoordinatorFields.includes(field));
+        
+        if (disallowedFields.length > 0) {
+          const errorMessage = `Coordinators can only edit: Name, Address, and Age. Cannot edit: ${disallowedFields.join(', ')}`;
+          toast.error(errorMessage);
+          throw new Error(errorMessage);
         }
+        
+        // Coordinator edits to allowed fields should NOT trigger reverification
+        // Status will remain unchanged (handled below)
+        isCoordinatorEditingVerified = false;
       }
       
-      const nextStatus = isAgentResubmittingFollowUp ? 'pending_verification' : 
+      // For coordinators: status should always remain unchanged
+      let nextStatus;
+      if (user.role === 'coordinator') {
+        // Coordinator edits should preserve the current status
+        nextStatus = leadData.status;
+      } else {
+        nextStatus = isAgentResubmittingFollowUp ? 'pending_verification' : 
                         isCoordinatorEditingVerified ? 'pending_verification' : 
                         (updates.status || leadData.status);
-      const updateData = {
+      }
+      
+      const updateData: any = {
         ...updates,
         // If agent resubmits from non_verified, move back to pending_verification
+        // For coordinators, status always remains unchanged
         status: nextStatus,
         // Preserve these fields regardless of who is updating
         agentId: leadData.agentId,
@@ -427,6 +450,22 @@ export function LeadDetails() {
         updatedAt: new Date(),
         updatedBy: user.id
       };
+
+      // If status changes, ensure plan statuses are aligned with the lead status
+      const statusChanged = nextStatus !== leadData.status;
+      if (statusChanged) {
+        if (updates.plans && Array.isArray(updates.plans)) {
+          updateData.plans = updates.plans.map((p: any) => ({
+            ...p,
+            status: nextStatus
+          }));
+        } else if (leadData.plans && Array.isArray(leadData.plans)) {
+          updateData.plans = leadData.plans.map((p: any) => ({
+            ...p,
+            status: nextStatus
+          }));
+        }
+      }
 
       // Update the lead in Firestore
       await updateDoc(leadRef, updateData);
@@ -699,6 +738,8 @@ export function LeadDetails() {
       }
       const updateData = {
         ...pendingVerifierUpdates,
+        // Preserve current status for activated_non_verified so it does NOT revert to pending_verification on edit
+        status: leadData.status === 'activated_non_verified' ? 'activated_non_verified' : pendingVerifierUpdates.status || leadData.status,
         agentId: leadData.agentId,
         teamId: leadData.teamId,
         managerId: leadData.managerId,
@@ -712,7 +753,8 @@ export function LeadDetails() {
           try {
             const numberRef = doc(db, 'numberPool', plan.numberId);
             await updateDoc(numberRef, {
-              status: 'pending_verification',
+              // Keep number status aligned with lead status; do not downgrade to pending_verification
+              status: leadData.status === 'activated_non_verified' ? 'activated_non_verified' : 'pending_verification',
               lastStatusChange: new Date(),
               leadId: id
             });
@@ -876,13 +918,25 @@ export function LeadDetails() {
             </div>
           )}
 
-        {/* Chat Section - Hide if lead is rejected or activated */}
-          {lead && lead.status !== 'rejected' && lead.status !== 'activated' && (
+        {/* Chat Section - Show for all leads, but read-only for rejected and activated leads */}
+          {lead && (
           <div className="bg-white rounded-lg shadow-lg overflow-hidden">
             <div className="px-3 sm:px-6 py-3 sm:py-4 border-b border-gray-200">
+              <div className="flex items-center justify-between">
               <div className="flex items-center">
                 <MessageSquare className="h-5 w-5 text-indigo-600 mr-2" />
                 <h2 className="text-lg font-medium text-gray-900">Chat</h2>
+                </div>
+                {lead.status === 'rejected' && (
+                  <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
+                    Read-only (Lead Rejected)
+                  </span>
+                )}
+                {lead.status === 'activated' && (
+                  <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
+                    Read-only (Lead Activated)
+                  </span>
+                )}
               </div>
             </div>
 
@@ -922,14 +976,22 @@ export function LeadDetails() {
               <form onSubmit={sendMessage} className="flex space-x-3">
                 <input
                   type="text"
-                  className="flex-1 rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-                  placeholder="Type a message..."
+                  className="flex-1 rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  placeholder={
+                    lead?.status === 'rejected' 
+                      ? 'Cannot send messages to rejected leads' 
+                      : lead?.status === 'activated'
+                      ? 'Cannot send messages to activated leads'
+                      : 'Type a message...'
+                  }
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
+                  disabled={lead?.status === 'rejected' || lead?.status === 'activated'}
                 />
                 <button
                   type="submit"
-                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  disabled={lead?.status === 'rejected' || lead?.status === 'activated' || !newMessage.trim()}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send className="h-4 w-4" />
                 </button>

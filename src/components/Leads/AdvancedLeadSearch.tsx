@@ -148,6 +148,18 @@ const STATUS_OPTIONS = [
   'verified', 'pending', 'assigned', 'activated', 'rejected', 'follow_up'
 ];
 
+function getStatusDisplayText(status: string | undefined): string {
+  if (!status) return 'UNKNOWN';
+  // Convert "assigned" to "Processed with Etisalat" for UI display only
+  if (status === 'assigned') {
+    return 'PROCESSED WITH ETISALAT';
+  }
+  // Convert "assigned_to_cord" to "ASSIGNED TO ACTIVATION" for UI display only
+  if (status === 'assigned_to_cord') {
+    return 'ASSIGNED TO ACTIVATION';
+  }
+  return status.replace(/_/g, ' ').toUpperCase();
+}
 
 export function AdvancedLeadSearch({ 
   leads, 
@@ -844,7 +856,7 @@ export function AdvancedLeadSearch({
                                 lead.status === 'assigned' ? 'bg-purple-100 text-purple-800' :
                                 'bg-gray-100 text-gray-800'
                               }`}>
-                                {lead.status?.replace('_', ' ').toUpperCase() || 'UNKNOWN'}
+                                {getStatusDisplayText(lead.status)}
                               </span>
                             </td>
 
@@ -873,7 +885,7 @@ export function AdvancedLeadSearch({
                                   <span className="font-medium">SR:&nbsp;</span>
                                   {srNumber || 'N/A'}
                                 </div>
-                              </td>
+                            </td>
 
                             {/* Plans Count */}
                             <td className="px-6 py-4 whitespace-nowrap">
