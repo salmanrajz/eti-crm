@@ -96,7 +96,8 @@ import {
   CheckSquare2,
   X,
   Database,
-  Trash2
+  Trash2,
+  Sparkles
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Line, Bar } from 'react-chartjs-2';
@@ -321,6 +322,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [planManagementModalOpen, setPlanManagementModalOpen] = useState(false);
   const [whatsappSettingsModalOpen, setWhatsappSettingsModalOpen] = useState(false);
   const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
+  // Broadcast poster states
+  const [posterTitle, setPosterTitle] = useState('');
+  const [posterMessage, setPosterMessage] = useState('');
+  const [isSendingPoster, setIsSendingPoster] = useState(false);
+  const [showPosterPreview, setShowPosterPreview] = useState(false);
+  const [posterModalOpen, setPosterModalOpen] = useState(false);
   // Group targets and activations (dynamic groups like G1..G5 and custom)
   const [groupTargets, setGroupTargets] = useState<{ groups: Record<string, number>; visibleToCoordinators: boolean }>({ groups: { G1: 0, G2: 0, G3: 0 }, visibleToCoordinators: false });
   const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
@@ -348,6 +355,23 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     loadGroupTargetsForMonth(selectedMonth);
     loadGroupAliases();
   }, [user]);
+
+  // Load existing broadcast poster for editing convenience
+  useEffect(() => {
+    const loadPoster = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'config', 'broadcastPoster'));
+        if (snap.exists()) {
+          const data = snap.data();
+          setPosterTitle(data?.title || '');
+          setPosterMessage(data?.message || '');
+        }
+      } catch (error) {
+        console.error('Failed to load broadcast poster', error);
+      }
+    };
+    loadPoster();
+  }, []);
 
   // Load numbers that are hidden from freelancers
   const loadHiddenNumbers = async () => {
@@ -390,6 +414,31 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       toast.error('Failed to update number visibility');
     }
   };
+
+  const handleSendBroadcastPoster = useCallback(async () => {
+    if (!posterTitle.trim() || !posterMessage.trim()) {
+      toast.error('Please add both title and message');
+      return;
+    }
+    setIsSendingPoster(true);
+    try {
+      const posterRef = doc(db, 'config', 'broadcastPoster');
+      await setDoc(posterRef, {
+        posterId: `${Date.now()}`,
+        title: posterTitle.trim(),
+        message: posterMessage.trim(),
+        createdAt: serverTimestamp(),
+        createdBy: user?.id || 'admin',
+        createdByName: user?.name || user?.email || 'Admin'
+      });
+      toast.success('Broadcast poster sent to all users');
+    } catch (error) {
+      console.error('Failed to send broadcast poster', error);
+      toast.error('Failed to send poster');
+    } finally {
+      setIsSendingPoster(false);
+    }
+  }, [posterTitle, posterMessage, user]);
 
   // Make all hidden numbers visible (batched)
   const makeAllHiddenVisible = async () => {
@@ -1529,6 +1578,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-emerald-600',
     },
     {
+      name: 'Broadcast Poster',
+      description: 'Send announcement',
+      value: 'Send',
+      href: '#broadcast-poster',
+      icon: Sparkles,
+      color: 'bg-gradient-to-br from-amber-500 to-amber-600',
+      textColor: 'text-amber-600',
+    },
+    {
       name: 'Bulk Delete Numbers',
       description: 'Delete multiple numbers',
       value: 'Delete',
@@ -2257,6 +2315,33 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
             </button>
+          ) : stat.name === 'Broadcast Poster' ? (
+            <button
+              key={stat.name}
+              onClick={() => setPosterModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
           ) : stat.name === 'Bulk Delete Numbers' ? (
             <button
               key={stat.name}
@@ -2915,6 +3000,137 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             </button>
             <OpenRequestsSection />
           </div>
+        </div>
+      )}
+
+      {/* Broadcast Poster Modal */}
+      {posterModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl overflow-hidden border border-gray-100 relative"
+          >
+            {/* Preview overlay on top layer */}
+            {showPosterPreview && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4 py-6">
+                <div className="w-full max-w-2xl bg-white/10 rounded-2xl overflow-hidden border border-white/20 shadow-2xl">
+                  <div className="flex items-center justify-between bg-white/10 px-4 py-3 border-b border-white/20">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <Sparkles className="w-4 h-4 text-amber-200" />
+                      Preview
+                    </div>
+                    <button
+                      onClick={() => setShowPosterPreview(false)}
+                      className="text-white hover:bg-white/20 rounded-lg p-1.5 transition-colors"
+                      aria-label="Close preview"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="bg-gradient-to-br from-rose-800 via-orange-900 to-amber-900 text-white p-6">
+                    <div className="flex flex-col items-center text-center gap-1">
+                      <div className="flex items-center gap-2">
+                        <div className="p-2 bg-white/10 rounded-xl border border-white/10 shadow-lg">
+                          <Sparkles className="w-4 h-4 text-amber-300" />
+                        </div>
+                        <div className="text-amber-300 text-sm uppercase tracking-[0.2em] font-semibold">
+                          Announcement
+                        </div>
+                        <div className="p-2 bg-white/10 rounded-xl border border-white/10 shadow-lg">
+                          <Sparkles className="w-4 h-4 text-amber-300" />
+                        </div>
+                      </div>
+                      <p className="text-xs font-semibold text-amber-200/90">
+                        {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </p>
+                      <div className="w-full max-w-sm h-0.5 bg-amber-200/70 mt-1 mb-2" />
+                      <h2 className="text-2xl font-semibold text-amber-100 drop-shadow">
+                        {posterTitle || 'Announcement Title'}
+                      </h2>
+                    </div>
+                    <div className="mt-5 text-sm text-amber-50/90 leading-relaxed whitespace-pre-line">
+                      {posterMessage || 'Your announcement message will appear here.'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-gradient-to-r from-indigo-600 via-purple-600 to-amber-500 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-white/15 rounded-xl border border-white/10">
+                  <Sparkles className="w-5 h-5 text-amber-200" />
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.25em] text-amber-200/80">Broadcast Poster</p>
+                  <h3 className="text-xl font-semibold text-white">Send Announcement</h3>
+                </div>
+              </div>
+              <button
+                onClick={() => setPosterModalOpen(false)}
+                className="text-white hover:bg-white/20 rounded-lg p-2 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="text-sm font-semibold text-gray-700">Title</label>
+                <input
+                  type="text"
+                  value={posterTitle}
+                  onChange={(e) => setPosterTitle(e.target.value)}
+                  placeholder="Announcement headline"
+                  className="mt-1 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-semibold text-gray-700">Message</label>
+                <textarea
+                  value={posterMessage}
+                  onChange={(e) => setPosterMessage(e.target.value)}
+                  rows={6}
+                  placeholder="Details of the announcement..."
+                  className="mt-1 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Tip: Each send generates a new poster ID. Users see it once per send until they acknowledge.
+                </p>
+              </div>
+
+              {/* Live Preview (toggle) */}
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-500">This will appear to all users on next refresh until they click “I Acknowledge”.</p>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setPosterModalOpen(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => setShowPosterPreview(!showPosterPreview)}
+                    className="px-4 py-2 text-sm font-medium text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors"
+                  >
+                    {showPosterPreview ? 'Hide Preview' : 'Preview'}
+                  </button>
+                  <motion.button
+                    whileHover={{ scale: isSendingPoster ? 1 : 1.02 }}
+                    whileTap={{ scale: isSendingPoster ? 1 : 0.98 }}
+                    onClick={handleSendBroadcastPoster}
+                    disabled={isSendingPoster}
+                    className="px-5 py-2.5 text-sm font-semibold rounded-lg text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 shadow-lg disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                  >
+                    {isSendingPoster ? 'Sending...' : 'Send to All'}
+                  </motion.button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
         </div>
       )}
 

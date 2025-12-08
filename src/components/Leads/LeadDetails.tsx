@@ -427,10 +427,10 @@ export function LeadDetails() {
         isCoordinatorEditingVerified = false;
       }
       
-      // For coordinators: status should always remain unchanged
+      // For coordinators and admins: status should always remain unchanged
       let nextStatus;
-      if (user.role === 'coordinator') {
-        // Coordinator edits should preserve the current status
+      if (user.role === 'coordinator' || user.role === 'admin') {
+        // Coordinator and admin edits should preserve the current status
         nextStatus = leadData.status;
       } else {
         nextStatus = isAgentResubmittingFollowUp ? 'pending_verification' : 
@@ -518,10 +518,12 @@ export function LeadDetails() {
           }
         });
         
-        // Handle added numbers - always set to 'pending_verification' for new numbers
+        // Handle added numbers - set status based on user role and lead status
         addedNumbers.forEach((plan: any) => {
           if (plan?.numberId) {
-            const newStatus = 'pending_verification';
+            // For admins, new numbers inherit the current lead status
+            // For others, new numbers go to 'pending_verification'
+            const newStatus = user.role === 'admin' ? nextStatus : 'pending_verification';
             
             updatePromises.push(
               updateDoc(doc(db, 'numberPool', plan.numberId), {

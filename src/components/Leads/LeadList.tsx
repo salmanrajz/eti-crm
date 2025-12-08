@@ -2151,7 +2151,7 @@ export function LeadList() {
                     {/* Actions */}
                     <div className="col-span-2 pl-8">
                       <div className="flex items-center gap-2">
-                        {(isAdmin() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
+                        {(isAdmin() || isCoordinator() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
                           <motion.button
                             whileHover={{ scale: 1.02, y: -1 }}
                             whileTap={{ scale: 0.98 }}
@@ -2241,11 +2241,6 @@ export function LeadList() {
                             <h3 className="text-lg font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors duration-200 truncate">
                               {lead.customerName || 'Unnamed Customer'}
                             </h3>
-                              {lead.leadNumber && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200 flex-shrink-0">
-                                  {lead.leadNumber}
-                                </span>
-                              )}
                             </div>
                             {isManager() && (lead as any).agentName && (
                               <div className="flex items-center text-sm text-gray-600 font-medium mt-1">
@@ -2257,10 +2252,10 @@ export function LeadList() {
                               <Phone className="h-4 w-4 mr-1.5 flex-shrink-0" />
                               <span className="truncate">{lead.customerNumber}</span>
                             </div>
-                            {lead.customerAddress && (
-                              <div className="flex items-center text-s text-gray-500 mt-1">
-                                <MapPin className="h-3 w-3 mr-1.5" />
-                                {lead.customerAddress}
+                            {lead.leadNumber && (
+                              <div className="flex items-center text-sm text-gray-500 mt-1">
+                                <Hash className="h-3 w-3 mr-1.5" />
+                                <span className="font-medium text-indigo-600">{lead.leadNumber}</span>
                               </div>
                             )}
                             <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200 mt-1">
@@ -2344,7 +2339,7 @@ export function LeadList() {
 
                     {/* Action Buttons */}
                     <div className="mt-4 flex gap-2">
-                      {(isAdmin() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
+                      {(isAdmin() || isCoordinator() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
                         <motion.button
                           whileHover={{ scale: 1.02, y: -1 }}
                           whileTap={{ scale: 0.98 }}

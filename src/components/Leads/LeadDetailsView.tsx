@@ -47,6 +47,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { format } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
 import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, onSnapshot, orderBy } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
@@ -190,6 +191,30 @@ const POSTPAID_CAMPAIGN_CHECKLIST = {
   ]
 };
 
+// Ready-made message templates for coordinators and admins
+const READY_MADE_MESSAGES = [
+  {
+    id: 'full_name',
+    label: 'Request Full Name',
+    message: 'May I kindly have your full name to ensure the order is processed accurately?'
+  },
+  {
+    id: 'delivery_address',
+    label: 'Request Delivery Address',
+    message: 'Could you please share the complete delivery address so we can arrange the shipment without any delays?'
+  },
+  {
+    id: 'delivery_time',
+    label: 'Request Preferred Delivery Time',
+    message: 'When would you like us to schedule the delivery at your convenience?'
+  },
+  {
+    id: 'thank_verification',
+    label: 'Thank for Verification',
+    message: 'Thank you for taking the time to complete the verification process.'
+  }
+];
+
 type LeadMediaItem = Lead['verificationMedia'] extends Array<infer T> ? T : never;
 
 export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { lead: Lead; onEdit: () => void; onResubmit?: () => void; isResubmitting?: boolean }) {
@@ -198,6 +223,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const chatBoxRef = useRef<HTMLDivElement>(null);
   const pageEndRef = useRef<HTMLDivElement>(null);
   const hasScrolledOnMountRef = useRef(false);
+  const whatsappMessagesRef = useRef<HTMLDivElement>(null);
   const [showVerifyDialog, setShowVerifyDialog] = useState(false);
   const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'non_verified' | null>(null);
   const [verificationNote, setVerificationNote] = useState('');
@@ -436,6 +462,18 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const whatsappLogsUnsubRef = useRef<null | (() => void)>(null);
+  const [sendingVerification, setSendingVerification] = useState(false);
+  const [showVerificationDialog, setShowVerificationDialog] = useState(false);
+  const [replyText, setReplyText] = useState('');
+  const [sendingReply, setSendingReply] = useState(false);
+  const [resendingLogId, setResendingLogId] = useState<string | null>(null);
+
+  // Auto-scroll to bottom when new messages are added
+  useEffect(() => {
+    if (whatsappMessagesRef.current) {
+      whatsappMessagesRef.current.scrollTop = whatsappMessagesRef.current.scrollHeight;
+    }
+  }, [whatsAppLogs]);
 
   const normalizeLogDate = (value: any): Date | null => {
     if (!value) return null;
@@ -453,11 +491,22 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     }
   };
 
-  const startWhatsAppLogsListener = () => {
+  const startWhatsAppLogsListener = async () => {
+    const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
+    
+    // First load existing messages immediately
     try {
-      const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
       const logsQuery = query(logsCol, orderBy('createdAt', 'asc'));
-      whatsappLogsUnsubRef.current = onSnapshot(
+      const snapshot = await getDocs(logsQuery);
+      const rows = snapshot.docs.map(docSnap => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+        createdAt: docSnap.data().createdAt
+      }));
+      setWhatsAppLogs(rows as any[]);
+      
+      // Then set up real-time listener for updates
+      const unsubscribe = onSnapshot(
         logsQuery,
         snapshot => {
           const rows = snapshot.docs.map(docSnap => ({
@@ -470,13 +519,17 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         error => {
           if (error.code !== 'permission-denied') {
             console.error('Error listening to WhatsApp logs:', error);
-            toast.error('Failed to listen to WhatsApp chat updates');
           }
-          stopWhatsAppLogsListener();
         }
       );
-    } catch (error) {
-      console.error('Error starting WhatsApp logs listener:', error);
+      
+      whatsappLogsUnsubRef.current = unsubscribe;
+    } catch (error: any) {
+      if (error.code === 'permission-denied') {
+        toast.error('Permission denied: Cannot access WhatsApp logs');
+      } else if (error.message?.includes('index')) {
+        toast.error('Missing Firestore index');
+      }
     }
   };
 
@@ -520,7 +573,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const [planPasscodes, setPlanPasscodes] = useState<Record<string, string>>({});
 
-  const isUserCoordinator = isCoordinator();
+  const isUserCoordinator = isCoordinator() || isAdmin();
 
   const getCountryName = (code?: string | null) => {
     if (!code) return '';
@@ -609,14 +662,15 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     isAdmin() ||
     isCoordinator()
   );
-  const canVerify = isVerifier() && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified' || lead.status === 'reverification');
+  const canVerify = (isVerifier() || isAdmin()) && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified' || lead.status === 'reverification');
   const isUserManager = isManager();
   const isActivationDialog = coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified';
   // Manager can assign any of their verified or follow_up leads to coordinator
   // (even if previously managerAssigned) – UI should always show the option
-  const canManagerAssign = isUserManager &&
+  const canManagerAssign = (isUserManager &&
     user?.id === lead.managerId &&
-    (lead.status === 'verified' || lead.status === 'follow_up');
+    (lead.status === 'verified' || lead.status === 'follow_up')) ||
+    (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up'));
   // Agent can also request assignment to coordinator for their own verified/follow_up leads
   const canAgentAssignToCoordinator =
     user?.role === 'agent' &&
@@ -1209,6 +1263,431 @@ Language: ${lead.language || 'N/A'}`;
       toast.error('Failed to assign lead');
     } finally {
       setIsManagerActionProcessing(false);
+    }
+  };
+
+  const handleTemplateMessage = (template: typeof READY_MADE_MESSAGES[0]) => {
+    const { message } = template;
+    setReplyText(message);
+  };
+
+  const handleResendVerificationMessage = async (log: any) => {
+    if (!lead) {
+      toast.error('Lead not found');
+      return;
+    }
+    
+    try {
+      setResendingLogId(log.id);
+      
+      // Fetch fresh lead data from Firestore
+      const leadDoc = await getDoc(doc(db, 'leads', lead.id));
+      if (!leadDoc.exists()) {
+        toast.error('Lead not found');
+        return;
+      }
+      
+      const freshLead = { id: leadDoc.id, ...leadDoc.data() } as Lead;
+      
+      // Get the first plan's fresh details
+      const firstPlan = freshLead.plans?.[0];
+      if (!firstPlan || !freshLead.customerNumber) {
+        toast.error('Missing plan or customer number');
+        return;
+      }
+      
+      // Fetch fresh plan details from Firebase
+      let planDetails = null;
+      if (firstPlan.plan) {
+        try {
+          const plansQuery = query(collection(db, 'plans'), where('name', '==', firstPlan.plan));
+          const plansSnapshot = await getDocs(plansQuery);
+          
+          if (!plansSnapshot.empty) {
+            const planDoc = plansSnapshot.docs[0];
+            const planData = planDoc.data();
+            
+            planDetails = {
+              amount: planData.amount || 'N/A',
+              benefits: planData.benefits || 'N/A',
+              duration: planData.duration || 'N/A'
+            };
+          }
+        } catch (error) {
+          console.error('Error fetching plan details:', error);
+        }
+      }
+      
+      if (!planDetails) {
+        toast.error('Could not fetch plan details');
+        return;
+      }
+      
+      // Generate fresh parameters from current lead data
+      const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+      const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
+      const parameters = [
+        firstPlan.number || 'N/A',
+        monthlyLabel,
+        planDetails.benefits,
+        planDetails.duration
+      ];
+      
+      let to = (freshLead.customerNumber || '').toString().replace(/\D/g, '');
+      const country = (freshLead as any).country || 'AE';
+      const code = country === 'AE' ? '971'
+        : country === 'SA' ? '966'
+        : country === 'QA' ? '974'
+        : country === 'KW' ? '965'
+        : country === 'BH' ? '973'
+        : country === 'OM' ? '968'
+        : country === 'IN' ? '91'
+        : country === 'PK' ? '92'
+        : country === 'EG' ? '20'
+        : country === 'PH' ? '63'
+        : country === 'ID' ? '62'
+        : country === 'MY' ? '60'
+        : country === 'SG' ? '65'
+        : country === 'TH' ? '66'
+        : country === 'VN' ? '84'
+        : country === 'CN' ? '86'
+        : country === 'JP' ? '81'
+        : country === 'KR' ? '82'
+        : country === 'AU' ? '61'
+        : country === 'NZ' ? '64'
+        : country === 'GB' ? '44'
+        : country === 'US' ? '1'
+        : country === 'CA' ? '1'
+        : '971';
+      
+      if (!to.startsWith(code)) {
+        to = `${code}${to}`;
+      }
+      
+      const components: any[] = [
+        {
+          type: 'body',
+          parameters: parameters.map((text: string) => ({ type: 'text', text }))
+        },
+        {
+          type: 'button',
+          sub_type: 'flow',
+          index: 0
+        }
+      ];
+      
+      const group = firstPlan.group || undefined;
+      const { sendWhatsAppWithComponentsByGroup } = await import('../../utils/whatsappRouter');
+      const { logOutboundVerificationMessage } = await import('../../utils/whatsappVerification');
+      
+      const sendResponse = await sendWhatsAppWithComponentsByGroup({
+        to,
+        group,
+        templateName: log.templateName,
+        components
+      });
+      
+      await logOutboundVerificationMessage(
+        freshLead.id,
+        to,
+        log.templateName,
+        parameters,
+        { sendResponse }
+      );
+      
+      toast.success('Verification message resent with updated data');
+    } catch (error: any) {
+      toast.error('Failed to resend WhatsApp message');
+      console.error('Resend WhatsApp error:', error);
+      
+      try {
+        const { logOutboundVerificationMessage } = await import('../../utils/whatsappVerification');
+        const parameters = log.parameters || [];
+        let to = (lead.customerNumber || '').toString().replace(/\D/g, '');
+        const country = (lead as any).country || 'AE';
+        const code = country === 'AE' ? '971' : '971';
+        if (!to.startsWith(code)) {
+          to = `${code}${to}`;
+        }
+        
+        await logOutboundVerificationMessage(
+          lead.id,
+          to,
+          log.templateName,
+          parameters,
+          {
+            status: 'failed',
+            error: {
+              message: error?.message || 'Resend failed',
+              details: typeof error?.toString === 'function' ? error.toString() : undefined
+            }
+          }
+        );
+      } catch (logError) {
+        console.error('Failed to log resend failure:', logError);
+      }
+    } finally {
+      setResendingLogId(null);
+    }
+  };
+
+  const sendWhatsAppReply = async () => {
+    if (!lead || !replyText.trim() || sendingReply) return;
+    
+    try {
+      setSendingReply(true);
+      const country = (lead as any).country || 'AE';
+      let to = (lead.customerNumber || '').toString().replace(/\D/g, '');
+      const code = country === 'AE' ? '971'
+        : country === 'SA' ? '966'
+        : country === 'QA' ? '974'
+        : country === 'KW' ? '965'
+        : country === 'BH' ? '973'
+        : country === 'OM' ? '968'
+        : country === 'IN' ? '91'
+        : country === 'PK' ? '92'
+        : country === 'EG' ? '20'
+        : country === 'PH' ? '63'
+        : country === 'ID' ? '62'
+        : country === 'MY' ? '60'
+        : country === 'SG' ? '65'
+        : country === 'TH' ? '66'
+        : country === 'VN' ? '84'
+        : country === 'CN' ? '86'
+        : country === 'JP' ? '81'
+        : country === 'KR' ? '82'
+        : country === 'AU' ? '61'
+        : country === 'NZ' ? '64'
+        : country === 'GB' ? '44'
+        : country === 'US' ? '1'
+        : country === 'CA' ? '1'
+        : '971';
+      if (!to.startsWith(code)) {
+        to = `${code}${to}`;
+      }
+
+      const group = lead.plans?.[0]?.group || undefined;
+      const { resolveWhatsAppRoute } = await import('../../utils/whatsappRouter');
+      const routeConfig = await resolveWhatsAppRoute(group);
+      const { meta } = routeConfig;
+      if (!meta.businessPhoneId || !meta.accessToken) {
+        throw new Error('WhatsApp credentials are not configured for this group');
+      }
+
+      const resp = await fetch(`https://graph.facebook.com/v19.0/${meta.businessPhoneId}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${meta.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to,
+          type: 'text',
+          text: { body: replyText.trim() }
+        })
+      });
+
+      const responseText = await resp.text();
+      let responseJson: any = {};
+      try {
+        responseJson = JSON.parse(responseText);
+      } catch (e) {
+        // ignore parse error
+      }
+
+      if (!resp.ok) {
+        throw new Error(responseJson?.error?.message || `Failed to send message (${resp.status})`);
+      }
+
+      // Log the outbound message
+      const msgId = responseJson.messages?.[0]?.id;
+      const newMessage = {
+        direction: 'outbound',
+        to,
+        messageText: replyText.trim(),
+        messageId: msgId || undefined,
+        status: msgId ? 'sent' : undefined,
+        createdAt: new Date()
+      };
+      
+      // Optimistically add to UI
+      setWhatsAppLogs(prev => [...prev, { id: 'temp-' + Date.now(), ...newMessage }]);
+      
+      // Then save to Firebase (listener will update with real data)
+      await addDoc(collection(db, 'leads', lead.id, 'whatsappLogs'), {
+        ...newMessage,
+        createdAt: serverTimestamp()
+      });
+
+      setReplyText('');
+      toast.success('Message sent successfully');
+    } catch (error: any) {
+      console.error('Error sending WhatsApp reply:', error);
+      toast.error(error?.message || 'Failed to send message');
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  const handleSendVerificationMessage = async () => {
+    if (!lead || !lead.id || sendingVerification) return;
+    
+    try {
+      setSendingVerification(true);
+      
+      // Get the first plan's details
+      const firstPlan = lead.plans?.[0];
+      if (!firstPlan || !lead.customerNumber) {
+        toast.error('Missing plan or customer number');
+        return;
+      }
+      
+      // Get plan details from Firebase
+      let planDetails = null;
+      if (firstPlan.plan) {
+        try {
+          const plansQuery = query(collection(db, 'plans'), where('name', '==', firstPlan.plan));
+          const plansSnapshot = await getDocs(plansQuery);
+          
+          if (!plansSnapshot.empty) {
+            const planDoc = plansSnapshot.docs[0];
+            const planData = planDoc.data();
+            
+            planDetails = {
+              amount: planData.amount || 'N/A',
+              benefits: planData.benefits || 'N/A',
+              duration: planData.duration || 'N/A'
+            };
+          }
+        } catch (error) {
+          console.error('Error fetching plan details:', error);
+        }
+      }
+      
+      if (!planDetails) {
+        toast.error('Could not fetch plan details');
+        return;
+      }
+      
+      // Format customer number
+      const country = (lead as any).country || 'AE';
+      let formattedNumber = lead.customerNumber.toString().replace(/\D/g, '');
+      const countryCode = country === 'AE' ? '971'
+        : country === 'SA' ? '966'
+        : country === 'QA' ? '974'
+        : country === 'KW' ? '965'
+        : country === 'BH' ? '973'
+        : country === 'OM' ? '968'
+        : country === 'IN' ? '91'
+        : country === 'PK' ? '92'
+        : country === 'EG' ? '20'
+        : country === 'PH' ? '63'
+        : country === 'ID' ? '62'
+        : country === 'MY' ? '60'
+        : country === 'SG' ? '65'
+        : country === 'TH' ? '66'
+        : country === 'VN' ? '84'
+        : country === 'CN' ? '86'
+        : country === 'JP' ? '81'
+        : country === 'KR' ? '82'
+        : country === 'AU' ? '61'
+        : country === 'NZ' ? '64'
+        : country === 'GB' ? '44'
+        : country === 'US' ? '1'
+        : country === 'CA' ? '1'
+        : '971';
+      
+      if (!formattedNumber.startsWith(countryCode)) {
+        formattedNumber = `${countryCode}${formattedNumber}`;
+      }
+      
+      const group = firstPlan.group || undefined;
+      
+      // Import WhatsApp utilities
+      const { sendWhatsAppWithComponentsByGroup, resolveWhatsAppRoute } = await import('../../utils/whatsappRouter');
+      const { logOutboundVerificationMessage } = await import('../../utils/whatsappVerification');
+      
+      const routeConfig = await resolveWhatsAppRoute(group);
+      const { template } = routeConfig;
+      const dynamicTemplateName = template.templateName;
+      
+      const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+      const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
+      const templateParameters = [
+        firstPlan.number || 'N/A',
+        monthlyLabel,
+        planDetails.benefits,
+        planDetails.duration
+      ];
+      
+      const payload = {
+        to: formattedNumber,
+        group,
+        templateName: dynamicTemplateName,
+        components: [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: firstPlan.number || 'N/A' },
+              { type: 'text', text: planDetails.amount },
+              { type: 'text', text: planDetails.benefits },
+              { type: 'text', text: planDetails.duration }
+            ]
+          },
+          {
+            type: 'button',
+            sub_type: 'flow',
+            index: 0
+          }
+        ]
+      };
+      
+      // Send WhatsApp message
+      const sendResponse = await sendWhatsAppWithComponentsByGroup(payload);
+      
+      // Optimistically add verification message to UI
+      const verificationMessage = {
+        direction: 'outbound',
+        to: formattedNumber,
+        messageText: `Verification message sent with template: ${dynamicTemplateName}`,
+        templateName: dynamicTemplateName,
+        status: 'sent',
+        createdAt: new Date()
+      };
+      setWhatsAppLogs(prev => [...prev, { id: 'temp-' + Date.now(), ...verificationMessage }]);
+      
+      // Log outbound verification message
+      try {
+        await logOutboundVerificationMessage(
+          lead.id,
+          formattedNumber,
+          dynamicTemplateName,
+          templateParameters,
+          {
+            sendResponse
+          }
+        );
+      } catch (e) {
+        console.error('Failed to log outbound message:', e);
+      }
+      
+      // Update lead to mark verification method and timestamp
+      await updateDoc(doc(db, 'leads', lead.id), {
+        verificationMethod: 'whatsapp',
+        whatsappInitiatedAt: new Date(),
+        status: 'pending_verification',
+        updatedAt: serverTimestamp()
+      });
+      
+      toast.success('Verification message sent successfully!');
+      setShowVerificationDialog(false);
+      
+    } catch (error: any) {
+      console.error('Error sending verification message:', error);
+      toast.error(error?.message || 'Failed to send verification message');
+    } finally {
+      setSendingVerification(false);
     }
   };
 
@@ -2173,9 +2652,17 @@ Language: ${lead.language || 'N/A'}`;
               Rejected
             </span>
           )}
-          {/* WhatsApp Chat Button for Agents */}
+          {/* WhatsApp Chat Button for Agents, Coordinators, and Admins */}
           {(() => {
-            return user?.role === 'agent' && user.id === lead.agentId && (lead as any).verificationMethod === 'whatsapp';
+            // Agents can only see chat for their own WhatsApp leads
+            if (user?.role === 'agent' && user.id === lead.agentId && (lead as any).verificationMethod === 'whatsapp') {
+              return true;
+            }
+            // Coordinators and Admins can see chat for ALL leads (they can initiate WhatsApp anytime)
+            if (isCoordinator() || isAdmin()) {
+              return true;
+            }
+            return false;
           })() && (
             <button
               onClick={() => {
@@ -2245,6 +2732,7 @@ Language: ${lead.language || 'N/A'}`;
           </div>
         </div>
       )}
+
 
       {showMediaModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4">
@@ -3749,8 +4237,8 @@ Language: ${lead.language || 'N/A'}`;
             value={lead.language}
             readOnly
           />
-          {/* Hide "Shared With" field from verifier and coordinator roles */}
-          {!isVerifier() && !isCoordinator() && (
+          {/* Hide "Shared With" field from verifier and coordinator roles (but show to admin) */}
+          {((!isVerifier() && !isCoordinator()) || isAdmin()) && (
             <FormInput
               label="Shared With"
               icon={Users}
@@ -3957,26 +4445,104 @@ Language: ${lead.language || 'N/A'}`;
       </Dialog>
 
       {/* WhatsApp Chat Modal */}
-      {showWhatsAppChat && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-4xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900">WhatsApp Verification Chat</h3>
-              <button
-                onClick={() => setShowWhatsAppChat(false)}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <X className="h-6 w-6" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4">
-              {whatsAppLogs.length === 0 ? (
-                <div className="text-center text-gray-500 py-8">
-                  <MessageCircle className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-                  <p>No WhatsApp messages found for this lead.</p>
+      <AnimatePresence>
+        {showWhatsAppChat && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[9999]"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              transition={{ duration: 0.2 }}
+              className="bg-white rounded-2xl p-0 max-w-3xl w-full mx-4 shadow-2xl overflow-hidden max-h-[85vh] flex flex-col"
+            >
+              <div className="px-4 sm:px-6 py-3 bg-gradient-to-r from-emerald-50 to-green-50 border-b border-emerald-100 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <span className="inline-flex items-center justify-center h-8 w-8 rounded-full bg-emerald-100 text-emerald-600">
+                    <svg viewBox="0 0 32 32" className="h-4 w-4" fill="currentColor" aria-hidden="true"><path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/></svg>
+                  </span>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-semibold text-emerald-800">WhatsApp Verification</h3>
+                    {lead && (
+                      <p className="text-xs text-emerald-700/80">{lead.customerName} · {lead.customerNumber}</p>
+                    )}
+                  </div>
                 </div>
-              ) : (
-                <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  {/* Send Verification Button - Only for specific statuses */}
+                  {(isCoordinator() || isAdmin()) && 
+                   (lead.status === 'pending_verification' || 
+                    lead.status === 'reverification' || 
+                    lead.status === 'activated_non_verified') && (
+                    <button
+                      onClick={() => setShowVerificationDialog(true)}
+                      disabled={sendingVerification}
+                      className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {sendingVerification ? 'Sending...' : 'Send Verification'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setShowWhatsAppChat(false);
+                      stopWhatsAppLogsListener();
+                    }}
+                    className="inline-flex items-center justify-center h-8 w-8 rounded-full text-emerald-700 hover:bg-emerald-100/60 transition-colors"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+              <div ref={whatsappMessagesRef} className="flex-1 px-4 sm:px-6 py-4 overflow-y-auto space-y-3">
+               {/* Verification Message Dialog - Inside Modal */}
+               {showVerificationDialog && (
+                 <div className="mb-4 bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                   <h4 className="text-base font-semibold text-gray-900 mb-2">
+                     Send Verification Message
+                   </h4>
+                   <p className="text-sm text-gray-600 mb-4">
+                     This will send a WhatsApp verification message to the customer ({lead.customerName}) at {lead.customerNumber} with the selected plan details.
+                   </p>
+                   <div className="flex justify-end gap-2">
+                     <button
+                       onClick={() => setShowVerificationDialog(false)}
+                       disabled={sendingVerification}
+                       className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                     >
+                       Cancel
+                     </button>
+                     <button
+                       onClick={handleSendVerificationMessage}
+                       disabled={sendingVerification}
+                       className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                     >
+                       {sendingVerification ? (
+                         <>
+                           <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                           </svg>
+                           Sending...
+                         </>
+                       ) : (
+                         'Send Message'
+                       )}
+                     </button>
+                   </div>
+                 </div>
+               )}
+               
+               {whatsAppLogs.length === 0 ? (
+                 <div className="text-center text-gray-500 py-8">
+                   <MessageCircle className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                   <p>No WhatsApp messages found for this lead.</p>
+                 </div>
+               ) : (
+                 <div className="space-y-4">
                   {whatsAppLogs
                     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
                     .map((log) => {
@@ -4124,48 +4690,22 @@ Language: ${lead.language || 'N/A'}`;
                               let errorCode = '';
                               let errorExplanation = '';
                               
-                              if (typeof log.error === 'string') {
-                                errorText = log.error;
-                              } else if (errorObj) {
-                                // WhatsApp error structure: { code, title, message, error_data }
-                                const parts = [];
-                                if (errorObj.title) parts.push(errorObj.title);
-                                // Only add message if it's different from title (avoid duplication)
-                                if (errorObj.message && errorObj.message !== errorObj.title) {
-                                  parts.push(errorObj.message);
+                              if (typeof errorObj === 'object') {
+                                errorText = errorObj.message || errorObj.details || JSON.stringify(errorObj);
+                                if (errorObj.code) {
+                                  errorCode = String(errorObj.code);
                                 }
-                                errorText = parts.length > 0 ? parts.join(' - ') : '';
-                                errorCode = errorObj.code || '';
-                                
-                                // Provide user-friendly explanations for common error codes
-                                const errorExplanations: Record<string, string> = {
-                                  '131026': 'The customer\'s phone number is not registered on WhatsApp or has blocked your business number.',
-                                  '131047': 'The customer has not replied within the 24-hour messaging window. Send a template message to re-engage.',
-                                  '131051': 'This type of message is not supported. Try using a different message format.',
-                                  '131052': 'Media download failed. The media file may be corrupted or too large.',
-                                  '131053': 'Media upload failed. Check the file format and size.',
-                                  '133000': 'The phone number format is invalid. Use international format (e.g., 971XXXXXXXXX).',
-                                  '133004': 'The template message was rejected. Verify the template name and parameters.',
-                                  '133005': 'Template not found. Make sure the template is approved in Meta Business Manager.',
-                                  '133006': 'Invalid template parameters. Check parameter count and format.',
-                                  '133010': 'Message limit exceeded. You\'ve reached the messaging limit for this customer.',
-                                  '130472': 'The customer has opted out of marketing messages. They must opt back in before you can send them marketing content.',
-                                  '135000': 'Generic WhatsApp Business API error. Contact support if this persists.',
-                                  '136000': 'Insufficient WhatsApp Business Account balance. Add funds to continue messaging.',
-                                  '368': 'Temporarily blocked for spammy behavior. Reduce message frequency.',
-                                  '131031': 'Rate limit exceeded. Too many messages sent in a short time. Wait before retrying.',
-                                };
-                                
-                                errorExplanation = errorExplanations[errorCode] || '';
+                              } else if (typeof errorObj === 'string') {
+                                errorText = errorObj;
                               }
                               
                               return (
-                                <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-2.5">
+                                <div className="mt-2 bg-red-50 border border-red-200 rounded-lg p-3">
                                   <div className="flex items-start gap-2">
-                                    <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                                    <div className="flex-1 text-xs text-red-800">
-                                      <div className="font-semibold mb-1">Message Failed</div>
-                                      {errorText && <div className="text-red-700 mb-1">{errorText}</div>}
+                                    <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+                                    <div className="flex-1 text-sm">
+                                      <div className="font-semibold text-red-800 mb-1">Message Failed</div>
+                                      <div className="text-red-700 leading-relaxed">{errorText}</div>
                                       {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
                                       {errorExplanation && (
                                         <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
@@ -4178,6 +4718,23 @@ Language: ${lead.language || 'N/A'}`;
                                 </div>
                               );
                             })()}
+                            {/* Resend button for outbound template messages (coordinators/admins only) */}
+                            {(isCoordinator() || isAdmin()) && isOutbound && log.templateName && Array.isArray(log.parameters) && log.parameters.length > 0 && (
+                              <div className="mt-2 flex justify-end">
+                                <button
+                                  onClick={() => handleResendVerificationMessage(log)}
+                                  disabled={resendingLogId === log.id}
+                                  className={clsx(
+                                    'inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium shadow-sm',
+                                    resendingLogId === log.id
+                                      ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
+                                      : 'bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500'
+                                  )}
+                                >
+                                  {resendingLogId === log.id ? 'Resending…' : 'Resend Message'}
+                                </button>
+                              </div>
+                            )}
                             {accepted.length > 0 && (
                               <ol className="mt-1 space-y-2 text-sm">
                                 {accepted.map((item, idx) => (
@@ -4201,9 +4758,58 @@ Language: ${lead.language || 'N/A'}`;
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
+            {/* Send Message Section for Coordinators and Admins */}
+            {(isCoordinator() || isAdmin()) && (
+              <div className="border-t border-gray-200 bg-white p-3 flex-shrink-0">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-medium text-gray-600">Reply to customer</label>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-gray-400 font-medium">Quick:</span>
+                    <div className="flex gap-1">
+                      {READY_MADE_MESSAGES.map((template) => (
+                        <button
+                          key={template.id}
+                          onClick={() => handleTemplateMessage(template)}
+                          className="inline-flex items-center px-2 py-0.5 rounded-md bg-blue-50 hover:bg-blue-100 text-[10px] font-medium text-blue-700 transition-all duration-150 border border-blue-200 hover:border-blue-300"
+                          title={template.message}
+                        >
+                          {template.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <textarea
+                      rows={1}
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          sendWhatsAppReply();
+                        }
+                      }}
+                      placeholder="Write a message..."
+                      className="w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 placeholder:text-gray-400 min-h-[38px] max-h-[80px]"
+                    />
+                  </div>
+                  <button
+                    disabled={sendingReply || !replyText.trim()}
+                    onClick={sendWhatsAppReply}
+                    className="inline-flex items-center px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {sendingReply ? 'Sending...' : 'Send'}
+                  </button>
+                </div>
+              </div>
+            )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       </div>
     </div>
   );

@@ -66,6 +66,7 @@ import NoticeBoard from '../NoticeBoard';
 import { DNCCheckModal } from '../modals/DNCCheckModal';
 import { DNCManagement } from '../admin/DNCManagement';
 import { clearAllStorage } from '../../utils/clearStorage';
+import { BroadcastPoster } from '../BroadcastPoster';
 
 /**
  * ===============================================================================
@@ -1350,6 +1351,9 @@ export function DashboardLayout() {
         isOpen={dncManagementOpen} 
         onClose={() => setDncManagementOpen(false)} 
       />
+
+      {/* Broadcast Poster (global premium announcement) */}
+      <BroadcastPoster />
     </div>
   );
 }
