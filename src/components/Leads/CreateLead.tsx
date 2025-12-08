@@ -771,34 +771,34 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         toast.success('Plan updated successfully');
         
       } else {
-        // TEMPORARILY DISABLED: Check number status before adding - verify it's not active
-        // setIsCheckingNumber(true);
-        // try {
-        //   toast.loading('Checking number status...', { id: 'number-check' });
-        //   const { NumberCheckService } = await import('../../services/numberCheckService');
-        //   const canReserve = await NumberCheckService.canReserveNumber(currentNumber);
-        //   toast.dismiss('number-check');
-        //   setIsCheckingNumber(false);
-        //   
-        //   if (!canReserve) {
-        //     // Number is active, show dialog
-        //     setActiveNumberInfo({
-        //       number: currentNumber,
-        //       etiStatus: 200, // ETI API returned 200 for active numbers
-        //       message: 'Number is active'
-        //     });
-        //     setShowNumberActiveDialog(true);
-        //     return;
-        //   }
-        // } catch (error: any) {
-        //   console.error('Error checking number status:', error);
-        //   toast.dismiss('number-check');
-        //   setIsCheckingNumber(false);
-        //   toast.error('Failed to verify number status. Please try again.', {
-        //     duration: 3000
-        //   });
-        //   return;
-        // }
+        // Check number status before adding - verify it's not active
+        setIsCheckingNumber(true);
+        try {
+          toast.loading('Checking number status...', { id: 'number-check' });
+          const { NumberCheckService } = await import('../../services/numberCheckService');
+          const canReserve = await NumberCheckService.canReserveNumber(currentNumber);
+          toast.dismiss('number-check');
+          setIsCheckingNumber(false);
+          
+          if (!canReserve) {
+            // Number is active, show dialog
+            setActiveNumberInfo({
+              number: currentNumber,
+              etiStatus: 200, // ETI API returned 200 for active numbers
+              message: 'Number is active'
+            });
+            setShowNumberActiveDialog(true);
+            return;
+          }
+        } catch (error: any) {
+          console.error('Error checking number status:', error);
+          toast.dismiss('number-check');
+          setIsCheckingNumber(false);
+          toast.error('Failed to verify number status. Please try again.', {
+            duration: 3000
+          });
+          return;
+        }
 
         // Add new number with plan
         setSelectedPlans(prev => [...prev, {
@@ -1086,7 +1086,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           }
           return p;
         }),
-        status: 'pending_verification', // Temporarily disabled coordination check
         agentId: user!.id,
         teamId: user!.teamId,
         managerId: teamManagerId || null,
@@ -1094,7 +1093,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         ...(isEditing ? {} : { createdAt: new Date() }),
         updatedAt: new Date(),
         startDate: new Date(formData.startDate),
-      status: currentStatus,
+        status: currentStatus,
         sharedWith: formData.sharedWith ? [formData.sharedWith] : [],
         remarks: formData.remarks || 'Please Verify'
       };
