@@ -738,7 +738,7 @@ export function Reports() {
         const plans = lead.plans || [];
         const teamId = lead.teamId || 'unknown';
         const team = teams.find(t => t.id === teamId);
-        const planCount = plans.length || 1;
+        const planCount = Math.max(plans.length, 1);
 
         // Initialize team if not exists
         if (!metrics.teamWise[teamId]) {
@@ -768,11 +768,11 @@ export function Reports() {
             metrics.teamWise[teamId].groups[group][category] = 0;
           }
 
-          // Update metrics
-          metrics.total += planCount;
-          metrics.teamWise[teamId].total += planCount;
-          metrics.teamWise[teamId].groups[group].total += planCount;
-          metrics.teamWise[teamId].groups[group][category] += planCount;
+          // Update metrics (count each plan once)
+          metrics.total += 1;
+          metrics.teamWise[teamId].total += 1;
+          metrics.teamWise[teamId].groups[group].total += 1;
+          metrics.teamWise[teamId].groups[group][category] += 1;
 
           // Track New + MNP + Prepaid to postpaid activations specifically for G2
           if (group === 'G2') {
