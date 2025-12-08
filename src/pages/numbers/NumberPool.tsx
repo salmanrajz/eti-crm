@@ -103,7 +103,13 @@ import {
   Copy,
   FileWarning,
   Edit,
-  RefreshCw
+  RefreshCw,
+  StickyNote,
+  Clipboard,
+  Check,
+  Minus,
+  Info,
+  ChevronUp
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -549,6 +555,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [isDeleting, setIsDeleting] = useState(false);
   
   // ===============================================================================
+  // AGENT UTILITIES STATE
+  // ===============================================================================
+  
+  // Notepad utility
+  const [showNotepad, setShowNotepad] = useState(false);
+  const [notepadContent, setNotepadContent] = useState('');
+  const [isCopyingNotepad, setIsCopyingNotepad] = useState(false);
+  const [notepadCopied, setNotepadCopied] = useState(false);
+  const [whatsappBlankLines, setWhatsappBlankLines] = useState(true); // Toggle for blank lines in WhatsApp format
+  const [showInstructions, setShowInstructions] = useState(false);
+  
+  // Bulk copy utility - reuse selectedNumbers state for checkboxes
+  const [bulkCopyMode, setBulkCopyMode] = useState(false);
+  
+  // ===============================================================================
   // UTILITY FUNCTIONS AND REFS
   // ===============================================================================
   
@@ -706,6 +727,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     };
   }, [selectedCategory, pageSize, user?.id, user?.role]); // Removed 'loading' to prevent circular dependency
 
+  // ===============================================================================
+  // AGENT UTILITIES - NOTEPAD LOCALSTORAGE
+  // ===============================================================================
+  
+  // Load notepad content from localStorage on mount
+  useEffect(() => {
+    if (user?.id) {
+      const storageKey = `notepad_${user.id}`;
+      const savedContent = localStorage.getItem(storageKey);
+      if (savedContent) {
+        setNotepadContent(savedContent);
+      }
+    }
+  }, [user?.id]);
+  
+  // Save notepad content to localStorage whenever it changes
+  useEffect(() => {
+    if (user?.id && notepadContent !== undefined) {
+      const storageKey = `notepad_${user.id}`;
+      localStorage.setItem(storageKey, notepadContent);
+    }
+  }, [notepadContent, user?.id]);
+
   /**
    * Helper function to refresh a specific number's data after an action
    * Fetches fresh data from Firestore and updates both numbers and search results
@@ -843,7 +887,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       try {
         // Use unified search for consistent results
       // Initially fetch 200 results for faster loading, "Load More" will fetch additional batches
-      const searchLimit = 200;
+        const searchLimit = 200;
         
         const result = await unifiedSearch.search(debouncedSearchTerm, {
           category: selectedCategory || 'all',
@@ -874,6 +918,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           setSearchTotalItems(combinedResults.length);
           setSearchHasNextPage(endIndex < combinedResults.length);
           setSearchHasPreviousPage(searchCurrentPage > 1);
+          
+          // Scroll to top after loading more results
+          setTimeout(() => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }, 0);
         } else {
           // New search - replace results
           fullSearchResultsRef.current = filteredResults;
@@ -1092,20 +1141,198 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const goToNextSearchPage = useCallback(() => {
     if (searchHasNextPage) {
       setSearchCurrentPage(prev => prev + 1);
+      // Scroll to top of the page after a brief delay to ensure content is updated
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 0);
     }
   }, [searchHasNextPage]);
 
   const goToPreviousSearchPage = useCallback(() => {
     if (searchHasPreviousPage) {
       setSearchCurrentPage(prev => prev - 1);
+      // Scroll to top of the page after a brief delay to ensure content is updated
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 0);
     }
   }, [searchHasPreviousPage]);
 
   const goToSearchPage = useCallback((page: number) => {
     if (page >= 1 && page <= searchTotalPages) {
       setSearchCurrentPage(page);
+      // Scroll to top of the page after a brief delay to ensure content is updated
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 0);
     }
   }, [searchTotalPages]);
+
+  // ===============================================================================
+  // AGENT UTILITIES CALLBACKS
+  // ===============================================================================
+  
+  /**
+   * Toggle bulk copy mode and clear selections when turning off
+   */
+  const toggleBulkCopyMode = useCallback(() => {
+    setBulkCopyMode(prev => !prev);
+    if (bulkCopyMode) {
+      setSelectedNumbers([]);
+    }
+  }, [bulkCopyMode]);
+  
+  /**
+   * Toggle number selection for bulk copy
+   * Also automatically adds/removes number from notepad (with duplicate check)
+   */
+  const toggleNumberSelection = useCallback((numberId: string, phoneNumber: string) => {
+    setSelectedNumbers(prev => {
+      const isCurrentlySelected = prev.includes(numberId);
+      
+      if (isCurrentlySelected) {
+        // Remove from selection and notepad
+        setNotepadContent(currentContent => {
+          const lines = currentContent.split('\n');
+          const filteredLines = lines.filter(line => line.trim() !== phoneNumber);
+          return filteredLines.join('\n');
+        });
+        return prev.filter(id => id !== numberId);
+      } else {
+        // Add to selection and notepad (check for duplicates)
+        setNotepadContent(currentContent => {
+          const trimmedContent = currentContent.trim();
+          
+          // Check if number already exists
+          const existingLines = trimmedContent ? trimmedContent.split('\n').map(l => l.trim()) : [];
+          if (existingLines.includes(phoneNumber)) {
+            // Number already exists, don't add again
+            return currentContent;
+          }
+          
+          if (trimmedContent === '') {
+            return phoneNumber;
+          }
+          return trimmedContent + '\n' + phoneNumber;
+        });
+        return [...prev, numberId];
+      }
+    });
+  }, []);
+  
+  /**
+   * Select all visible numbers on current page
+   * Also adds all numbers to notepad
+   */
+  const selectAllVisible = useCallback(() => {
+    const visibleNumbers = debouncedSearchTerm.trim() ? searchResults : numbers;
+    const allIds = visibleNumbers.map(n => n.id);
+    const allPhoneNumbers = visibleNumbers.map(n => n.number).join('\n');
+    
+    setSelectedNumbers(allIds);
+    
+    // Add all numbers to notepad
+    setNotepadContent(currentContent => {
+      const trimmedContent = currentContent.trim();
+      if (trimmedContent === '') {
+        return allPhoneNumbers;
+      }
+      // Only add numbers that aren't already in the notepad
+      const existingLines = new Set(trimmedContent.split('\n').map(l => l.trim()));
+      const newNumbers = visibleNumbers
+        .map(n => n.number)
+        .filter(num => !existingLines.has(num))
+        .join('\n');
+      
+      if (newNumbers) {
+        return trimmedContent + '\n' + newNumbers;
+      }
+      return trimmedContent;
+    });
+  }, [numbers, searchResults, debouncedSearchTerm]);
+  
+  /**
+   * Clear selected numbers (they're already in notepad)
+   */
+  const clearSelectedNumbers = useCallback(() => {
+    if (selectedNumbers.length === 0) {
+      return;
+    }
+    
+    setSelectedNumbers([]);
+    setBulkCopyMode(false);
+    toast.success(`${selectedNumbers.length} number${selectedNumbers.length > 1 ? 's' : ''} added to notepad`);
+  }, [selectedNumbers]);
+
+  /**
+   * Handle textarea input with smart line break after 10 digits
+   */
+  const handleNotepadInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    let value = e.target.value;
+    const cursorPosition = e.target.selectionStart;
+    
+    // Get the current line (text from last newline to cursor)
+    const textBeforeCursor = value.substring(0, cursorPosition);
+    const lastNewlineIndex = textBeforeCursor.lastIndexOf('\n');
+    const currentLine = textBeforeCursor.substring(lastNewlineIndex + 1);
+    
+    // Count only digits in current line
+    const digitCount = (currentLine.match(/\d/g) || []).length;
+    
+    // If exactly 10 digits and user just typed a digit, add newline
+    if (digitCount === 10 && /^\d+$/.test(currentLine)) {
+      const textAfterCursor = value.substring(cursorPosition);
+      value = textBeforeCursor + '\n' + textAfterCursor;
+      setNotepadContent(value);
+      
+      // Set cursor position after the newline
+      setTimeout(() => {
+        const newCursorPos = cursorPosition + 1;
+        e.target.setSelectionRange(newCursorPos, newCursorPos);
+      }, 0);
+    } else {
+      setNotepadContent(value);
+    }
+  }, []);
+
+  /**
+   * Copy notepad content with WhatsApp formatting (bold with asterisks and optional empty lines)
+   */
+  const copyNotepadContent = useCallback(async () => {
+    if (!notepadContent.trim()) {
+      toast.error('Notepad is empty');
+      return;
+    }
+    
+    setIsCopyingNotepad(true);
+    
+    try {
+      // Get all non-empty lines
+      const lines = notepadContent.split('\n').filter(line => line.trim());
+      
+      // Format each number with asterisks for WhatsApp bold
+      const formattedNumbers = lines.map(line => `*${line.trim()}*`);
+      
+      // Join with blank lines if toggle is on, otherwise single newline
+      const separator = whatsappBlankLines ? '\n\n' : '\n';
+      const finalText = formattedNumbers.join(separator);
+      
+      await navigator.clipboard.writeText(finalText);
+      
+      // Show success state
+      setNotepadCopied(true);
+      toast.success(`✅ Copied ${lines.length} number${lines.length > 1 ? 's' : ''} (WhatsApp formatted)`);
+      
+      // Reset success state after 2 seconds
+      setTimeout(() => {
+        setNotepadCopied(false);
+      }, 2000);
+    } catch (error) {
+      toast.error('Failed to copy to clipboard');
+    } finally {
+      setIsCopyingNotepad(false);
+    }
+  }, [notepadContent, whatsappBlankLines]);
 
 
   // Get display pagination info
@@ -2886,6 +3113,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const generatePageNumbers = () => {
     const pages = [];
     const maxVisiblePages = 5; // Reduced from 7 to 5 for better performance
+    const isSearchMode = debouncedSearchTerm.trim();
     
     if (displayPagination.totalPages <= maxVisiblePages) {
       // Show all pages if total pages is small
@@ -2923,8 +3151,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         pages.push(i);
       }
       
-      // Add ellipsis and last page if needed
-      if (endPage < displayPagination.totalPages) {
+      // Add ellipsis and last page if needed (only in browse mode, not search mode)
+      if (endPage < displayPagination.totalPages && !isSearchMode) {
         if (endPage < displayPagination.totalPages - 1) {
           pages.push('...');
         }
@@ -3072,7 +3300,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       </div>
     );
   }
-
   // ===============================================================================
   // RENDER SECTION
   // ===============================================================================
@@ -3178,6 +3405,51 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </div>
                   </div>
                 </motion.button>
+              </div>
+            )}
+            {/* Agent Utilities */}
+            {user?.role === 'agent' && (
+              <div className="flex items-center gap-2">
+                {/* Bulk Copy Button - Left */}
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={selectedNumbers.length > 0 ? clearSelectedNumbers : toggleBulkCopyMode}
+                  className={`inline-flex items-center px-3 py-1.5 rounded-lg shadow hover:shadow-md transition-all duration-300 border ${
+                    bulkCopyMode 
+                      ? selectedNumbers.length > 0
+                        ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white border-green-600'
+                        : 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-200'
+                  }`}
+                >
+                  {selectedNumbers.length > 0 ? (
+                    <>
+                      <Check className="w-4 h-4 transition-all duration-300" />
+                      <span className="ml-2 text-xs font-semibold">Done ({selectedNumbers.length})</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clipboard className="w-4 h-4 transition-all duration-300" />
+                      <span className="ml-2 text-xs font-medium">Bulk Copy</span>
+                    </>
+                  )}
+                </motion.button>
+                
+                {/* Notepad Button - Right */}
+                <motion.div
+                  onMouseEnter={() => setShowNotepad(true)}
+                  className="inline-block"
+                >
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    className="inline-flex items-center px-3 py-1.5 bg-white rounded-lg shadow hover:shadow-md transition-all duration-300 border border-gray-200"
+                  >
+                    <StickyNote className={`w-4 h-4 transition-colors duration-300 ${showNotepad ? 'text-blue-600' : 'text-gray-600'}`} />
+                    <span className="ml-2 text-xs font-medium text-gray-700">Notes</span>
+                  </motion.button>
+                </motion.div>
               </div>
             )}
             </div>
@@ -4251,15 +4523,15 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <table className="min-w-full divide-y divide-gray-200">
             <thead>
                 <tr className="bg-gradient-to-r from-gray-50 to-gray-100">
-                {isAdmin() && (
+                {(isAdmin() || bulkCopyMode) && (
                   <th className="px-6 py-4 text-left">
                     <input
                       type="checkbox"
                       className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 transition-colors"
-                      checked={selectedNumbers.length === paginatedNumbers.length}
+                      checked={selectedNumbers.length > 0 && selectedNumbers.length === paginatedNumbers.length}
                       onChange={(e) => {
                         if (e.target.checked) {
-                          setSelectedNumbers(paginatedNumbers.map(n => n.id));
+                          selectAllVisible();
                         } else {
                           setSelectedNumbers([]);
                         }
@@ -4373,19 +4645,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       transition={{ duration: 0.3, delay: index * 0.05 }}
       className="hover:bg-gray-50/50 transition-colors group"
     >
-                    {isAdmin() && (
+                    {(isAdmin() || bulkCopyMode) && (
         <td className="px-6 py-4">
           <input
             type="checkbox"
             className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 transition-colors"
                           checked={selectedNumbers.includes(number.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedNumbers([...selectedNumbers, number.id]);
-                            } else {
-                              setSelectedNumbers(selectedNumbers.filter(id => id !== number.id));
-                            }
-                          }}
+                          onChange={() => toggleNumberSelection(number.id, number.number)}
+                          onClick={(e) => e.stopPropagation()}
           />
         </td>
       )}
@@ -4731,7 +4998,15 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     key={index}
                     whileHover={{ scale: page !== '...' ? 1.05 : 1 }}
                     whileTap={{ scale: page !== '...' ? 0.95 : 1 }}
-                    onClick={() => typeof page === 'number' && (debouncedSearchTerm.trim() ? goToSearchPage(page) : goToPage(page))}
+                    onClick={() => {
+                      if (typeof page === 'number') {
+                        if (debouncedSearchTerm.trim()) {
+                          goToSearchPage(page);
+                        } else {
+                          goToPage(page);
+                        }
+                      }
+                    }}
                     disabled={page === '...' || page === displayPagination.currentPage || loading}
                     className={`inline-flex items-center px-3 py-2 text-sm font-medium border transition-all duration-200 ${
                       page === displayPagination.currentPage
@@ -4752,24 +5027,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   whileTap={{ scale: 0.95 }}
                   onClick={debouncedSearchTerm.trim() ? goToNextSearchPage : goToNextPage}
                   disabled={!displayPagination.hasNextPage || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
+                  className={`inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0 ${
+                    debouncedSearchTerm.trim() ? 'rounded-r-lg' : ''
+                  }`}
                   title="Next Page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </motion.button>
 
-                {/* Last Page Button */}
+                {/* Last Page Button - Only show in browse mode, not in search mode */}
+                {!debouncedSearchTerm.trim() && (
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
-                  onClick={() => debouncedSearchTerm.trim() ? goToSearchPage(displayPagination.totalPages) : goToPage(displayPagination.totalPages)}
+                    onClick={() => goToPage(displayPagination.totalPages)}
                   disabled={displayPagination.currentPage === displayPagination.totalPages || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
+                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
                   title="Last Page"
                 >
                   <ChevronRight className="h-4 w-4" />
                   <ChevronRight className="h-4 w-4 -ml-1" />
                 </motion.button>
+                )}
 
                 {/* Load More Button - Only show on last page when searching and more results available */}
                 {debouncedSearchTerm.trim() && 
@@ -5400,6 +5679,231 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           </div>
           )}
         </motion.div>
+        
+        {/* Agent Notepad - Floating Panel */}
+        <AnimatePresence>
+          {showNotepad && user?.role === 'agent' && (
+            <motion.div
+              initial={{ opacity: 0, x: 300 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 300 }}
+              transition={{ duration: 0.3 }}
+              onMouseEnter={() => setShowNotepad(true)}
+              onMouseLeave={() => setShowNotepad(false)}
+              className="fixed right-4 top-24 w-96 bg-white rounded-lg shadow-2xl border border-gray-200 z-50 overflow-hidden"
+            >
+              {/* Notepad Header */}
+              <div className="bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center">
+                  <StickyNote className="w-5 h-5 text-white mr-2" />
+                  <h3 className="text-white font-semibold">Quick Notes</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowInstructions(!showInstructions)}
+                    className="text-white hover:bg-white/20 rounded p-1 transition-colors"
+                    title="Show/Hide Instructions"
+                  >
+                    <Info className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setShowNotepad(false)}
+                    className="text-white hover:bg-white/20 rounded p-1 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              
+              {/* Help Button */}
+              {!showInstructions && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="px-4 pt-3"
+                >
+                  <motion.button
+                    onClick={() => setShowInstructions(true)}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    className="w-full bg-gradient-to-r from-blue-100 to-indigo-100 hover:from-blue-200 hover:to-indigo-200 border border-blue-300 text-blue-700 px-4 py-2 rounded-lg text-xs font-medium transition-all duration-300 flex items-center justify-center gap-2"
+                  >
+                    <Info className="w-4 h-4" />
+                    <span>For help click on me</span>
+                  </motion.button>
+                </motion.div>
+              )}
+              
+              {/* Instructions Section */}
+              <AnimatePresence>
+                {showInstructions && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="overflow-hidden bg-blue-50 border-b border-blue-200"
+                  >
+                    {/* Instructions Header with Close Button */}
+                    <div className="px-4 pt-3 pb-2 flex items-center justify-between border-b border-blue-200">
+                      <h4 className="text-sm font-semibold text-gray-900 flex items-center">
+                        <Info className="w-4 h-4 mr-2 text-blue-600" />
+                        Instructions
+                      </h4>
+                      <button
+                        onClick={() => setShowInstructions(false)}
+                        className="text-gray-500 hover:text-gray-700 hover:bg-blue-100 rounded p-1 transition-colors"
+                        title="Close Instructions"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="p-4 space-y-4">
+                      {/* Bulk Copy Instructions */}
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center">
+                          <Clipboard className="w-4 h-4 mr-2 text-blue-600" />
+                          Bulk Copy Feature
+                        </h4>
+                        <ol className="text-xs text-gray-700 space-y-1.5 ml-6 list-decimal">
+                          <li>Click the <strong>"Bulk Copy"</strong> button in the header (left side)</li>
+                          <li>Button turns <span className="text-blue-600 font-semibold">blue</span> - checkboxes appear next to each number</li>
+                          <li>Click checkboxes to select numbers you want</li>
+                          <li>Selected numbers are <strong>automatically added</strong> to this notepad</li>
+                          <li>You can select numbers across multiple pages</li>
+                          <li>Click <span className="text-green-600 font-semibold">"Done (X)"</span> when finished - checkboxes disappear</li>
+                          <li>All selected numbers remain saved in the notepad</li>
+                        </ol>
+                      </div>
+                      
+                      {/* Notepad Instructions */}
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center">
+                          <StickyNote className="w-4 h-4 mr-2 text-blue-600" />
+                          Notepad Features
+                        </h4>
+                        <ol className="text-xs text-gray-700 space-y-1.5 ml-6 list-decimal">
+                          <li><strong>Auto Line Break:</strong> Type 10 digits and it automatically moves to next line</li>
+                          <li><strong>Manual Typing:</strong> You can also type numbers manually, one per line</li>
+                          <li><strong>Duplicate Prevention:</strong> Same number won't be added twice automatically</li>
+                          <li><strong>Auto-Save:</strong> Everything saves automatically to your browser</li>
+                          <li><strong>Blank Lines Toggle:</strong> Turn ON/OFF empty lines between numbers for WhatsApp</li>
+                          <li><strong>Copy for WhatsApp:</strong> Formats numbers with bold (*number*) and copies to clipboard</li>
+                          <li><strong>Clear Notes:</strong> Remove all content (with confirmation)</li>
+                        </ol>
+                      </div>
+                      
+                      {/* Quick Tips */}
+                      <div className="bg-blue-100 rounded p-2">
+                        <p className="text-xs font-semibold text-blue-900 mb-1">💡 Quick Tips:</p>
+                        <ul className="text-xs text-blue-800 space-y-0.5 ml-4 list-disc">
+                          <li>Hover over "Notes" button to auto-open notepad</li>
+                          <li>Numbers are saved per-user in your browser</li>
+                          <li>Use "Blank Lines" toggle for better WhatsApp readability</li>
+                          <li>You can edit notepad content manually anytime</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              
+              {/* Notepad Content */}
+              <div className="p-4">
+                <textarea
+                  value={notepadContent}
+                  onChange={handleNotepadInput}
+                  placeholder="Jot down numbers, notes, or anything else... (Auto line break after 10 digits)"
+                  className="w-full h-96 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-sm font-mono"
+                  style={{ lineHeight: '1.5' }}
+                />
+                <div className="mt-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <p className="text-xs text-gray-500">
+                      <Check className="w-3 h-3 inline mr-1" />
+                      Auto-saved locally
+                    </p>
+                  <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => setWhatsappBlankLines(!whatsappBlankLines)}
+                      className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded transition-all duration-300 ${
+                        whatsappBlankLines
+                          ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                          : 'bg-gray-100 text-gray-600 border border-gray-300'
+                      }`}
+                      title={whatsappBlankLines ? 'Blank lines ON (for WhatsApp)' : 'Blank lines OFF'}
+                    >
+                      <span className="mr-1">{whatsappBlankLines ? '✓' : '○'}</span>
+                      Blank Lines
+                    </motion.button>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <motion.button
+                      onClick={copyNotepadContent}
+                      disabled={!notepadContent.trim() || isCopyingNotepad}
+                      whileHover={notepadContent.trim() ? { scale: 1.05 } : {}}
+                      whileTap={notepadContent.trim() ? { scale: 0.95 } : {}}
+                      className="inline-flex items-center px-3 py-1 text-xs font-medium bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded hover:from-green-600 hover:to-emerald-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <AnimatePresence mode="wait">
+                        {isCopyingNotepad ? (
+                          <motion.span
+                            key="copying"
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 5 }}
+                            transition={{ duration: 0.2 }}
+                            className="inline-flex items-center"
+                          >
+                            <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                            Copying...
+                          </motion.span>
+                        ) : notepadCopied ? (
+                          <motion.span
+                            key="copied"
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.8 }}
+                            transition={{ duration: 0.2 }}
+                            className="inline-flex items-center"
+                          >
+                            <Check className="w-3 h-3 mr-1" />
+                            Copied!
+                          </motion.span>
+                        ) : (
+                          <motion.span
+                            key="copy"
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 5 }}
+                            transition={{ duration: 0.2 }}
+                            className="inline-flex items-center"
+                          >
+                            <Clipboard className="w-3 h-3 mr-1" />
+                            Copy for WhatsApp
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => {
+                        if (window.confirm('Clear all notes?')) {
+                          setNotepadContent('');
+                        }
+                      }}
+                      className="text-xs text-red-600 hover:text-red-700 font-medium transition-colors"
+                    >
+                      Clear Notes
+                  </motion.button>
+                  </div>
+                </div>
+                </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   ) : null;
