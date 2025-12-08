@@ -1622,6 +1622,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                         <StatusIcon className="h-3.5 w-3.5 mr-1.5" />
                         {getStatusDisplayText(lead.status)}
                       </span>
+                      {lead.status === 'later' && lead.scheduledFor && (
+                        <div className="mt-1 text-xs text-gray-500">
+                          {format(lead.scheduledFor, 'MMM d, yyyy p')}
+                        </div>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {format(lead.updatedAt, 'MMM d, yyyy')}
