@@ -1,0 +1,6164 @@
+/**
+ * ===============================================================================
+ * NUMBER POOL PAGE COMPONENT - COMPREHENSIVE NUMBER POOL MANAGEMENT INTERFACE
+ * ===============================================================================
+ * 
+ * This is the main Number Pool management page that provides comprehensive
+ * functionality for managing phone numbers in the CRM system. It includes
+ * advanced features like pagination, search, filtering, real-time updates,
+ * number claiming/reservation, and administrative operations.
+ * 
+ * FEATURES:
+ * 
+ * 1. NUMBER POOL MANAGEMENT
+ *    - Complete CRUD operations for phone numbers
+ *    - Real-time synchronization with Firebase Firestore
+ *    - Advanced pagination with cursor-based navigation
+ *    - Category-based filtering and organization
+ * 
+ * 2. SEARCH AND DISCOVERY
+ *    - Real-time search with debounced input
+ *    - Hybrid search combining cache and live data
+ *    - Advanced filtering by category, status, and team visibility
+ *    - Search result pagination and caching
+ * 
+ * 3. NUMBER OPERATIONS
+ *    - Number claiming and reservation system
+ *    - Status management and updates
+ *    - Team visibility controls
+ *    - Bulk operations and multi-selection
+ * 
+ * 4. USER INTERFACE
+ *    - Responsive design optimized for mobile and desktop
+ *    - Real-time status updates and countdown timers
+ *    - Interactive modals and dialogs for operations
+ *    - Advanced sorting and column management
+ * 
+ * 5. PERFORMANCE OPTIMIZATION
+ *    - IndexedDB caching for fast data access
+ *    - Smart pagination with cursor caching
+ *    - Debounced search and operations
+ *    - Memory-efficient state management
+ * 
+ * 6. ROLE-BASED ACCESS CONTROL
+ *    - Admin, Manager, Coordinator, and Agent role support
+ *    - Team-based number visibility
+ *    - Permission-based operation availability
+ * 
+ * USAGE:
+ * This component is the main interface for number pool management and is
+ * used by all user roles with appropriate permission filtering.
+ * ===============================================================================
+ */
+
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
+import { 
+  getCachedPaginatedNumbers,
+  cachePaginatedNumbers,
+  searchCachedNumbersFast
+} from '../../utils/indexedDB';
+import { NumberPoolPagination, paginationUtils } from '../../utils/pagination';
+import { numberPoolManager } from '../../utils/numberPoolManager';
+import { unifiedSearch } from '../../utils/unifiedSearch';
+import { useAuthStore } from '../../store/authStore';
+import { NumberPool as NumberPoolType, NumberStatus } from '../../types';
+import { toast } from 'react-hot-toast';
+import { useSearchParams } from 'react-router-dom';
+import { useDebounce } from '../../hooks/useDebounce';
+import { logNumberAction } from '../../utils/numberLogging';
+import { resolveUserName } from '../../utils/numberLogging';
+import { numberPoolStatsService } from '../../services/numberPoolStatsService';
+import { 
+  AlertCircle, 
+  Trash2, 
+  Search, 
+  ArrowUpDown, 
+  ArrowUp, 
+  ArrowDown,
+  ChevronLeft,
+  ChevronRight,
+  Hash,
+  Tag,
+  XCircle,
+  Clock,
+  Zap,
+  AlertTriangle,
+  Filter,
+  MessageSquare,
+  UserCheck,
+  CheckSquare,
+  XSquare,
+  Loader2,
+  Phone,
+  Package,
+  Shield,
+  Lock,
+  Plus,
+  ChevronDown,
+  CheckCircle2,
+  CheckCircle,
+  X,
+  Copy,
+  FileWarning,
+  Edit,
+  RefreshCw,
+  StickyNote,
+  Clipboard,
+  Check,
+  Minus,
+  Info,
+  ChevronUp,
+  Download
+} from 'lucide-react';
+import { clsx } from 'clsx';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ChatBox } from '../../components/ChatBox';
+
+// ===============================================================================
+// HELPER COMPONENTS
+// ===============================================================================
+
+/**
+ * ===============================================================================
+ * AGENT TEAM INFO COMPONENT
+ * ===============================================================================
+ * 
+ * Displays agent name and team information for number assignments.
+ * Handles permission-based data access and loading states.
+ * Can fetch agent info directly via agentId or from a lead via leadId.
+ * 
+ * @param agentId - ID of the agent to display information for
+ * @param leadId - Optional lead ID to fetch agent info from if agentId is not available
+ */
+const AgentTeamInfo = ({ agentId, leadId }: { agentId?: string; leadId?: string }) => {
+  const [agentInfo, setAgentInfo] = useState<{ name: string; teamName: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const { user, isAdmin } = useAuthStore();
+
+  useEffect(() => {
+    const fetchAgentInfo = async () => {
+      try {
+        setLoading(true);
+        
+        let resolvedAgentId = agentId;
+        
+        // If no agentId but we have leadId, fetch the lead to get the agentId
+        if (!resolvedAgentId && leadId) {
+          const leadDoc = await getDoc(doc(db, 'leads', leadId));
+          if (leadDoc.exists()) {
+            resolvedAgentId = leadDoc.data().agentId;
+          }
+        }
+        
+        if (!resolvedAgentId) {
+          setAgentInfo(null);
+          return;
+        }
+        
+        const userDoc = await getDoc(doc(db, 'users', resolvedAgentId));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          const agentName = userData.name || userData.email || 'Unknown Agent';
+          
+          // Get team information (only if user has permission)
+          let teamName = 'No Team';
+          if (userData.teamId && (isAdmin() || user?.role === 'coordinator' || user?.role === 'manager')) {
+            try {
+              const teamDoc = await getDoc(doc(db, 'teams', userData.teamId));
+              if (teamDoc.exists()) {
+                teamName = teamDoc.data().name || 'Unknown Team';
+              }
+            } catch (teamError) {
+              // If user doesn't have permission to read teams, just show "No Team"
+              teamName = 'No Team';
+            }
+          }
+          
+          setAgentInfo({ name: agentName, teamName });
+        } else {
+          setAgentInfo(null);
+        }
+      } catch (error) {
+        setAgentInfo({ name: 'Error', teamName: 'Error' });
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (agentId || leadId) {
+      fetchAgentInfo();
+    } else {
+      setLoading(false);
+    }
+  }, [agentId, leadId, isAdmin, user?.role]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center space-x-2">
+        <div className="h-4 w-4 bg-gray-200 rounded animate-pulse"></div>
+        <div className="h-3 w-16 bg-gray-200 rounded animate-pulse"></div>
+      </div>
+    );
+  }
+
+  if (!agentInfo) {
+    return <div className="text-sm text-gray-400">-</div>;
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center space-x-2">
+        <div className="h-6 w-6 rounded-full bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center">
+          <UserCheck className="h-3 w-3 text-indigo-600" />
+        </div>
+        <div className="text-sm font-medium text-gray-900 whitespace-normal break-words">
+          {agentInfo.name}
+        </div>
+      </div>
+      <div className="text-xs text-gray-500 whitespace-normal break-words">
+        {agentInfo.teamName}
+      </div>
+    </div>
+  );
+};
+
+// ===============================================================================
+// TYPE DEFINITIONS AND INTERFACES
+// ===============================================================================
+
+/**
+ * Props interface for the NumberPool component
+ */
+interface NumberPoolProps {
+  onNumberSelect?: (number: NumberPoolType) => void;  // Callback for number selection
+  selectedCategory?: string;                          // Pre-selected category filter
+  onCategoryChange?: (category: string) => void;      // Callback for category changes
+}
+
+/**
+ * Available sortable fields for the number pool table
+ */
+type SortField = 'number' | 'category' | 'code' | 'group' | 'passcode' | 'status' | 'reservationCount';
+
+/**
+ * Sort direction options
+ */
+type SortDirection = 'asc' | 'desc';
+
+// ===============================================================================
+// CONSTANTS AND CONFIGURATION
+// ===============================================================================
+
+/**
+ * Available number categories in the system
+ */
+const CATEGORIES = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'] as const;
+
+/**
+ * Available number groups in the system
+ */
+const GROUPS = ['G1', 'G2', 'G3'] as const;
+
+/**
+ * Available number initials in the system
+ */
+const INITIALS = ['050', '054', '056'] as const;
+
+/**
+ * Available page sizes for pagination
+ */
+const PAGE_SIZES = [10, 20, 40, 80, 120] as const;
+
+/**
+ * Maximum time (15 minutes) for number claims before auto-release
+ */
+const CLAIM_TIMEOUT = 15 * 60 * 1000; // 15 minutes in milliseconds
+
+/**
+ * Maximum number of concurrent reservations per user
+ */
+const MAX_RESERVATIONS = 3;
+
+/**
+ * Debounce delay for button operations to prevent rapid clicking
+ */
+const BUTTON_DEBOUNCE_DELAY = 300; // 300ms debounce
+
+/**
+ * Timeout for claim operations to prevent hanging states
+ */
+const CLAIM_OPERATION_TIMEOUT = 10000; // 10 seconds timeout for claim operations
+
+/**
+ * Status styling configuration for number status badges
+ * Defines colors, icons, and gradients for each number status
+ */
+const STATUS_STYLES = {
+  open: {
+    bg: 'bg-emerald-100',
+    text: 'text-emerald-800',
+    icon: CheckCircle2,
+    gradient: 'from-emerald-50 to-emerald-100'
+  },
+  verified: {
+    bg: 'bg-blue-100',
+    text: 'text-blue-800',
+    icon: CheckCircle2,
+    gradient: 'from-blue-50 to-blue-100'
+  },
+  reserved: {
+    bg: 'bg-amber-100',
+    text: 'text-amber-800',
+    icon: Clock,
+    gradient: 'from-amber-50 to-amber-100'
+  },
+  pending_verification: {
+    bg: 'bg-yellow-100',
+    text: 'text-yellow-800',
+    icon: Clock,
+    gradient: 'from-yellow-50 to-yellow-100'
+  },
+  assigned: {
+    bg: 'bg-purple-100',
+    text: 'text-purple-800',
+    icon: Tag,
+    gradient: 'from-purple-50 to-purple-100'
+  },
+  activated: {
+    bg: 'bg-indigo-100',
+    text: 'text-indigo-800',
+    icon: Zap,
+    gradient: 'from-indigo-50 to-indigo-100'
+  },
+  follow_up: {
+    bg: 'bg-orange-100',
+    text: 'text-orange-800',
+    icon: AlertTriangle,
+    gradient: 'from-orange-50 to-orange-100'
+  },
+  later: {
+    bg: 'bg-orange-100',
+    text: 'text-orange-800',
+    icon: Clock,
+    gradient: 'from-orange-50 to-orange-100'
+  },
+  rejected: {
+    bg: 'bg-red-100',
+    text: 'text-red-800',
+    icon: XCircle,
+    gradient: 'from-red-50 to-red-100'
+  },
+  claimed: {
+    bg: 'bg-blue-100',
+    text: 'text-blue-800',
+    icon: Clock,
+    gradient: 'from-blue-50 to-blue-100'
+  },
+  being_claimed: {
+    bg: 'bg-blue-100',
+    text: 'text-blue-800',
+    icon: Clock,
+    gradient: 'from-blue-50 to-blue-100'
+  }
+};
+
+/**
+ * Status check interface for external number availability verification
+ */
+interface StatusCheck {
+  id: string;
+  numberId: string;
+  number: string;
+  requestedBy: string;
+  requestedAt: Date;
+  status?: 'pending' | 'available' | 'unavailable';
+  respondedAt?: Date;
+  respondedBy?: string;
+  expiresAt?: Date; // Add expiration time
+}
+
+// ===============================================================================
+// MAIN NUMBER POOL COMPONENT
+// ===============================================================================
+
+/**
+ * ===============================================================================
+ * NUMBER POOL COMPONENT
+ * ===============================================================================
+ * 
+ * Main component for managing the number pool with comprehensive functionality
+ * including pagination, search, filtering, real-time updates, and number operations.
+ * 
+ * @param onNumberSelect - Optional callback when a number is selected
+ * @param propSelectedCategory - Optional pre-selected category
+ * @param onCategoryChange - Optional callback for category changes
+ */
+
+// Helper function to check if current time is within claim hours (9 AM - 8 PM UAE time)
+const isWithinClaimHours = (): boolean => {
+  const now = new Date();
+  const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
+  const currentHour = uaeTime.getHours();
+  return currentHour >= 9 && currentHour < 20; // 9 AM to 8 PM (20:00)
+};
+
+export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCategory, onCategoryChange }: NumberPoolProps = {}) {
+  // ===============================================================================
+  // STATE MANAGEMENT
+  // ===============================================================================
+  
+  // Core data state
+  const [numbers, setNumbers] = useState<NumberPoolType[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showPool, setShowPool] = useState(true);
+  const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+  const { user, isAdmin } = useAuthStore();
+  
+  // Track claim hours state for real-time updates
+  const [isWithinClaimWindow, setIsWithinClaimWindow] = useState(isWithinClaimHours());
+  
+  // Update claim window status every minute
+  useEffect(() => {
+    const updateClaimWindow = () => {
+      setIsWithinClaimWindow(isWithinClaimHours());
+    };
+    
+    updateClaimWindow(); // Initial check
+    const interval = setInterval(updateClaimWindow, 60000); // Update every minute
+    
+    return () => clearInterval(interval);
+  }, []);
+  
+  // Reservation and number management state
+  const [hasReservation, setHasReservation] = useState(false);
+  const [reservedNumbers, setReservedNumbers] = useState<NumberPoolType[]>([]);
+  const [allNumbersForReserved, setAllNumbersForReserved] = useState<NumberPoolType[]>([]);
+  
+  // ===============================================================================
+  // PAGINATION STATE
+  // ===============================================================================
+  
+  const [currentPage, setCurrentPage] = useState(1);
+  // Mobile-optimized page size
+  const [pageSize, setPageSize] = useState(() => {
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    return isMobile ? 20 : paginationUtils.calculateOptimalPageSize();
+  });
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalItems, setTotalItems] = useState(0);
+  const [hasNextPage, setHasNextPage] = useState(false);
+  const [hasPreviousPage, setHasPreviousPage] = useState(false);
+  // ===============================================================================
+  // SEARCH STATE
+  // ===============================================================================
+  
+  const [searchResults, setSearchResults] = useState<NumberPoolType[]>([]);
+  // Store full filtered search results to avoid re-searching when only pageSize changes
+  const fullSearchResultsRef = useRef<NumberPoolType[]>([]);
+  const recoveryAttemptedRef = useRef(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [searchCurrentPage, setSearchCurrentPage] = useState(1);
+  const [searchTotalPages, setSearchTotalPages] = useState(0);
+  const [searchTotalItems, setSearchTotalItems] = useState(0);
+  const [searchHasNextPage, setSearchHasNextPage] = useState(false);
+  const [searchHasPreviousPage, setSearchHasPreviousPage] = useState(false);
+  const [searchLastDoc, setSearchLastDoc] = useState<any>(null);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  
+  // ===============================================================================
+  // UI STATE AND DIALOGS
+  // ===============================================================================
+  
+  const [showReleaseDialog, setShowReleaseDialog] = useState(false);
+  const [selectedNumber, setSelectedNumber] = useState<NumberPoolType | null>(null);
+  const [selectedNumbers, setSelectedNumbers] = useState<string[]>([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(propSelectedCategory || null);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [selectedInitials, setSelectedInitials] = useState<string | null>(null);
+  const [statsTotalPages, setStatsTotalPages] = useState<number>(0);
+  const [statsTotalItems, setStatsTotalItems] = useState<number>(0);
+  const [sortConfig, setSortConfig] = useState<{ field: SortField; direction: SortDirection }>({
+    field: 'number',
+    direction: 'asc'
+  });
+  const [showReserveDialog, setShowReserveDialog] = useState(false);
+  const [numberToReserve, setNumberToReserve] = useState<NumberPoolType | null>(null);
+  const [showReserveLimitDialog, setShowReserveLimitDialog] = useState(false);
+  const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
+  const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
+  const [showReserveConflictDialog, setShowReserveConflictDialog] = useState(false);
+  const [reserveConflictInfo, setReserveConflictInfo] = useState<{ number: string; status?: string; reservedByName?: string | null } | null>(null);
+  const [checkingReserveId, setCheckingReserveId] = useState<string | null>(null);
+  const [selectAllMode, setSelectAllMode] = useState(false);
+  const [showClaimDialog, setShowClaimDialog] = useState(false);
+  const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
+  const [showStatusCheckDialog, setShowStatusCheckDialog] = useState(false);
+  const [numberForStatusCheck, setNumberForStatusCheck] = useState<NumberPoolType | null>(null);
+  const [isStatusCheckSubmitting, setIsStatusCheckSubmitting] = useState(false);
+  const [claimTimer, setClaimTimer] = useState<NodeJS.Timeout | null>(null);
+  const [claimCountdowns, setClaimCountdowns] = useState<Record<string, number>>({});
+  const [reservationCountdowns, setReservationCountdowns] = useState<Record<string, number>>({});
+  const [showChat, setShowChat] = useState(false);
+  const [selectedNumberForChat, setSelectedNumberForChat] = useState<NumberPoolType | null>(null);
+  const [searchParams] = useSearchParams();
+  const numberIdFromUrl = searchParams.get('numberId');
+  const [statusChecks, setStatusChecks] = useState<StatusCheck[]>([]);
+  const [isCoordinator, setIsCoordinator] = useState(false);
+  const [agentLeadNumberIds, setAgentLeadNumberIds] = useState<Set<string>>(new Set());
+  const [showDuplicateDialog, setShowDuplicateDialog] = useState(false);
+  const [duplicateNumbers, setDuplicateNumbers] = useState<Array<{ number: string; entries: NumberPoolType[] }>>([]);
+  const [checkingDuplicates, setCheckingDuplicates] = useState(false);
+  const [selectedDuplicateEntries, setSelectedDuplicateEntries] = useState<Set<string>>(new Set());
+  const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false);
+  const [showDeleteDuplicatesDialog, setShowDeleteDuplicatesDialog] = useState(false);
+
+  const formatStatusLabel = useCallback((status?: string) => {
+    if (!status) return 'Unknown';
+    return status
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, letter => letter.toUpperCase());
+  }, []);
+  
+  // ===============================================================================
+  // PERFORMANCE OPTIMIZATION STATE
+  // ===============================================================================
+  
+  const [claimingNumbers, setClaimingNumbers] = useState<Set<string>>(new Set());
+  const [reservingNumbers, setReservingNumbers] = useState<Set<string>>(new Set());
+  const [chattingNumbers, setChattingNumbers] = useState<Set<string>>(new Set());
+  const [operationTimeouts, setOperationTimeouts] = useState<Map<string, NodeJS.Timeout>>(new Map());
+  const [lastClaimAttempts, setLastClaimAttempts] = useState<Map<string, number>>(new Map());
+  
+  // ===============================================================================
+  // COORDINATOR ADD/EDIT NUMBER STATES
+  // ===============================================================================
+  
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [addingNumber, setAddingNumber] = useState(false);
+  const [newPoolNumber, setNewPoolNumber] = useState('');
+  const [newPoolCategory, setNewPoolCategory] = useState('');
+  const [newPoolCode, setNewPoolCode] = useState('');
+  const [newPoolGroup, setNewPoolGroup] = useState('');
+  const [newPoolPasscode, setNewPoolPasscode] = useState('');
+  const [newPoolTeamVisibility, setNewPoolTeamVisibility] = useState('');
+  const [phoneError, setPhoneError] = useState('');
+
+  // Edit functionality states
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editingNumber, setEditingNumber] = useState<NumberPoolType | null>(null);
+  const [editPoolNumber, setEditPoolNumber] = useState('');
+  const [editPoolCategory, setEditPoolCategory] = useState('');
+  const [editPoolCode, setEditPoolCode] = useState('');
+  const [editPoolGroup, setEditPoolGroup] = useState('');
+  const [editPoolPasscode, setEditPoolPasscode] = useState('');
+  const [editPoolTeamVisibility, setEditPoolTeamVisibility] = useState('');
+  const [editPoolStatus, setEditPoolStatus] = useState<NumberStatus>('open');
+  const [editPhoneError, setEditPhoneError] = useState('');
+  const [updatingNumber, setUpdatingNumber] = useState(false);
+  const [teams, setTeams] = useState<Array<{ id: string; name: string }>>([]);
+  const [showDuplicateNumberDialog, setShowDuplicateNumberDialog] = useState(false);
+  const [duplicateNumberData, setDuplicateNumberData] = useState<{ existingNumber: string; newNumber: string } | null>(null);
+  
+  // Bulk delete functionality states
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  
+  // ===============================================================================
+  // AGENT UTILITIES STATE
+  // ===============================================================================
+  
+  // Notepad utility
+  const [showNotepad, setShowNotepad] = useState(false);
+  const [notepadContent, setNotepadContent] = useState('');
+  const [isCopyingNotepad, setIsCopyingNotepad] = useState(false);
+  const [notepadCopied, setNotepadCopied] = useState(false);
+  const [whatsappBlankLines, setWhatsappBlankLines] = useState(true); // Toggle for blank lines in WhatsApp format
+  const [showInstructions, setShowInstructions] = useState(false);
+  
+  // Bulk copy utility - reuse selectedNumbers state for checkboxes
+  const [bulkCopyMode, setBulkCopyMode] = useState(false);
+
+  // Export numbers (admin)
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportingNumbers, setExportingNumbers] = useState(false);
+  const exportFields = [
+    { key: 'number', label: 'Number' },
+    { key: 'category', label: 'Category' },
+    { key: 'code', label: 'Code' },
+    { key: 'passcode', label: 'Passcode' },
+    { key: 'status', label: 'Status' },
+    { key: 'group', label: 'Group' },
+    { key: 'teamVisibility', label: 'Team Visibility' },
+    { key: 'visibleToFreelancers', label: 'Visible To Freelancers' },
+    { key: 'reservedBy', label: 'Reserved By' },
+    { key: 'reservedAt', label: 'Reserved At' },
+    { key: 'expiresAt', label: 'Expires At' },
+    { key: 'claimingAgentId', label: 'Claiming Agent' },
+    { key: 'claimingStartedAt', label: 'Claiming Started At' },
+    { key: 'claimingExpiresAt', label: 'Claiming Expires At' },
+    { key: 'originalAgentId', label: 'Original Agent' },
+    { key: 'originalReservedAt', label: 'Original Reserved At' },
+    { key: 'originalExpiresAt', label: 'Original Expires At' },
+    { key: 'lastClaimedAt', label: 'Last Claimed At' },
+    { key: 'claimedAt', label: 'Claimed At' },
+    { key: 'leadId', label: 'Lead Id' }
+  ] as const;
+  const [selectedExportFields, setSelectedExportFields] = useState<string[]>(exportFields.map(f => f.key));
+  
+  // ===============================================================================
+  // UTILITY FUNCTIONS AND REFS
+  // ===============================================================================
+  
+  // Debounced search term for performance optimization
+  // Debounce search input to 400ms to reduce redundant queries
+  const debouncedSearchTerm = useDebounce(searchTerm, 400);
+
+  // Realtime subscriptions for search-visible documents cleanup
+  const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
+
+  const toggleExportField = (key: string) => {
+    setSelectedExportFields(prev =>
+      prev.includes(key)
+        ? prev.filter(k => k !== key)
+        : [...prev, key]
+    );
+  };
+
+  const handleExportNumbers = async () => {
+    if (!isAdmin()) return;
+    setExportingNumbers(true);
+    try {
+      const snapshot = await getDocs(collection(db, 'numberPool'));
+      const rows = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as any[];
+      if (!rows.length) {
+        toast.error('No numbers to export');
+        return;
+      }
+
+      const headerMap: Record<string, string> = {
+        number: 'Number',
+        category: 'Category',
+        code: 'Code',
+        passcode: 'Passcode',
+        status: 'Status',
+        group: 'Group',
+        teamVisibility: 'Team Visibility',
+        visibleToFreelancers: 'Visible To Freelancers',
+        reservedBy: 'Reserved By',
+        reservedAt: 'Reserved At',
+        expiresAt: 'Expires At',
+        claimingAgentId: 'Claiming Agent',
+        claimingStartedAt: 'Claiming Started At',
+        claimingExpiresAt: 'Claiming Expires At',
+        originalAgentId: 'Original Agent',
+        originalReservedAt: 'Original Reserved At',
+        originalExpiresAt: 'Original Expires At',
+        lastClaimedAt: 'Last Claimed At',
+        claimedAt: 'Claimed At',
+        leadId: 'Lead Id'
+      };
+
+      const formatVal = (val: any) => {
+        if (val === undefined || val === null) return '';
+        if (val?.toDate instanceof Function) return val.toDate().toISOString();
+        if (val instanceof Date) return val.toISOString();
+        if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+        return val;
+      };
+
+      const data = rows.map(row => {
+        const out: Record<string, any> = {};
+        selectedExportFields.forEach(key => {
+          out[headerMap[key] || key] = formatVal(row[key]);
+        });
+        return out;
+      });
+
+      const XLSX = await import('xlsx');
+      const ws = XLSX.utils.json_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'NumberPool');
+      const filename = `NumberPool_${new Date().toISOString().slice(0,10)}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      toast.success('Export complete');
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Error exporting numbers:', error);
+      toast.error('Failed to export numbers');
+    } finally {
+      setExportingNumbers(false);
+    }
+  };
+
+  /**
+   * Visibility guard filter for team-restricted numbers based on user role
+   * @param list - List of numbers to filter
+   * @returns Filtered list based on user permissions
+   */
+  const filterByVisibility = useCallback((list: NumberPoolType[]): NumberPoolType[] => {
+    // Admin/manager/coordinator see everything
+    if (isAdmin() || user?.role === 'manager' || user?.role === 'coordinator') return list;
+    // Agents: if number has teamVisibility, it must match user's team; if missing, it's public
+    // Also hide activated numbers from agents
+    if (user?.role === 'agent' && user.teamId) {
+      return list.filter(n => {
+        // Hide activated numbers
+        if (n.status === 'activated') return false;
+        // Filter by team visibility
+        return !n.teamVisibility || n.teamVisibility === user.teamId;
+      });
+    }
+    return list;
+  }, [isAdmin, user?.role, user?.teamId]);
+
+  // ===============================================================================
+  // EFFECTS AND LIFECYCLE MANAGEMENT
+  // ===============================================================================
+
+  /**
+   * Initialize number pool manager and subscribe to state changes
+   * Handles persistent state management across navigation and loading timeout protection
+   */
+  useEffect(() => {
+    if (!user?.id) {
+      // User not logged in, clear state and listeners
+      recoveryAttemptedRef.current = false;
+      numberPoolManager.destroy();
+      setNumbers([]);
+      setCurrentPage(1);
+      setTotalPages(0);
+      setTotalItems(0);
+      setHasNextPage(false);
+      setHasPreviousPage(false);
+      setAllNumbersForReserved([]);
+      setLoading(false);
+      return;
+    }
+    
+    let isMounted = true;
+    let loadingCheckInterval: NodeJS.Timeout | null = null;
+    let stuckStateTimeout: NodeJS.Timeout | null = null;
+    
+    // Subscribe to manager state
+    const unsubscribe = numberPoolManager.subscribe((state) => {
+      if (!isMounted) return;
+      
+      setNumbers(state.numbers);
+      setCurrentPage(state.currentPage);
+      setTotalPages(state.totalPages);
+      setTotalItems(state.totalItems);
+      setHasNextPage(state.hasNextPage);
+      setHasPreviousPage(state.hasPreviousPage);
+      setLoading(state.isLoading);
+      
+      // Always keep track of all numbers for reserved numbers calculation
+      setAllNumbersForReserved(state.numbers);
+      
+      // Don't update search results from manager subscription
+      // Search results are managed separately by the search effect
+    });
+
+    // Initialize manager (will use cache if available)
+    // The manager will detect user changes and force reset internally
+    numberPoolManager.setUserRole(user?.role);
+    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role, selectedGroup, selectedInitials).catch(error => {
+      console.error('[NumberPool] Initialization error:', error);
+      if (isMounted) {
+        setLoading(false);
+      }
+    });
+
+    // Watchdog: Check for stuck loading state every 10 seconds
+    let stuckCheckCount = 0;
+    let loadingStartTime: number | null = null;
+    
+    loadingCheckInterval = setInterval(() => {
+      if (!isMounted) return;
+      
+      // Get current state from manager directly
+      const currentState = numberPoolManager.getState();
+      const currentLoading = currentState?.isLoading ?? false;
+      
+      // Track when loading starts
+      if (currentLoading && loadingStartTime === null) {
+        loadingStartTime = Date.now();
+      } else if (!currentLoading && loadingStartTime !== null) {
+        // Loading stopped, reset tracking
+        loadingStartTime = null;
+        stuckCheckCount = 0;
+        return;
+      }
+      
+      // If loading has been true for more than 30 seconds, force reset
+      if (currentLoading && loadingStartTime !== null) {
+        const loadingDuration = Date.now() - loadingStartTime;
+        stuckCheckCount++;
+        
+        if (stuckCheckCount >= 3 || loadingDuration > 30000) { // 3 checks = 30 seconds OR if duration > 30s
+        numberPoolManager.forceResetLoading();
+          stuckCheckCount = 0;
+          loadingStartTime = null; // Reset to allow new cycle
+        }
+      }
+    }, 10000); // Check every 10 seconds
+
+    // Fallback timeout: If still loading after 40 seconds, force reset
+    stuckStateTimeout = setTimeout(() => {
+      if (isMounted) {
+        const currentState = numberPoolManager.getState();
+        if (currentState?.isLoading) {
+          if (!user?.id) {
+            numberPoolManager.destroy();
+            setLoading(false);
+            return;
+          }
+          numberPoolManager.forceReset();
+          // Re-initialize after reset
+          setTimeout(() => {
+            if (isMounted && user?.id) {
+              numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role, selectedGroup, selectedInitials).catch(() => {
+                // Silent error handling
+              });
+            }
+          }, 1000);
+        }
+      }
+    }, 40000); // 40 second hard timeout
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+      if (loadingCheckInterval) {
+        clearInterval(loadingCheckInterval);
+      }
+      if (stuckStateTimeout) {
+        clearTimeout(stuckStateTimeout);
+      }
+    };
+  }, [selectedCategory, selectedGroup, selectedInitials, pageSize, user?.id, user?.role]); // Removed 'loading' to prevent circular dependency
+
+  // ===============================================================================
+  // AGENT UTILITIES - NOTEPAD LOCALSTORAGE
+  // ===============================================================================
+  
+  // Load notepad content from localStorage on mount
+  useEffect(() => {
+    if (user?.id) {
+      const storageKey = `notepad_${user.id}`;
+      const savedContent = localStorage.getItem(storageKey);
+      if (savedContent) {
+        setNotepadContent(savedContent);
+      }
+    }
+  }, [user?.id]);
+  
+  // Save notepad content to localStorage whenever it changes
+  useEffect(() => {
+    if (user?.id && notepadContent !== undefined) {
+      const storageKey = `notepad_${user.id}`;
+      localStorage.setItem(storageKey, notepadContent);
+    }
+  }, [notepadContent, user?.id]);
+
+  /**
+   * Helper function to refresh a specific number's data after an action
+   * Fetches fresh data from Firestore and updates both numbers and search results
+   */
+  const refreshNumberData = useCallback(async (numberId: string) => {
+    try {
+      const numberDoc = await getDoc(doc(db, 'numberPool', numberId));
+      if (numberDoc.exists()) {
+        const data = numberDoc.data();
+        const refreshedNumber: NumberPoolType = {
+          id: numberDoc.id,
+          ...data,
+          lastStatusChange: data.lastStatusChange?.toDate?.() || data.lastStatusChange,
+          reservedAt: data.reservedAt?.toDate?.() || data.reservedAt,
+          expiresAt: data.expiresAt?.toDate?.() || data.expiresAt,
+          claimingStartedAt: data.claimingStartedAt?.toDate?.() || data.claimingStartedAt,
+          claimingExpiresAt: data.claimingExpiresAt?.toDate?.() || data.claimingExpiresAt
+        } as NumberPoolType;
+        
+        // Update both numbers and search results
+        setNumbers(prev => prev.map(n => n.id === numberId ? refreshedNumber : n));
+        setSearchResults(prev => prev.map(n => n.id === numberId ? refreshedNumber : n));
+        
+        // Also update full search results cache
+        if (fullSearchResultsRef.current.length > 0) {
+          fullSearchResultsRef.current = fullSearchResultsRef.current.map(n => 
+            n.id === numberId ? refreshedNumber : n
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Error refreshing number data:', error);
+    }
+  }, []);
+
+  /**
+   * Component cleanup effect - handles cleanup of listeners and timers
+   * Runs only on component unmount to prevent memory leaks
+   */
+  useEffect(() => {
+    return () => {
+      // Clean up search listeners when component unmounts
+      const searchUnsubs = searchVisibleUnsubsRef.current;
+      for (const unsub of searchUnsubs.values()) {
+          unsub();
+      }
+      searchUnsubs.clear();
+      
+      if (claimTimer) {
+        clearTimeout(claimTimer);
+      }
+    };
+  }, []);
+
+  /**
+   * Search management effect - handles comprehensive search functionality
+   * Includes debounced search, result pagination, and real-time updates
+   */
+  useEffect(() => {
+    if (!debouncedSearchTerm.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+      fullSearchResultsRef.current = [];
+      // Reset search pagination state
+      setSearchCurrentPage(1);
+      setSearchTotalPages(0);
+      setSearchTotalItems(0);
+      setSearchHasNextPage(false);
+      setSearchHasPreviousPage(false);
+      // Return to original page when search is cleared
+      numberPoolManager.onSearchClear();
+      
+      // Force a re-render by updating the display numbers
+      setTimeout(() => {
+        setSearchResults([]);
+      }, 100);
+      return;
+    }
+
+    // Check if we have cached results and only pageSize/page changed (not search term or category)
+    // This allows fast re-pagination without re-searching
+    const hasCachedResults = fullSearchResultsRef.current.length > 0;
+    const lastSearchTerm = (fullSearchResultsRef.current as any).lastSearchTerm;
+    const lastCategory = (fullSearchResultsRef.current as any).lastCategory;
+    
+    // Determine if search term or category changed
+    const searchTermChanged = debouncedSearchTerm !== lastSearchTerm;
+    const categoryChanged = selectedCategory !== lastCategory;
+    
+    // IMPORTANT: If we have cached results and search term/category haven't changed,
+    // ONLY re-paginate - DO NOT call performSearch() which would reset everything
+    if (hasCachedResults && !searchTermChanged && !categoryChanged) {
+      // Use cached results - just re-slice for new pageSize/page
+      const filteredResults = fullSearchResultsRef.current;
+      const startIndex = (searchCurrentPage - 1) * pageSize;
+      const endIndex = startIndex + pageSize;
+      const paginatedResults = filteredResults.slice(startIndex, endIndex);
+      
+      setSearchResults(paginatedResults);
+      setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
+      setSearchTotalItems(filteredResults.length);
+      setSearchHasNextPage(endIndex < filteredResults.length);
+      setSearchHasPreviousPage(searchCurrentPage > 1);
+      setIsSearching(false);
+      setIsLoadingMore(false);
+      return; // CRITICAL: Return early to prevent performSearch() from being called
+    }
+
+    // Only perform new search if we don't have cached results OR search term/category changed
+    // This prevents resetting results when only page changes
+    if (!hasCachedResults || searchTermChanged || categoryChanged) {
+      // Reset to page 1 when search term or category changes
+      if (searchTermChanged || categoryChanged) {
+        setSearchCurrentPage(1);
+      }
+      performSearch();
+    }
+  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize]);
+
+  // Perform search function - accessible for "Load More" button
+  const performSearch = useCallback(async (loadMore: boolean = false) => {
+    if (loadMore) {
+      setIsLoadingMore(true);
+    } else {
+      setIsSearching(true);
+      // Reset results when starting new search
+      setSearchResults([]);
+      fullSearchResultsRef.current = [];
+      setSearchLastDoc(null);
+      setSearchHasMore(false);
+    }
+    
+      const termAtStart = debouncedSearchTerm;
+      
+      try {
+        // Use unified search for consistent results
+      // Initially fetch 200 results for faster loading, "Load More" will fetch additional batches
+        const searchLimit = 200;
+        
+        const result = await unifiedSearch.search(debouncedSearchTerm, {
+          category: selectedCategory || 'all',
+          limit: searchLimit,
+        startAfter: loadMore ? searchLastDoc : null,
+          includeStale: false
+        });
+        
+        // Avoid race conditions: only apply if term hasn't changed
+        if (termAtStart === debouncedSearchTerm) {
+          const filteredResults = filterByVisibility(result.data);
+          
+        if (loadMore) {
+          // Append new results to existing ones
+          const combinedResults = [...fullSearchResultsRef.current, ...filteredResults];
+          fullSearchResultsRef.current = combinedResults;
+          // Preserve search metadata for pagination checks
+          (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+          (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+          
+          // Update pagination
+          const startIndex = (searchCurrentPage - 1) * pageSize;
+          const endIndex = startIndex + pageSize;
+          const paginatedResults = combinedResults.slice(startIndex, endIndex);
+          
+          setSearchResults(paginatedResults);
+          setSearchTotalPages(Math.ceil(combinedResults.length / pageSize));
+          setSearchTotalItems(combinedResults.length);
+          setSearchHasNextPage(endIndex < combinedResults.length);
+          setSearchHasPreviousPage(searchCurrentPage > 1);
+          
+          // Scroll to top after loading more results
+          setTimeout(() => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }, 0);
+        } else {
+          // New search - replace results
+          fullSearchResultsRef.current = filteredResults;
+          (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+          (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+          
+          // For new searches, always start at page 1
+          const pageForNewSearch = 1;
+          const startIndex = (pageForNewSearch - 1) * pageSize;
+          const endIndex = startIndex + pageSize;
+          const paginatedResults = filteredResults.slice(startIndex, endIndex);
+          
+          setSearchResults(paginatedResults);
+          setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
+          setSearchTotalItems(filteredResults.length);
+          setSearchHasNextPage(endIndex < filteredResults.length);
+          setSearchHasPreviousPage(false); // Always false for page 1
+          
+          // Ensure we're on page 1 for new searches
+          setSearchCurrentPage(1);
+        }
+        
+        // Store cursor and hasMore for "Load More" button
+        setSearchLastDoc(result.lastDoc);
+        setSearchHasMore(result.hasMore);
+          
+          // Search complete - results ready for display
+        }
+      } catch (error) {
+        console.error('Search error:', error);
+        toast.error('Search failed');
+      } finally {
+        if (termAtStart === debouncedSearchTerm) {
+          setIsSearching(false);
+        setIsLoadingMore(false);
+        }
+      }
+  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize, searchLastDoc]);
+
+  // DISABLED: Real-time listeners for search results
+  // Search already fetches fresh data, no need for additional real-time listeners
+  // This prevents "400 Bad Request" errors from too many concurrent Firebase connections
+  useEffect(() => {
+    // Cleanup any existing search listeners
+    const unsubs = searchVisibleUnsubsRef.current;
+      for (const fn of unsubs.values()) fn();
+      unsubs.clear();
+    
+    return () => {
+      for (const fn of unsubs.values()) fn();
+      unsubs.clear();
+    };
+  }, []); // Run once on mount/unmount only
+
+  // Load stats for total pages (OPTIMIZED) - Mobile performance
+  useEffect(() => {
+    let isMounted = true;
+    let unsubStats: (() => void) | undefined;
+    
+    const loadStats = async () => {
+      try {
+        const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined, selectedGroup || undefined, selectedInitials || undefined);
+        if (isMounted) {
+          setStatsTotalPages(totalPages);
+        }
+      } catch (error) {
+        // no-op
+      }
+    };
+
+    loadStats();
+    // Subscribe to live updates and hydrate when stats change
+    unsubStats = numberPoolStatsService.subscribeToStats(async (stats) => {
+      if (!isMounted) return;
+      const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined, selectedGroup || undefined, selectedInitials || undefined);
+      const totalItems = await numberPoolStatsService.getTotalItems(selectedCategory || undefined, selectedGroup || undefined, selectedInitials || undefined);
+      if (isMounted) {
+        setStatsTotalPages(totalPages);
+        setStatsTotalItems(totalItems || 0);
+      }
+    });
+
+    // Refresh on tab focus and on upload invalidation to bypass stale cache
+    const onFocus = () => {
+      numberPoolStatsService.clearCache();
+      loadStats();
+    };
+    const onVis = () => { if (document.visibilityState === 'visible') onFocus(); };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'npInvalidate') {
+        numberPoolStatsService.clearCache();
+        loadStats();
+      }
+    };
+    window.addEventListener('visibilitychange', onVis);
+    window.addEventListener('storage', onStorage);
+    
+    return () => {
+      isMounted = false;
+      if (unsubStats) unsubStats();
+      window.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [pageSize, selectedCategory, selectedGroup, selectedInitials]);
+
+  // Always keep "Your Reserved Numbers" in sync globally (independent of current page) - Mobile optimized
+  useEffect(() => {
+    if (!user?.id) {
+      setReservedNumbers([]);
+      return;
+    }
+
+    let isMounted = true;
+    let unsub: (() => void) | undefined;
+    let fallbackCleanup: (() => void) | undefined;
+
+    // Primary listener ordered by reservedAt desc (requires composite index)
+    const qPrimary = query(
+      collection(db, 'numberPool'),
+      where('reservedBy', '==', user.id),
+      where('status', '==', 'reserved'),
+      orderBy('reservedAt', 'desc'),
+      limit(20) // Reduced from 40 for mobile performance
+    );
+
+    unsub = onSnapshot(
+      qPrimary,
+      (snap) => {
+        if (!isMounted) return;
+        
+        const items = snap.docs.map((d) => {
+          const data: any = d.data();
+          return {
+            id: d.id,
+            ...data,
+            reservedAt: data.reservedAt?.toDate?.() || data.reservedAt,
+            lastStatusChange: data.lastStatusChange?.toDate?.() || data.lastStatusChange,
+            claimingStartedAt: data.claimingStartedAt?.toDate?.() || data.claimingStartedAt,
+            claimingExpiresAt: data.claimingExpiresAt?.toDate?.() || data.claimingExpiresAt
+          } as NumberPoolType;
+        });
+        setReservedNumbers(items);
+      },
+      (error) => {
+        // ✅ FIX: Handle permission errors gracefully during logout
+        if (error.code === 'permission-denied') {
+          // User logged out or lost permissions - cleanup silently
+          return;
+        }
+        
+        if (!isMounted) return;
+        
+        // Fallback without orderBy to avoid index requirement; client-side sort
+        const qFallback = query(
+          collection(db, 'numberPool'),
+          where('reservedBy', '==', user.id),
+          where('status', '==', 'reserved'),
+          limit(20) // Reduced from 40 for mobile performance
+        );
+        fallbackCleanup = onSnapshot(qFallback, (snap) => {
+          if (!isMounted) return;
+          
+          const items = snap.docs
+            .map((d) => {
+              const data: any = d.data();
+              return {
+                id: d.id,
+                ...data,
+                reservedAt: data.reservedAt?.toDate?.() || data.reservedAt,
+                lastStatusChange: data.lastStatusChange?.toDate?.() || data.lastStatusChange,
+                claimingStartedAt: data.claimingStartedAt?.toDate?.() || data.claimingStartedAt,
+                claimingExpiresAt: data.claimingExpiresAt?.toDate?.() || data.claimingExpiresAt
+              } as NumberPoolType;
+            })
+            .sort((a, b) => (new Date(b.reservedAt || 0).getTime() - new Date(a.reservedAt || 0).getTime()));
+          setReservedNumbers(items);
+        }, (error) => {
+          // ✅ FIX: Handle permission errors gracefully during logout
+          if (error.code === 'permission-denied') {
+            // User logged out or lost permissions - cleanup silently
+            return;
+          }
+          
+          console.error('Error in NumberPool fallback listener:', error);
+        });
+      }
+    );
+
+    return () => {
+      isMounted = false;
+      if (unsub) unsub();
+      if (fallbackCleanup) fallbackCleanup();
+    };
+  }, [user?.id]);
+
+  // Reset to first page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+    setSearchCurrentPage(1);
+  }, [selectedCategory, selectedGroup, selectedInitials, pageSize]);
+
+  // Pagination navigation functions using global manager
+  const goToNextPage = useCallback(async () => {
+    await numberPoolManager.nextPage();
+  }, []);
+
+  const goToPreviousPage = useCallback(async () => {
+    await numberPoolManager.previousPage();
+  }, []);
+
+  const goToPage = useCallback(async (page: number) => {
+    await numberPoolManager.goToPage(page);
+  }, []);
+
+  // Search pagination functions
+  const goToNextSearchPage = useCallback(() => {
+    if (searchHasNextPage) {
+      setSearchCurrentPage(prev => prev + 1);
+      // Scroll to top of the page after a brief delay to ensure content is updated
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 0);
+    }
+  }, [searchHasNextPage]);
+
+  const goToPreviousSearchPage = useCallback(() => {
+    if (searchHasPreviousPage) {
+      setSearchCurrentPage(prev => prev - 1);
+      // Scroll to top of the page after a brief delay to ensure content is updated
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 0);
+    }
+  }, [searchHasPreviousPage]);
+
+  const goToSearchPage = useCallback((page: number) => {
+    if (page >= 1 && page <= searchTotalPages) {
+      setSearchCurrentPage(page);
+      // Scroll to top of the page after a brief delay to ensure content is updated
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, 0);
+    }
+  }, [searchTotalPages]);
+
+  // ===============================================================================
+  // AGENT UTILITIES CALLBACKS
+  // ===============================================================================
+  
+  /**
+   * Toggle bulk copy mode and clear selections when turning off
+   */
+  const toggleBulkCopyMode = useCallback(() => {
+    setBulkCopyMode(prev => !prev);
+    if (bulkCopyMode) {
+      setSelectedNumbers([]);
+    }
+  }, [bulkCopyMode]);
+  
+  /**
+   * Toggle number selection for bulk copy
+   * Also automatically adds/removes number from notepad (with duplicate check)
+   */
+  const toggleNumberSelection = useCallback((numberId: string, phoneNumber: string) => {
+    setSelectedNumbers(prev => {
+      const isCurrentlySelected = prev.includes(numberId);
+      
+      if (isCurrentlySelected) {
+        // Remove from selection and notepad
+        setNotepadContent(currentContent => {
+          const lines = currentContent.split('\n');
+          const filteredLines = lines.filter(line => line.trim() !== phoneNumber);
+          return filteredLines.join('\n');
+        });
+        return prev.filter(id => id !== numberId);
+      } else {
+        // Add to selection and notepad (check for duplicates)
+        setNotepadContent(currentContent => {
+          const trimmedContent = currentContent.trim();
+          
+          // Check if number already exists
+          const existingLines = trimmedContent ? trimmedContent.split('\n').map(l => l.trim()) : [];
+          if (existingLines.includes(phoneNumber)) {
+            // Number already exists, don't add again
+            return currentContent;
+          }
+          
+          if (trimmedContent === '') {
+            return phoneNumber;
+          }
+          return trimmedContent + '\n' + phoneNumber;
+        });
+        return [...prev, numberId];
+      }
+    });
+  }, []);
+  
+  /**
+   * Select all visible numbers on current page
+   * Also adds all numbers to notepad
+   */
+  const selectAllVisible = useCallback(() => {
+    const visibleNumbers = debouncedSearchTerm.trim() ? searchResults : numbers;
+    const allIds = visibleNumbers.map(n => n.id);
+    const allPhoneNumbers = visibleNumbers.map(n => n.number).join('\n');
+    
+    setSelectedNumbers(allIds);
+    
+    // Add all numbers to notepad
+    setNotepadContent(currentContent => {
+      const trimmedContent = currentContent.trim();
+      if (trimmedContent === '') {
+        return allPhoneNumbers;
+      }
+      // Only add numbers that aren't already in the notepad
+      const existingLines = new Set(trimmedContent.split('\n').map(l => l.trim()));
+      const newNumbers = visibleNumbers
+        .map(n => n.number)
+        .filter(num => !existingLines.has(num))
+        .join('\n');
+      
+      if (newNumbers) {
+        return trimmedContent + '\n' + newNumbers;
+      }
+      return trimmedContent;
+    });
+  }, [numbers, searchResults, debouncedSearchTerm]);
+  
+  /**
+   * Clear selected numbers (they're already in notepad)
+   */
+  const clearSelectedNumbers = useCallback(() => {
+    if (selectedNumbers.length === 0) {
+      return;
+    }
+    
+    setSelectedNumbers([]);
+    setBulkCopyMode(false);
+    toast.success(`${selectedNumbers.length} number${selectedNumbers.length > 1 ? 's' : ''} added to notepad`);
+  }, [selectedNumbers]);
+
+  /**
+   * Handle textarea input with smart line break after 10 digits
+   */
+  const handleNotepadInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    let value = e.target.value;
+    const cursorPosition = e.target.selectionStart;
+    
+    // Get the current line (text from last newline to cursor)
+    const textBeforeCursor = value.substring(0, cursorPosition);
+    const lastNewlineIndex = textBeforeCursor.lastIndexOf('\n');
+    const currentLine = textBeforeCursor.substring(lastNewlineIndex + 1);
+    
+    // Count only digits in current line
+    const digitCount = (currentLine.match(/\d/g) || []).length;
+    
+    // If exactly 10 digits and user just typed a digit, add newline
+    if (digitCount === 10 && /^\d+$/.test(currentLine)) {
+      const textAfterCursor = value.substring(cursorPosition);
+      value = textBeforeCursor + '\n' + textAfterCursor;
+      setNotepadContent(value);
+      
+      // Set cursor position after the newline
+      setTimeout(() => {
+        const newCursorPos = cursorPosition + 1;
+        e.target.setSelectionRange(newCursorPos, newCursorPos);
+      }, 0);
+    } else {
+      setNotepadContent(value);
+    }
+  }, []);
+
+  /**
+   * Copy notepad content with WhatsApp formatting (bold with asterisks and optional empty lines)
+   */
+  const copyNotepadContent = useCallback(async () => {
+    if (!notepadContent.trim()) {
+      toast.error('Notepad is empty');
+      return;
+    }
+    
+    setIsCopyingNotepad(true);
+    
+    try {
+      // Get all non-empty lines
+      const lines = notepadContent.split('\n').filter(line => line.trim());
+      
+      // Format each number with asterisks for WhatsApp bold
+      const formattedNumbers = lines.map(line => `*${line.trim()}*`);
+      
+      // Join with blank lines if toggle is on, otherwise single newline
+      const separator = whatsappBlankLines ? '\n\n' : '\n';
+      const finalText = formattedNumbers.join(separator);
+      
+      await navigator.clipboard.writeText(finalText);
+      
+      // Show success state
+      setNotepadCopied(true);
+      toast.success(`✅ Copied ${lines.length} number${lines.length > 1 ? 's' : ''} (WhatsApp formatted)`);
+      
+      // Reset success state after 2 seconds
+      setTimeout(() => {
+        setNotepadCopied(false);
+      }, 2000);
+    } catch (error) {
+      toast.error('Failed to copy to clipboard');
+    } finally {
+      setIsCopyingNotepad(false);
+    }
+  }, [notepadContent, whatsappBlankLines]);
+
+
+  // Get display pagination info
+  const displayPagination = useMemo(() => {
+    if (debouncedSearchTerm.trim()) {
+      return {
+        currentPage: searchCurrentPage,
+        totalPages: searchTotalPages,
+        totalItems: searchTotalItems,
+        hasNextPage: searchHasNextPage,
+        hasPreviousPage: searchHasPreviousPage
+      };
+    }
+    // When a category is selected, use actual pagination totalPages (from count query)
+    // Stats service doesn't have category-specific page counts
+    if (selectedCategory) {
+    return {
+      currentPage,
+        totalPages,
+      totalItems,
+      hasNextPage,
+      hasPreviousPage
+    };
+    }
+    // For "all categories" view, prefer stats service (faster)
+    return {
+      currentPage,
+      totalPages: statsTotalPages > 0 ? statsTotalPages : totalPages,
+      totalItems: statsTotalItems > 0 ? statsTotalItems : totalItems,
+      hasNextPage,
+      hasPreviousPage
+    };
+  }, [debouncedSearchTerm, searchCurrentPage, searchTotalPages, searchTotalItems, searchHasNextPage, searchHasPreviousPage, currentPage, totalPages, totalItems, hasNextPage, hasPreviousPage, statsTotalPages, statsTotalItems, selectedCategory]);
+
+  // Compute reservation cap state from the dedicated reservedNumbers listener
+  useEffect(() => {
+    setHasReservation(reservedNumbers.length >= MAX_RESERVATIONS);
+  }, [reservedNumbers]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, selectedCategory, selectedGroup, selectedInitials, pageSize]);
+
+  useEffect(() => {
+    if (propSelectedCategory !== undefined) {
+      setSelectedCategory(propSelectedCategory);
+    }
+  }, [propSelectedCategory]);
+
+  // Edit number functionality
+  const openEditModal = (number: NumberPoolType) => {
+    setEditingNumber(number);
+    setEditPoolNumber(number.number || '');
+    setEditPoolCategory(number.category || '');
+    setEditPoolCode(number.code || '');
+    setEditPoolGroup(number.group || '');
+    setEditPoolPasscode(number.passcode || '');
+    setEditPoolTeamVisibility(number.teamVisibility || '');
+    setEditPoolStatus(number.status || 'open');
+    setEditPhoneError('');
+    setShowEditDialog(true);
+  
+  };
+
+  const handleUpdateNumber = async () => {
+    if (!editingNumber || updatingNumber) {
+      return;
+    }
+
+    const num = editPoolNumber.trim();
+    const cat = editPoolCategory.trim();
+    const code = editPoolCode.trim();
+    const group = editPoolGroup.trim();
+    
+
+    // Validate phone number
+    if (!num) {
+      toast.error('Phone number is required');
+      return;
+    }
+    if (num.length !== 10) {
+      toast.error('Phone number must be exactly 10 digits');
+      return;
+    }
+    if (!code) {
+      toast.error('Code is required');
+      return;
+    }
+    if (!group) {
+      toast.error('Group is required');
+      return;
+    }
+    if (!Array.from(CATEGORIES).includes(cat as any)) {
+      toast.error('Please select a valid category');
+      return;
+    }
+    // Validate passcode for admin/coordinator
+    if ((isAdmin() || isCoordinator) && !editPoolPasscode.trim()) {
+      toast.error('Passcode is required');
+      return;
+    }
+
+    // Check if another number already exists with this number (excluding current)
+    const existingNumber = numbers.find(n => n.id !== editingNumber.id && (n.number || '').trim() === num);
+    if (existingNumber) {
+      setDuplicateNumberData({
+        existingNumber: existingNumber.number || '',
+        newNumber: num
+      });
+      setShowDuplicateNumberDialog(true);
+      return;
+    }
+
+    try {
+      setUpdatingNumber(true);
+      const numberData: any = {
+        number: num,
+        category: cat,
+        code,
+        group: group.trim(),
+        status: editPoolStatus,
+        lastStatusChange: serverTimestamp()
+      };
+
+      // If status is being set to 'open', clear all reserved data (for admin or coordinator)
+      if (editPoolStatus === 'open' && (isAdmin() || isCoordinator || user?.role === 'coordinator')) {
+        numberData.reservedBy = null;
+        numberData.reservedAt = null;
+        numberData.expiresAt = null;
+        numberData.claimingAgentId = null;
+        numberData.claimingStartedAt = null;
+        numberData.claimingExpiresAt = null;
+        numberData.claimQueue = [];
+        numberData.originalAgentId = null;
+        numberData.originalReservedAt = null;
+        numberData.originalExpiresAt = null;
+      }
+
+      // Add passcode for admin/coordinator
+      if (isAdmin() || isCoordinator) {
+        numberData.passcode = editPoolPasscode.trim();
+      }
+      // Handle team visibility - set to empty string if cleared, or to the selected team ID
+      if (isAdmin() || isCoordinator) {
+      if (editPoolTeamVisibility.trim()) {
+        numberData.teamVisibility = editPoolTeamVisibility.trim();
+        } else {
+          // Clear team visibility to make it visible to all teams
+          numberData.teamVisibility = null;
+        }
+      }
+
+      
+      // Get old data for logging
+      const oldData = {
+        number: editingNumber.number,
+        category: editingNumber.category,
+        code: editingNumber.code,
+        group: editingNumber.group,
+        passcode: editingNumber.passcode,
+        teamVisibility: editingNumber.teamVisibility,
+        status: editingNumber.status
+      };
+      
+      await updateDoc(doc(db, 'numberPool', editingNumber.id), numberData);
+      
+      // Log the number update
+      await logNumberAction(
+        editingNumber.id,
+        num,
+        'updated',
+        oldData,
+        numberData,
+        `Updated number: ${editingNumber.number} → ${num}`
+      );
+      
+      toast.success('Number updated successfully!');
+      await refreshNumberData(editingNumber.id);
+      setShowEditDialog(false);
+      setEditingNumber(null);
+      // Reset form
+      setEditPoolNumber('');
+      setEditPoolCategory('');
+      setEditPoolCode('');
+      setEditPoolGroup('');
+      setEditPoolPasscode('');
+      setEditPoolTeamVisibility('');
+      setEditPoolStatus('open');
+      setEditPhoneError('');
+    } catch (err) {
+      toast.error('Failed to update number');
+    } finally {
+      setUpdatingNumber(false);
+    }
+  };
+
+  // Fetch teams data for team visibility selection (only for admins and coordinators)
+  useEffect(() => {
+    const fetchTeams = async () => {
+      try {
+        const teamsSnapshot = await getDocs(collection(db, 'teams'));
+        const teamsData = teamsSnapshot.docs.map(doc => ({
+          id: doc.id,
+          name: doc.data().name || 'Unnamed Team'
+        }));
+        setTeams(teamsData);
+      } catch (error) {
+      }
+    };
+
+    // Only fetch teams for admins and coordinators (they need it for team visibility dropdown)
+    if (isAdmin() || user?.role === 'coordinator') {
+      fetchTeams();
+    }
+  }, [isAdmin, user?.role]);
+
+  useEffect(() => {
+    if (onCategoryChange && selectedCategory !== propSelectedCategory) {
+      onCategoryChange(selectedCategory || '');
+    }
+  }, [selectedCategory, onCategoryChange, propSelectedCategory]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const newClaimCountdowns: Record<string, number> = {};
+      const newReservationCountdowns: Record<string, number> = {};
+
+      // Combine all sources: current page numbers, reserved section numbers, and search results
+      const mergedMap = new Map<string, NumberPoolType>();
+      numbers.forEach(n => mergedMap.set(n.id, n));
+      reservedNumbers.forEach(n => mergedMap.set(n.id, n));
+      searchResults.forEach(n => mergedMap.set(n.id, n));
+      
+
+      mergedMap.forEach((number) => {
+        // Handle claim countdowns
+        const claimingRaw = (number as any)?.claimingExpiresAt;
+        if (claimingRaw) {
+          const claimingExpiresAt: Date = typeof claimingRaw?.toDate === 'function'
+            ? claimingRaw.toDate()
+            : (claimingRaw instanceof Date ? claimingRaw : new Date(claimingRaw));
+          if (claimingExpiresAt && !Number.isNaN(claimingExpiresAt.getTime())) {
+            const timeLeft = Math.max(0, claimingExpiresAt.getTime() - now);
+            if (timeLeft > 0) newClaimCountdowns[number.id] = timeLeft;
+          }
+        }
+
+        // Handle reservation countdowns
+        const reservationRaw = (number as any)?.expiresAt;
+        if (reservationRaw && number.status === 'reserved') {
+          let reservationExpiresAt: Date;
+          
+          // Handle different date formats
+          if (typeof reservationRaw?.toDate === 'function') {
+            // Firestore Timestamp
+            reservationExpiresAt = reservationRaw.toDate();
+          } else if (reservationRaw instanceof Date) {
+            // Already a Date object
+            reservationExpiresAt = reservationRaw;
+          } else if (typeof reservationRaw === 'string') {
+            // ISO string
+            reservationExpiresAt = new Date(reservationRaw);
+          } else if (typeof reservationRaw === 'number') {
+            // Unix timestamp
+            reservationExpiresAt = new Date(reservationRaw);
+          } else {
+            // Try to parse as date
+            reservationExpiresAt = new Date(reservationRaw);
+          }
+          
+          if (reservationExpiresAt && !Number.isNaN(reservationExpiresAt.getTime())) {
+            const timeLeft = Math.max(0, reservationExpiresAt.getTime() - now);
+            if (timeLeft > 0) {
+              newReservationCountdowns[number.id] = timeLeft;
+            }
+          }
+        }
+      });
+
+      setClaimCountdowns(newClaimCountdowns);
+      setReservationCountdowns(newReservationCountdowns);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [numbers, reservedNumbers, searchResults]);
+
+  // Trigger expiry when countdown reaches 0
+  useEffect(() => {
+    const triggerExpiredReservations = async () => {
+      const now = Date.now();
+      const expiredNumbers = reservedNumbers.filter(number => {
+        const expiresAt = number.expiresAt;
+        if (!expiresAt) return false;
+        const expiryTime = expiresAt instanceof Date ? expiresAt.getTime() : new Date(expiresAt).getTime();
+        return expiryTime <= now;
+      });
+
+      if (expiredNumbers.length > 0) {
+        console.log(`Found ${expiredNumbers.length} expired reservations, triggering release...`);
+        
+        // Import Firebase functions
+        const { getFunctions, httpsCallable } = await import('firebase/functions');
+        const functions = getFunctions();
+        const triggerExpiry = httpsCallable(functions, 'triggerReservationExpiry');
+
+        // Trigger expiry for each expired number
+        for (const number of expiredNumbers) {
+          try {
+            console.log(`Triggering expiry for number ${number.id}`);
+            await triggerExpiry({ numberId: number.id });
+          } catch (error) {
+            console.error(`Failed to trigger expiry for number ${number.id}:`, error);
+          }
+        }
+      }
+    };
+
+    // Check for expired reservations every 5 seconds
+    const interval = setInterval(triggerExpiredReservations, 5000);
+    
+    return () => clearInterval(interval);
+  }, [reservedNumbers]);
+
+  useEffect(() => {
+    if (numberIdFromUrl && numbers.length > 0) {
+      const number = numbers.find(n => n.id === numberIdFromUrl);
+      if (number) {
+        setSelectedNumberForChat(number);
+        setShowChat(true);
+      }
+    }
+  }, [numberIdFromUrl, numbers]);
+
+  // Add useEffect to check coordinator status and fetch status checks
+  useEffect(() => {
+    const checkCoordinatorStatus = async () => {
+      if (!user?.id) return;
+      
+      const userDoc = await getDoc(doc(db, 'users', user.id));
+      if (userDoc.exists()) {
+        setIsCoordinator(userDoc.data().role === 'coordinator');
+      }
+    };
+
+    checkCoordinatorStatus();
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    // Get all status checks
+    const q = query(
+      collection(db, 'statusChecks'),
+      orderBy('requestedAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const checks = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          numberId: data.numberId,
+          number: data.number,
+          requestedBy: data.requestedBy,
+          requestedAt: data.requestedAt?.toDate(),
+          status: data.status,
+          respondedAt: data.respondedAt?.toDate(),
+          respondedBy: data.respondedBy,
+          expiresAt: data.expiresAt?.toDate()
+        };
+      }) as StatusCheck[];
+      setStatusChecks(checks);
+    }, (error) => {
+      // ✅ FIX: Handle permission errors gracefully during logout
+      if (error.code === 'permission-denied') {
+        // User logged out or lost permissions - cleanup silently
+        return;
+      }
+      
+      console.error('Error in NumberPool status checks listener:', error);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
+    async function fetchAgentLeadNumbers() {
+      if (!user?.id) return;
+      const leadsQuery = query(
+        collection(db, 'leads'),
+        where('agentId', '==', user.id)
+      );
+      const leadsSnapshot = await getDocs(leadsQuery);
+      const numberIds = new Set<string>();
+      leadsSnapshot.forEach(doc => {
+        const data = doc.data();
+        if (Array.isArray(data.plans)) {
+          data.plans.forEach((plan: any) => {
+            if (plan.numberId) numberIds.add(plan.numberId);
+          });
+        }
+      });
+      setAgentLeadNumberIds(numberIds);
+    }
+    fetchAgentLeadNumbers();
+  }, [user?.id]);
+
+  const handleSort = (field: SortField) => {
+    setSortConfig(current => ({
+      field,
+      direction: current.field === field && current.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
+  const handleNumberSelect = (number: NumberPoolType) => {
+    if (onNumberSelect) {
+      onNumberSelect(number);
+      setShowPool(false);
+    }
+  };
+
+  const [orderedNumbers, setOrderedNumbers] = useState<NumberPoolType[]>([]);
+
+  const passesFilter = useCallback((number: NumberPoolType) => {
+    // Filter out activated numbers for non-admin and non-coordinator users
+    if (!isAdmin() && user?.role !== 'coordinator') {
+      if (number.status === 'activated') return false;
+    }
+
+    // Category filter is handled server-side by numberPoolManager
+    // No need to filter client-side as manager already returns filtered results
+
+    // Team visibility for agents
+    if (user?.role === 'agent' && user.teamId) {
+      if (number.teamVisibility && number.teamVisibility !== user.teamId) return false;
+    }
+
+    // Search filter (only when actively searching, not for category changes)
+    if (searchTerm && debouncedSearchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      const matches =
+        number.number.toLowerCase().includes(searchLower) ||
+        number.category.toLowerCase().includes(searchLower) ||
+        number.code.toLowerCase().includes(searchLower);
+      if (!matches) return false;
+    }
+
+    return true;
+  }, [isAdmin, user?.role, user?.teamId, searchTerm, debouncedSearchTerm]);
+
+  const computeSorted = useCallback((list: NumberPoolType[]) => {
+    const result = [...list];
+    const direction = sortConfig.direction === 'asc' ? 1 : -1;
+    
+    result.sort((a, b) => {
+      if (sortConfig.field === 'number') {
+        return a.number.localeCompare(b.number) * direction;
+      }
+      if (sortConfig.field === 'category') {
+        return a.category.localeCompare(b.category) * direction;
+      }
+      if (sortConfig.field === 'code') {
+        return a.code.localeCompare(b.code) * direction;
+      }
+      if (sortConfig.field === 'group') {
+        const groupA = a.group || '';
+        const groupB = b.group || '';
+        return groupA.localeCompare(groupB) * direction;
+      }
+      if (sortConfig.field === 'passcode') {
+        const passcodeA = a.passcode || '';
+        const passcodeB = b.passcode || '';
+        return passcodeA.localeCompare(passcodeB) * direction;
+      }
+      if (sortConfig.field === 'status') {
+        return a.status.localeCompare(b.status) * direction;
+      }
+      if (sortConfig.field === 'reservationCount') {
+        const countA = a.reservationCount || 0;
+        const countB = b.reservationCount || 0;
+        return (countA - countB) * direction;
+      }
+      return 0;
+    });
+    
+    return result;
+  }, [sortConfig]);
+
+  // Recompute full order only when sort or filters change
+  useEffect(() => {
+    const filtered = numbers.filter(passesFilter);
+    setOrderedNumbers(computeSorted(filtered));
+  }, [passesFilter, computeSorted]);
+
+  // On incremental updates, keep order stable: retain existing order, update items, append new
+  useEffect(() => {
+    if (orderedNumbers.length === 0) {
+      // Initial population when numbers arrive
+      const filtered = numbers.filter(passesFilter);
+      setOrderedNumbers(prev => (prev.length === 0 ? computeSorted(filtered) : prev));
+      return;
+    }
+
+    const byId = new Map(numbers.map(n => [n.id, n]));
+    const next: NumberPoolType[] = [];
+    const seen = new Set<string>();
+
+    // Keep existing order for items that still exist and pass filters
+    for (const item of orderedNumbers) {
+      const fresh = byId.get(item.id);
+      if (fresh && passesFilter(fresh)) {
+        next.push(fresh);
+        seen.add(fresh.id);
+      }
+    }
+
+    // Append any new items that pass filters
+    for (const n of numbers) {
+      if (!seen.has(n.id) && passesFilter(n)) {
+        next.push(n);
+        seen.add(n.id);
+      }
+    }
+
+    setOrderedNumbers(next);
+  }, [numbers]);
+
+  // Get display numbers (search results take precedence; do not fallback to page while searching)
+  const displayNumbers = useMemo(() => {
+    if (debouncedSearchTerm.trim()) {
+      return searchResults; // can be empty to show "no results"
+    }
+    // If we have search results but no search term, clear them
+    if (searchResults.length > 0 && !debouncedSearchTerm.trim()) {
+      setSearchResults([]);
+      return orderedNumbers; // Use orderedNumbers instead of numbers
+    }
+    return orderedNumbers; // Use orderedNumbers instead of numbers
+  }, [debouncedSearchTerm, searchResults, orderedNumbers]);
+
+  // Auto-recovery: if nothing is visible but stats indicate there are items, attempt a re-initialize
+  // Only trigger if we're not currently loading and haven't just initialized
+  useEffect(() => {
+    // Only attempt recovery if:
+    // 1. Not currently loading
+    // 2. Display is empty
+    // 3. Stats show items exist
+    // 4. User is logged in
+    // 5. Haven't already attempted recovery for this state
+    if (!user?.id) {
+      recoveryAttemptedRef.current = false;
+      return;
+    }
+
+    if (!loading && displayNumbers.length === 0 && (statsTotalItems > 0)) {
+      const currentState = numberPoolManager.getState();
+      // Don't recover if we just reset or are initializing
+      if (currentState?.isLoading) {
+        return;
+      }
+      
+      // Prevent multiple recovery attempts
+      if (recoveryAttemptedRef.current) {
+        return;
+      }
+      
+      recoveryAttemptedRef.current = true;
+      
+      // Use a gentler approach - just re-initialize instead of force reset
+      setTimeout(() => {
+        if (user?.id) {
+          // Mark as not initialized so it will reload
+          numberPoolManager.initialize(selectedCategory, pageSize, user.id, user.role, selectedGroup, selectedInitials).catch(() => {
+            recoveryAttemptedRef.current = false; // Allow retry on error
+          }).finally(() => {
+            // Reset recovery flag after a delay to allow future recoveries if needed
+            setTimeout(() => {
+              recoveryAttemptedRef.current = false;
+            }, 5000);
+          });
+        }
+      }, 1000);
+    } else {
+      // Reset recovery flag if conditions change
+      recoveryAttemptedRef.current = false;
+    }
+  }, [loading, displayNumbers.length, statsTotalItems, selectedCategory, selectedGroup, selectedInitials, pageSize, user?.id, user?.role]);
+
+  // Use displayNumbers instead of paginatedNumbers for the new pagination system
+  const paginatedNumbers = displayNumbers;
+
+  async function handleReserve(number: NumberPoolType) {
+    // Enforce cap using global reservedNumbers (listener-backed, not page-limited)
+    if (reservedNumbers.length >= MAX_RESERVATIONS) {
+      setShowReserveLimitDialog(true);
+      return;
+    }
+
+    setCheckingReserveId(number.id);
+
+    // Pre-check on server data (outside transaction) to avoid transaction query limitations
+    if (user?.id) {
+      try {
+        const capCheckQuery = query(
+          collection(db, 'numberPool'),
+          where('reservedBy', '==', user.id),
+          where('status', '==', 'reserved'),
+          limit(MAX_RESERVATIONS)
+        );
+        const capSnap = await getDocs(capCheckQuery);
+        if (capSnap.size >= MAX_RESERVATIONS) {
+          setCheckingReserveId(null);
+          setShowReserveLimitDialog(true);
+          return;
+        }
+      } catch (_err) {
+        // If the pre-check query fails (e.g., missing index), do not block reservation
+      }
+    }
+
+    // Check number status with ETI API before showing reserve dialog
+    try {
+      toast.loading('Checking number status...', { id: 'number-check' });
+      const { NumberCheckService } = await import('../../services/numberCheckService');
+      const canReserve = await NumberCheckService.canReserveNumber(number.number);
+      toast.dismiss('number-check');
+      
+      if (!canReserve) {
+        // Show dialog instead of toast
+        setActiveNumberInfo({
+          number: number.number,
+          etiStatus: 200, // ETI API returned 200 for active numbers
+          message: 'Number is active'
+        });
+        setShowNumberActiveDialog(true);
+        setCheckingReserveId(null);
+        return;
+      }
+    } catch (error: any) {
+      console.error('Error checking number status:', error);
+      toast.dismiss('number-check');
+      toast.error('Failed to verify number status. Please try again.', {
+        duration: 3000
+      });
+      setCheckingReserveId(null);
+      return;
+    }
+    
+    setCheckingReserveId(null);
+
+    try {
+      const numberRef = doc(db, 'numberPool', number.id);
+      const latestSnapshot = await getDoc(numberRef);
+      if (latestSnapshot.exists()) {
+        const latestData = latestSnapshot.data();
+        const latestStatus = latestData.status as NumberStatus | undefined;
+        // Number is reservable if status is 'open' - reservedBy field doesn't matter for open numbers
+        const isReservable = latestStatus === 'open';
+
+        if (!isReservable) {
+          setReserveConflictInfo({
+            number: latestData.number || number.number,
+            status: latestStatus,
+            reservedByName: null
+          });
+          setShowReserveConflictDialog(true);
+          await refreshNumberData(number.id);
+          return;
+        }
+      }
+    } catch (error) {
+      console.error('Error validating latest number status before reserve:', error);
+    }
+
+    setReserveConflictInfo(null);
+    setNumberToReserve(number);
+    setShowReserveDialog(true);
+  }
+
+  async function confirmReserve() {
+    if (!numberToReserve || !user?.id) return;
+
+    // Prevent multiple clicks during reservation
+    if (reservingNumbers.has(numberToReserve.id)) {
+      return;
+    }
+
+    try {
+      // Show loading state
+      setReservingNumbers(prev => new Set(prev).add(numberToReserve.id));
+      setShowReserveDialog(false);
+
+      // ETI API check is now handled in handleReserve function
+      
+      // Use Firestore transaction to prevent race conditions
+      const result = await runTransaction(db, async (transaction) => {
+        const numberRef = doc(db, 'numberPool', numberToReserve.id);
+        const numberDoc = await transaction.get(numberRef);
+        
+        if (!numberDoc.exists()) {
+          throw new Error('Number not found');
+        }
+        
+        const numberData = numberDoc.data();
+        
+        // Check if number is still available for reservation
+        if (numberData.status !== 'open') {
+          throw new Error('Number is no longer available for reservation');
+        }
+        
+        // Check if another agent has already reserved it
+        if (numberData.reservedBy) {
+          throw new Error('Number has already been reserved by another agent');
+        }
+        
+        // Cap was already checked before the transaction
+        
+        // Prepare the update data for Firestore
+        const firestoreUpdateData = {
+          status: 'reserved' as NumberStatus,
+          reservedBy: user.id,
+          reservedAt: serverTimestamp(),
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
+          lastStatusChange: serverTimestamp(),
+          reservationCount: (numberData.reservationCount || 0) + 1
+        };
+        
+        // Update the document in the transaction
+        transaction.update(numberRef, firestoreUpdateData);
+        
+        // Prepare data for local state (with Date objects)
+        const localUpdateData = {
+          status: 'reserved' as NumberStatus,
+          reservedBy: user.id,
+          reservedAt: new Date(),
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
+          lastStatusChange: new Date(),
+          reservationCount: (numberData.reservationCount || 0) + 1
+        };
+        
+        return {
+          success: true,
+          updateData: localUpdateData
+        };
+      });
+      
+      if (result.success) {
+        // Update local state only after successful transaction
+        const updatedNumber: NumberPoolType = {
+          ...numberToReserve,
+          ...result.updateData
+        };
+
+        setNumbers(prev => prev.map(n => 
+          n.id === numberToReserve.id ? updatedNumber : n
+        ));
+        setReservedNumbers(prev => [...prev, updatedNumber]);
+        setAllNumbersForReserved(prev => 
+          prev.map(n => n.id === numberToReserve.id ? updatedNumber : n)
+        );
+        
+        // Log the reservation action
+        await logNumberAction(
+          numberToReserve.id,
+          numberToReserve.number || '',
+          'reserved',
+          { status: 'open' },
+          result.updateData,
+          `Reserved number for 24 hours`
+        );
+        
+        // Refresh with latest data from Firestore
+        await refreshNumberData(numberToReserve.id);
+        
+        toast.success('Number reserved successfully');
+      }
+      
+    } catch (error: any) {
+      
+      // Show appropriate error message
+      if (error.message.includes('Number is no longer available')) {
+        toast.error('This number is no longer available for reservation');
+      } else if (error.message.includes('already been reserved')) {
+        toast.error('This number has already been reserved by another agent');
+      } else if (error.message.includes('only reserve up to')) {
+        toast.error(error.message);
+      } else {
+        toast.error('Failed to reserve number. Please try again.');
+      }
+      
+      // Refresh the number data to get the latest status
+      // This will be handled by the real-time listener
+    } finally {
+      // Cleanup loading state
+      setReservingNumbers(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(numberToReserve.id);
+        return newSet;
+      });
+    }
+  }
+
+  async function handleRelease(number: NumberPoolType) {
+    setSelectedNumber(number);
+    setShowReleaseDialog(true);
+  }
+
+
+  async function confirmRelease() {
+    if (!selectedNumber) return;
+
+    try {
+      // Update local state immediately
+      const updatedNumber: NumberPoolType = {
+        ...selectedNumber,
+        status: 'open' as NumberStatus,
+        reservedBy: undefined,
+        reservedAt: undefined,
+        expiresAt: undefined,
+        lastStatusChange: new Date(),
+        claimingAgentId: undefined,
+        claimingStartedAt: undefined,
+        claimingExpiresAt: undefined,
+        originalAgentId: undefined,
+        originalReservedAt: undefined,
+        originalExpiresAt: undefined,
+        claimQueue: [],
+        claimCount: 0
+      };
+
+      // Update UI immediately
+      setNumbers(prev => prev.map(n => 
+        n.id === selectedNumber.id ? updatedNumber : n
+      ));
+      setReservedNumbers(prev => prev.filter(n => n.id !== selectedNumber.id));
+      setAllNumbersForReserved(prev => 
+        prev.map(n => n.id === selectedNumber.id ? updatedNumber : n)
+      );
+      setHasReservation(false);
+      setShowReleaseDialog(false);
+
+      // If there's a claiming agent, transfer ownership to them immediately
+      if (selectedNumber.claimingAgentId) {
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
+
+        // Get the next claim from the queue
+        const claimQueue = selectedNumber.claimQueue || [];
+        const nextClaim = claimQueue.find((claim: { agentId: string; claimedAt: Date }) => claim.agentId !== selectedNumber.claimingAgentId);
+
+        // Update local state for the claiming agent
+        const claimedNumber: NumberPoolType = {
+          ...selectedNumber,
+          status: 'reserved',
+          reservedBy: selectedNumber.claimingAgentId,
+          reservedAt: now,
+          expiresAt: expiresAt,
+          lastStatusChange: now,
+          // Update claiming agent information if there's a next claim
+          claimingAgentId: nextClaim ? nextClaim.agentId : undefined,
+          claimingStartedAt: nextClaim ? now : undefined,
+          claimingExpiresAt: nextClaim ? new Date(now.getTime() + CLAIM_TIMEOUT) : undefined,
+          // Clear original agent information
+          originalAgentId: undefined,
+          originalReservedAt: undefined,
+          originalExpiresAt: undefined,
+          // Update claim queue
+          claimQueue: nextClaim ? claimQueue.filter(claim => claim.agentId !== selectedNumber.claimingAgentId) : []
+        };
+
+        setNumbers(prev => prev.map(n => 
+          n.id === selectedNumber.id ? claimedNumber : n
+        ));
+
+        if (claimTimer) {
+        clearTimeout(claimTimer);
+      }
+
+        // Update backend asynchronously
+        const numberRef = doc(db, 'numberPool', selectedNumber.id);
+        
+        // Get old data for logging
+        const oldData = {
+          status: selectedNumber.status,
+          reservedBy: selectedNumber.reservedBy,
+          claimingAgentId: selectedNumber.claimingAgentId,
+          claimQueue: selectedNumber.claimQueue
+        };
+        
+        await updateDoc(numberRef, {
+          status: 'reserved',
+          reservedBy: selectedNumber.claimingAgentId,
+          reservedAt: serverTimestamp(),
+          expiresAt: expiresAt,
+          lastStatusChange: serverTimestamp(),
+          // Update claiming agent information if there's a next claim
+          claimingAgentId: nextClaim ? nextClaim.agentId : null,
+          claimingStartedAt: nextClaim ? serverTimestamp() : null,
+          claimingExpiresAt: nextClaim ? new Date(now.getTime() + CLAIM_TIMEOUT) : null,
+          // Clear original agent information
+          originalAgentId: null,
+          originalReservedAt: null,
+          originalExpiresAt: null,
+          // Update claim queue
+          claimQueue: nextClaim ? claimQueue.filter(claim => claim.agentId !== selectedNumber.claimingAgentId) : []
+        });
+
+        // Log the release and transfer action
+        const claimingAgentName = selectedNumber.claimingAgentId 
+          ? await resolveUserName(selectedNumber.claimingAgentId) 
+          : 'Unknown User';
+
+        await logNumberAction(
+          selectedNumber.id,
+          selectedNumber.number || '',
+          'released',
+          oldData,
+          { 
+            status: 'reserved', 
+            reservedBy: selectedNumber.claimingAgentId,
+            claimingAgentId: nextClaim ? nextClaim.agentId : null
+          },
+          `Released number and transferred to claiming agent: ${claimingAgentName}`
+        );
+
+        // Send notification to the claiming agent
+        await addDoc(collection(db, 'notifications'), {
+          userId: selectedNumber.claimingAgentId,
+          type: 'number_claimed',
+          title: 'Number Claim Completed',
+          message: `The number has been released by the original agent and is now reserved for you.`,
+          read: false,
+          createdAt: serverTimestamp(),
+          numberId: selectedNumber.id
+        });
+
+        // If there's a next claim, start real-time timer
+        if (nextClaim) {
+          // Start timer to trigger real-time claim expiry when time expires
+          const timer = setTimeout(() => {
+            handleClaimTimeout({
+              ...selectedNumber,
+              claimingAgentId: nextClaim.agentId,
+              claimingStartedAt: now,
+              claimingExpiresAt: new Date(now.getTime() + CLAIM_TIMEOUT)
+            });
+          }, CLAIM_TIMEOUT);
+
+          setClaimTimer(timer);
+
+          // Send notification to the next claiming agent
+          await addDoc(collection(db, 'notifications'), {
+            userId: nextClaim.agentId,
+            type: 'number_claimed',
+            title: 'Number Claim Started',
+            message: `The number is now available for your claim. You have ${CLAIM_TIMEOUT / 60000} minutes to take ownership.`,
+            read: false,
+            createdAt: serverTimestamp(),
+            numberId: selectedNumber.id
+          });
+        }
+      } else {
+        // Regular release without any claims
+        const numberRef = doc(db, 'numberPool', selectedNumber.id);
+        
+        // Get old data for logging
+        const oldData = {
+          status: selectedNumber.status,
+          reservedBy: selectedNumber.reservedBy,
+          reservedAt: selectedNumber.reservedAt,
+          expiresAt: selectedNumber.expiresAt,
+          claimingAgentId: selectedNumber.claimingAgentId,
+          claimQueue: selectedNumber.claimQueue
+        };
+        
+        await updateDoc(numberRef, {
+          status: 'open',
+          reservedBy: null,
+          reservedAt: null,
+          expiresAt: null,
+          lastStatusChange: serverTimestamp(),
+          claimingAgentId: null,
+          claimingStartedAt: null,
+          claimingExpiresAt: null,
+          originalAgentId: null,
+          originalReservedAt: null,
+          originalExpiresAt: null,
+          claimQueue: [],
+          claimCount: 0
+        });
+
+        // Log the regular release action
+        await logNumberAction(
+          selectedNumber.id,
+          selectedNumber.number || '',
+          'released',
+          oldData,
+          { status: 'open' },
+          `Released number (no claiming agent)`
+        );
+      }
+
+      // Refresh with latest data from Firestore after all updates complete
+      await refreshNumberData(selectedNumber.id);
+      
+      toast.success('Number released successfully');
+      
+    } catch (error) {
+      // Revert local state if backend update fails
+      setNumbers(prev => prev.map(n => 
+        n.id === selectedNumber.id ? selectedNumber : n
+      ));
+      setReservedNumbers(prev => [...prev, selectedNumber]);
+      setAllNumbersForReserved(prev => 
+        prev.map(n => n.id === selectedNumber.id ? selectedNumber : n)
+      );
+      setHasReservation(true);
+      toast.error('Failed to release number');
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    if (!isAdmin()) {
+      toast.error('Only administrators can delete numbers');
+      return;
+    }
+
+    if (selectedNumbers.length === 0) {
+      toast.error('Please select numbers to delete');
+      return;
+    }
+
+    if (selectedNumbers.length > 10000) {
+      toast.error('Cannot delete more than 10000 numbers at once');
+      return;
+    }
+
+    setShowDeleteDialog(true);
+  };
+
+  const confirmBulkDelete = async () => {
+    try {
+      setIsDeleting(true);
+      let batch = writeBatch(db);
+      
+      // Process numbers in chunks of 30 to comply with Firebase's IN operator limitation
+      const chunkSize = 30;
+      let totalDeleted = 0;
+      
+      for (let i = 0; i < selectedNumbers.length; i += chunkSize) {
+        const chunk = selectedNumbers.slice(i, i + chunkSize);
+        const numbersRef = collection(db, 'numberPool');
+        const q = query(numbersRef, where('id', 'in', chunk));
+        const querySnapshot = await getDocs(q);
+        
+        querySnapshot.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        
+        // Commit the batch for this chunk
+        await batch.commit();
+        totalDeleted += querySnapshot.size;
+        
+        // Create a new batch for the next chunk
+        batch = writeBatch(db);
+      }
+      
+      toast.success(`Successfully deleted ${totalDeleted} numbers`);
+      setSelectedNumbers([]);
+      setShowDeleteDialog(false);
+      setSelectAllMode(false);
+    } catch (error) {
+      toast.error('Failed to delete numbers');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleCheckDuplicates = async () => {
+    if (!isAdmin()) {
+      toast.error('Only administrators can check for duplicates');
+      return;
+    }
+
+    try {
+      setCheckingDuplicates(true);
+      
+      // Fetch all numbers from Firestore
+      const numbersRef = collection(db, 'numberPool');
+      const numbersSnapshot = await getDocs(numbersRef);
+      
+      // Group numbers by their number value
+      const numberMap = new Map<string, NumberPoolType[]>();
+      
+      numbersSnapshot.forEach((doc) => {
+        const data = doc.data() as NumberPoolType;
+        const number = (data.number || '').trim();
+        
+        if (number) {
+          if (!numberMap.has(number)) {
+            numberMap.set(number, []);
+          }
+          numberMap.get(number)!.push({
+            ...data,
+            id: doc.id
+          });
+        }
+      });
+      
+      // Find duplicates (numbers that appear more than once)
+      const duplicates: Array<{ number: string; entries: NumberPoolType[] }> = [];
+      
+      numberMap.forEach((entries, number) => {
+        if (entries.length > 1) {
+          duplicates.push({ number, entries });
+        }
+      });
+      
+      // Sort by number of duplicates (most duplicates first)
+      duplicates.sort((a, b) => b.entries.length - a.entries.length);
+      
+      setDuplicateNumbers(duplicates);
+      setShowDuplicateDialog(true);
+      
+      if (duplicates.length === 0) {
+        toast.success('No duplicate numbers found!');
+      } else {
+        toast.success(`Found ${duplicates.length} duplicate number(s)`);
+      }
+    } catch (error) {
+      console.error('Error checking duplicates:', error);
+      toast.error('Failed to check for duplicates');
+    } finally {
+      setCheckingDuplicates(false);
+    }
+  };
+
+  const handleDeleteSelectedDuplicates = async () => {
+    if (!isAdmin()) {
+      toast.error('Only administrators can delete numbers');
+      return;
+    }
+
+    if (selectedDuplicateEntries.size === 0) {
+      toast.error('Please select entries to delete');
+      return;
+    }
+
+    try {
+      setIsDeletingDuplicates(true);
+      
+      const entriesToDelete = Array.from(selectedDuplicateEntries);
+      let deletedCount = 0;
+      
+      // Delete in batches of 30 (Firestore limit)
+      const batchSize = 30;
+      for (let i = 0; i < entriesToDelete.length; i += batchSize) {
+        const batch = writeBatch(db);
+        const chunk = entriesToDelete.slice(i, i + batchSize);
+        
+        for (const entryId of chunk) {
+          // Find the entry to get its details for logging
+          let entryToLog: NumberPoolType | null = null;
+          for (const duplicate of duplicateNumbers) {
+            const found = duplicate.entries.find(e => e.id === entryId);
+            if (found) {
+              entryToLog = found;
+              break;
+            }
+          }
+          
+          if (entryToLog) {
+            // Get old data for logging
+            const oldData = {
+              number: entryToLog.number,
+              category: entryToLog.category,
+              code: entryToLog.code,
+              group: entryToLog.group,
+              status: entryToLog.status
+            };
+            
+            // Delete the document
+            const docRef = doc(db, 'numberPool', entryId);
+            batch.delete(docRef);
+            
+            // Log the deletion
+            await logNumberAction(
+              entryId,
+              entryToLog.number || '',
+              'deleted',
+              oldData,
+              {},
+              `Deleted duplicate number: ${entryToLog.number}`
+            );
+          }
+        }
+        
+        await batch.commit();
+        deletedCount += chunk.length;
+      }
+      
+      toast.success(`Successfully deleted ${deletedCount} duplicate entry/entries`);
+      
+      // Remove deleted entries from local state
+      setDuplicateNumbers(prev => 
+        prev.map(duplicate => ({
+          ...duplicate,
+          entries: duplicate.entries.filter(e => !selectedDuplicateEntries.has(e.id))
+        })).filter(duplicate => duplicate.entries.length > 1) // Remove if no longer duplicate
+      );
+      
+      // Clear selection
+      setSelectedDuplicateEntries(new Set());
+      setShowDeleteDuplicatesDialog(false);
+      
+      // Refresh the numbers list
+      // The real-time listener will update automatically
+    } catch (error) {
+      console.error('Error deleting duplicates:', error);
+      toast.error('Failed to delete duplicate entries');
+    } finally {
+      setIsDeletingDuplicates(false);
+    }
+  };
+
+  const handleSelectAll = () => {
+    if (selectAllMode) {
+      setSelectedNumbers([]);
+      setSelectAllMode(false);
+    } else {
+      // Get all numbers that match current filters
+      const filteredNumbers = orderedNumbers;
+      if (filteredNumbers.length > 10000) {
+        toast.error('Cannot select more than 10000 numbers at once');
+        return;
+      }
+      setSelectedNumbers(filteredNumbers.map(n => n.id));
+      setSelectAllMode(true);
+    }
+  };
+
+  const SortIcon = ({ field }: { field: SortField }) => {
+    if (sortConfig.field !== field) {
+      return <ArrowUpDown className="h-4 w-4 ml-1" />;
+    }
+    return sortConfig.direction === 'asc' ? 
+      <ArrowUp className="h-4 w-4 ml-1" /> : 
+      <ArrowDown className="h-4 w-4 ml-1" />;
+  };
+
+  // ===============================================================================
+  // EVENT HANDLERS AND OPERATIONS
+  // ===============================================================================
+
+  /**
+   * Optimized claim function with debouncing and loading states
+   * Handles number claiming with rate limiting and UI feedback
+   */
+  const handleClaim = useCallback(async (number: NumberPoolType) => {
+    if (!user?.id) return;
+    
+    // Check if this number is already being claimed
+    if (claimingNumbers.has(number.id)) {
+      toast.error('Claim in progress, please wait');
+      return;
+    }
+    
+    // Check rate limiting
+    const lastAttempt = lastClaimAttempts.get(number.id) || 0;
+    const now = Date.now();
+    if (now - lastAttempt < BUTTON_DEBOUNCE_DELAY) {
+      return; // Silently ignore rapid clicks
+    }
+    
+    setLastClaimAttempts(prev => new Map(prev.set(number.id, now)));
+    setNumberToClaim(number);
+    setShowClaimDialog(true);
+  }, [user?.id, claimingNumbers, lastClaimAttempts]);
+
+  const confirmClaim = async () => {
+    if (!numberToClaim || !user?.id) return;
+
+    // Prevent multiple simultaneous claims
+    if (claimingNumbers.has(numberToClaim.id)) {
+      return;
+    }
+
+    setClaimingNumbers(prev => new Set(prev.add(numberToClaim.id)));
+    
+    // Set timeout for operation
+    const timeoutId = setTimeout(() => {
+      setClaimingNumbers(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(numberToClaim.id);
+        return newSet;
+      });
+      toast.error('Claim operation timed out. Please try again.');
+    }, CLAIM_OPERATION_TIMEOUT);
+
+    setOperationTimeouts(prev => new Map(prev.set(numberToClaim.id, timeoutId)));
+
+    try {
+      // FIXED: Use simple updateDoc instead of complex transaction for better performance
+        const numberRef = doc(db, 'numberPool', numberToClaim.id);
+      
+      // For numbers with specific statuses (STRIKE functionality)
+      if (['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)) {
+        const now = new Date();
+        
+        // Get current number data first
+        const numberDoc = await getDoc(numberRef);
+        if (!numberDoc.exists()) {
+          throw new Error('Number not found');
+        }
+
+        const numberData = numberDoc.data();
+          const claims = numberData.claims || [];
+          
+          // Check if user already has a pending claim
+          const existingClaim = claims.find((claim: any) => claim.userId === user.id && claim.status === 'pending');
+          if (existingClaim) {
+            throw new Error('You already have a pending claim for this number');
+          }
+
+        // Add new claim to the array - FIXED: Use direct array update
+          const newClaim = {
+            userId: user.id,
+            claimedAt: now,
+            status: 'pending'
+          };
+
+        const updatedClaims = [...claims, newClaim];
+
+        // Update in Firebase - FIXED: Simple update instead of transaction
+        await updateDoc(numberRef, {
+            lastClaimedAt: now,
+            claimedAt: now,
+          claims: updatedClaims,  // FIXED: Direct array instead of arrayUnion
+            claimCount: (numberData.claimCount || 0) + 1
+          });
+
+          // Log the strike action
+          await logNumberAction(
+            numberToClaim.id,
+            numberToClaim.number || '',
+            'claimed',
+            { claims: claims, claimCount: numberData.claimCount || 0 },
+            { claims: updatedClaims, claimCount: (numberData.claimCount || 0) + 1 },
+            `Striked number (status: ${numberToClaim.status})`
+          );
+
+          // Update local state immediately for better UX
+          setNumbers(prev => prev.map(n => 
+            n.id === numberToClaim.id 
+              ? {
+                  ...n,
+                  claimedAt: now,
+                claims: updatedClaims,
+                  claimCount: (n.claimCount || 0) + 1
+                }
+              : n
+          ));
+
+      } else {
+        // CLAIM functionality for reserved numbers
+        const numberDoc = await getDoc(numberRef);
+        if (!numberDoc.exists()) {
+          throw new Error('Number not found');
+        }
+        
+        const numberData = numberDoc.data();
+        
+        if (numberData.status !== 'reserved') {
+          throw new Error('This number is not available for claiming');
+        }
+
+        if (numberData.claimingAgentId === user.id) {
+          throw new Error('You are already claiming this number');
+        }
+
+        // Check if user is already in the claim queue
+        const claimQueue = numberData.claimQueue || [];
+        const existingQueueClaim = claimQueue.find((claim: any) => claim.agentId === user.id);
+        if (existingQueueClaim) {
+          throw new Error('You are already in the claim queue for this number');
+        }
+
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + CLAIM_TIMEOUT);
+
+        // Add user to claim queue
+        const updatedClaimQueue = [...claimQueue, { agentId: user.id, claimedAt: now }];
+
+        // Update in Firebase - FIXED: Simple update instead of transaction
+        await updateDoc(numberRef, {
+          claimingAgentId: numberData.claimingAgentId || user.id,
+          claimingStartedAt: numberData.claimingAgentId ? numberData.claimingStartedAt : now,
+          claimingExpiresAt: numberData.claimingAgentId ? numberData.claimingExpiresAt : expiresAt,
+          claimQueue: updatedClaimQueue,
+          claimCount: (numberData.claimCount || 0) + 1
+        });
+
+        // Log the claim action
+        await logNumberAction(
+          numberToClaim.id,
+          numberToClaim.number || '',
+          'claimed',
+          { 
+            claimQueue: claimQueue, 
+            claimCount: numberData.claimCount || 0,
+            claimingAgentId: numberData.claimingAgentId
+          },
+          { 
+            claimQueue: updatedClaimQueue, 
+            claimCount: (numberData.claimCount || 0) + 1,
+            claimingAgentId: numberData.claimingAgentId || user.id
+          },
+          `Claimed reserved number (queue position: ${updatedClaimQueue.length})`
+        );
+
+        // Update local state immediately
+        setNumbers(prev => prev.map(n => 
+          n.id === numberToClaim.id 
+            ? {
+                ...n,
+                claimingAgentId: n.claimingAgentId || user.id,
+                claimingStartedAt: n.claimingAgentId ? n.claimingStartedAt : now,
+                claimingExpiresAt: n.claimingAgentId ? n.claimingExpiresAt : expiresAt,
+                claimQueue: updatedClaimQueue,
+                claimCount: (n.claimCount || 0) + 1
+              }
+            : n
+        ));
+
+        // Send notification to the original owner asynchronously (outside transaction)
+        if (numberData.reservedBy) {
+          // FIXED: Use setTimeout to prevent blocking
+          setTimeout(async () => {
+            try {
+              await addDoc(collection(db, 'notifications'), {
+              userId: numberData.reservedBy,
+              type: 'number_claimed',
+              title: 'Number Claim Alert',
+              message: `Number ${numberToClaim.number} has been claimed by another agent. You have ${CLAIM_TIMEOUT / 60000} minutes to respond.`,
+              read: false,
+              createdAt: serverTimestamp(),
+              numberId: numberToClaim.id
+            });
+            } catch (error) {
+            }
+          }, 0);
+        }
+      }
+
+      // Success - close dialog and show success message
+      setShowClaimDialog(false);
+      
+      // Refresh with latest data from Firestore
+      await refreshNumberData(numberToClaim.id);
+      
+      toast.success(['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) 
+        ? 'Number Striked successfully' 
+        : 'Number claimed successfully');
+
+    } catch (error: any) {
+      
+      // Revert local state if there's an error
+      setNumbers(prev => prev.map(n => 
+        n.id === numberToClaim.id ? numberToClaim : n
+      ));
+      
+      toast.error(error.message || 'Failed to claim number');
+    } finally {
+      // Cleanup loading state and timeout
+      setClaimingNumbers(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(numberToClaim.id);
+        return newSet;
+      });
+      
+      const timeoutId = operationTimeouts.get(numberToClaim.id);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        setOperationTimeouts(prev => {
+          const newMap = new Map(prev);
+          newMap.delete(numberToClaim.id);
+          return newMap;
+        });
+      }
+    }
+  };
+
+    const handleClaimTimeout = async (number: NumberPoolType) => {
+      try {
+        // Trigger real-time claim expiry by updating the document
+        const numberRef = doc(db, 'numberPool', number.id);
+        
+        // Update the document to trigger the real-time Cloud Function
+        await updateDoc(numberRef, {
+          claimExpiryTrigger: serverTimestamp(),
+          // Add performance tracking
+          clientTriggeredAt: new Date().toISOString(),
+          triggerSource: 'client_timer'
+        });
+        
+        console.log(`Claim timeout triggered for number ${number.id} - Real-time function will process immediately`);
+        
+        // Refresh with latest data from Firestore
+        await refreshNumberData(number.id);
+        
+        // Show user feedback
+        toast.success('Claim expiry processed - number will transfer automatically');
+      } catch (error) {
+        console.error('Error triggering claim expiry:', error);
+        toast.error('Failed to process claim timeout');
+      }
+    };
+
+  // Add a new function to handle status changes
+  const handleStatusChange = async (number: NumberPoolType, newStatus: NumberStatus) => {
+    try {
+      const numberRef = doc(db, 'numberPool', number.id);
+      
+      if (newStatus === 'open') {
+        // If status is changing to open, check for pending claims
+        const claimQueue = number.claimQueue || [];
+        if (claimQueue.length > 0) {
+          const nextClaim = claimQueue[0];
+          const now = new Date();
+          const newExpiresAt = new Date(now.getTime() + CLAIM_TIMEOUT);
+
+          // Update the number to be reserved for the first person in queue
+          const updateData = {
+            status: 'reserved' as NumberStatus,
+            reservedBy: nextClaim.agentId,
+            reservedAt: serverTimestamp(),
+            lastStatusChange: serverTimestamp(),
+            // If there's a second claim in queue, set them as the claiming agent
+            claimingAgentId: claimQueue.length > 1 ? claimQueue[1].agentId : null,
+            claimingStartedAt: claimQueue.length > 1 ? serverTimestamp() : null,
+            claimingExpiresAt: claimQueue.length > 1 ? newExpiresAt : null,
+            claimQueue: claimQueue.slice(1) // Remove the first claim from queue
+          };
+
+          await updateDoc(numberRef, updateData);
+
+          // If there's a second claim in queue, start real-time timer
+          if (claimQueue.length > 1) {
+            // Start timer to trigger real-time claim expiry when time expires
+            const timer = setTimeout(() => {
+              handleClaimTimeout({
+                ...number,
+                claimingAgentId: claimQueue[1].agentId,
+                claimingStartedAt: now,
+                claimingExpiresAt: newExpiresAt
+              });
+            }, CLAIM_TIMEOUT);
+
+            setClaimTimer(timer);
+
+            // Send notification to the second claiming agent
+            await addDoc(collection(db, 'notifications'), {
+              userId: claimQueue[1].agentId,
+              type: 'number_claimed',
+              title: 'Number Claim Started',
+              message: `The number is now available for your claim. You have ${CLAIM_TIMEOUT / 60000} minutes to take ownership.`,
+              read: false,
+              createdAt: serverTimestamp(),
+              numberId: number.id
+            });
+          }
+
+          // Send notification to the first claiming agent
+          await addDoc(collection(db, 'notifications'), {
+            userId: nextClaim.agentId,
+            type: 'number_claimed',
+            title: 'Number Claim Completed',
+            message: `The number has been reserved for you.`,
+            read: false,
+            createdAt: serverTimestamp(),
+            numberId: number.id
+          });
+        } else {
+          // No claims in queue, just update status
+          await updateDoc(numberRef, {
+            status: newStatus,
+            lastStatusChange: serverTimestamp(),
+            claimingAgentId: null,
+            claimingStartedAt: null,
+            claimingExpiresAt: null,
+            claimQueue: []
+          });
+        }
+      } else {
+        // For any other status change, clear the claim queue and stop timers
+        await updateDoc(numberRef, {
+          status: newStatus,
+          lastStatusChange: serverTimestamp(),
+          claimingAgentId: null,
+          claimingStartedAt: null,
+          claimingExpiresAt: null,
+          claimQueue: []
+        });
+
+        if (claimTimer) {
+        clearTimeout(claimTimer);
+      }
+      }
+    } catch (error) {
+      toast.error('Failed to update number status');
+    }
+  };
+
+  // Format countdown time
+  const formatCountdown = (ms: number) => {
+    const totalSeconds = Math.ceil(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${seconds}s`;
+  };
+
+  // Format reservation countdown time (shows hours and minutes)
+  const formatReservationCountdown = (ms: number) => {
+    const totalSeconds = Math.ceil(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    } else {
+      return `${seconds}s`;
+    }
+  };
+
+  // Optimized chat function with loading state
+  const handleOpenChat = useCallback((number: NumberPoolType) => {
+    // Check if chat is already being opened for this number
+    if (chattingNumbers.has(number.id)) {
+      return;
+    }
+    
+    // Check rate limiting
+    const lastAttempt = lastClaimAttempts.get(`chat_${number.id}`) || 0;
+    const now = Date.now();
+    if (now - lastAttempt < BUTTON_DEBOUNCE_DELAY) {
+      return; // Silently ignore rapid clicks
+    }
+    
+    setLastClaimAttempts(prev => new Map(prev.set(`chat_${number.id}`, now)));
+    setChattingNumbers(prev => new Set(prev.add(number.id)));
+    
+    setSelectedNumberForChat(number);
+    setShowChat(true);
+    
+    // Remove from chatting set after a short delay
+    setTimeout(() => {
+      setChattingNumbers(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(number.id);
+        return newSet;
+      });
+    }, 1000);
+  }, [chattingNumbers, lastClaimAttempts]);
+
+  // Add function to handle status check request
+  const handleStatusCheck = async (number: NumberPoolType) => {
+    if (!user?.id) return;
+
+    try {
+      // Create status check request
+      const statusCheckRef = await addDoc(collection(db, 'statusChecks'), {
+        numberId: number.id,
+        number: number.number,
+        requestedBy: user.id,
+        requestedAt: serverTimestamp(),
+        status: 'pending'
+      });
+
+      // Update local state immediately to show pending status
+      setStatusChecks(prev => [...prev, {
+        id: statusCheckRef.id,
+        numberId: number.id,
+        number: number.number,
+        requestedBy: user.id,
+        requestedAt: new Date(),
+        status: 'pending'
+      }]);
+
+      // Send notification to coordinators
+      const coordinatorsQuery = query(
+        collection(db, 'users'),
+        where('role', '==', 'coordinator')
+      );
+      const coordinatorsSnapshot = await getDocs(coordinatorsQuery);
+      
+      const notificationPromises = coordinatorsSnapshot.docs.map(doc => 
+        addDoc(collection(db, 'notifications'), {
+          userId: doc.id,
+          type: 'status_check',
+          title: 'New Status Check Request',
+          message: `Agent ${user.email} has requested a status check for number ${number.number}`,
+          read: false,
+          createdAt: serverTimestamp(),
+          numberId: number.id
+        })
+      );
+
+      await Promise.all(notificationPromises);
+      toast.success('Status check request sent to coordinator');
+    } catch (error) {
+      toast.error('Failed to request status check');
+    }
+  };
+
+  // Add function to handle status response
+  const handleStatusResponse = async (check: StatusCheck, status: 'available' | 'unavailable') => {
+    if (!user?.id) return;
+
+    try {
+      const checkRef = doc(db, 'statusChecks', check.id);
+      const updateData: any = {
+        status,
+        respondedAt: serverTimestamp(),
+        respondedBy: user.id
+      };
+
+      // If marking as available, add 24-hour expiration
+      if (status === 'available') {
+        const expiresAt = new Date();
+        expiresAt.setHours(expiresAt.getHours() + 24); // Set expiration to 24 hours from now
+        updateData.expiresAt = expiresAt;
+      }
+
+      await updateDoc(checkRef, updateData);
+
+      // Send notification to the requesting agent
+      await addDoc(collection(db, 'notifications'), {
+        userId: check.requestedBy,
+        type: 'status_check_response',
+        title: 'Status Check Response',
+        message: `Your status check for number ${check.number} has been marked as ${status}`,
+        read: false,
+        createdAt: serverTimestamp(),
+        numberId: check.numberId
+      });
+
+      // Remove the check from the local state immediately
+      setStatusChecks(prev => prev.filter(c => c.id !== check.id));
+
+      toast.success('Status updated successfully');
+    } catch (error) {
+      toast.error('Failed to update status');
+    }
+  };
+
+  // Update formatTimeRemaining function to handle undefined dates
+  const formatTimeRemaining = (expiresAt?: Date) => {
+    if (!expiresAt) return '00:00';
+    
+    const now = new Date();
+    const diff = expiresAt.getTime() - now.getTime();
+    
+    if (diff <= 0) return '00:00';
+    
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+  };
+
+  // Helper function to generate dynamic page numbers (OPTIMIZED)
+  const generatePageNumbers = () => {
+    const pages = [];
+    const maxVisiblePages = 5; // Reduced from 7 to 5 for better performance
+    const isSearchMode = debouncedSearchTerm.trim();
+    
+    if (displayPagination.totalPages <= maxVisiblePages) {
+      // Show all pages if total pages is small
+      for (let i = 1; i <= displayPagination.totalPages; i++) {
+        pages.push(i);
+      }
+    } else {
+      // Smart pagination logic
+      const leftOffset = Math.floor(maxVisiblePages / 2);
+      const rightOffset = maxVisiblePages - leftOffset - 1;
+      
+      let startPage = Math.max(1, displayPagination.currentPage - leftOffset);
+      let endPage = Math.min(displayPagination.totalPages, displayPagination.currentPage + rightOffset);
+      
+      // Adjust if we're near the beginning
+      if (displayPagination.currentPage <= leftOffset) {
+        endPage = Math.min(displayPagination.totalPages, maxVisiblePages);
+      }
+      
+      // Adjust if we're near the end
+      if (displayPagination.currentPage + rightOffset >= displayPagination.totalPages) {
+        startPage = Math.max(1, displayPagination.totalPages - maxVisiblePages + 1);
+      }
+      
+      // Add first page and ellipsis if needed
+      if (startPage > 1) {
+        pages.push(1);
+        if (startPage > 2) {
+          pages.push('...');
+        }
+      }
+      
+      // Add middle pages
+      for (let i = startPage; i <= endPage; i++) {
+        pages.push(i);
+      }
+      
+      // Add ellipsis and last page if needed (only in browse mode, not search mode)
+      if (endPage < displayPagination.totalPages && !isSearchMode) {
+        if (endPage < displayPagination.totalPages - 1) {
+          pages.push('...');
+        }
+        pages.push(displayPagination.totalPages);
+      }
+    }
+    
+    return pages;
+  };
+
+  // Update the status check display in the table
+  const renderStatusCheck = (number: NumberPoolType) => {
+    const check = statusChecks.find(check => check.numberId === number.id);
+    
+    // Check if the status check has expired
+    const isExpired = check?.status === 'available' && check?.expiresAt && check.expiresAt.getTime() <= Date.now();
+    
+    if (!check?.status || isExpired) {
+      return (
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={() => { setNumberForStatusCheck(number); setShowStatusCheckDialog(true); }}
+          className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 text-blue-600 rounded-lg hover:from-blue-100 hover:to-indigo-100 transition-all duration-200 group ring-1 ring-blue-100"
+        >
+          <CheckSquare className="h-4 w-4 mr-1.5" />
+          Check Status
+        </motion.button>
+      );
+    }
+
+    return (
+      <motion.span
+        className={clsx(
+          "inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium",
+          check.status === 'available'
+            ? "bg-green-100 text-green-700"
+            : check.status === 'unavailable'
+            ? "bg-red-100 text-red-700"
+            : "bg-yellow-100 text-yellow-700"
+        )}
+      >
+        {check.status === 'available' && (
+          <>
+            <CheckCircle2 className="h-4 w-4 mr-1.5" />
+            <span>Available</span>
+            {check.expiresAt && (
+              <span className="ml-2 text-xs font-medium bg-green-200 px-2 py-0.5 rounded">
+                {formatTimeRemaining(check.expiresAt)}
+              </span>
+            )}
+          </>
+        )}
+        {check.status === 'unavailable' && (
+          <>
+            <XSquare className="h-4 w-4 mr-1.5" />
+            <span>Unavailable</span>
+          </>
+        )}
+        {check.status === 'pending' && (
+          <>
+            <Clock className="h-4 w-4 mr-1.5" />
+            <span>Pending</span>
+          </>
+        )}
+      </motion.span>
+    );
+  };
+
+
+  if (loading) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="mb-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+              <div className="h-8 w-48 bg-gray-200 rounded-lg animate-pulse mb-2"></div>
+              <div className="h-4 w-64 bg-gray-200 rounded-lg animate-pulse"></div>
+            </div>
+          </div>
+
+          {/* Search and Filters Skeleton */}
+          <div className="mt-6 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="h-10 bg-gray-200 rounded-lg animate-pulse"></div>
+              <div className="h-10 bg-gray-200 rounded-lg animate-pulse"></div>
+              <div className="h-10 bg-gray-200 rounded-lg animate-pulse"></div>
+            </div>
+          </div>
+        </div>
+
+        {/* Table Skeleton */}
+        <div className="bg-white shadow-xl rounded-2xl overflow-hidden border border-gray-100">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead>
+                <tr className="bg-gray-50">
+                  <th className="px-6 py-4">
+                    <div className="h-4 w-4 bg-gray-200 rounded animate-pulse"></div>
+                  </th>
+                  <th className="px-6 py-4">
+                    <div className="h-4 w-20 bg-gray-200 rounded animate-pulse"></div>
+                  </th>
+                  <th className="px-6 py-4">
+                    <div className="h-4 w-24 bg-gray-200 rounded animate-pulse"></div>
+                  </th>
+                  <th className="px-6 py-4">
+                    <div className="h-4 w-16 bg-gray-200 rounded animate-pulse"></div>
+                  </th>
+                  <th className="px-6 py-4">
+                    <div className="h-4 w-20 bg-gray-200 rounded animate-pulse"></div>
+                  </th>
+                  <th className="px-6 py-4">
+                    <div className="h-4 w-16 bg-gray-200 rounded animate-pulse"></div>
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {[...Array(5)].map((_, index) => (
+                  <tr key={index}>
+                    <td className="px-6 py-4">
+                      <div className="h-4 w-4 bg-gray-200 rounded animate-pulse"></div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="h-4 w-32 bg-gray-200 rounded animate-pulse"></div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="h-6 w-24 bg-gray-200 rounded-full animate-pulse"></div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="h-4 w-20 bg-gray-200 rounded animate-pulse"></div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="h-6 w-28 bg-gray-200 rounded-full animate-pulse"></div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="h-8 w-20 bg-gray-200 rounded-lg animate-pulse"></div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  // ===============================================================================
+  // RENDER SECTION
+  // ===============================================================================
+
+  /**
+   * Main component render - comprehensive number pool interface with all dialogs and tables
+   */
+  return showPool ? (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-7xl mx-auto">
+        {/* Header Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="mb-12"
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex-1">
+              <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
+                Number Pool
+              </h1>
+              <p className="mt-2 text-lg text-gray-600">
+                Manage and reserve phone numbers for your leads
+            </p>
+            </div>
+            {isAdmin() && (
+              <div className="flex items-center gap-4">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleCheckDuplicates}
+                  disabled={checkingDuplicates}
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center">
+                    <div className="bg-gradient-to-br from-orange-500 to-red-600 p-2 rounded-lg mr-3">
+                      {checkingDuplicates ? (
+                        <Loader2 className="w-5 h-5 text-white animate-spin" />
+                      ) : (
+                        <FileWarning className="w-5 h-5 text-white" />
+                      )}
+                    </div>
+                    <div>
+                      <span className="block text-sm font-semibold text-gray-900">
+                        {checkingDuplicates ? 'Checking...' : 'Check Duplicates'}
+                      </span>
+                    </div>
+                  </div>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={() => setShowExportModal(true)}
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
+                >
+                  <div className="flex items-center">
+                    <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-2 rounded-lg mr-3">
+                      <Download className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <span className="block text-sm font-semibold text-gray-900">
+                        Export Numbers
+                      </span>
+                      <span className="block text-xs text-gray-500">Choose columns</span>
+                    </div>
+                  </div>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleSelectAll}
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
+                >
+                  <div className="flex items-center">
+                    <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2 rounded-lg mr-3">
+                      <Hash className="w-5 h-5 text-white" />
+            </div>
+                    <div>
+                      <span className="block text-sm font-semibold text-gray-900">
+                        {selectAllMode ? 'Deselect All' : 'Select All'}
+                      </span>
+          </div>
+        </div>
+                </motion.button>
+                {selectedNumbers.length > 0 && (
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleBulkDelete}
+                    className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
+                  >
+                    <div className="flex items-center">
+                      <div className="bg-white/10 p-2 rounded-lg mr-3">
+                        <Trash2 className="w-5 h-5 text-white" />
+            </div>
+                      <div>
+                        <span className="block text-sm font-semibold text-white">
+                          Delete Selected ({selectedNumbers.length})
+                        </span>
+          </div>
+        </div>
+                  </motion.button>
+                )}
+              </div>
+            )}
+            {(isCoordinator || isAdmin()) && (
+              <div className="flex items-center gap-4">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={() => setShowAddDialog(true)}
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 border border-gray-200"
+                >
+                  <div className="flex items-center">
+                    <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-2 rounded-lg mr-3">
+                      <Hash className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <span className="block text-sm font-semibold text-gray-900">Add Number</span>
+                    </div>
+                  </div>
+                </motion.button>
+              </div>
+            )}
+            {/* Agent Utilities */}
+            {user?.role === 'agent' && (
+              <div className="flex items-center gap-2">
+                {/* Bulk Copy Button - Left */}
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={selectedNumbers.length > 0 ? clearSelectedNumbers : toggleBulkCopyMode}
+                  className={`inline-flex items-center px-3 py-1.5 rounded-lg shadow hover:shadow-md transition-all duration-300 border ${
+                    bulkCopyMode 
+                      ? selectedNumbers.length > 0
+                        ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white border-green-600'
+                        : 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white border-blue-600'
+                      : 'bg-white text-gray-700 border-gray-200'
+                  }`}
+                >
+                  {selectedNumbers.length > 0 ? (
+                    <>
+                      <Check className="w-4 h-4 transition-all duration-300" />
+                      <span className="ml-2 text-xs font-semibold">Done ({selectedNumbers.length})</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clipboard className="w-4 h-4 transition-all duration-300" />
+                      <span className="ml-2 text-xs font-medium">Bulk Copy</span>
+                    </>
+                  )}
+                </motion.button>
+                
+                {/* Notepad Button - Right */}
+                <motion.div
+                  onMouseEnter={() => setShowNotepad(true)}
+                  className="inline-block"
+                >
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    className="inline-flex items-center px-3 py-1.5 bg-white rounded-lg shadow hover:shadow-md transition-all duration-300 border border-gray-200"
+                  >
+                    <StickyNote className={`w-4 h-4 transition-colors duration-300 ${showNotepad ? 'text-blue-600' : 'text-gray-600'}`} />
+                    <span className="ml-2 text-xs font-medium text-gray-700">Notes</span>
+                  </motion.button>
+                </motion.div>
+              </div>
+            )}
+            </div>
+          </motion.div>
+
+          {/* Reserved Numbers Section */}
+          {reservedNumbers.length > 0 && (
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.1 }}
+            className="mt-6 mb-12"
+            >
+              <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+                <div className="px-8 py-6 bg-gradient-to-r from-indigo-500 to-purple-600">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-xl font-bold text-white">Your Reserved Numbers</h3>
+                      <p className="mt-1 text-indigo-100 text-sm">Numbers currently reserved by you</p>
+            </div>
+                    <div className="p-2 bg-white/10 rounded-lg">
+                      <Hash className="h-6 w-6 text-white" />
+          </div>
+        </div>
+              </div>
+                <div className="p-6">
+                <div className="space-y-4">
+                    {reservedNumbers.map((number, index) => (
+                      <motion.div
+                        key={number.id}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3, delay: index * 0.1 }}
+                      className="bg-white rounded-lg p-4 sm:p-5 shadow-sm hover:shadow-md transition-all duration-300 border border-gray-100 w-full"
+                      >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div className="flex items-center space-x-3 sm:space-x-4">
+          <div>
+                            <h4 className="text-xl sm:text-2xl font-bold font-mono tracking-wide text-gray-900">{number.number}</h4>
+                            <span className="text-xs sm:text-sm text-gray-500">{number.category}</span>
+                      </div>
+                          </div>
+
+                        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+                          <div className="flex items-center space-x-2 bg-gradient-to-br from-indigo-50 to-indigo-100 rounded-lg px-3 py-2">
+                            <Clock className="h-4 w-4 sm:h-5 sm:w-5 text-indigo-600" />
+                            <div>
+                              <p className="text-xs text-indigo-600 font-medium">Reserve Count</p>
+                              <p className="text-sm sm:text-base font-semibold text-indigo-700">
+                                {number.reservationCount || 0}
+                              </p>
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center space-x-2 bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg px-3 py-2">
+                            <UserCheck className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600" />
+                            <div>
+                              <p className="text-xs text-purple-600 font-medium">Claims in Queue</p>
+                              <p className="text-sm sm:text-base font-semibold text-purple-700">
+                                {number.claimQueue?.length || 0}
+                              </p>
+                            </div>
+                          </div>
+
+                          {reservationCountdowns[number.id] && (
+                            <div className="flex items-center space-x-2 bg-gradient-to-br from-green-50 to-green-100 rounded-lg px-3 py-2">
+                              <Clock className="h-4 w-4 sm:h-5 sm:w-5 text-green-600" />
+                              <div>
+                                <p className="text-xs text-green-600 font-medium">Expires In</p>
+                                <p className="text-sm sm:text-base font-semibold text-green-700">
+                                  {formatReservationCountdown(reservationCountdowns[number.id])}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          {number.claimingAgentId && claimCountdowns[number.id] && (
+                            <div className="flex items-center space-x-2 bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg px-3 py-2">
+                              <Zap className="h-4 w-4 sm:h-5 sm:w-5 text-blue-600" />
+                              <div>
+                                <p className="text-xs text-blue-600 font-medium">Claim Timer</p>
+                                <p className="text-sm sm:text-base font-semibold text-blue-700">
+                                  {formatCountdown(claimCountdowns[number.id])}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          <motion.button
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                        onClick={() => handleRelease(number)}
+                            className="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100"
+                      >
+                            <XCircle className="h-4 w-4 mr-1.5" />
+                        Release
+                          </motion.button>
+                        </div>
+                    </div>
+                      </motion.div>
+                  ))}
+                </div>
+              </div>
+          </div>
+            </motion.div>
+          )}
+
+        {/* Search and Filters */}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.2 }}
+          className="mb-10"
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {/* Search Input */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Search className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <input
+                type="text"
+                placeholder="Search numbers or codes..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-12 pr-20 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200"
+              />
+              {isSearching && (
+                <div className="absolute inset-y-0 right-12 pr-4 flex items-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+                </div>
+              )}
+              {/* Manual Refresh Button */}
+              <button
+                onClick={async () => {
+                  try {
+                    // If there's active search, clear it first to avoid conflicts
+                    if (debouncedSearchTerm.trim()) {
+                      setSearchTerm('');
+                      setSearchResults([]);
+                      setIsSearching(false);
+                      fullSearchResultsRef.current = [];
+                      // Small delay to let search clear before refreshing
+                      await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    // Then refresh the number pool with timeout protection
+                    const refreshPromise = numberPoolManager.manualRefresh();
+                    const timeoutPromise = new Promise((_, reject) => 
+                      setTimeout(() => reject(new Error('Refresh timeout')), 10000)
+                    );
+                    await Promise.race([refreshPromise, timeoutPromise]);
+                  } catch (error) {
+                    // If refresh fails or times out, ensure loading state is cleared
+                    numberPoolManager.forceResetLoading();
+                    toast.error('Refresh failed or timed out');
+                  }
+                }}
+                className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Refresh data (real-time updates active)"
+                disabled={loading && !debouncedSearchTerm.trim()}
+              >
+                <RefreshCw className={`h-4 w-4 ${loading && !debouncedSearchTerm.trim() ? 'animate-spin' : ''}`} />
+              </button>
+              {debouncedSearchTerm.trim() && (
+                <div className="mt-1 text-xs text-gray-500 pl-12">
+                  {isSearching ? 'Searching…' : (
+                    <>
+                      Found {fullSearchResultsRef.current.length} result{fullSearchResultsRef.current.length === 1 ? '' : 's'}
+                      {numberPoolManager.getPreSearchPage() > 1 && (
+                        <span className="ml-2 text-blue-600">
+                          (Will return to page {numberPoolManager.getPreSearchPage()})
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Category Filter */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <select
+                value={selectedCategory || ''}
+                onChange={(e) => setSelectedCategory(e.target.value || null)}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+              >
+                <option value="">All Categories</option>
+                {CATEGORIES.map(category => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Group Filter */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <select
+                value={selectedGroup || ''}
+                onChange={(e) => setSelectedGroup(e.target.value || null)}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+              >
+                <option value="">All Groups</option>
+                {GROUPS.map(group => (
+                  <option key={group} value={group}>{group}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Initials Filter - Hidden for now */}
+            {/* <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <select
+                value={selectedInitials || ''}
+                onChange={(e) => setSelectedInitials(e.target.value || null)}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+              >
+                <option value="">All Initials</option>
+                {INITIALS.map(initials => (
+                  <option key={initials} value={initials}>{initials}</option>
+                ))}
+              </select>
+            </div> */}
+
+            {/* Page Size Selector */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Hash className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value) as typeof PAGE_SIZES[number])}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+              >
+                {PAGE_SIZES.map(size => (
+                  <option key={size} value={size}>{size} per page</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </motion.div>
+
+        {/* Add Number Dialog */}
+        <AnimatePresence>
+          {showAddDialog && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                transition={{ type: 'spring', duration: 0.5, bounce: 0.3 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-auto overflow-hidden border border-gray-100"
+              >
+                {/* Header */}
+                <div className="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 px-6 py-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-xl font-bold tracking-tight">Add New Number</h2>
+                      <p className="text-indigo-100 text-sm">Configure number settings and visibility options</p>
+                    </div>
+                    <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
+                      <Hash className="h-6 w-6" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Form Content */}
+                <div className="px-6 py-4">
+                  {/* Basic Information Card */}
+                  <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg p-4 mb-3 border border-gray-200/50">
+                    <div className="flex items-center mb-3">
+                      <div className="p-1.5 bg-indigo-100 rounded-md mr-2">
+                        <Phone className="h-4 w-4 text-indigo-600" />
+                      </div>
+                      <h3 className="text-base font-semibold text-gray-900">Basic Information</h3>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {/* Phone Number Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Phone Number
+                          <span className="ml-2 text-xs text-gray-500 font-normal">(10 digits required)</span>
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={newPoolNumber}
+                            onChange={(e) => {
+                              const value = e.target.value.replace(/\D/g, ''); // Only allow digits
+                              if (value.length <= 10) { // Limit to 10 digits
+                                setNewPoolNumber(value);
+                                // Validate phone number
+                                if (value.length > 0 && value.length !== 10) {
+                                  setPhoneError('Phone number must be exactly 10 digits');
+                                } else if (value.length === 10) {
+                                  setPhoneError('');
+                                } else {
+                                  setPhoneError('');
+                                }
+                              }
+                            }}
+                            className={`w-full pl-3 pr-10 py-2.5 bg-white border-2 rounded-lg focus:ring-2 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm ${
+                              phoneError
+                                ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
+                                : 'border-gray-200 focus:border-indigo-500 focus:ring-indigo-500/20'
+                            }`}
+                            placeholder="1234567890"
+                            maxLength={10}
+                          />
+                          <div className={`absolute right-3 top-1/2 transform -translate-y-1/2 ${
+                            phoneError ? 'text-red-400' : 'text-gray-400'
+                          }`}>
+                            <Phone className="h-4 w-4" />
+                          </div>
+                        </div>
+                        {/* Character counter */}
+                        <div className="flex justify-between items-center text-xs">
+                          <span className={`font-medium ${
+                            newPoolNumber.length === 10 ? 'text-green-600' :
+                            newPoolNumber.length > 10 ? 'text-red-600' : 'text-gray-500'
+                          }`}>
+                            {newPoolNumber.length}/10 digits
+                          </span>
+                          {newPoolNumber.length === 10 && (
+                            <span className="text-green-600 flex items-center">
+                              <CheckCircle2 className="h-3 w-3 mr-1" />
+                              Valid
+                            </span>
+                          )}
+                        </div>
+                        {phoneError && (
+                          <motion.p
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="text-xs text-red-600 flex items-center"
+                          >
+                            <AlertCircle className="h-3 w-3 mr-1" />
+                            {phoneError}
+                          </motion.p>
+                        )}
+                      </div>
+
+                      {/* Category Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Category
+                        </label>
+                        <div className="relative">
+                          <select
+                            value={newPoolCategory}
+                            onChange={(e) => setNewPoolCategory((e.target as HTMLSelectElement).value)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                          >
+                            <option value="" className="text-gray-400">Select a category</option>
+                            {Array.from(CATEGORIES).map((c) => (
+                              <option key={c as string} value={c as string} className="text-gray-900">
+                                {c as string}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none">
+                            <ChevronDown className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Code Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Code
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={newPoolCode}
+                            onChange={(e) => setNewPoolCode((e.target as HTMLInputElement).value)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                            placeholder="Abc123"
+                          />
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
+                            <Tag className="h-4 w-4" />
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-600">
+                          
+                        </p>
+                      </div>
+
+                      {/* Group Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Group
+                        </label>
+                        <div className="relative">
+                          <select
+                            value={newPoolGroup}
+                            onChange={(e) => setNewPoolGroup(e.target.value)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 text-sm appearance-none cursor-pointer"
+                          >
+                            <option value="">Select a group</option>
+                            <option value="G1">G1</option>
+                            <option value="G2">G2</option>
+                            <option value="G3">G3</option>
+                            <option value="G4">G4</option>
+                            <option value="G5">G5</option>
+                          </select>
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none">
+                            <ChevronDown className="h-4 w-4" />
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-600">
+                          Select a group from G1 to G5
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Security & Access Card */}
+                  {(isAdmin() || isCoordinator) && (
+                    <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg p-4 mb-3 border border-blue-200/50">
+                      <div className="flex items-center mb-3">
+                        <div className="p-1.5 bg-blue-100 rounded-md mr-2">
+                          <Shield className="h-4 w-4 text-blue-600" />
+                        </div>
+                        <h3 className="text-base font-semibold text-gray-900">Security & Access</h3>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Passcode Field */}
+                        {(isAdmin() || isCoordinator) && (
+                          <div className="space-y-2">
+                            <label className="text-sm font-semibold text-gray-700 flex items-center">
+                              <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                              Passcode
+                            </label>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                value={newPoolPasscode}
+                                onChange={(e) => setNewPoolPasscode((e.target as HTMLInputElement).value)}
+                                className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-blue-200 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                                placeholder="Enter security passcode"
+                              />
+                              <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-blue-400">
+                                <Lock className="h-4 w-4" />
+                              </div>
+                            </div>
+                            <p className="text-xs text-gray-600">
+                              Enter security passcode
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Team Visibility Field */}
+                        {isCoordinator && (
+                          <div className="space-y-2">
+                            <label className="text-sm font-semibold text-gray-700 flex items-center">
+                              <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2"></span>
+                              Team Visibility
+                              <span className="ml-2 text-xs text-gray-500 font-normal">(optional)</span>
+                            </label>
+                            <div className="relative">
+                              <select
+                                value={newPoolTeamVisibility}
+                                onChange={(e) => setNewPoolTeamVisibility((e.target as HTMLSelectElement).value)}
+                                className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                              >
+                                <option value="" className="text-gray-400">Visible to all teams</option>
+                                {teams.map((team) => (
+                                  <option key={team.id} value={team.id} className="text-gray-900">
+                                    {team.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-400 pointer-events-none">
+                                <ChevronDown className="h-4 w-4" />
+                              </div>
+                            </div>
+                            <p className="text-xs text-gray-600">
+                              Restrict this number to a specific team only
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 pt-6 border-t border-gray-200">
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        setShowAddDialog(false);
+                        // Reset form and clear errors
+                        setNewPoolNumber('');
+                        setNewPoolCategory('');
+                        setNewPoolCode('');
+                        setNewPoolGroup('');
+                        setNewPoolPasscode('');
+                        setNewPoolTeamVisibility('');
+                        setPhoneError('');
+                      }}
+                      disabled={addingNumber}
+                      className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+                    >
+                      Cancel
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: addingNumber ? 1 : 1.02 }}
+                      whileTap={{ scale: addingNumber ? 1 : 0.98 }}
+                      onClick={async () => {
+                        if (addingNumber) return;
+                        const num = newPoolNumber.trim();
+                        const cat = newPoolCategory.trim();
+                        const code = newPoolCode.trim();
+                        const group = newPoolGroup.trim();
+
+                        // Validate phone number
+                        if (!num) {
+                          toast.error('Phone number is required');
+                          return;
+                        }
+                        if (num.length !== 10) {
+                          toast.error('Phone number must be exactly 10 digits');
+                          return;
+                        }
+                        if (!code) {
+                          toast.error('Code is required');
+                          return;
+                        }
+                        if (!group) {
+                          toast.error('Group is required');
+                          return;
+                        }
+                        if (!Array.from(CATEGORIES).includes(cat as any)) {
+                          toast.error('Please select a valid category');
+                          return;
+                        }
+                        // Validate passcode for admin/coordinator
+                        if ((isAdmin() || isCoordinator) && !newPoolPasscode.trim()) {
+                          toast.error('Passcode is required');
+                          return;
+                        }
+                        
+                        // Check if number already exists in Firestore
+                        setAddingNumber(true);
+                        try {
+                          const numbersRef = collection(db, 'numberPool');
+                          const q = query(numbersRef, where('number', '==', num));
+                          const querySnapshot = await getDocs(q);
+                          
+                          if (!querySnapshot.empty) {
+                            // Number already exists
+                            const existingDoc = querySnapshot.docs[0];
+                            const existingData = existingDoc.data() as NumberPoolType;
+                          setDuplicateNumberData({
+                              existingNumber: existingData.number || '',
+                            newNumber: num
+                          });
+                          setShowDuplicateNumberDialog(true);
+                            setAddingNumber(false);
+                          return;
+                        }
+                          
+                          // Number doesn't exist, proceed with adding
+                          const numberData: any = {
+                            number: num,
+                            category: cat,
+                            code,
+                            group: group.trim(),
+                            status: 'open',
+                            visibleToFreelancers: true, // Default to visible for single number additions
+                            lastStatusChange: new Date('2025-07-05'), // Baseline for "never touched" numbers
+                            createdAt: serverTimestamp(),
+                            reservationCount: 0,
+                            claimCount: 0
+                          };
+
+                          // Add passcode for admin/coordinator
+                          if (isAdmin() || isCoordinator) {
+                            numberData.passcode = newPoolPasscode.trim();
+                          }
+                          // Only add team visibility if it has a value
+                          if (newPoolTeamVisibility.trim()) {
+                            numberData.teamVisibility = newPoolTeamVisibility.trim();
+                          }
+
+                          const docRef = await addDoc(collection(db, 'numberPool'), numberData);
+                          
+                          // Log the number creation
+                          await logNumberAction(
+                            docRef.id,
+                            num,
+                            'created',
+                            null,
+                            numberData,
+                            `Created new number with category: ${cat}, code: ${code}, group: ${group}`
+                          );
+                          
+                          toast.success('Number added to pool successfully!');
+                          setShowAddDialog(false);
+                          setNewPoolNumber('');
+                          setNewPoolCategory('');
+                          setNewPoolCode('');
+                          setNewPoolGroup('');
+                          setNewPoolPasscode('');
+                          setNewPoolTeamVisibility('');
+                          setPhoneError('');
+                        } catch (err) {
+                          toast.error('Failed to add number');
+                        } finally {
+                          setAddingNumber(false);
+                        }
+                      }}
+                      disabled={addingNumber}
+                      className={clsx(
+                        'px-4 py-2 text-sm font-semibold text-white rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed',
+                        addingNumber
+                          ? 'bg-gray-400 cursor-not-allowed'
+                          : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 transform hover:scale-[1.02]'
+                      )}
+                    >
+                      <div className="flex items-center justify-center">
+                        {addingNumber ? (
+                          <>
+                            <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                            Adding Number...
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="h-5 w-5 mr-2" />
+                            Add Number
+                          </>
+                        )}
+                      </div>
+                    </motion.button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Edit Number Dialog */}
+        <AnimatePresence>
+          {showEditDialog && editingNumber && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                transition={{ type: 'spring', duration: 0.5, bounce: 0.3 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl mx-auto overflow-hidden border border-gray-100"
+              >
+                {/* Header */}
+                <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-6 py-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-xl font-bold tracking-tight">Edit Number</h2>
+                      <p className="text-blue-100 text-sm">Modify details and settings</p>
+                    </div>
+                    <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
+                      <Edit className="h-6 w-6" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Form Content */}
+                <div className="px-6 py-4">
+                  {/* Basic Information Card */}
+                  <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg p-4 mb-3 border border-gray-200/50">
+                    <div className="flex items-center mb-3">
+                      <div className="p-1.5 bg-indigo-100 rounded-md mr-2">
+                        <Phone className="h-4 w-4 text-indigo-600" />
+                      </div>
+                      <h3 className="text-base font-semibold text-gray-900">Basic Information</h3>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {/* Number Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Phone Number
+                          <span className="ml-2 text-xs text-gray-500 font-normal">(10 digits required)</span>
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={editPoolNumber}
+                            onChange={(e) => {
+                              const value = e.target.value.replace(/\D/g, ''); // Only allow digits
+                              if (value.length <= 10) { // Limit to 10 digits
+                                setEditPoolNumber(value);
+                                // Validate phone number
+                                if (value.length > 0 && value.length !== 10) {
+                                  setEditPhoneError('Phone number must be exactly 10 digits');
+                                } else if (value.length === 10) {
+                                  setEditPhoneError('');
+                                } else {
+                                  setEditPhoneError('');
+                                }
+                              }
+                            }}
+                            className={`w-full pl-3 pr-10 py-2.5 bg-white border-2 rounded-lg focus:ring-2 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm ${
+                              editPhoneError
+                                ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
+                                : 'border-gray-200 focus:border-indigo-500 focus:ring-indigo-500/20'
+                            }`}
+                            placeholder="1234567890"
+                            maxLength={10}
+                          />
+                          <div className={`absolute right-3 top-1/2 transform -translate-y-1/2 ${
+                            editPhoneError ? 'text-red-400' : 'text-gray-400'
+                          }`}>
+                            <Phone className="h-4 w-4" />
+                          </div>
+                        </div>
+                        {/* Character counter */}
+                        <div className="flex justify-between items-center text-xs">
+                          <span className={`font-medium ${
+                            editPoolNumber.length === 10 ? 'text-green-600' :
+                            editPoolNumber.length > 10 ? 'text-red-600' : 'text-gray-500'
+                          }`}>
+                            {editPoolNumber.length}/10 digits
+                          </span>
+                          {editPoolNumber.length === 10 && (
+                            <span className="text-green-600 flex items-center">
+                              <CheckCircle2 className="h-3 w-3 mr-1" />
+                              Valid
+                            </span>
+                          )}
+                        </div>
+                        {editPhoneError && (
+                          <motion.p
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="text-xs text-red-600 flex items-center mt-1"
+                          >
+                            <AlertCircle className="h-3 w-3 mr-1" />
+                            {editPhoneError}
+                          </motion.p>
+                        )}
+                      </div>
+
+                      {/* Category Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Category
+                        </label>
+                        <div className="relative">
+                          <select
+                            value={editPoolCategory}
+                            onChange={(e) => setEditPoolCategory((e.target as HTMLSelectElement).value)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                          >
+                            <option value="" className="text-gray-400">Select a category</option>
+                            {Array.from(CATEGORIES).map((c) => (
+                              <option key={c as string} value={c as string} className="text-gray-900">
+                                {c as string}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none">
+                            <ChevronDown className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Code Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Code
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={editPoolCode}
+                            onChange={(e) => setEditPoolCode((e.target as HTMLInputElement).value)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                            placeholder="e.g., 050, 051"
+                          />
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
+                            <Tag className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Group Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          Group
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={editPoolGroup}
+                            onChange={(e) => setEditPoolGroup((e.target as HTMLInputElement).value)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                            placeholder="e.g., G1, G2, VIP"
+                          />
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
+                            <Package className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Status Field */}
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1.5 h-1.5 bg-purple-500 rounded-full mr-2"></span>
+                          Status
+                        </label>
+                        <div className="relative">
+                          <select
+                            value={editPoolStatus}
+                            onChange={(e) => setEditPoolStatus((e.target as HTMLSelectElement).value as NumberStatus)}
+                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-purple-200 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                          >
+                            <option value="open" className="text-gray-900">Open</option>
+                            <option value="reserved" className="text-gray-900">Reserved</option>
+                            <option value="pending_verification" className="text-gray-900">Pending Verification</option>
+                            <option value="verified" className="text-gray-900">Verified</option>
+                            <option value="rejected" className="text-gray-900">Rejected</option>
+                            <option value="non_verified" className="text-gray-900">Non Verified</option>
+                            <option value="activated" className="text-gray-900">Activated</option>
+                          </select>
+                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-purple-400 pointer-events-none">
+                            <ChevronDown className="h-4 w-4" />
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-600">
+                          Set the current status of this number
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Security & Access Card */}
+                  {(isAdmin() || isCoordinator) && (
+                    <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg p-4 mb-3 border border-blue-200/50">
+                      <div className="flex items-center mb-3">
+                        <div className="p-1.5 bg-blue-100 rounded-md mr-2">
+                          <Shield className="h-4 w-4 text-blue-600" />
+                        </div>
+                        <h3 className="text-base font-semibold text-gray-900">Security & Access</h3>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Passcode Field */}
+                        {(isAdmin() || isCoordinator) && (
+                          <div className="space-y-2">
+                            <label className="text-sm font-semibold text-gray-700 flex items-center">
+                              <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                              Passcode
+                            </label>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                value={editPoolPasscode}
+                                onChange={(e) => setEditPoolPasscode((e.target as HTMLInputElement).value)}
+                                className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-blue-200 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                                placeholder="Enter security passcode"
+                              />
+                              <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-blue-400">
+                                <Lock className="h-4 w-4" />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Team Visibility Field */}
+                        {(isAdmin() || isCoordinator) && (
+                          <div className="space-y-2">
+                            <label className="text-sm font-semibold text-gray-700 flex items-center">
+                              <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2"></span>
+                              Team Visibility
+                              <span className="ml-2 text-xs text-gray-500 font-normal">(optional)</span>
+                            </label>
+                            <div className="relative">
+                              <select
+                                value={editPoolTeamVisibility}
+                                onChange={(e) => setEditPoolTeamVisibility((e.target as HTMLSelectElement).value)}
+                                className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                              >
+                                <option value="" className="text-gray-400">Visible to all teams</option>
+                                {teams.map((team) => (
+                                  <option key={team.id} value={team.id} className="text-gray-900">
+                                    {team.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-400 pointer-events-none">
+                                <ChevronDown className="h-4 w-4" />
+                              </div>
+                            </div>
+                            <p className="text-xs text-gray-600">
+                              Restrict this number to a specific team only
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 pt-6 border-t border-gray-200">
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        setShowEditDialog(false);
+                        setEditingNumber(null);
+                        // Reset form
+                        setEditPoolNumber('');
+                        setEditPoolCategory('');
+                        setEditPoolCode('');
+                        setEditPoolGroup('');
+                        setEditPoolPasscode('');
+                        setEditPoolTeamVisibility('');
+                        setEditPoolStatus('open');
+                        setEditPhoneError('');
+                      }}
+                      disabled={updatingNumber}
+                      className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+                    >
+                      Cancel
+                    </motion.button>
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: updatingNumber ? 1 : 1.02 }}
+                      whileTap={{ scale: updatingNumber ? 1 : 0.98 }}
+                      onClick={(e) => {
+                       e.preventDefault();
+                        e.stopPropagation();
+                        handleUpdateNumber();
+                      }}
+                      disabled={updatingNumber}
+                      style={{ pointerEvents: 'auto' }}
+                      className={clsx(
+                        'px-4 py-2 text-sm font-semibold text-white rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed',
+                        updatingNumber
+                          ? 'bg-gray-400 cursor-not-allowed'
+                          : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 transform hover:scale-[1.02]'
+                      )}
+                    >
+                      <div className="flex items-center justify-center">
+                        {updatingNumber ? (
+                          <>
+                            <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                            Updating...
+                          </>
+                        ) : (
+                          <>
+                            <Edit className="h-5 w-5 mr-2" />
+                            Update Number
+                          </>
+                        )}
+                      </div>
+                    </motion.button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Duplicate Number Dialog */}
+        <AnimatePresence>
+          {showDuplicateNumberDialog && duplicateNumberData && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                transition={{ type: 'spring', duration: 0.5, bounce: 0.3 }}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-auto overflow-hidden border border-gray-100"
+              >
+                {/* Header */}
+                <div className="bg-gradient-to-r from-red-500 to-red-600 px-6 py-4 text-white">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-xl font-bold tracking-tight">Number Already Exists</h2>
+                      <p className="text-red-100 text-sm">This number is already in use</p>
+                    </div>
+                    <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
+                      <AlertCircle className="h-6 w-6" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Content */}
+                <div className="px-6 py-6">
+                  <div className="text-center">
+                    <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4">
+                      <AlertCircle className="h-6 w-6 text-red-600" />
+                    </div>
+                    <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                      Duplicate Number Detected
+                    </h3>
+                    <p className="text-gray-600 mb-4">
+                      The number you're trying to use is already assigned to another entry in the pool.
+                    </p>
+                    
+                    <div className="bg-gray-50 rounded-lg p-4 mb-6">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm font-medium text-gray-700">New Number:</span>
+                        <span className="text-sm font-mono bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                          {duplicateNumberData.newNumber}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mt-2">
+                        <span className="text-sm font-medium text-gray-700">Existing Number:</span>
+                        <span className="text-sm font-mono bg-red-100 text-red-800 px-2 py-1 rounded">
+                          {duplicateNumberData.existingNumber}
+                        </span>
+                      </div>
+                    </div>
+
+                    <p className="text-sm text-gray-500 mb-6">
+                      Please choose a different number or modify the existing entry instead.
+                    </p>
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3">
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        setShowDuplicateNumberDialog(false);
+                        setDuplicateNumberData(null);
+                      }}
+                      className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md"
+                    >
+                      Close
+                    </motion.button>
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        setShowDuplicateNumberDialog(false);
+                        setDuplicateNumberData(null);
+                        // Focus on the phone number input to allow user to change it
+                        setTimeout(() => {
+                          const phoneInput = document.querySelector('input[placeholder="1234567890"]') as HTMLInputElement;
+                          if (phoneInput) {
+                            phoneInput.focus();
+                            phoneInput.select();
+                          }
+                        }, 100);
+                      }}
+                      className="px-4 py-2 text-sm font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl"
+                    >
+                      Change Number
+                    </motion.button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+      {/* Numbers Table */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.3 }}
+          className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100"
+        >
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead>
+                <tr className="bg-gradient-to-r from-gray-50 to-gray-100">
+                {(isAdmin() || bulkCopyMode) && (
+                  <th className="px-6 py-4 text-left">
+                    <input
+                      type="checkbox"
+                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 transition-colors"
+                      checked={selectedNumbers.length > 0 && selectedNumbers.length === paginatedNumbers.length}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          selectAllVisible();
+                        } else {
+                          setSelectedNumbers([]);
+                        }
+                      }}
+                    />
+                  </th>
+                )}
+                <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  S.No.
+                </th>
+                <th 
+                    className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => handleSort('number')}
+                >
+                  <div className="flex items-center">
+                    Number
+                    <SortIcon field="number" />
+                  </div>
+                </th>
+                <th 
+                    className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => handleSort('category')}
+                >
+                  <div className="flex items-center">
+                    Category
+                    <SortIcon field="category" />
+                  </div>
+                </th>
+                <th 
+                    className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => handleSort('code')}
+                >
+                  <div className="flex items-center">
+                    Code
+                    <SortIcon field="code" />
+                  </div>
+                </th>
+                <th
+                    className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => handleSort('group')}
+                >
+                  <div className="flex items-center">
+                    Group
+                    <SortIcon field="group" />
+                  </div>
+                </th>
+                {(isAdmin() || isCoordinator) && (
+                  <>
+                    <th 
+                      className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                      onClick={() => handleSort('passcode')}
+                    >
+                      <div className="flex items-center">
+                        Passcode
+                        <SortIcon field="passcode" />
+                      </div>
+                    </th>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Visibility
+                    </th>
+                  </>
+                )}
+                <th 
+                    className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                  onClick={() => handleSort('reservationCount')}
+                >
+                  <div className="flex items-center">
+                    Status
+                    <SortIcon field="reservationCount" />
+                  </div>
+                </th>
+                <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <div className="flex items-center">
+                    <Clock className="h-4 w-4 mr-1" />
+                    Time Left
+                  </div>
+                </th>
+                {(isAdmin() || isCoordinator) && (
+                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <div className="flex items-center">
+                      <UserCheck className="h-4 w-4 mr-1" />
+                      Agent & Team
+                    </div>
+                  </th>
+                )}
+                <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+                {paginatedNumbers.map((number, index) => {
+                const isBeingClaimed = number.status === 'reserved' && number.claimingAgentId;
+                const getStatusStyle = (status: NumberStatus) => {
+                  if (status === 'non_verified') {
+                      return STATUS_STYLES.reserved;
+                  }
+                  return STATUS_STYLES[status as keyof typeof STATUS_STYLES];
+                };
+                
+                const statusStyle = getStatusStyle(number.status);
+                const StatusIcon = statusStyle?.icon || CheckCircle2; 
+
+  const serialNumber = (displayPagination.currentPage - 1) * pageSize + index + 1;
+
+  return (
+    <motion.tr 
+                      key={number.id}
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, delay: index * 0.05 }}
+      className="hover:bg-gray-50/50 transition-colors group"
+    >
+                    {(isAdmin() || bulkCopyMode) && (
+        <td className="px-6 py-4">
+          <input
+            type="checkbox"
+            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 transition-colors"
+                          checked={selectedNumbers.includes(number.id)}
+                          onChange={() => toggleNumberSelection(number.id, number.number)}
+                          onClick={(e) => e.stopPropagation()}
+          />
+        </td>
+      )}
+      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-500">
+        {serialNumber}
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+          <div
+            className={clsx(
+              "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
+              number.status === 'reserved'
+                ? `${STATUS_STYLES.reserved.bg} text-gray-800`
+                : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`
+            )}
+          >
+            {number.number}
+        </div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <motion.span
+          whileHover={{ scale: 1.05 }}
+          className={clsx(
+            "px-3 py-1 rounded-full text-xs font-medium inline-flex items-center shadow-sm",
+            number.category === 'Platinum' ? 'bg-purple-100 text-purple-800' :
+            number.category === 'Gold' ? 'bg-yellow-100 text-yellow-800' :
+            number.category === 'Gold Plus' ? 'bg-amber-100 text-amber-800' :
+            number.category === 'Silver Plus' ? 'bg-blue-200 text-blue-800' :
+            number.category === 'Silver' ? 'bg-blue-100 text-blue-800' :
+            'bg-gray-100 text-gray-800'
+          )}
+        >
+          <Tag className="h-3 w-3 mr-1" />
+          {number.category}
+        </motion.span>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="text-sm text-gray-500">{number.code}</div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="text-sm text-gray-500">{number.group || '-'}</div>
+      </td>
+                    {(isAdmin() || isCoordinator) && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="text-sm text-gray-500">{number.passcode || '-'}</div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="text-sm text-gray-500">
+                            {number.teamVisibility ?
+                              (teams.find(team => team.id === number.teamVisibility)?.name || 'Unknown Team') :
+                              'All Teams'
+                            }
+                          </div>
+                        </td>
+                      </>
+                    )}
+      <td className="px-6 py-4 whitespace-nowrap">
+        <motion.span
+          whileHover={{ scale: 1.05 }}
+          className={clsx(
+            "px-3 py-1 rounded-full text-xs font-medium inline-flex items-center shadow-sm ring-1 ring-opacity-5",
+            number.status === 'reserved' ? STATUS_STYLES.reserved.bg : (statusStyle?.bg || STATUS_STYLES.open.bg),
+            number.status === 'reserved' ? STATUS_STYLES.reserved.text : (statusStyle?.text || STATUS_STYLES.open.text),
+            number.status === 'reserved' ? 'ring-indigo-200' : 'ring-gray-200'
+          )}
+        >
+          <StatusIcon className="h-3 w-3 mr-1" />
+          {number.status === 'reserved' ? "Reserved" : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        {number.claimingAgentId && claimCountdowns[number.id] && (
+            <span className="ml-2 text-xs">
+                            ({formatCountdown(claimCountdowns[number.id])})
+            </span>
+          )}
+          <span className="ml-2 text-xs font-normal">
+            (R: {number.reservationCount || 0})
+          </span>
+          <span className="ml-2 text-xs font-normal">
+            (C: {number.claimQueue?.length || 0})
+          </span>
+        </motion.span>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        {number.status === 'reserved' ? (
+          (() => {
+            // Try to get countdown from state first
+            let timeLeft = reservationCountdowns[number.id];
+            
+            // If not in state, calculate directly from expiresAt
+            if (!timeLeft && number.expiresAt) {
+              const now = Date.now();
+              let expiresAt: number;
+              
+              // Handle different date formats
+              if (typeof number.expiresAt === 'object' && typeof (number.expiresAt as any)?.toDate === 'function') {
+                expiresAt = (number.expiresAt as any).toDate().getTime();
+              } else if (number.expiresAt instanceof Date) {
+                expiresAt = number.expiresAt.getTime();
+              } else if (typeof number.expiresAt === 'string') {
+                expiresAt = new Date(number.expiresAt).getTime();
+              } else {
+                expiresAt = new Date(number.expiresAt as any).getTime();
+              }
+              
+              if (!Number.isNaN(expiresAt)) {
+                timeLeft = Math.max(0, expiresAt - now);
+              }
+            }
+            
+            return timeLeft && timeLeft > 0 ? (
+              <div className="flex items-center">
+                <div className="flex items-center space-x-2 bg-gradient-to-br from-green-50 to-green-100 rounded-lg px-3 py-2">
+                  <Clock className="h-4 w-4 text-green-600" />
+                  <div>
+                    <p className="text-xs text-green-600 font-medium">Expires In</p>
+                    <p className="text-sm font-semibold text-green-700">
+                      {formatReservationCountdown(timeLeft)}
+                    </p>
+                  </div>
+                </div>
+      {isAdmin() && (
+        <AnimatePresence>
+          {showExportModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+              onClick={() => !exportingNumbers && setShowExportModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Export Number Pool</h3>
+                    <p className="text-sm text-gray-500">Choose the columns to include in the Excel file.</p>
+                  </div>
+                  <button
+                    onClick={() => setShowExportModal(false)}
+                    className="text-gray-500 hover:text-gray-700"
+                    disabled={exportingNumbers}
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {exportFields.map(field => (
+                    <label key={field.key} className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        checked={selectedExportFields.includes(field.key)}
+                        onChange={() => toggleExportField(field.key)}
+                        disabled={exportingNumbers}
+                      />
+                      {field.label}
+                    </label>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => setSelectedExportFields(exportFields.map(f => f.key))}
+                    disabled={exportingNumbers}
+                  >
+                    Select all
+                  </button>
+                  <span>Exports current number pool snapshot</span>
+                </div>
+
+                <div className="flex justify-end gap-3">
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    onClick={() => setShowExportModal(false)}
+                    disabled={exportingNumbers}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex items-center px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                    onClick={handleExportNumbers}
+                    disabled={exportingNumbers || selectedExportFields.length === 0}
+                  >
+                    {exportingNumbers ? 'Exporting...' : 'Export to Excel'}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
+              </div>
+            ) : (
+              <div className="text-sm text-gray-400">-</div>
+            );
+          })()
+        ) : (
+          <div className="text-sm text-gray-400">-</div>
+        )}
+      </td>
+                    {(isAdmin() || isCoordinator) && (
+        <td className="px-6 py-4 whitespace-nowrap">
+          {number.status !== 'open' && (number.reservedBy || number.claimingAgentId || number.originalAgentId || number.leadId) ? (
+            <AgentTeamInfo 
+              agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string} 
+              leadId={number.leadId}
+            />
+          ) : (
+            <div className="text-sm text-gray-400">-</div>
+          )}
+        </td>
+      )}
+      <td className="px-6 py-4 whitespace-nowrap text-right relative z-10">
+        <div className="flex items-center justify-end space-x-3">
+          {number.status === 'open' && (
+            <motion.button
+                              type="button"
+                              whileHover={{ scale: reservingNumbers.has(number.id) ? 1 : 1.05 }}
+                              whileTap={{ scale: reservingNumbers.has(number.id) ? 1 : 0.95 }}
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleReserve(number); }}
+                              disabled={reservingNumbers.has(number.id) || checkingReserveId === number.id}
+              className={clsx(
+                "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
+                reservingNumbers.has(number.id) || checkingReserveId === number.id
+                  ? "bg-gray-100 text-gray-400 ring-gray-200 cursor-not-allowed"
+                  : "bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 hover:from-indigo-100 hover:to-purple-100 ring-indigo-100"
+              )}
+            >
+                              {reservingNumbers.has(number.id) || checkingReserveId === number.id ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <Clock className="h-4 w-4 mr-1.5" />
+              )}
+                              {reservingNumbers.has(number.id) ? 'Reserving...' : checkingReserveId === number.id ? 'Checking...' : 'Reserve'}
+            </motion.button>
+          )}
+          {/* Strike button - Only visible to agents */}
+          {user?.role === 'agent' && (number.status === 'pending_verification' || 
+            number.status === 'assigned' || 
+            number.status === 'verified' || 
+            number.status === 'follow_up') && 
+                            number.reservedBy !== user?.id && 
+                            !((number as any).claims || []).some((claim: any) => claim.userId === user?.id && claim.status === 'pending') &&
+                            !agentLeadNumberIds.has(number.id) && (
+            <motion.button
+                              whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
+                              whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
+                              onClick={() => handleClaim(number)}
+                              disabled={claimingNumbers.has(number.id)}
+              className={clsx(
+                "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
+                                claimingNumbers.has(number.id)
+                  ? "bg-gray-100 text-gray-400 ring-gray-200 cursor-not-allowed"
+                  : "bg-gradient-to-r from-amber-50 to-orange-50 text-amber-600 hover:from-amber-100 hover:to-orange-100 ring-amber-100"
+              )}
+            >
+                              {claimingNumbers.has(number.id) ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <AlertTriangle className="h-4 w-4 mr-1.5" />
+              )}
+                              {claimingNumbers.has(number.id) ? 'Striking...' : 'Strike'}
+            </motion.button>
+          )}
+          {/* Striked status - Only visible to agents */}
+          {user?.role === 'agent' && (number.status === 'pending_verification' || 
+            number.status === 'assigned' || 
+            number.status === 'verified' || 
+            number.status === 'follow_up') && 
+                            ((number as any).claims || []).some((claim: any) => claim.userId === user?.id && claim.status === 'pending') && (
+            <motion.span
+              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-gray-50 to-gray-100 text-gray-600 rounded-lg ring-1 ring-gray-100 relative z-20"
+            >
+              <CheckCircle2 className="h-4 w-4 mr-1.5" />
+              Striked
+            </motion.span>
+          )}
+          {/* Claim button - Only visible to agents and only between 9 AM - 8 PM UAE time */}
+          {user?.role === 'agent' && number.status === 'reserved' && 
+                           number.reservedBy !== user?.id && 
+                           number.claimingAgentId !== user?.id &&
+                           isWithinClaimWindow && (
+            <motion.button
+                              whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
+                              whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
+                              onClick={() => handleClaim(number)}
+              className={clsx(
+                "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
+                                claimingNumbers.has(number.id)
+                  ? "bg-gray-100 text-gray-400 ring-gray-200 cursor-not-allowed"
+                                  : number.claimQueue?.some((claim: any) => claim.agentId === user?.id)
+                  ? "bg-gray-100 text-gray-600 ring-gray-200 cursor-not-allowed"
+                  : "bg-gradient-to-r from-blue-50 to-indigo-50 text-blue-600 hover:from-blue-100 hover:to-indigo-100 ring-blue-100"
+              )}
+                              disabled={claimingNumbers.has(number.id) || number.claimQueue?.some((claim: any) => claim.agentId === user?.id)}
+            >
+                              {claimingNumbers.has(number.id) ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <Zap className="h-4 w-4 mr-1.5" />
+              )}
+                              {claimingNumbers.has(number.id) 
+                ? 'Claiming...' 
+                                : number.claimQueue?.some((claim: any) => claim.agentId === user?.id) 
+                ? 'Claimed' 
+                : 'Claim'}
+            </motion.button>
+          )}
+                          {number.status === 'reserved' && number.reservedBy === user?.id && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+                              onClick={() => handleRelease(number)}
+              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 relative z-20"
+            >
+              <XCircle className="h-4 w-4 mr-1.5" />
+              Release
+            </motion.button>
+          )}
+                          {(isAdmin() || (number.claimingAgentId && (user?.id === number.claimingAgentId || user?.id === number.reservedBy))) && (
+            <motion.button
+                              whileHover={{ scale: chattingNumbers.has(number.id) ? 1 : 1.05 }}
+                              whileTap={{ scale: chattingNumbers.has(number.id) ? 1 : 0.95 }}
+                              onClick={() => handleOpenChat(number)}
+                              disabled={chattingNumbers.has(number.id)}
+              className={clsx(
+                "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
+                                chattingNumbers.has(number.id)
+                  ? "bg-gray-100 text-gray-400 ring-gray-200 cursor-not-allowed"
+                  : "bg-gradient-to-r from-green-50 to-emerald-50 text-green-600 hover:from-green-100 hover:to-emerald-100 ring-green-100"
+              )}
+            >
+                              {chattingNumbers.has(number.id) ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <MessageSquare className="h-4 w-4 mr-1.5" />
+              )}
+                              {chattingNumbers.has(number.id) 
+                ? 'Opening...' 
+                                : isAdmin() ? 'View Chat' : 'Chat'}
+            </motion.button>
+          )}
+          {(number.group?.includes('G4') || number.group?.includes('G5')) && 
+           (number.status === 'open' || number.status === 'reserved') && (
+            <>
+                              {renderStatusCheck(number)}
+            </>
+          )}
+          {/* Edit button for coordinators and admins */}
+          {/* Admin can edit all numbers; coordinator limited by status */}
+                        {(
+              isAdmin() ||
+              (isCoordinator &&
+                ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
+            ) && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => openEditModal(number)}
+              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-blue-50 to-indigo-50 text-indigo-600 rounded-lg hover:from-blue-100 hover:to-indigo-100 transition-all duration-200 group ring-1 ring-indigo-100 relative z-20 ml-2"
+              title="Edit Number"
+            >
+              <Edit className="h-4 w-4 mr-1.5" />
+              Edit
+            </motion.button>
+          )}
+        </div>
+      </td>
+    </motion.tr>
+  );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Enhanced Pagination with Firebase Integration - Mobile Optimized */}
+          <div className="px-6 py-4 bg-gradient-to-r from-gray-50 to-gray-100 border-t border-gray-200">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex items-center space-x-4">
+              <div className="text-sm text-gray-700">
+                {debouncedSearchTerm.trim() ? (
+                  `Showing ${searchResults.length} of ${fullSearchResultsRef.current.length} search results`
+                ) : selectedCategory ? (
+                  `${selectedCategory}: Page ${displayPagination.currentPage} of ${displayPagination.totalPages} (${displayPagination.totalItems} total)`
+                ) : (
+                  `Page ${displayPagination.currentPage} of ${displayPagination.totalPages} (${displayPagination.totalItems} total)`
+                )}
+              </div>
+              </div>
+              
+              {/* Enhanced Pagination Controls - Mobile Optimized */}
+              <div className="w-full sm:w-auto">
+                <div className="flex items-center space-x-1 overflow-x-auto scrollbar-hide pb-2 sm:pb-0 min-w-0" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
+                {/* First Page Button */}
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => debouncedSearchTerm.trim() ? goToSearchPage(1) : goToPage(1)}
+                  disabled={displayPagination.currentPage === 1 || loading}
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-l-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
+                  title="First Page"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  <ChevronLeft className="h-4 w-4 -ml-1" />
+                </motion.button>
+
+                {/* Previous Button */}
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={debouncedSearchTerm.trim() ? goToPreviousSearchPage : goToPreviousPage}
+                  disabled={!displayPagination.hasPreviousPage || loading}
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
+                  title="Previous Page"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </motion.button>
+
+                {/* Dynamic Page Numbers */}
+                {generatePageNumbers().map((page, index) => (
+                  <motion.button
+                    key={index}
+                    whileHover={{ scale: page !== '...' ? 1.05 : 1 }}
+                    whileTap={{ scale: page !== '...' ? 0.95 : 1 }}
+                    onClick={() => {
+                      if (typeof page === 'number') {
+                        if (debouncedSearchTerm.trim()) {
+                          goToSearchPage(page);
+                        } else {
+                          goToPage(page);
+                        }
+                      }
+                    }}
+                    disabled={page === '...' || page === displayPagination.currentPage || loading}
+                    className={`inline-flex items-center px-3 py-2 text-sm font-medium border transition-all duration-200 ${
+                      page === displayPagination.currentPage
+                        ? 'bg-indigo-600 text-white border-indigo-600 z-10 relative'
+                        : page === '...'
+                        ? 'bg-white text-gray-400 border-gray-300 cursor-default'
+                        : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50 hover:text-gray-700'
+                    }`}
+                    title={page === '...' ? 'More pages' : `Page ${page}`}
+                  >
+                    {page}
+                  </motion.button>
+                ))}
+
+                {/* Next Button */}
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={debouncedSearchTerm.trim() ? goToNextSearchPage : goToNextPage}
+                  disabled={!displayPagination.hasNextPage || loading}
+                  className={`inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0 ${
+                    debouncedSearchTerm.trim() ? 'rounded-r-lg' : ''
+                  }`}
+                  title="Next Page"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </motion.button>
+
+                {/* Last Page Button - Only show in browse mode, not in search mode */}
+                {!debouncedSearchTerm.trim() && (
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                    onClick={() => goToPage(displayPagination.totalPages)}
+                  disabled={displayPagination.currentPage === displayPagination.totalPages || loading}
+                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
+                  title="Last Page"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRight className="h-4 w-4 -ml-1" />
+                </motion.button>
+                )}
+
+                {/* Load More Button - Only show on last page when searching and more results available */}
+                {debouncedSearchTerm.trim() && 
+                 searchHasMore && 
+                 displayPagination.currentPage === displayPagination.totalPages && (
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => performSearch(true)}
+                    disabled={isLoadingMore || isSearching}
+                    className="inline-flex items-center px-3 py-2 text-xs font-medium text-white bg-indigo-600 border border-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0 ml-1"
+                    title="Load More Results"
+                  >
+                    {isLoadingMore ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                        Loading...
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="h-3 w-3 mr-1" />
+                        Load More
+                      </>
+                    )}
+                  </motion.button>
+                )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+        {/* Reserve Dialog */}
+        {showReserveDialog && numberToReserve && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-indigo-100">
+                  <AlertCircle className="h-8 w-8 text-indigo-600" />
+        </div>
+        </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Reserve Number
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                Are you sure you want to reserve the number {numberToReserve.number}?
+                <br />
+                <span className="text-sm mt-2 block">
+                  This number will be reserved for 24 hours.
+                  <br />
+                  You currently have {reservedNumbers.length} out of {MAX_RESERVATIONS} reservations.
+                </span>
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowReserveDialog(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmReserve}
+                  className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                  Reserve
+                </button>
+      </div>
+      </div>
+    </div>
+        )}
+
+        {/* Number Active Dialog */}
+        {showNumberActiveDialog && activeNumberInfo && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-red-100">
+                  <XCircle className="h-8 w-8 text-red-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Number Already Active
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                The number <span className="font-semibold text-gray-900">{activeNumberInfo.number}</span> is currently active and cannot be reserved.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => {
+                    setShowNumberActiveDialog(false);
+                    setActiveNumberInfo(null);
+                  }}
+                  className="px-6 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reserve Conflict Dialog */}
+        {showReserveConflictDialog && reserveConflictInfo && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-amber-100">
+                  <AlertCircle className="h-8 w-8 text-amber-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Number Already Reserved
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                The number <span className="font-semibold text-gray-900">{reserveConflictInfo.number}</span> is currently{' '}
+                {formatStatusLabel(reserveConflictInfo.status)}.
+                <br />
+                We've refreshed the latest status so you can claim the number.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => {
+                    setShowReserveConflictDialog(false);
+                    setReserveConflictInfo(null);
+                  }}
+                  className="px-6 py-2 text-sm font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Claim Dialog */}
+        {showClaimDialog && numberToClaim && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className={clsx(
+                  "p-3 rounded-full",
+                  ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                    ? "bg-amber-100"
+                    : "bg-blue-100"
+                )}>
+                  <AlertCircle className={clsx(
+                    "h-8 w-8",
+                    ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                      ? "text-amber-600"
+                      : "text-blue-600"
+                  )} />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                  ? "Strike Number"
+                  : "Claim Number"
+                }
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
+                  <>
+                    Are you sure you want to strike the number {numberToClaim.number}?
+                    <br />
+                    <span className="text-sm mt-2 block">
+                      This will notify the current agent that you are interested in this number.
+                      The agent will be notified of your strike.
+            </span>
+                  </>
+                ) : (
+                  <>
+                    Are you sure you want to claim the number {numberToClaim.number}?
+                    <br />
+                    <span className="text-sm mt-2 block">
+                      The number will remain reserved by the original agent for {CLAIM_TIMEOUT / 60000} minutes.
+                      After that time, it will be automatically reserved for you.
+                    </span>
+        </>
+      )}
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowClaimDialog(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmClaim}
+                  disabled={claimingNumbers.has(numberToClaim.id)}
+                  className={clsx(
+                    "px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors flex items-center",
+                    claimingNumbers.has(numberToClaim.id)
+                      ? "bg-gray-400 cursor-not-allowed"
+                      : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                      ? "bg-amber-600 hover:bg-amber-700"
+                      : "bg-blue-600 hover:bg-blue-700"
+                  )}
+                >
+                  {claimingNumbers.has(numberToClaim.id) && (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  )}
+                  {claimingNumbers.has(numberToClaim.id)
+                    ? 'Processing...'
+                    : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                    ? "Strike"
+                    : "Claim"
+                  }
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Status Check Confirmation Dialog */}
+        {showStatusCheckDialog && numberForStatusCheck && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-blue-100">
+                  <AlertCircle className="h-8 w-8 text-blue-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Request Status Check
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                Do you want to request a status check for number {numberForStatusCheck.number}?
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => { setShowStatusCheckDialog(false); setNumberForStatusCheck(null); }}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!numberForStatusCheck || isStatusCheckSubmitting) return;
+                    setIsStatusCheckSubmitting(true);
+                    try {
+                      await handleStatusCheck(numberForStatusCheck);
+                      setShowStatusCheckDialog(false);
+                      setNumberForStatusCheck(null);
+                    } finally {
+                      setIsStatusCheckSubmitting(false);
+                    }
+                  }}
+                  disabled={isStatusCheckSubmitting}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors inline-flex items-center"
+                >
+                  {isStatusCheckSubmitting && (
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  )}
+                  {isStatusCheckSubmitting ? 'Sending...' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reserve Limit Dialog */}
+        {showReserveLimitDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-red-100">
+                  <AlertCircle className="h-8 w-8 text-red-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Reservation Limit Reached
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                You can only reserve up to {MAX_RESERVATIONS} numbers at a time.
+                <br />
+                Please release a reserved number before reserving a new one.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setShowReserveLimitDialog(false)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Release Dialog */}
+        {showReleaseDialog && selectedNumber && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-red-100">
+                  <AlertCircle className="h-8 w-8 text-red-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Release Number
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                Are you sure you want to release the number {selectedNumber.number}?
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowReleaseDialog(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmRelease}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  Release
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <AnimatePresence>
+          {showChat && selectedNumberForChat && (
+            <ChatBox
+              numberId={selectedNumberForChat.id}
+              originalAgentId={selectedNumberForChat.reservedBy || ''}
+              claimingAgentId={selectedNumberForChat.claimingAgentId || ''}
+              onClose={() => {
+                setShowChat(false);
+                setSelectedNumberForChat(null);
+              }}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Duplicate Numbers Dialog */}
+        {showDuplicateDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden"
+              >
+                {/* Header */}
+              <div className="bg-gradient-to-r from-orange-500 to-red-600 text-white p-6">
+                  <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-3">
+                    <FileWarning className="h-6 w-6" />
+                    <h2 className="text-2xl font-bold">Duplicate Numbers</h2>
+                    {duplicateNumbers.length > 0 && (
+                      <span className="bg-white bg-opacity-20 px-3 py-1 rounded-full text-sm">
+                        {duplicateNumbers.length} duplicate(s) found
+                      </span>
+                    )}
+                    </div>
+                  <button
+                    onClick={() => {
+                      setShowDuplicateDialog(false);
+                      setSelectedDuplicateEntries(new Set());
+                    }}
+                    className="text-white hover:bg-white hover:bg-opacity-20 p-2 rounded-lg transition-colors"
+                  >
+                    <X className="h-6 w-6" />
+                  </button>
+                  </div>
+                </div>
+
+                {/* Content */}
+              <div className="flex-1 overflow-y-auto p-6">
+                {duplicateNumbers.length === 0 ? (
+                  <div className="text-center py-12">
+                    <CheckCircle2 className="h-16 w-16 text-green-500 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                      No Duplicates Found
+                    </h3>
+                    <p className="text-gray-500">
+                      All numbers in the pool are unique.
+                    </p>
+                    </div>
+                ) : (
+                  <div className="space-y-6">
+                    {duplicateNumbers.map((duplicate, index) => (
+                      <motion.div
+                        key={duplicate.number}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: index * 0.1 }}
+                        className="bg-red-50 border-2 border-red-200 rounded-xl p-6"
+                      >
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center space-x-3">
+                            <div className="bg-red-100 p-2 rounded-lg">
+                              <FileWarning className="h-5 w-5 text-red-600" />
+                            </div>
+                            <div>
+                              <h3 className="text-lg font-bold text-gray-900">
+                                Number: {duplicate.number}
+                    </h3>
+                              <p className="text-sm text-gray-600">
+                                Found {duplicate.entries.length} duplicate entries
+                              </p>
+                            </div>
+                  </div>
+                </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-12">
+                                  <input
+                                    type="checkbox"
+                                    className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                    checked={duplicate.entries.every(e => selectedDuplicateEntries.has(e.id))}
+                                    onChange={(e) => {
+                                      const newSelected = new Set(selectedDuplicateEntries);
+                                      if (e.target.checked) {
+                                        duplicate.entries.forEach(entry => newSelected.add(entry.id));
+                                      } else {
+                                        duplicate.entries.forEach(entry => newSelected.delete(entry.id));
+                                      }
+                                      setSelectedDuplicateEntries(newSelected);
+                                    }}
+                                  />
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  ID
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Category
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Code
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Group
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Status
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Reserved By
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Created At
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {duplicate.entries.map((entry) => {
+                                const statusStyle = STATUS_STYLES[entry.status as keyof typeof STATUS_STYLES] || STATUS_STYLES.open;
+                                const StatusIcon = statusStyle?.icon || CheckCircle2;
+                                
+                                const isSelected = selectedDuplicateEntries.has(entry.id);
+                                
+                                return (
+                                  <tr key={entry.id} className={`hover:bg-gray-50 ${isSelected ? 'bg-indigo-50' : ''}`}>
+                                    <td className="px-4 py-3">
+                                      <input
+                                        type="checkbox"
+                                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                        checked={isSelected}
+                                        onChange={(e) => {
+                                          const newSelected = new Set(selectedDuplicateEntries);
+                                          if (e.target.checked) {
+                                            newSelected.add(entry.id);
+                                          } else {
+                                            newSelected.delete(entry.id);
+                                          }
+                                          setSelectedDuplicateEntries(newSelected);
+                                        }}
+                                      />
+                                    </td>
+                                    <td className="px-4 py-3 text-sm font-mono text-gray-900">
+                                      {entry.id.substring(0, 8)}...
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.category}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.code || 'N/A'}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.group || 'N/A'}
+                                    </td>
+                                    <td className="px-4 py-3">
+                                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${statusStyle.bg} ${statusStyle.text}`}>
+                                        <StatusIcon className="h-3 w-3 mr-1" />
+                                        {formatStatusLabel(entry.status)}
+                                      </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-900">
+                                      {entry.reservedBy ? (
+                                        <span className="font-medium">{entry.reservedBy.substring(0, 8)}...</span>
+                                      ) : (
+                                        <span className="text-gray-400">None</span>
+                                      )}
+                                    </td>
+                                    <td className="px-4 py-3 text-sm text-gray-500">
+                                      {entry.createdAt ? (() => {
+                                        try {
+                                          let date: Date;
+                                          const createdAt = entry.createdAt as any;
+                                          
+                                          if (typeof createdAt?.toDate === 'function') {
+                                            // Firestore Timestamp
+                                            date = createdAt.toDate();
+                                          } else if (createdAt instanceof Date) {
+                                            // Already a Date object
+                                            date = createdAt;
+                                          } else if (createdAt?.seconds) {
+                                            // Firestore Timestamp with seconds
+                                            date = new Date(createdAt.seconds * 1000);
+                                          } else if (typeof createdAt === 'string') {
+                                            // ISO string
+                                            date = new Date(createdAt);
+                                          } else if (typeof createdAt === 'number') {
+                                            // Unix timestamp
+                                            date = new Date(createdAt);
+                                          } else {
+                                            return 'N/A';
+                                          }
+                                          
+                                          return date.toLocaleDateString();
+                                        } catch {
+                                          return 'N/A';
+                                        }
+                                      })() : 'N/A'}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="border-t border-gray-200 p-6 bg-gray-50">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-gray-600">
+                    {selectedDuplicateEntries.size > 0 && (
+                      <span className="font-medium text-gray-900">
+                        {selectedDuplicateEntries.size} entry/entries selected
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-3">
+                    {selectedDuplicateEntries.size > 0 && (
+                      <button
+                        onClick={() => setShowDeleteDuplicatesDialog(true)}
+                        disabled={isDeletingDuplicates}
+                        className="px-6 py-2 text-sm font-medium text-white bg-gradient-to-r from-red-500 to-red-600 rounded-lg hover:from-red-600 hover:to-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center"
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete Selected ({selectedDuplicateEntries.size})
+                      </button>
+                    )}
+                    <button
+                    onClick={() => {
+                        setShowDuplicateDialog(false);
+                        setSelectedDuplicateEntries(new Set());
+                      }}
+                      className="px-6 py-2 text-sm font-medium text-white bg-gradient-to-r from-orange-500 to-red-600 rounded-lg hover:from-orange-600 hover:to-red-700 transition-colors"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Delete Duplicates Confirmation Dialog */}
+        {showDeleteDuplicatesDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl"
+            >
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-3 rounded-full bg-red-100">
+                  <Trash2 className="h-8 w-8 text-red-600" />
+                </div>
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+                Delete Selected Duplicates
+              </h3>
+              <p className="text-gray-500 text-center mb-6">
+                Are you sure you want to delete <span className="font-semibold text-gray-900">{selectedDuplicateEntries.size}</span> duplicate entry/entries?
+                <br />
+                <span className="text-sm mt-2 block text-red-600">
+                  This action cannot be undone.
+                </span>
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowDeleteDuplicatesDialog(false)}
+                  disabled={isDeletingDuplicates}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                </button>
+                <button
+                  onClick={handleDeleteSelectedDuplicates}
+                  disabled={isDeletingDuplicates}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center"
+                >
+                  {isDeletingDuplicates && (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  )}
+                  {isDeletingDuplicates ? 'Deleting...' : 'Delete'}
+                </button>
+                </div>
+              </motion.div>
+          </div>
+          )}
+        </motion.div>
+        
+        {/* Agent Notepad - Floating Panel */}
+        <AnimatePresence>
+          {showNotepad && user?.role === 'agent' && (
+            <motion.div
+              initial={{ opacity: 0, x: 300 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 300 }}
+              transition={{ duration: 0.3 }}
+              onMouseEnter={() => setShowNotepad(true)}
+              onMouseLeave={() => setShowNotepad(false)}
+              className="fixed right-4 top-24 w-96 bg-white rounded-lg shadow-2xl border border-gray-200 z-50 overflow-hidden"
+            >
+              {/* Notepad Header */}
+              <div className="bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center">
+                  <StickyNote className="w-5 h-5 text-white mr-2" />
+                  <h3 className="text-white font-semibold">Quick Notes</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowInstructions(!showInstructions)}
+                    className="text-white hover:bg-white/20 rounded p-1 transition-colors"
+                    title="Show/Hide Instructions"
+                  >
+                    <Info className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setShowNotepad(false)}
+                    className="text-white hover:bg-white/20 rounded p-1 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              
+              {/* Help Button */}
+              {!showInstructions && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="px-4 pt-3"
+                >
+                  <motion.button
+                    onClick={() => setShowInstructions(true)}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    className="w-full bg-gradient-to-r from-blue-100 to-indigo-100 hover:from-blue-200 hover:to-indigo-200 border border-blue-300 text-blue-700 px-4 py-2 rounded-lg text-xs font-medium transition-all duration-300 flex items-center justify-center gap-2"
+                  >
+                    <Info className="w-4 h-4" />
+                    <span>For help click on me</span>
+                  </motion.button>
+                </motion.div>
+              )}
+              
+              {/* Instructions Section */}
+              <AnimatePresence>
+                {showInstructions && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="overflow-hidden bg-blue-50 border-b border-blue-200"
+                  >
+                    {/* Instructions Header with Close Button */}
+                    <div className="px-4 pt-3 pb-2 flex items-center justify-between border-b border-blue-200">
+                      <h4 className="text-sm font-semibold text-gray-900 flex items-center">
+                        <Info className="w-4 h-4 mr-2 text-blue-600" />
+                        Instructions
+                      </h4>
+                      <button
+                        onClick={() => setShowInstructions(false)}
+                        className="text-gray-500 hover:text-gray-700 hover:bg-blue-100 rounded p-1 transition-colors"
+                        title="Close Instructions"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="p-4 space-y-4">
+                      {/* Bulk Copy Instructions */}
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center">
+                          <Clipboard className="w-4 h-4 mr-2 text-blue-600" />
+                          Bulk Copy Feature
+                        </h4>
+                        <ol className="text-xs text-gray-700 space-y-1.5 ml-6 list-decimal">
+                          <li>Click the <strong>"Bulk Copy"</strong> button in the header (left side)</li>
+                          <li>Button turns <span className="text-blue-600 font-semibold">blue</span> - checkboxes appear next to each number</li>
+                          <li>Click checkboxes to select numbers you want</li>
+                          <li>Selected numbers are <strong>automatically added</strong> to this notepad</li>
+                          <li>You can select numbers across multiple pages</li>
+                          <li>Click <span className="text-green-600 font-semibold">"Done (X)"</span> when finished - checkboxes disappear</li>
+                          <li>All selected numbers remain saved in the notepad</li>
+                        </ol>
+                      </div>
+                      
+                      {/* Notepad Instructions */}
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900 mb-2 flex items-center">
+                          <StickyNote className="w-4 h-4 mr-2 text-blue-600" />
+                          Notepad Features
+                        </h4>
+                        <ol className="text-xs text-gray-700 space-y-1.5 ml-6 list-decimal">
+                          <li><strong>Auto Line Break:</strong> Type 10 digits and it automatically moves to next line</li>
+                          <li><strong>Manual Typing:</strong> You can also type numbers manually, one per line</li>
+                          <li><strong>Duplicate Prevention:</strong> Same number won't be added twice automatically</li>
+                          <li><strong>Auto-Save:</strong> Everything saves automatically to your browser</li>
+                          <li><strong>Blank Lines Toggle:</strong> Turn ON/OFF empty lines between numbers for WhatsApp</li>
+                          <li><strong>Copy for WhatsApp:</strong> Formats numbers with bold (*number*) and copies to clipboard</li>
+                          <li><strong>Clear Notes:</strong> Remove all content (with confirmation)</li>
+                        </ol>
+                      </div>
+                      
+                      {/* Quick Tips */}
+                      <div className="bg-blue-100 rounded p-2">
+                        <p className="text-xs font-semibold text-blue-900 mb-1">💡 Quick Tips:</p>
+                        <ul className="text-xs text-blue-800 space-y-0.5 ml-4 list-disc">
+                          <li>Hover over "Notes" button to auto-open notepad</li>
+                          <li>Numbers are saved per-user in your browser</li>
+                          <li>Use "Blank Lines" toggle for better WhatsApp readability</li>
+                          <li>You can edit notepad content manually anytime</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              
+              {/* Notepad Content */}
+              <div className="p-4">
+                <textarea
+                  value={notepadContent}
+                  onChange={handleNotepadInput}
+                  placeholder="Jot down numbers, notes, or anything else... (Auto line break after 10 digits)"
+                  className="w-full h-96 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-sm font-mono"
+                  style={{ lineHeight: '1.5' }}
+                />
+                <div className="mt-3 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <p className="text-xs text-gray-500">
+                      <Check className="w-3 h-3 inline mr-1" />
+                      Auto-saved locally
+                    </p>
+                  <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => setWhatsappBlankLines(!whatsappBlankLines)}
+                      className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded transition-all duration-300 ${
+                        whatsappBlankLines
+                          ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                          : 'bg-gray-100 text-gray-600 border border-gray-300'
+                      }`}
+                      title={whatsappBlankLines ? 'Blank lines ON (for WhatsApp)' : 'Blank lines OFF'}
+                    >
+                      <span className="mr-1">{whatsappBlankLines ? '✓' : '○'}</span>
+                      Blank Lines
+                    </motion.button>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <motion.button
+                      onClick={copyNotepadContent}
+                      disabled={!notepadContent.trim() || isCopyingNotepad}
+                      whileHover={notepadContent.trim() ? { scale: 1.05 } : {}}
+                      whileTap={notepadContent.trim() ? { scale: 0.95 } : {}}
+                      className="inline-flex items-center px-3 py-1 text-xs font-medium bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded hover:from-green-600 hover:to-emerald-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                      <AnimatePresence mode="wait">
+                        {isCopyingNotepad ? (
+                          <motion.span
+                            key="copying"
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 5 }}
+                            transition={{ duration: 0.2 }}
+                            className="inline-flex items-center"
+                          >
+                            <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                            Copying...
+                          </motion.span>
+                        ) : notepadCopied ? (
+                          <motion.span
+                            key="copied"
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.8 }}
+                            transition={{ duration: 0.2 }}
+                            className="inline-flex items-center"
+                          >
+                            <Check className="w-3 h-3 mr-1" />
+                            Copied!
+                          </motion.span>
+                        ) : (
+                          <motion.span
+                            key="copy"
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 5 }}
+                            transition={{ duration: 0.2 }}
+                            className="inline-flex items-center"
+                          >
+                            <Clipboard className="w-3 h-3 mr-1" />
+                            Copy for WhatsApp
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => {
+                        if (window.confirm('Clear all notes?')) {
+                          setNotepadContent('');
+                        }
+                      }}
+                      className="text-xs text-red-600 hover:text-red-700 font-medium transition-colors"
+                    >
+                      Clear Notes
+                  </motion.button>
+                  </div>
+                </div>
+                </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  ) : null;
+}
