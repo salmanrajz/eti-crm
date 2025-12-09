@@ -43,6 +43,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { collection, query, getDocs, where, orderBy, doc, getDoc, updateDoc, addDoc, onSnapshot, serverTimestamp, deleteDoc, limit, writeBatch, setDoc, deleteField } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../lib/firebase';
 import { User, Team, Lead, NumberPool } from '../../types';
 import { AdminManagerPhoneNumbers } from '../settings/AdminManagerPhoneNumbers';
@@ -97,7 +98,8 @@ import {
   X,
   Database,
   Trash2,
-  Sparkles
+  Sparkles,
+  RefreshCw as RefreshCwIcon
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Line, Bar } from 'react-chartjs-2';
@@ -337,6 +339,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [showAliasInput, setShowAliasInput] = useState(false);
   const [editingGroups, setEditingGroups] = useState(false);
   const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
+  const [initializingStats, setInitializingStats] = useState(false);
+  const [initStatsResult, setInitStatsResult] = useState<string | null>(null);
   const navigate = useNavigate();
 
   // ✅ PERFORMANCE: Performance optimization refs
@@ -1595,6 +1599,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
     },
+    {
+      name: 'Initialize Stats',
+      description: 'Initialize number pool stats (with initials)',
+      value: 'Initialize',
+      href: '#initialize-stats',
+      icon: RefreshCwIcon,
+      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
+      textColor: 'text-indigo-600',
+    },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
   // Memoize sorted team metrics to prevent unnecessary re-sorting
@@ -1925,6 +1938,30 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       navigate(`/dashboard/leads/${leadId}`);
     } else {
       toast.error('Lead not found for this number');
+    }
+  };
+
+  // Handle initialize number pool stats
+  const handleInitializeStats = async () => {
+    try {
+      setInitializingStats(true);
+      setInitStatsResult(null);
+      const fn = httpsCallable(getFunctions(), 'initializeNumberPoolStats');
+      const res = await fn({});
+      const data = res.data as any;
+      setInitStatsResult(
+        `Initialization completed! Total: ${data.totalItems} items. ` +
+        `Categories: ${Object.keys(data.categoryCounts || {}).length}, ` +
+        `Groups: ${Object.keys(data.groupCounts || {}).length}, ` +
+        `Initials: ${Object.keys(data.initialsCounts || {}).length}`
+      );
+      toast.success('Number pool stats initialized successfully');
+    } catch (err: any) {
+      const errorMsg = `Failed to initialize stats: ${err?.message || 'Unknown error'}`;
+      setInitStatsResult(errorMsg);
+      toast.error(errorMsg);
+    } finally {
+      setInitializingStats(false);
     }
   };
 
@@ -2365,6 +2402,39 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                   <div className="flex items-baseline justify-between">
                     <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Initialize Stats' ? (
+            <button
+              key={stat.name}
+              onClick={handleInitializeStats}
+              disabled={initializingStats}
+              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name) || 'bg-white'} disabled:opacity-60 disabled:cursor-not-allowed`}
+              type="button"
+            >
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className={`h-6 w-6 text-white ${initializingStats ? 'animate-spin' : ''}`} />
+                  </div>
+                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-3xl font-bold ${stat.textColor}`}>
+                      {initializingStats ? 'Running...' : stat.value}
+                    </p>
+                  </div>
+                  {initStatsResult && (
+                    <p className="text-xs text-gray-600 mt-2">{initStatsResult}</p>
+                  )}
                 </div>
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />

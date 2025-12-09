@@ -915,43 +915,46 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         errors.customerAge = 'Age must be 21 or above';
       }
     }
-    // Date & Time
-    if (!formData.startDate) {
-      errors.startDate = 'Date is required';
-    } else {
-      // Check if date is in the past
-      const selectedDate = new Date(formData.startDate);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      selectedDate.setHours(0, 0, 0, 0);
-      
-      if (selectedDate < today) {
-        errors.startDate = 'Date cannot be in the past';
-      } else if (!isEditing && selectedDate.getTime() === today.getTime() && formData.startTime) {
-        // Only validate "time cannot be in the past" when NOT editing
-        // Handle both 24-hour format (HH:mm) and 12-hour format (h:mm AM/PM)
-        let time24 = formData.startTime;
-        if (time24.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
-          // It's in 12-hour format, convert it
-          time24 = convertTo24Hour(time24);
-        }
-        if (time24 && time24.includes(':')) {
-          const [hours, minutes] = time24.split(':').map(Number);
-          if (!isNaN(hours) && !isNaN(minutes)) {
-            const selectedDateTime = new Date();
-            selectedDateTime.setHours(hours, minutes, 0, 0);
-            const now = new Date();
-            
-            if (selectedDateTime < now) {
-              errors.startTime = 'Time cannot be in the past';
+    // Date & Time (skip strict validation for coordinators when editing)
+    const skipDateTimeValidation = isEditing && user?.role === 'coordinator';
+    if (!skipDateTimeValidation) {
+      if (!formData.startDate) {
+        errors.startDate = 'Date is required';
+      } else {
+        // Check if date is in the past
+        const selectedDate = new Date(formData.startDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        selectedDate.setHours(0, 0, 0, 0);
+        
+        if (selectedDate < today) {
+          errors.startDate = 'Date cannot be in the past';
+        } else if (!isEditing && selectedDate.getTime() === today.getTime() && formData.startTime) {
+          // Only validate "time cannot be in the past" when NOT editing
+          // Handle both 24-hour format (HH:mm) and 12-hour format (h:mm AM/PM)
+          let time24 = formData.startTime;
+          if (time24.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) {
+            // It's in 12-hour format, convert it
+            time24 = convertTo24Hour(time24);
+          }
+          if (time24 && time24.includes(':')) {
+            const [hours, minutes] = time24.split(':').map(Number);
+            if (!isNaN(hours) && !isNaN(minutes)) {
+              const selectedDateTime = new Date();
+              selectedDateTime.setHours(hours, minutes, 0, 0);
+              const now = new Date();
+              
+              if (selectedDateTime < now) {
+                errors.startTime = 'Time cannot be in the past';
+              }
             }
           }
         }
       }
-    }
-    // Time is only required when NOT editing
-    if (!isEditing && !formData.startTime) {
-      errors.startTime = 'Time is required';
+      // Time is only required when NOT editing
+      if (!isEditing && !formData.startTime) {
+        errors.startTime = 'Time is required';
+      }
     }
     // Optional URL validation
     if (formData.locationUrl && formData.locationUrl.trim().length > 0) {

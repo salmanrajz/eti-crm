@@ -6,6 +6,8 @@ export function FirebaseIndexes() {
   const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
   const [recomputing, setRecomputing] = useState(false);
   const [recomputeResult, setRecomputeResult] = useState<string | null>(null);
+  const [initializing, setInitializing] = useState(false);
+  const [initResult, setInitResult] = useState<string | null>(null);
 
   async function handleRecomputeStats() {
     try {
@@ -18,6 +20,27 @@ export function FirebaseIndexes() {
       setRecomputeResult(`Failed to recompute stats: ${err?.message || 'Unknown error'}`);
     } finally {
       setRecomputing(false);
+    }
+  }
+
+  async function handleInitializeStats() {
+    try {
+      setInitializing(true);
+      setInitResult(null);
+      const fn = httpsCallable(getFunctions(), 'initializeNumberPoolStats');
+      const res = await fn({});
+      const data = res.data as any;
+      setInitResult(
+        `Initialization completed successfully! ` +
+        `Total: ${data.totalItems} items. ` +
+        `Categories: ${Object.keys(data.categoryCounts || {}).length}, ` +
+        `Groups: ${Object.keys(data.groupCounts || {}).length}, ` +
+        `Initials: ${Object.keys(data.initialsCounts || {}).length}`
+      );
+    } catch (err: any) {
+      setInitResult(`Failed to initialize stats: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setInitializing(false);
     }
   }
 
@@ -130,15 +153,27 @@ export function FirebaseIndexes() {
         {/* Temporary Admin Tool: Recompute NumberPool Stats */}
         <div className="mt-8 border-t pt-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-3">Admin Tools</h2>
-          <button
-            onClick={handleRecomputeStats}
-            disabled={recomputing}
-            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-60"
-          >
-            {recomputing ? 'Recomputing stats…' : 'Recompute NumberPool Stats'}
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={handleRecomputeStats}
+              disabled={recomputing || initializing}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-60"
+            >
+              {recomputing ? 'Recomputing stats…' : 'Recompute NumberPool Stats'}
+            </button>
+            <button
+              onClick={handleInitializeStats}
+              disabled={recomputing || initializing}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-60"
+            >
+              {initializing ? 'Initializing stats (this may take a few minutes)…' : 'Initialize NumberPool Stats (with Initials)'}
+            </button>
+          </div>
           {recomputeResult && (
             <p className="mt-3 text-sm text-gray-700">{recomputeResult}</p>
+          )}
+          {initResult && (
+            <p className="mt-3 text-sm text-gray-700">{initResult}</p>
           )}
         </div>
       </div>
