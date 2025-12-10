@@ -15,6 +15,8 @@ interface NumberPoolState {
   hasNextPage: boolean;
   hasPreviousPage: boolean;
   selectedCategory: string | null;
+  selectedGroup: string | null;
+  selectedInitials: string | null;
   lastLoadTime: number;
   isLoading: boolean;
 }
@@ -31,6 +33,8 @@ class NumberPoolManager {
     hasNextPage: false,
     hasPreviousPage: false,
     selectedCategory: null,
+    selectedGroup: null,
+    selectedInitials: null,
     lastLoadTime: 0,
     isLoading: false
   };
@@ -75,7 +79,7 @@ class NumberPoolManager {
 
 
   // Check if we need to reload data
-  private needsReload(category: string | null, pageSize: number, userId?: string, userRole?: string): boolean {
+  private needsReload(category: string | null, pageSize: number, userId?: string, userRole?: string, group?: string | null, initials?: string | null): boolean {
     const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
     const now = Date.now();
     
@@ -87,6 +91,8 @@ class NumberPoolManager {
     return (
       !this.isInitialized ||
       this.state.selectedCategory !== category ||
+      this.state.selectedGroup !== (group || null) ||
+      this.state.selectedInitials !== (initials || null) ||
       this.state.pageSize !== pageSize ||
       (now - this.state.lastLoadTime) > CACHE_DURATION ||
       this.state.numbers.length === 0
@@ -235,12 +241,12 @@ class NumberPoolManager {
   }
 
   // Initialize or get existing data
-  async initialize(category: string | null = null, pageSize: number = 50, userId?: string, userRole?: string): Promise<void> {
+  async initialize(category: string | null = null, pageSize: number = 50, userId?: string, userRole?: string, group?: string | null, initials?: string | null): Promise<void> {
     
     // Check user change first - this will force reset if user changed
     const userChanged = this.checkUserChange(userId, userRole);
     
-    if (!userChanged && !this.needsReload(category, pageSize, userId, userRole)) {
+    if (!userChanged && !this.needsReload(category, pageSize, userId, userRole, group, initials)) {
       return;
     }
 
@@ -257,11 +263,13 @@ class NumberPoolManager {
     }, 30000); // 30 second timeout
 
     try {
-      // Track if category changed to skip cache
+      // Track if filters changed to recreate pagination
       const categoryChanged = this.state.selectedCategory !== category;
+      const groupChanged = this.state.selectedGroup !== (group || null);
+      const initialsChanged = this.state.selectedInitials !== (initials || null);
       
-      // Update pagination instance if needed
-      if (!this.pagination || categoryChanged || this.state.pageSize !== pageSize) {
+      // Update pagination instance if needed (when any filter or pageSize changes)
+      if (!this.pagination || categoryChanged || groupChanged || this.state.pageSize !== pageSize) {
         if (this.pagination) {
           this.pagination.clearCache();
         }
@@ -270,16 +278,26 @@ class NumberPoolManager {
         if (category && category !== 'all') {
           filters.push({ field: 'category', operator: '==' as const, value: category });
         }
+        if (group && group !== 'all') {
+          filters.push({ field: 'group', operator: '==' as const, value: group });
+        }
+        // Initials filtering will be done client-side after fetching (Firestore doesn't support regex easily)
         // Do NOT add a strict filter here; rules now allow missing field. We'll filter client-side.
 
         this.pagination = new SmartPagination<NumberPool>('numberPool', {
           pageSize,
           orderBy: 'createdAt',
           orderDirection: 'desc', // DESC to show newest numbers first
-          filters
+          filters,
+          initials: initials || null // Pass initials for stats service
         });
         
         // No cache to clear with memory-only mode
+      } else if (initialsChanged && this.pagination) {
+        // If only initials changed, update it and reload data
+        this.pagination.updateInitials(initials || null);
+        this.pagination.clearCache();
+        // Force reload page 1 with new initials filter
       }
 
       // No cache with memory-only mode - always fetch fresh data from Firestore
@@ -309,7 +327,19 @@ class NumberPoolManager {
         throw e;
       }
 
-      const filteredNumbers = this.filterNumbersByRole(result.data, userRole);
+      // Filter by role first
+      let filteredNumbers = this.filterNumbersByRole(result.data, userRole);
+      
+      // Filter by initials client-side (extract first 3 digits from number)
+      if (initials && initials !== 'all') {
+        filteredNumbers = filteredNumbers.filter(n => {
+          if (!n.number) return false;
+          const numStr = n.number.toString().trim();
+          const match = numStr.match(/^(\d{3})/);
+          return match && match[1] === initials;
+        });
+      }
+      
       this.updateState({
         numbers: filteredNumbers,
         currentPage: 1,
@@ -319,6 +349,8 @@ class NumberPoolManager {
         hasNextPage: result.hasNextPage,
         hasPreviousPage: result.hasPreviousPage,
         selectedCategory: category,
+        selectedGroup: group || null,
+        selectedInitials: initials || null,
         lastLoadTime: Date.now(),
         isLoading: false
       });
@@ -355,7 +387,7 @@ class NumberPoolManager {
         // Only retry if still not initialized, user unchanged, and user still present
         if (!this.isInitialized && userId && this.currentUserId === userId) {
           console.log('[NumberPoolManager] Auto-retrying initialization after error');
-          this.initialize(category, pageSize, userId, userRole).catch(err => {
+          this.initialize(category, pageSize, userId, userRole, group, initials).catch(err => {
             console.error('[NumberPoolManager] Retry initialization failed:', err);
           });
         }
@@ -381,7 +413,17 @@ class NumberPoolManager {
     try {
       // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.nextPage();
-      const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
+      let filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
+      
+      // Apply initials filter if set
+      if (this.state.selectedInitials && this.state.selectedInitials !== 'all') {
+        filteredNumbers = filteredNumbers.filter(n => {
+          if (!n.number) return false;
+          const numStr = n.number.toString().trim();
+          const match = numStr.match(/^(\d{3})/);
+          return match && match[1] === this.state.selectedInitials;
+        });
+      }
       
       this.updateState({
         numbers: filteredNumbers,
@@ -416,7 +458,17 @@ class NumberPoolManager {
     try {
       // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.previousPage();
-      const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
+      let filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
+      
+      // Apply initials filter if set
+      if (this.state.selectedInitials && this.state.selectedInitials !== 'all') {
+        filteredNumbers = filteredNumbers.filter(n => {
+          if (!n.number) return false;
+          const numStr = n.number.toString().trim();
+          const match = numStr.match(/^(\d{3})/);
+          return match && match[1] === this.state.selectedInitials;
+        });
+      }
       
       this.updateState({
         numbers: filteredNumbers,
@@ -448,7 +500,17 @@ class NumberPoolManager {
     try {
       // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.loadPage(page);
-      const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
+      let filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
+      
+      // Apply initials filter if set
+      if (this.state.selectedInitials && this.state.selectedInitials !== 'all') {
+        filteredNumbers = filteredNumbers.filter(n => {
+          if (!n.number) return false;
+          const numStr = n.number.toString().trim();
+          const match = numStr.match(/^(\d{3})/);
+          return match && match[1] === this.state.selectedInitials;
+        });
+      }
       
       this.updateState({
         numbers: filteredNumbers,

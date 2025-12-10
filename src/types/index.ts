@@ -273,6 +273,9 @@ export interface ChatMessage {
   message: string;
   createdAt: Date;
   readBy: string[];
+  mediaUrl?: string;
+  mediaType?: 'image' | 'video' | 'audio' | 'file' | 'pdf';
+  durationMs?: number;
 }
 
 export interface Team {

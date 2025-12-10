@@ -109,7 +109,8 @@ import {
   Check,
   Minus,
   Info,
-  ChevronUp
+  ChevronUp,
+  Download
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -254,6 +255,16 @@ type SortDirection = 'asc' | 'desc';
  * Available number categories in the system
  */
 const CATEGORIES = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'] as const;
+
+/**
+ * Available number groups in the system
+ */
+const GROUPS = ['G1', 'G2', 'G3'] as const;
+
+/**
+ * Available number initials in the system
+ */
+const INITIALS = ['050', '054', '056'] as const;
 
 /**
  * Available page sizes for pagination
@@ -466,6 +477,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(propSelectedCategory || null);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [selectedInitials, setSelectedInitials] = useState<string | null>(null);
   const [statsTotalPages, setStatsTotalPages] = useState<number>(0);
   const [statsTotalItems, setStatsTotalItems] = useState<number>(0);
   const [sortConfig, setSortConfig] = useState<{ field: SortField; direction: SortDirection }>({
@@ -568,6 +581,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   
   // Bulk copy utility - reuse selectedNumbers state for checkboxes
   const [bulkCopyMode, setBulkCopyMode] = useState(false);
+
+  // Export numbers (admin)
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportingNumbers, setExportingNumbers] = useState(false);
+  const exportFields = [
+    { key: 'number', label: 'Number' },
+    { key: 'category', label: 'Category' },
+    { key: 'code', label: 'Code' },
+    { key: 'passcode', label: 'Passcode' },
+    { key: 'status', label: 'Status' },
+    { key: 'group', label: 'Group' },
+    { key: 'reservedBy', label: 'Reserved By' }
+  ] as const;
+  const [selectedExportFields, setSelectedExportFields] = useState<string[]>(exportFields.map(f => f.key));
   
   // ===============================================================================
   // UTILITY FUNCTIONS AND REFS
@@ -579,6 +606,80 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
+
+  const toggleExportField = (key: string) => {
+    setSelectedExportFields(prev =>
+      prev.includes(key)
+        ? prev.filter(k => k !== key)
+        : [...prev, key]
+    );
+  };
+
+  const handleExportNumbers = async () => {
+    if (!isAdmin()) return;
+    setExportingNumbers(true);
+    try {
+      const snapshot = await getDocs(collection(db, 'numberPool'));
+      const rows = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as any[];
+      if (!rows.length) {
+        toast.error('No numbers to export');
+        return;
+      }
+
+      const headerMap: Record<string, string> = {
+        number: 'Number',
+        category: 'Category',
+        code: 'Code',
+        passcode: 'Passcode',
+        status: 'Status',
+        group: 'Group',
+        teamVisibility: 'Team Visibility',
+        visibleToFreelancers: 'Visible To Freelancers',
+        reservedBy: 'Reserved By',
+        reservedAt: 'Reserved At',
+        expiresAt: 'Expires At',
+        claimingAgentId: 'Claiming Agent',
+        claimingStartedAt: 'Claiming Started At',
+        claimingExpiresAt: 'Claiming Expires At',
+        originalAgentId: 'Original Agent',
+        originalReservedAt: 'Original Reserved At',
+        originalExpiresAt: 'Original Expires At',
+        lastClaimedAt: 'Last Claimed At',
+        claimedAt: 'Claimed At',
+        leadId: 'Lead Id'
+      };
+
+      const formatVal = (val: any) => {
+        if (val === undefined || val === null) return '';
+        if (val?.toDate instanceof Function) return val.toDate().toISOString();
+        if (val instanceof Date) return val.toISOString();
+        if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+        return val;
+      };
+
+      const data = rows.map(row => {
+        const out: Record<string, any> = {};
+        selectedExportFields.forEach(key => {
+          out[headerMap[key] || key] = formatVal(row[key]);
+        });
+        return out;
+      });
+
+      const XLSX = await import('xlsx');
+      const ws = XLSX.utils.json_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'NumberPool');
+      const filename = `NumberPool_${new Date().toISOString().slice(0,10)}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      toast.success('Export complete');
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Error exporting numbers:', error);
+      toast.error('Failed to export numbers');
+    } finally {
+      setExportingNumbers(false);
+    }
+  };
 
   /**
    * Visibility guard filter for team-restricted numbers based on user role
@@ -651,7 +752,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // Initialize manager (will use cache if available)
     // The manager will detect user changes and force reset internally
     numberPoolManager.setUserRole(user?.role);
-    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role).catch(error => {
+    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role, selectedGroup, selectedInitials).catch(error => {
       console.error('[NumberPool] Initialization error:', error);
       if (isMounted) {
         setLoading(false);
@@ -706,7 +807,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           // Re-initialize after reset
           setTimeout(() => {
             if (isMounted && user?.id) {
-              numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role).catch(() => {
+              numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role, selectedGroup, selectedInitials).catch(() => {
                 // Silent error handling
               });
             }
@@ -725,7 +826,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         clearTimeout(stuckStateTimeout);
       }
     };
-  }, [selectedCategory, pageSize, user?.id, user?.role]); // Removed 'loading' to prevent circular dependency
+  }, [selectedCategory, selectedGroup, selectedInitials, pageSize, user?.id, user?.role]); // Removed 'loading' to prevent circular dependency
 
   // ===============================================================================
   // AGENT UTILITIES - NOTEPAD LOCALSTORAGE
@@ -984,7 +1085,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     
     const loadStats = async () => {
       try {
-        const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined);
+        const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined, selectedGroup || undefined, selectedInitials || undefined);
         if (isMounted) {
           setStatsTotalPages(totalPages);
         }
@@ -997,8 +1098,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // Subscribe to live updates and hydrate when stats change
     unsubStats = numberPoolStatsService.subscribeToStats(async (stats) => {
       if (!isMounted) return;
-      const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined);
-      const totalItems = await numberPoolStatsService.getTotalItems(selectedCategory || undefined);
+      const totalPages = await numberPoolStatsService.getTotalPages(pageSize, selectedCategory || undefined, selectedGroup || undefined, selectedInitials || undefined);
+      const totalItems = await numberPoolStatsService.getTotalItems(selectedCategory || undefined, selectedGroup || undefined, selectedInitials || undefined);
       if (isMounted) {
         setStatsTotalPages(totalPages);
         setStatsTotalItems(totalItems || 0);
@@ -1026,7 +1127,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       window.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('storage', onStorage);
     };
-  }, [pageSize, selectedCategory]);
+  }, [pageSize, selectedCategory, selectedGroup, selectedInitials]);
 
   // Always keep "Your Reserved Numbers" in sync globally (independent of current page) - Mobile optimized
   useEffect(() => {
@@ -1122,7 +1223,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   useEffect(() => {
     setCurrentPage(1);
     setSearchCurrentPage(1);
-  }, [selectedCategory, pageSize]);
+  }, [selectedCategory, selectedGroup, selectedInitials, pageSize]);
 
   // Pagination navigation functions using global manager
   const goToNextPage = useCallback(async () => {
@@ -1346,16 +1447,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         hasPreviousPage: searchHasPreviousPage
       };
     }
-    // When a category is selected, use actual pagination totalPages (from count query)
-    // Stats service doesn't have category-specific page counts
-    if (selectedCategory) {
-    return {
-      currentPage,
+    // When a category OR group is selected, use actual pagination totalPages (from count query or stats service)
+    // This ensures accurate pagination for filtered views
+    if (selectedCategory || selectedGroup) {
+      return {
+        currentPage,
         totalPages,
-      totalItems,
-      hasNextPage,
-      hasPreviousPage
-    };
+        totalItems,
+        hasNextPage,
+        hasPreviousPage
+      };
     }
     // For "all categories" view, prefer stats service (faster)
     return {
@@ -1365,7 +1466,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       hasNextPage,
       hasPreviousPage
     };
-  }, [debouncedSearchTerm, searchCurrentPage, searchTotalPages, searchTotalItems, searchHasNextPage, searchHasPreviousPage, currentPage, totalPages, totalItems, hasNextPage, hasPreviousPage, statsTotalPages, statsTotalItems, selectedCategory]);
+  }, [debouncedSearchTerm, searchCurrentPage, searchTotalPages, searchTotalItems, searchHasNextPage, searchHasPreviousPage, currentPage, totalPages, totalItems, hasNextPage, hasPreviousPage, statsTotalPages, statsTotalItems, selectedCategory, selectedGroup, selectedInitials]);
 
   // Compute reservation cap state from the dedicated reservedNumbers listener
   useEffect(() => {
@@ -1374,7 +1475,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, selectedCategory, pageSize]);
+  }, [searchTerm, selectedCategory, selectedGroup, selectedInitials, pageSize]);
 
   useEffect(() => {
     if (propSelectedCategory !== undefined) {
@@ -1908,7 +2009,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       setTimeout(() => {
         if (user?.id) {
           // Mark as not initialized so it will reload
-          numberPoolManager.initialize(selectedCategory, pageSize, user.id, user.role).catch(() => {
+          numberPoolManager.initialize(selectedCategory, pageSize, user.id, user.role, selectedGroup, selectedInitials).catch(() => {
             recoveryAttemptedRef.current = false; // Allow retry on error
           }).finally(() => {
             // Reset recovery flag after a delay to allow future recoveries if needed
@@ -1922,7 +2023,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // Reset recovery flag if conditions change
       recoveryAttemptedRef.current = false;
     }
-  }, [loading, displayNumbers.length, statsTotalItems, selectedCategory, pageSize, user?.id, user?.role]);
+  }, [loading, displayNumbers.length, statsTotalItems, selectedCategory, selectedGroup, selectedInitials, pageSize, user?.id, user?.role]);
 
   // Use displayNumbers instead of paginatedNumbers for the new pagination system
   const paginatedNumbers = displayNumbers;
@@ -3353,6 +3454,24 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
+                  onClick={() => setShowExportModal(true)}
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
+                >
+                  <div className="flex items-center">
+                    <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-2 rounded-lg mr-3">
+                      <Download className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <span className="block text-sm font-semibold text-gray-900">
+                        Export Numbers
+                      </span>
+                      <span className="block text-xs text-gray-500">Choose columns</span>
+                    </div>
+                  </div>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
                   onClick={handleSelectAll}
                   className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
                 >
@@ -3488,7 +3607,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="flex items-center space-x-3 sm:space-x-4">
           <div>
-                            <h4 className="text-base sm:text-base font-semibold text-gray-900">{number.number}</h4>
+                            <h4 className="text-xl sm:text-2xl font-bold font-mono tracking-wide text-gray-900">{number.number}</h4>
                             <span className="text-xs sm:text-sm text-gray-500">{number.category}</span>
                       </div>
                           </div>
@@ -3645,6 +3764,40 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 ))}
               </select>
             </div>
+
+            {/* Group Filter */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <select
+                value={selectedGroup || ''}
+                onChange={(e) => setSelectedGroup(e.target.value || null)}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+              >
+                <option value="">All Groups</option>
+                {GROUPS.map(group => (
+                  <option key={group} value={group}>{group}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Initials Filter - Hidden for now */}
+            {/* <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+              </div>
+              <select
+                value={selectedInitials || ''}
+                onChange={(e) => setSelectedInitials(e.target.value || null)}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+              >
+                <option value="">All Initials</option>
+                {INITIALS.map(initials => (
+                  <option key={initials} value={initials}>{initials}</option>
+                ))}
+              </select>
+            </div> */}
 
             {/* Page Size Selector */}
             <div className="relative group">
@@ -4660,7 +4813,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         {serialNumber}
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
-          <div className="text-sm font-medium text-gray-900 group-hover:text-indigo-600 transition-colors">
+          <div
+            className={clsx(
+              "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
+              number.status === 'reserved'
+                ? `${STATUS_STYLES.reserved.bg} text-gray-800`
+                : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`
+            )}
+          >
             {number.number}
         </div>
       </td>
@@ -4765,6 +4925,87 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </p>
                   </div>
                 </div>
+      {isAdmin() && (
+        <AnimatePresence>
+          {showExportModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+              onClick={() => !exportingNumbers && setShowExportModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Export Number Pool</h3>
+                    <p className="text-sm text-gray-500">Choose the columns to include in the Excel file.</p>
+                  </div>
+                  <button
+                    onClick={() => setShowExportModal(false)}
+                    className="text-gray-500 hover:text-gray-700"
+                    disabled={exportingNumbers}
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {exportFields.map(field => (
+                    <label key={field.key} className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        checked={selectedExportFields.includes(field.key)}
+                        onChange={() => toggleExportField(field.key)}
+                        disabled={exportingNumbers}
+                      />
+                      {field.label}
+                    </label>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => setSelectedExportFields(exportFields.map(f => f.key))}
+                    disabled={exportingNumbers}
+                  >
+                    Select all
+                  </button>
+                  <span>Exports current number pool snapshot</span>
+                </div>
+
+                <div className="flex justify-end gap-3">
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    onClick={() => setShowExportModal(false)}
+                    disabled={exportingNumbers}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex items-center px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                    onClick={handleExportNumbers}
+                    disabled={exportingNumbers || selectedExportFields.length === 0}
+                  >
+                    {exportingNumbers ? 'Exporting...' : 'Export to Excel'}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
               </div>
             ) : (
               <div className="text-sm text-gray-400">-</div>
@@ -5845,7 +6086,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       whileHover={notepadContent.trim() ? { scale: 1.05 } : {}}
                       whileTap={notepadContent.trim() ? { scale: 0.95 } : {}}
                       className="inline-flex items-center px-3 py-1 text-xs font-medium bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded hover:from-green-600 hover:to-emerald-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
+                  >
                       <AnimatePresence mode="wait">
                         {isCopyingNotepad ? (
                           <motion.span

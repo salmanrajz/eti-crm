@@ -71,9 +71,25 @@ class NumberPoolStatsService {
   /**
    * Get total pages for a specific page size
    */
-  async getTotalPages(pageSize: number, category?: string): Promise<number> {
+  async getTotalPages(pageSize: number, category?: string, group?: string, initials?: string): Promise<number> {
     const stats = await this.getStats();
     if (!stats) return 0;
+
+    // Use initials-specific stats if available (highest priority)
+    if (initials && initials !== 'all') {
+      const initialsKey = `initialsTotalPages_${pageSize}_${initials}` as keyof NumberPoolStats;
+      if (stats[initialsKey] && typeof stats[initialsKey] === 'number') {
+        return stats[initialsKey] as number;
+      }
+    }
+
+    // Use group-specific stats if available
+    if (group && group !== 'all') {
+      const groupKey = `groupTotalPages_${pageSize}_${group}` as keyof NumberPoolStats;
+      if (stats[groupKey] && typeof stats[groupKey] === 'number') {
+        return stats[groupKey] as number;
+      }
+    }
 
     // Use category-specific stats if available
     if (category && category !== 'all') {
@@ -91,9 +107,25 @@ class NumberPoolStatsService {
   /**
    * Get total items count
    */
-  async getTotalItems(category?: string): Promise<number> {
+  async getTotalItems(category?: string, group?: string, initials?: string): Promise<number> {
     const stats = await this.getStats();
     if (!stats) return 0;
+
+    // Use initials-specific stats if available (highest priority)
+    if (initials && initials !== 'all') {
+      const initialsKey = `initialsTotalItems_${initials}` as keyof NumberPoolStats;
+      if (stats[initialsKey] && typeof stats[initialsKey] === 'number') {
+        return stats[initialsKey] as number;
+      }
+    }
+
+    // Use group-specific stats if available
+    if (group && group !== 'all') {
+      const groupKey = `groupTotalItems_${group}` as keyof NumberPoolStats;
+      if (stats[groupKey] && typeof stats[groupKey] === 'number') {
+        return stats[groupKey] as number;
+      }
+    }
 
     // Use category-specific stats if available
     if (category && category !== 'all') {

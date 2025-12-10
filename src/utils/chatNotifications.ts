@@ -74,11 +74,13 @@ function coordinatorMatchesGroup(coordinatorType: CoordinatorType, leadGroup: st
  * @param lead - The lead object containing managerId and other details
  * @param messageText - The chat message text to include in notification
  * @param senderName - The name of the person who sent the message
+ * @param mediaType - Optional media type (audio, image, video, file, pdf) to customize the notification message
  */
 export async function sendChatMessageWhatsAppNotification(
   lead: Lead,
   messageText: string,
-  senderName: string
+  senderName: string,
+  mediaType?: 'audio' | 'image' | 'video' | 'file' | 'pdf'
 ): Promise<void> {
 
   try {
@@ -129,10 +131,18 @@ export async function sendChatMessageWhatsAppNotification(
       }
     }
 
-    // Determine lead group (from first plan)
-    const leadGroup = getLeadGroup(latestLead) || 'N/A';
-    const primaryPlan = Array.isArray(latestLead?.plans) && latestLead.plans.length > 0 ? latestLead.plans[0] : null;
-    const primaryNumber = primaryPlan?.number || "N/A";
+    // Determine lead group (from first plan) and build numbers list
+    const plans = Array.isArray(latestLead?.plans) ? latestLead.plans : [];
+    const numbersList =
+      plans.length > 0
+        ? plans
+            .map((p: any) => {
+              const num = (p?.number || '').toString().trim();
+              const grp = (p?.group || '').toString().trim();
+              return `${num || 'N/A'}${grp ? ` (${grp})` : ''}`;
+            })
+            .join(', ')
+        : 'N/A';
 
     const formatStatus = (status?: string) => {
       if (!status) return 'N/A';
@@ -140,19 +150,55 @@ export async function sendChatMessageWhatsAppNotification(
     };
 
     // Format the message according to the specified format
+    const etisalatId =
+      typeof latestLead?.etisalatLeadId === 'string'
+        ? latestLead.etisalatLeadId.trim()
+        : undefined;
+    const planEtisalatIds = Array.isArray(latestLead?.plans)
+      ? latestLead.plans
+          .map((p: any) => (typeof p?.etisalatLeadId === 'string' ? p.etisalatLeadId.trim() : undefined))
+          .filter((v: string | undefined) => v && v.length > 0)
+      : [];
+    const uniqueEtisalatIds = Array.from(new Set([...(etisalatId ? [etisalatId] : []), ...planEtisalatIds]));
+    const etisalatLine = uniqueEtisalatIds.length > 0
+      ? `\n\n🆔 Etisalat ID${uniqueEtisalatIds.length > 1 ? 's' : ''}: ${uniqueEtisalatIds.map(id => `*${id}*`).join(', ')}`
+      : '';
+
+    const customerName =
+      typeof latestLead?.customerName === 'string'
+        ? latestLead.customerName.trim()
+        : undefined;
+    const customerNumber =
+      typeof latestLead?.customerNumber === 'string'
+        ? latestLead.customerNumber.trim()
+        : undefined;
     const formattedMessage = `*Lead Notification:*
 
 🔢 Lead Number: *${latestLead?.leadNumber || "N/A"}*
 
-👤 Customer Name: *${latestLead?.customerName || "N/A"}*
+👤 Customer Name: *${customerName || "N/A"}*
 
-📞 Customer Number: *${latestLead?.customerNumber || "N/A"}*
+📞 Customer Number: *${customerNumber || "N/A"}*
 
-🔢 Selected Number: *${primaryNumber}* (${leadGroup})
+🔢 Numbers: ${numbersList}${etisalatLine}
 
 📊 Lead Status: *${formatStatus(latestLead?.status)}*
 
-📝 Remarks: *${messageText}* by *${senderName || "N/A"}*
+📝 Remarks: ${(() => {
+      if (mediaType === 'audio') {
+        return '🎤 *Voice note*';
+      } else if (mediaType === 'image') {
+        return '🖼️ *Image attachment*';
+      } else if (mediaType === 'video') {
+        return '🎥 *Video attachment*';
+      } else if (mediaType === 'pdf') {
+        return '📄 *PDF attachment*';
+      } else if (mediaType === 'file') {
+        return '📎 *File attachment*';
+      } else {
+        return `*${messageText}*`;
+      }
+    })()} by *${senderName || "N/A"}*
 
 🧑‍💼 Agent Name: ${agentName}
 
@@ -184,33 +230,28 @@ export async function sendChatMessageWhatsAppNotification(
       console.error('Error fetching admins for WhatsApp notification:', error);
     }
 
-    // 3. Add coordinators' phone numbers (only if lead is verified and matches their group)
-    if (latestLead.status === 'verified') {
-      try {
-        const leadGroup = getLeadGroup(latestLead);
-        
-        if (leadGroup) {
-          const coordinatorsQuery = query(collection(db, 'users'), where('role', '==', 'coordinator'));
-          const coordinatorsSnapshot = await getDocs(coordinatorsQuery);
-          
-          coordinatorsSnapshot.docs.forEach(coordDoc => {
-            const coordData = coordDoc.data();
-            const coordinatorType = coordData.coordinatorType as CoordinatorType;
-            
-            // Check if this coordinator handles the lead's group
-            if (coordinatorMatchesGroup(coordinatorType, leadGroup)) {
-              const coordPhones = extractPhoneNumbers(coordData);
-              if (coordPhones.length > 0) {
-                coordPhones.forEach(phone => {
-                  allPhoneNumbers.add(phone);
-                });
-              }
-            }
+    // 3. Add coordinators' phone numbers (all states except create/pending_verification)
+    try {
+      const leadGroup = getLeadGroup(latestLead);
+      const coordinatorsQuery = query(collection(db, 'users'), where('role', '==', 'coordinator'));
+      const coordinatorsSnapshot = await getDocs(coordinatorsQuery);
+      
+      coordinatorsSnapshot.docs.forEach(coordDoc => {
+        const coordData = coordDoc.data();
+        const coordinatorType = coordData.coordinatorType as CoordinatorType;
+        const coordPhones = extractPhoneNumbers(coordData);
+        const matchesGroup = leadGroup ? coordinatorMatchesGroup(coordinatorType, leadGroup) : true;
+        const shouldNotify =
+          latestLead.status !== 'pending_verification' &&
+          latestLead.status !== 'non_verified'; // skip create/pending
+        if (coordPhones.length > 0 && (matchesGroup || !leadGroup) && shouldNotify) {
+          coordPhones.forEach(phone => {
+            allPhoneNumbers.add(phone);
           });
         }
-      } catch (error) {
-        console.error('Error fetching coordinators for WhatsApp notification:', error);
-      }
+      });
+    } catch (error) {
+      console.error('Error fetching coordinators for WhatsApp notification:', error);
     }
 
     // Send WhatsApp notification to all collected phone numbers

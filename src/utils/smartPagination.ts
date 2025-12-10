@@ -64,11 +64,12 @@ interface SmartPaginationOptions {
     operator: WhereFilterOp;
     value: any;
   }>;
+  initials?: string | null; // For stats service (client-side filtering)
 }
 
 export class SmartPagination<T> {
   private collectionName: string;
-  private options: Required<SmartPaginationOptions>;
+  private options: Required<Omit<SmartPaginationOptions, 'initials'>> & { initials?: string | null };
   private cursorCache = new Map<number, PageCursor>(); // Cache cursors for visited pages
   private totalItems = 0;
   private totalPages = 0;
@@ -80,7 +81,8 @@ export class SmartPagination<T> {
       pageSize: options.pageSize || 50,
       orderBy: options.orderBy || 'lastStatusChange',
       orderDirection: options.orderDirection || 'desc',
-      filters: options.filters || []
+      filters: options.filters || [],
+      initials: options.initials || null
     };
   }
 
@@ -97,14 +99,17 @@ export class SmartPagination<T> {
   }
 
   private async updateTotalCount() {
-    // Extract category from filters if present
+    // Extract category and group from filters if present
     const categoryFilter = this.options.filters.find(f => f.field === 'category');
+    const groupFilter = this.options.filters.find(f => f.field === 'group');
     const category = categoryFilter?.value;
+    const group = groupFilter?.value;
+    const initials = this.options.initials;
 
     // Try stats service first (fast, pre-calculated)
     try {
-      const totalItems = await numberPoolStatsService.getTotalItems(category);
-      const totalPages = await numberPoolStatsService.getTotalPages(this.options.pageSize, category);
+      const totalItems = await numberPoolStatsService.getTotalItems(category, group, initials || undefined);
+      const totalPages = await numberPoolStatsService.getTotalPages(this.options.pageSize, category, group, initials || undefined);
       
       if (totalItems > 0 && totalPages > 0) {
         this.totalItems = totalItems;
@@ -119,7 +124,6 @@ export class SmartPagination<T> {
     const countSnap = await getCountFromServer(this.buildBaseQuery());
     this.totalItems = Number(countSnap.data().count || 0);
     this.totalPages = Math.ceil(this.totalItems / this.options.pageSize) || 1; // At least 1 page
-    // no-op
   }
 
   private cacheCursor(page: number, firstDoc: QueryDocumentSnapshot | null, lastDoc: QueryDocumentSnapshot | null) {
@@ -149,6 +153,7 @@ export class SmartPagination<T> {
       throw new Error('Page number must be greater than 0');
     }
 
+    // Always update total count first to ensure accurate pagination
     await this.updateTotalCount();
 
     // Allow navigation to any positive page number - Firebase will handle empty results
@@ -158,8 +163,8 @@ export class SmartPagination<T> {
       await this.updateTotalCount();
       
       // If still invalid after refresh, throw error
-    if (pageNumber > this.totalPages) {
-      throw new Error('Page does not exist');
+      if (pageNumber > this.totalPages) {
+        throw new Error(`Page ${pageNumber} does not exist. Total pages: ${this.totalPages}`);
       }
     }
 
@@ -335,6 +340,13 @@ export class SmartPagination<T> {
   // Update filters and clear cache
   updateFilters(filters: Array<{ field: string; operator: WhereFilterOp; value: any }>) {
     this.options.filters = filters;
+    this.clearCache();
+    this.currentPage = 1;
+  }
+
+  // Update initials and clear cache (for stats service)
+  updateInitials(initials: string | null) {
+    this.options.initials = initials;
     this.clearCache();
     this.currentPage = 1;
   }
