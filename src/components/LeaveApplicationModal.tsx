@@ -275,6 +275,8 @@ export default function LeaveApplicationModal({ user, role, teamId, open, onClos
     return { pending, approved, rejected, unpaid, total: monthApps.length };
   };
 
+  if (!open) return null;
+
   return (
     <>
       {open ? (

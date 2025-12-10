@@ -262,36 +262,10 @@ export function TeamReservedNumbers({ user }: TeamReservedNumbersProps) {
 
   return (
     <div className="space-y-8">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 rounded-2xl shadow-lg border border-blue-100 p-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="flex items-center mb-3">
-              <div className="p-3 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl shadow-lg mr-4">
-                <Phone className="h-8 w-8 text-white" />
-              </div>
-              <div>
-                <h2 className="text-3xl font-bold bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent">
-                  Team Reserved Numbers
-                </h2>
-                <p className="text-gray-600 mt-1 text-lg">
-                  Monitor all numbers currently reserved by your team members
-                </p>
-              </div>
-            </div>
-          </div>
-          <div className="flex items-center space-x-3">
-            <div className="bg-white/80 backdrop-blur-sm text-blue-800 px-6 py-3 rounded-xl text-lg font-semibold shadow-md border border-blue-200">
-              {reservedNumbers.length} Reserved
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Filters and Search */}
       <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg border border-gray-200/50 p-6">
-        <div className="flex flex-col sm:flex-row gap-6">
-          <div className="flex-1">
+        <div className="flex flex-col sm:flex-row gap-4 sm:gap-6">
+          <div className="w-full sm:max-w-sm">
             <div className="relative group">
               <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5 group-focus-within:text-blue-500 transition-colors" />
               <input
@@ -299,15 +273,15 @@ export function TeamReservedNumbers({ user }: TeamReservedNumbersProps) {
                 placeholder="Search by number, agent, category, or code..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-12 pr-4 py-4 border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 transition-all duration-200 bg-gray-50/50 focus:bg-white text-lg placeholder-gray-400"
+                className="w-full pl-11 pr-3 py-2.5 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all duration-200 bg-gray-50 focus:bg-white text-sm placeholder-gray-400"
               />
             </div>
           </div>
-          <div className="flex gap-3">
+          <div className="flex gap-3 sm:items-center">
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
-              className="px-6 py-4 border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 transition-all duration-200 bg-gray-50/50 focus:bg-white text-lg font-medium"
+              className="px-4 py-2.5 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all duration-200 bg-gray-50 focus:bg-white text-sm font-medium w-36"
             >
               <option value="all">All Status</option>
               <option value="reserved">Reserved</option>

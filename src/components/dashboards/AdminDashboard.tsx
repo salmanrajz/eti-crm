@@ -150,6 +150,7 @@ interface TeamMetrics {
   activated: number;
   pendingAssignment: number;
   assigned: number;
+  teamTarget?: number; // Team target set by admin (optional, falls back to sum of agent targets)
   agents: {
     id: string;
     name: string;
@@ -341,6 +342,10 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
   const [initializingStats, setInitializingStats] = useState(false);
   const [initStatsResult, setInitStatsResult] = useState<string | null>(null);
+  // Team target editing state
+  const [editingTeamTarget, setEditingTeamTarget] = useState<string | null>(null);
+  const [teamTargetValue, setTeamTargetValue] = useState<number>(0);
+  const [savingTeamTarget, setSavingTeamTarget] = useState(false);
   const navigate = useNavigate();
 
   // ✅ PERFORMANCE: Performance optimization refs
@@ -593,7 +598,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         // Check if teamId is in URL params and select the team
         const teamIdFromUrl = searchParams.get('teamId');
         if (teamIdFromUrl && cachedTeamMetrics) {
-          const team = cachedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+          const team = cachedTeamMetrics.find((t: TeamMetrics) => t.teamId === teamIdFromUrl);
           if (team) {
             setSelectedTeam(team);
           }
@@ -749,51 +754,72 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   }, [teamLeads, selectedMonth, loadTeamMetricsForMonth]);
 
   // ✅ PERFORMANCE: Compute group activations function
+  // Matches the logic from Reports.tsx exactly
   const computeGroupActivations = useCallback((allLeads: Lead[], month: Date) => {
     const start = startOfMonth(month);
     const end = endOfMonth(month);
     const gCounts: Record<string, number> = {};
     
+    // Normalize group function - matches Reports.tsx
+    const normalizeGroup = (group?: string): string => {
+      const g = (group || '').toUpperCase().trim();
+      return g || 'UNKNOWN';
+    };
+    
     const monthActivated = allLeads.filter(lead => {
-      const isActivated = lead.status === 'activated';
-      
-      // Fix date comparison - convert to Date objects for proper comparison
-      let hasUpdatedAt = false;
-      if (lead.updatedAt) {
-        const leadDate = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
-        hasUpdatedAt = leadDate >= start && leadDate <= end;
-      }
-      
-      return isActivated && hasUpdatedAt;
+      if (lead.status !== 'activated') return false;
+      const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
+      return updated >= start && updated <= end;
     });
     
     monthActivated.forEach(lead => {
+      const productType = (lead as any).productType;
+
       (lead.plans || []).forEach(plan => {
-        const grp = (plan.group || '').toUpperCase();
-        if (!grp) return;
-        gCounts[grp] = (gCounts[grp] || 0) + 1;
+        const grp = normalizeGroup(plan.group);
+        
+        // For Express Dial (G2), only count "New" productType towards the group target/achieved
+        // This matches the logic in Reports.tsx
+        const shouldCountForGroup =
+          grp === 'G2'
+            ? productType === 'New'
+            : true;
+
+        if (shouldCountForGroup) {
+          gCounts[grp] = (gCounts[grp] || 0) + 1;
+        }
       });
     });
+    
+    // Always set group activations, even if empty, to ensure state is updated
     setGroupActivations(gCounts);
   }, []);
 
   // ✅ PERFORMANCE: Recompute group activations when teamLeads change
+  // NOTE: The main calculation happens in loadTeamMetricsForMonth with all leads
+  // This useEffect is a backup to ensure group activations are computed when teamLeads updates
+  // We skip if loading to avoid race conditions, and we rely on the direct call in loadTeamMetricsForMonth
   useEffect(() => {
-    if (teamLeads.length > 0) {
+    // Only recompute if we're not currently loading (to avoid race conditions)
+    // and if we have some data (to avoid computing on empty state)
+    // The main computation happens in loadTeamMetricsForMonth, this is just a safety net
+    if (!loading && teamLeads.length > 0) {
       computeGroupActivations(teamLeads, selectedMonth);
     }
-  }, [teamLeads, selectedMonth, computeGroupActivations]);
+  }, [teamLeads, selectedMonth, computeGroupActivations, loading]);
 
   // ✅ REALTIME: Setup real-time snapshots for live updates
   const setupRealtimeSnapshots = useCallback(() => {
     if (!realtimeEnabled || !isMountedRef.current) return;
 
     // Real-time leads snapshot
+    // NOTE: For accurate group activations, we need ALL leads, not just recent ones
+    // But loading all leads in realtime can be expensive, so we reload full data periodically
     const leadsUnsubscribe = onSnapshot(
       query(
         collection(db, 'leads'),
         orderBy('updatedAt', 'desc'),
-        limit(100) // Limit for performance
+        limit(1000) // Increased limit to capture more leads for accurate group calculations
       ),
       (snapshot) => {
         if (!isMountedRef.current) return;
@@ -814,8 +840,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         // Update cache with fresh data
         setCachedData(ADMIN_LEADS_CACHE_KEY, newLeads);
         setTeamLeads(newLeads);
-        // Recompute group activations with new leads data
-        computeGroupActivations(newLeads, selectedMonth);
+        // NOTE: Don't recompute group activations from realtime snapshot
+        // Group activations should only be computed from full dataset in loadTeamMetricsForMonth
+        // The realtime snapshot is limited and would give incorrect counts
         lastRealtimeUpdateRef.current = now;
       },
       (error) => {
@@ -888,7 +915,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         // Check if teamId is in URL params and select the team
         const teamIdFromUrl = searchParams.get('teamId');
         if (teamIdFromUrl && cachedTeamMetrics) {
-          const team = cachedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+          const team = cachedTeamMetrics.find((t: TeamMetrics) => t.teamId === teamIdFromUrl);
           if (team) {
             setSelectedTeam(team);
           }
@@ -902,33 +929,36 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     try {
       setLoading(true);
       
-      // Optimize: Load only recent leads (last 6 months) instead of all leads
-      const sixMonthsAgo = new Date();
-      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-      
-      const recentLeadsQuery = query(
-        collection(db, 'leads'),
-        where('updatedAt', '>=', sixMonthsAgo),
-        orderBy('updatedAt', 'desc'),
-        limit(1000) // Limit to prevent huge datasets
-      );
-      
-      const leadsSnapshot = await getDocs(recentLeadsQuery);
+      // Load all leads - matches Reports.tsx approach for accurate group activations
+      const leadsQuery = query(collection(db, 'leads'));
+      const leadsSnapshot = await getDocs(leadsQuery);
       const allLeads = leadsSnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data(),
         createdAt: doc.data().createdAt?.toDate(),
-        updatedAt: doc.data().updatedAt?.toDate()
+        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
       })) as Lead[];
 
       // Filter leads for current month
       const currentMonthStart = startOfMonth(selectedMonth);
       const currentMonthEnd = endOfMonth(selectedMonth);
-      const currentMonthLeads = allLeads.filter(lead => 
-        lead.updatedAt && 
-        lead.updatedAt >= currentMonthStart && 
-        lead.updatedAt <= currentMonthEnd
-      );
+      const getActivatedAt = (lead: any): Date | null => {
+        const raw = lead?.activatedAt || lead?.updatedAt;
+        if (!raw) return null;
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      // Filter leads for current month by activatedAt (fallback updatedAt)
+      const currentMonthLeads = allLeads.filter(lead => {
+        const activatedAt = getActivatedAt(lead);
+        return activatedAt && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
+      });
         
       // Historical verified count: any lead that has ever been verified,
       // based ONLY on presence of verifiedAt (regardless of current status)
@@ -937,9 +967,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       ).length;
       
       // Calculate activated leads for current month
-      const currentMonthActivatedLeads = currentMonthLeads.filter(lead => 
-        lead.status === 'activated'
-      );
+      // Properly handle Firestore timestamps by converting them to Date objects
+      const currentMonthActivatedLeads = currentMonthLeads.filter(lead => lead.status === 'activated');
       
       // Calculate all-time activated leads
       const allTimeActivatedLeads = allLeads.filter(lead => 
@@ -969,6 +998,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       setMetrics(currentMetrics);
       setTeamLeads(allLeads);
       // Compute group activations for the selected month
+      // IMPORTANT: Always compute from allLeads (full dataset) to ensure accuracy
       computeGroupActivations(allLeads, selectedMonth);
 
       // Optimize: Load teams and users in parallel
@@ -996,6 +1026,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       const usersMap = new Map(allUsers.map(user => [user.id, user]));
 
       const teamMetricsPromises = teams.map(async team => {
+        // Load team target for the selected month
+        const monthStr = format(selectedMonth, 'yyyy-MM');
+        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
+        const teamTargetDoc = await getDoc(teamTargetRef);
+        const teamTarget = teamTargetDoc.exists() ? teamTargetDoc.data()?.target : undefined;
+        
         const teamMetric: TeamMetrics = {
           teamId: team.id,
           teamName: team.name,
@@ -1007,6 +1043,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           activated: 0,
           pendingAssignment: 0,
           assigned: 0,
+          teamTarget: teamTarget,
           agents: []
         };
 
@@ -1026,12 +1063,22 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         teamMetric.totalLeads = teamLeads.length;
         
         // Calculate activated leads for the team in current month
-        const teamActivatedLeads = teamLeads.filter(lead => 
-          lead.status === 'activated' && 
-          lead.updatedAt && 
-          lead.updatedAt >= currentMonthStart && 
-          lead.updatedAt <= currentMonthEnd
-        );
+        // Properly handle Firestore timestamps by converting them to Date objects
+        const teamActivatedLeads = teamLeads.filter(lead => {
+          if (lead.status !== 'activated' || !lead.updatedAt) return false;
+          
+          // Convert Firestore timestamp to Date if needed
+          let updatedAtDate: Date;
+          if (lead.updatedAt instanceof Date) {
+            updatedAtDate = lead.updatedAt;
+          } else if (lead.updatedAt && typeof (lead.updatedAt as any).toDate === 'function') {
+            updatedAtDate = (lead.updatedAt as any).toDate();
+          } else {
+            updatedAtDate = new Date(lead.updatedAt);
+          }
+          
+          return updatedAtDate >= currentMonthStart && updatedAtDate <= currentMonthEnd;
+        });
         
         // Count total activations by summing up plans in each activated lead
         teamMetric.activated = teamActivatedLeads.reduce((count, lead) => {
@@ -1068,12 +1115,22 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           ).length;
           
           // Calculate activated leads for the agent in current month
-          const agentActivatedLeads = agentLeads.filter(lead => 
-            lead.status === 'activated' && 
-            lead.updatedAt && 
-            lead.updatedAt >= currentMonthStart && 
-            lead.updatedAt <= currentMonthEnd
-          );
+          // Properly handle Firestore timestamps by converting them to Date objects
+          const agentActivatedLeads = agentLeads.filter(lead => {
+            if (lead.status !== 'activated' || !lead.updatedAt) return false;
+            
+            // Convert Firestore timestamp to Date if needed
+            let updatedAtDate: Date;
+            if (lead.updatedAt instanceof Date) {
+              updatedAtDate = lead.updatedAt;
+            } else if (lead.updatedAt && typeof (lead.updatedAt as any).toDate === 'function') {
+              updatedAtDate = (lead.updatedAt as any).toDate();
+            } else {
+              updatedAtDate = new Date(lead.updatedAt);
+            }
+            
+            return updatedAtDate >= currentMonthStart && updatedAtDate <= currentMonthEnd;
+          });
           
           // Count total activations by summing up plans in each activated lead
           const activated = agentActivatedLeads.reduce((count, lead) => {
@@ -1222,6 +1279,40 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       toast.error('Failed to save group alias');
     }
   }
+
+  // Save team target function
+  const handleSaveTeamTarget = async (teamId: string) => {
+    if (user?.role !== 'admin') return;
+    
+    setSavingTeamTarget(true);
+    try {
+      const monthStr = format(selectedMonth, 'yyyy-MM');
+      const teamTargetRef = doc(db, 'teamTargets', `${teamId}_${monthStr}`);
+      
+      await setDoc(teamTargetRef, {
+        teamId: teamId,
+        target: teamTargetValue,
+        month: monthStr,
+        updatedAt: serverTimestamp(),
+        setBy: 'admin'
+      }, { merge: true });
+      
+      // Update local state
+      setTeamMetrics(prev => prev.map(team => 
+        team.teamId === teamId 
+          ? { ...team, teamTarget: teamTargetValue }
+          : team
+      ));
+      
+      setEditingTeamTarget(null);
+      toast.success('Team target saved successfully');
+    } catch (error) {
+      console.error('Error saving team target:', error);
+      toast.error('Failed to save team target');
+    } finally {
+      setSavingTeamTarget(false);
+    }
+  };
 
 
 
@@ -1598,15 +1689,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       icon: Trash2,
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
-    },
-    {
-      name: 'Initialize Stats',
-      description: 'Initialize number pool stats (with initials)',
-      value: 'Initialize',
-      href: '#initialize-stats',
-      icon: RefreshCwIcon,
-      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
-      textColor: 'text-indigo-600',
     },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
@@ -2406,39 +2488,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
             </button>
-          ) : stat.name === 'Initialize Stats' ? (
-            <button
-              key={stat.name}
-              onClick={handleInitializeStats}
-              disabled={initializingStats}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name) || 'bg-white'} disabled:opacity-60 disabled:cursor-not-allowed`}
-              type="button"
-            >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className={`h-6 w-6 text-white ${initializingStats ? 'animate-spin' : ''}`} />
-                  </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.name}
-                  </h3>
-                  <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>
-                      {initializingStats ? 'Running...' : stat.value}
-                    </p>
-                  </div>
-                  {initStatsResult && (
-                    <p className="text-xs text-gray-600 mt-2">{initStatsResult}</p>
-                  )}
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
           ) : (
             <Link
               to={stat.href}
@@ -2467,6 +2516,36 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             </Link>
           )
         ))}
+        
+        {/* Initialize Number Pool Stats Button */}
+        <button
+          onClick={handleInitializeStats}
+          disabled={initializingStats}
+          className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-blue-200"
+          type="button"
+        >
+          <div className="p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="p-3 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 group-hover:scale-110 transition-transform duration-300">
+                <Database className="h-6 w-6 text-white" />
+              </div>
+              <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                {initializingStats ? 'Initializing...' : 'Regenerate stats'}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                Initialize Number Pool Stats
+              </h3>
+              <div className="flex items-baseline justify-between">
+                <p className="text-sm text-gray-600">
+                  {initStatsResult || 'Regenerate pagination stats for groups and initials'}
+                </p>
+              </div>
+            </div>
+          </div>
+          <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
+        </button>
       </div>
 
       {/* Team Performance Section */}
@@ -2906,20 +2985,13 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {(teamMetrics || []).map((team) => {
-                const startDate = startOfMonth(selectedMonth);
-                const endDate = endOfMonth(selectedMonth);
-                const currentMonthLeads = teamLeads.filter(lead => 
-                  lead.teamId === team.teamId && 
-                  lead.status === 'activated' &&
-                  lead.updatedAt && 
-                  lead.updatedAt >= startDate && 
-                  lead.updatedAt <= endDate
-                ).reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
-
-                const totalTarget = (team.agents || []).reduce((sum, agent) => sum + (agent.target || 0), 0);
-                const totalAchieved = currentMonthLeads;
+                // Use the pre-calculated teamMetric.activated instead of recalculating
+                const totalAchieved = team.activated || 0;
+                // Use team target if set by admin, otherwise fall back to sum of agent targets
+                const agentTargetSum = (team.agents || []).reduce((sum, agent) => sum + (agent.target || 0), 0);
+                const totalTarget = team.teamTarget !== undefined ? team.teamTarget : agentTargetSum;
                 const averageActivationPerAgent = (team.agents || []).length > 0 
-                  ? (currentMonthLeads / (team.agents || []).length).toFixed(1) 
+                  ? (totalAchieved / (team.agents || []).length).toFixed(1) 
                   : '0';
 
                 const achievementPercentage = totalTarget > 0 ? (totalAchieved / totalTarget) * 100 : 0;
@@ -2959,7 +3031,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                               </span>
                             </div>
                           </div>
-                          <p className="text-2xl font-bold text-purple-900">{currentMonthLeads}</p>
+                          <p className="text-2xl font-bold text-purple-900">{totalAchieved}</p>
                           <p className="text-xs text-purple-600 mt-1">Activations</p>
                         </div>
                         <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
@@ -2991,8 +3063,55 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                           <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-xl">
                             <div className="flex items-center justify-between mb-2">
                               <p className="text-sm font-medium text-blue-700">Total Target</p>
+                              {user?.role === 'admin' && (
+                                <button
+                                  onClick={() => {
+                                    setEditingTeamTarget(team.teamId);
+                                    setTeamTargetValue(team.teamTarget !== undefined ? team.teamTarget : agentTargetSum);
+                                  }}
+                                  className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                >
+                                  Edit
+                                </button>
+                              )}
                             </div>
-                            <p className="text-2xl font-bold text-blue-900">{totalTarget}</p>
+                            {editingTeamTarget === team.teamId ? (
+                              <div className="space-y-3">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={teamTargetValue}
+                                  onChange={(e) => setTeamTargetValue(Number(e.target.value))}
+                                  className="w-full px-3 py-2 border border-blue-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                  autoFocus
+                                  onKeyPress={(e) => {
+                                    if (e.key === 'Enter') {
+                                      handleSaveTeamTarget(team.teamId);
+                                    }
+                                    if (e.key === 'Escape') {
+                                      setEditingTeamTarget(null);
+                                    }
+                                  }}
+                                />
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => setEditingTeamTarget(null)}
+                                    className="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => handleSaveTeamTarget(team.teamId)}
+                                    disabled={savingTeamTarget}
+                                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                                  >
+                                    {savingTeamTarget ? 'Saving...' : 'Save'}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-2xl font-bold text-blue-900">{totalTarget}</p>
+                            )}
                           </div>
                           <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
                             <div className="flex items-center justify-between mb-2">

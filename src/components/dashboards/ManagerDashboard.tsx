@@ -40,7 +40,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { collection, query, where, getDocs, orderBy, doc, setDoc, getDoc, updateDoc, addDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, doc, setDoc, getDoc, updateDoc, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { User, Lead } from '../../types';
 import { Link } from 'react-router-dom';
@@ -194,6 +194,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
   const [agentMetrics, setAgentMetrics] = useState<AgentMetrics[]>([]);
   const [loadingAgentMetrics, setLoadingAgentMetrics] = useState(false);
   const [agentTargets, setAgentTargets] = useState<Record<string, AgentTarget>>({});
+  const [teamTarget, setTeamTarget] = useState<number | null>(null);
   const [isTargetDialogOpen, setIsTargetDialogOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<User | null>(null);
   const [targetAmount, setTargetAmount] = useState('');
@@ -209,7 +210,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
   });
   const [selectedMonth, setSelectedMonth] = useState(new Date());
   const [monthlyAgentMetrics, setMonthlyAgentMetrics] = useState<MonthlyAgentMetrics[]>([]);
-  const [viewMode, setViewMode] = useState<'table' | 'charts' | 'reserved'>('table');
+  const [viewMode, setViewMode] = useState<'table' | 'charts'>('table');
+  const [showReservedModal, setShowReservedModal] = useState(false);
   const [chartType, setChartType] = useState<'bar' | 'radar' | 'line'>('bar');
   const [isAgentDetailsOpen, setIsAgentDetailsOpen] = useState(false);
   const [selectedAgentDetails, setSelectedAgentDetails] = useState<{
@@ -367,13 +369,24 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         }
       });
 
-      // Calculate activated leads for current month based on when they were activated
-      const currentMonthActivatedLeads = teamLeads.filter(lead => 
-        lead.status === 'activated' && 
-        lead.updatedAt && 
-        lead.updatedAt >= startOfCurrentMonth && 
-        lead.updatedAt <= endOfCurrentMonth
-      );
+      const getActivatedAt = (lead: any): Date | null => {
+        const raw = lead?.activatedAt || lead?.updatedAt;
+        if (!raw) return null;
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      // Calculate activated leads for current month based on activatedAt (fallback updatedAt)
+      const currentMonthActivatedLeads = teamLeads.filter(lead => {
+        if (lead.status !== 'activated') return false;
+        const activatedAt = getActivatedAt(lead);
+        return activatedAt !== null && activatedAt >= startOfCurrentMonth && activatedAt <= endOfCurrentMonth;
+      });
       
       // Count total activations by summing up plans in each activated lead
       monthlyMetricsData.activated = currentMonthActivatedLeads.reduce((count, lead) => {
@@ -399,13 +412,11 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
           );
 
           // Calculate activated leads for the agent in selected month based on when they were activated
-          const agentActivatedLeads = teamLeads.filter(lead => 
-            lead.agentId === agent.id &&
-            lead.status === 'activated' && 
-            lead.updatedAt && 
-            lead.updatedAt >= startDate && 
-            lead.updatedAt <= endDate
-          );
+          const agentActivatedLeads = teamLeads.filter(lead => {
+            if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
+            const activatedAt = getActivatedAt(lead);
+            return activatedAt !== null && activatedAt >= startDate && activatedAt <= endDate;
+          });
           
           // Count total activations by summing up plans in each activated lead
           const activated = agentActivatedLeads.reduce((count, lead) => {
@@ -449,12 +460,64 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         };
       });
       setAgentTargets(targets);
+
+      // Load team target with auto-carry-forward logic
+      await loadTeamTarget(selectedMonth);
     } catch (error) {
       console.error('Error loading manager data:', error instanceof Error ? error.message : error);
       toast.error('Failed to load team data');
     } finally {
       setLoadingAgentMetrics(false);
       setLoading(false);
+    }
+  }
+
+  // Load team target with auto-carry-forward logic
+  // If current month doesn't have a target, check previous month and carry forward
+  async function loadTeamTarget(month: Date) {
+    if (!user?.teamId) return;
+    
+    try {
+      const monthStr = format(month, 'yyyy-MM');
+      const teamTargetRef = doc(db, 'teamTargets', `${user.teamId}_${monthStr}`);
+      const teamTargetDoc = await getDoc(teamTargetRef);
+      
+      if (teamTargetDoc.exists()) {
+        // Current month has a target, use it
+        const target = teamTargetDoc.data()?.target;
+        setTeamTarget(target || null);
+      } else {
+        // Current month doesn't have a target, check previous month
+        const previousMonth = subMonths(month, 1);
+        const previousMonthStr = format(previousMonth, 'yyyy-MM');
+        const previousTeamTargetRef = doc(db, 'teamTargets', `${user.teamId}_${previousMonthStr}`);
+        const previousTeamTargetDoc = await getDoc(previousTeamTargetRef);
+        
+        if (previousTeamTargetDoc.exists()) {
+          // Carry forward from previous month
+          const previousTarget = previousTeamTargetDoc.data()?.target;
+          if (previousTarget !== undefined) {
+            // Auto-carry forward: save to current month without changing previous month
+            await setDoc(teamTargetRef, {
+              teamId: user.teamId,
+              target: previousTarget,
+              month: monthStr,
+              updatedAt: serverTimestamp(),
+              setBy: 'auto-carry-forward',
+              carriedFrom: previousMonthStr
+            }, { merge: true });
+            setTeamTarget(previousTarget);
+          } else {
+            setTeamTarget(null);
+          }
+        } else {
+          // No target in previous month either
+          setTeamTarget(null);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading team target:', error);
+      setTeamTarget(null);
     }
   }
 
@@ -736,14 +799,6 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
 
   const stats = [
     {
-      name: 'Team Members',
-      description: 'Total team members',
-      value: teamMembers.length,
-      icon: Users,
-      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
-      textColor: 'text-purple-600',
-    },
-    {
       name: 'Total Leads',
       description: 'Total leads (all time)',
       value: metrics.totalLeads,
@@ -865,12 +920,11 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         );
 
         // Calculate activated leads for the month based on when they were activated
-        const monthActivatedLeads = leads.filter(lead => 
-          lead.status === 'activated' && 
-          lead.updatedAt && 
-          lead.updatedAt >= startOfMonth(month) && 
-          lead.updatedAt <= endOfMonth(month)
-        );
+          const monthActivatedLeads = leads.filter(lead => {
+            if (lead.status !== 'activated') return false;
+            const activatedAt = getActivatedAt(lead);
+            return activatedAt !== null && activatedAt >= startOfMonth(month) && activatedAt <= endOfMonth(month);
+          });
         
         // Count total activations by summing up plans in each activated lead
         const activated = monthActivatedLeads.reduce((count, lead) => {
@@ -1219,11 +1273,67 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                 Here's what's happening with your team this month.
               </p>
             </div>
-            <div className="hidden sm:flex items-center space-x-2 text-sm text-gray-600">
-              <Calendar className="h-5 w-5" />
-              <span>{format(new Date(), 'MMMM yyyy')}</span>
+            <div className="hidden sm:flex items-center space-x-3 text-sm text-gray-600">
+              <button
+                type="button"
+                onClick={() => setShowReservedModal(true)}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-indigo-200 text-indigo-700 bg-white hover:bg-indigo-50 transition-colors shadow-sm"
+              >
+                <Phone className="h-4 w-4" />
+                <span className="font-semibold">Team Reserved Numbers</span>
+              </button>
+              <div className="flex items-center space-x-2">
+                <Calendar className="h-5 w-5" />
+                <span>{format(new Date(), 'MMMM yyyy')}</span>
+              </div>
             </div>
           </div>
+        </div>
+
+        {/* Team target strip (MAR-style) */}
+        <div className="flex flex-wrap gap-4 mb-8">
+          {/* Target card */}
+          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-rose-50 to-red-50 border border-red-200 rounded-lg px-5 py-4 shadow-sm">
+            <Target className="h-6 w-6 text-red-600" />
+            <div className="flex flex-col">
+              <p className="text-xs font-semibold text-red-700">Team Target</p>
+              <p className="text-4xl font-extrabold text-red-600 leading-none">
+                {teamTarget !== null ? teamTarget : 200}
+              </p>
+            </div>
+          </div>
+
+          {/* Achieved card */}
+          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-indigo-50 to-blue-50 border border-blue-200 rounded-lg px-5 py-4 shadow-sm">
+            <Zap className="h-6 w-6 text-indigo-600" />
+            <div className="flex flex-col">
+              <p className="text-xs font-semibold text-indigo-700">Achieved</p>
+              <p className="text-4xl font-extrabold text-indigo-900 leading-none">{monthlyMetrics.activated}</p>
+            </div>
+          </div>
+
+          {/* Remaining card */}
+          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg px-5 py-4 shadow-sm">
+            <CheckCircle className="h-6 w-6 text-amber-600" />
+            <div className="flex flex-col">
+              <p className="text-xs font-semibold text-amber-700">Remaining</p>
+              <p className="text-4xl font-extrabold text-amber-900 leading-none">
+                {Math.max((teamTarget !== null ? teamTarget : 200) - monthlyMetrics.activated, 0)}
+              </p>
+            </div>
+          </div>
+
+          {/* Average per Agent card */}
+          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-lg px-5 py-4 shadow-sm">
+            <Users className="h-6 w-6 text-emerald-600" />
+            <div className="flex flex-col">
+              <p className="text-xs font-semibold text-emerald-700">Avg per Agent</p>
+              <p className="text-4xl font-extrabold text-emerald-900 leading-none">
+                {teamMembers.length > 0 ? (monthlyMetrics.activated / teamMembers.length).toFixed(1) : '0.0'}
+              </p>
+            </div>
+          </div>
+
         </div>
 
         {/* Stats Grid */}
@@ -1436,7 +1546,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                       <ChevronRight className="h-5 w-5" />
                     </button>
                   </div>
-                  <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2">
                     <button
                       onClick={() => setViewMode('table')}
                       className={clsx(
@@ -1458,18 +1568,6 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                       )}
                     >
                       <BarChart3 className="h-5 w-5" />
-                    </button>
-                    <button
-                      onClick={() => setViewMode('reserved')}
-                      className={clsx(
-                        "p-2 rounded-lg transition-colors",
-                        viewMode === 'reserved'
-                          ? "bg-indigo-100 text-indigo-600"
-                          : "hover:bg-gray-100 text-gray-600"
-                      )}
-                      title="Team Reserved Numbers"
-                    >
-                      <Phone className="h-5 w-5" />
                     </button>
                   </div>
                 </div>
@@ -1622,8 +1720,6 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                     </div>
                   </div>
                 </div>
-              ) : viewMode === 'reserved' ? (
-                <TeamReservedNumbers user={user} />
               ) : (
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
@@ -2047,6 +2143,34 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         open={leaveModalOpen}
         onClose={() => setLeaveModalOpen(false)}
       />
+
+      {/* Reserved Numbers Modal */}
+      {showReservedModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div
+            className="absolute inset-0"
+            onClick={() => setShowReservedModal(false)}
+          />
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-6xl w-full mx-4 max-h-[90vh] flex flex-col">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Phone className="h-5 w-5 text-indigo-600" />
+                <h2 className="text-xl font-semibold text-gray-900">Team Reserved Numbers</h2>
+              </div>
+              <button
+                onClick={() => setShowReservedModal(false)}
+                className="text-gray-500 hover:text-gray-700 p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                aria-label="Close reserved numbers modal"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-4">
+              <TeamReservedNumbers user={user} />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Commission Config Modal */}
       {showCommissionConfigModal && user.teamId && (

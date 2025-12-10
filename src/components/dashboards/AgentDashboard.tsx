@@ -185,6 +185,18 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
 
   // ✅ ENHANCED: Enhanced metrics calculation with memoization
   const calculateMetrics = useCallback((allLeads: any[], targetData: { target: number; mar: number }) => {
+    const getActivatedAt = (lead: any): Date | null => {
+      const raw = lead?.activatedAt || lead?.updatedAt;
+      if (!raw) return null;
+      if (typeof raw.toDate === 'function') {
+        const d = raw.toDate();
+        return isNaN(d.getTime()) ? null : d;
+      }
+      if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+      const d = new Date(raw);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
     const now = new Date();
     const startOfCurrentMonth = startOfMonth(now);
     const endOfCurrentMonth = endOfMonth(now);
@@ -210,9 +222,12 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
           break;
       }
 
-      // Count activated plans for current month
-      if (lead.status === 'activated' && lead.plans && lead.updatedAt >= startOfCurrentMonth && lead.updatedAt <= endOfCurrentMonth) {
-        acc.activated += lead.plans.length;
+      // Count activated plans for current month using activatedAt (fallback updatedAt)
+      if (lead.status === 'activated' && lead.plans) {
+        const activatedAt = getActivatedAt(lead);
+        if (activatedAt && activatedAt >= startOfCurrentMonth && activatedAt <= endOfCurrentMonth) {
+          acc.activated += lead.plans.length;
+        }
       }
 
       acc.totalLeads++;

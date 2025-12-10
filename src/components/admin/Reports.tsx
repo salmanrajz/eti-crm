@@ -146,6 +146,18 @@ function normalizeCategory(category?: string): string {
   return normalized;
 }
 
+function getActivatedAt(lead: any): Date | null {
+  const raw = lead?.activatedAt || lead?.updatedAt;
+  if (!raw) return null;
+  if (typeof raw.toDate === 'function') {
+    const d = raw.toDate();
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 interface TeamPerformanceData {
   teamId: string;
   teamName: string;
@@ -627,8 +639,8 @@ export function Reports() {
     
     const monthActivated = allLeads.filter(lead => {
       if (lead.status !== 'activated') return false;
-      const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
-      return updated >= start && updated <= end;
+      const activatedAt = getActivatedAt(lead);
+      return activatedAt !== null && activatedAt >= start && activatedAt <= end;
     });
     
     monthActivated.forEach(lead => {
@@ -682,8 +694,8 @@ export function Reports() {
       // Filter activated leads for the current month
       const monthActivated = allLeads.filter(lead => {
         if (lead.status !== 'activated') return false;
-        const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
-        return updated >= start && updated <= end;
+        const activatedAt = getActivatedAt(lead);
+        return activatedAt !== null && activatedAt >= start && activatedAt <= end;
       });
 
       // Count activations per category
@@ -716,8 +728,8 @@ export function Reports() {
 
       const filteredLeads = allLeads.filter(lead => {
         if (lead.status !== 'activated') return false;
-        const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
-        return updated >= start && updated <= end;
+        const activatedAt = getActivatedAt(lead);
+        return activatedAt !== null && activatedAt >= start && activatedAt <= end;
       });
 
       // Calculate group and category activations
@@ -863,12 +875,11 @@ export function Reports() {
 
       // Calculate team metrics
       const totalLeads = teamLeads.length;
-      const activatedLeads = teamLeads.filter(lead =>
-        lead.status === 'activated' &&
-        lead.updatedAt &&
-        lead.updatedAt >= currentMonthStart &&
-        lead.updatedAt <= currentMonthEnd
-      );
+      const activatedLeads = teamLeads.filter(lead => {
+        if (lead.status !== 'activated') return false;
+        const activatedAt = getActivatedAt(lead);
+        return activatedAt !== null && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
+      });
       const activated = activatedLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
 
       // Calculate agent metrics
@@ -886,23 +897,20 @@ export function Reports() {
         const verified = agentLeads.filter(lead => lead.status === 'verified').length;
 
         // Calculate activated for current month
-        const agentActivatedLeads = agentLeads.filter(lead =>
-          lead.status === 'activated' &&
-          lead.updatedAt &&
-          lead.updatedAt >= currentMonthStart &&
-          lead.updatedAt <= currentMonthEnd
-        );
+        const agentActivatedLeads = agentLeads.filter(lead => {
+          if (lead.status !== 'activated') return false;
+          const activatedAt = getActivatedAt(lead);
+          return activatedAt !== null && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
+        });
         const agentActivated = agentActivatedLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
 
         // Calculate 6-month average
         const sixMonthActivations = teamLeads
-          .filter(lead =>
-            lead.agentId === agent.id &&
-            lead.status === 'activated' &&
-            lead.updatedAt &&
-            lead.updatedAt >= startOfMonth(sixMonthsAgo) &&
-            lead.updatedAt <= currentMonthEnd
-          )
+          .filter(lead => {
+            if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
+            const activatedAt = getActivatedAt(lead);
+            return activatedAt !== null && activatedAt >= startOfMonth(sixMonthsAgo) && activatedAt <= currentMonthEnd;
+          })
           .reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
         const sixMonthAverage = Math.round(sixMonthActivations / 6);
 
@@ -960,13 +968,11 @@ export function Reports() {
         const endDate = endOfMonth(month);
 
         // Get agent's leads for the month
-        const agentLeads = teamLeadsForPerformance.filter(lead =>
-          lead.agentId === agent.id &&
-          lead.status === 'activated' &&
-          lead.updatedAt &&
-          lead.updatedAt >= startDate &&
-          lead.updatedAt <= endDate
-        );
+        const agentLeads = teamLeadsForPerformance.filter(lead => {
+          if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
+          const activatedAt = getActivatedAt(lead);
+          return activatedAt !== null && activatedAt >= startDate && activatedAt <= endDate;
+        });
 
         // Calculate total activated numbers
         const activatedNumbers = agentLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);

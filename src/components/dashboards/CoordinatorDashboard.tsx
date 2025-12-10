@@ -67,7 +67,8 @@ import {
   CheckCircle2,
   Users,
   UserCheck,
-  X
+  X,
+  Target
 } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { clsx } from 'clsx';
@@ -101,6 +102,11 @@ const STATUS_STYLES: Record<string, { bg: string; text: string; icon: any }> = {
   verified: {
     bg: 'bg-green-100',
     text: 'text-green-800',
+    icon: CheckCircle,
+  },
+  activated_non_verified: {
+    bg: 'bg-yellow-100',
+    text: 'text-yellow-800',
     icon: CheckCircle,
   },
   rejected: {
@@ -208,6 +214,9 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [loading, setLoading] = useState(true);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [groupTargets, setGroupTargets] = useState<Record<string, number>>({});
+  const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
+  const [groupBreakdown, setGroupBreakdown] = useState<Record<string, { newCount: number; mnp: number; p2p: number }>>({});
   const [metrics, setMetrics] = useState({
     totalLeads: 0,
     verified: 0,
@@ -239,6 +248,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [assignError, setAssignError] = useState('');
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [assignDebounce, setAssignDebounce] = useState<number | undefined>(undefined);
+  const [assignGroup, setAssignGroup] = useState<string>('');
 
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'verified';
@@ -246,6 +256,27 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   // Get coordinator type and team assignments from user
   const coordinatorType = user.coordinatorType || 'all';
   const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
+
+  // Load group targets for current month
+  useEffect(() => {
+    const loadTargets = async () => {
+      try {
+        const monthId = format(new Date(), 'yyyy-MM');
+        const ref = doc(db, 'groupTargets', monthId);
+        const snap = await getDoc(ref);
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          setGroupTargets(data.groups || {});
+        } else {
+          setGroupTargets({});
+        }
+      } catch (error) {
+        console.error('Failed to load group targets for coordinator:', error);
+        setGroupTargets({});
+      }
+    };
+    loadTargets();
+  }, []);
 
   const searchVerifiedLeadsForAssign = async () => {
     const term = assignSearchTerm.trim().toLowerCase();
@@ -510,21 +541,55 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           // Get current month's start and end dates
           const now = new Date();
           const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-          const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+          const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
           const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
           const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
 
-          // Filter activated leads for current month and count each number as a separate activation
-          const currentMonthActivatedLeads = filteredCoordinatorLeads.filter(lead => 
-            lead.status === 'activated' && 
-            lead.updatedAt >= startOfMonth && 
-            lead.updatedAt <= endOfMonth
-          );
+          // Filter activated leads for current month using activatedAt (fallback updatedAt)
+          const currentMonthActivatedLeads = filteredCoordinatorLeads.filter(lead => {
+            if (lead.status !== 'activated') return false;
+            const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
+            if (!activatedAtRaw) return false;
+            const activatedAt =
+              typeof activatedAtRaw.toDate === 'function'
+                ? activatedAtRaw.toDate()
+                : activatedAtRaw instanceof Date
+                  ? activatedAtRaw
+                  : new Date(activatedAtRaw);
+            return activatedAt >= startOfMonth && activatedAt <= endOfMonth;
+          });
 
           // Calculate total activations by counting the number of plans in each activated lead
           const totalActivations = currentMonthActivatedLeads.reduce((count, lead) => {
             return count + (lead.plans?.length || 0);
           }, 0);
+
+          // Group activations for current month (with breakdown for G2 only)
+          const groupCounts: Record<string, number> = {};
+          const breakdownCounts: Record<string, { newCount: number; mnp: number; p2p: number }> = {};
+          currentMonthActivatedLeads.forEach(lead => {
+            (lead.plans || []).forEach((plan: any) => {
+              const grp = (plan.group || '').toUpperCase().trim();
+              if (!grp) return;
+              groupCounts[grp] = (groupCounts[grp] || 0) + 1;
+
+              // Only track breakdown for G2
+              if (grp === 'G2') {
+                const productTypeRaw = (plan.productType || plan.type || plan.planType || '').toString().toLowerCase();
+                const breakdown = breakdownCounts[grp] || { newCount: 0, mnp: 0, p2p: 0 };
+                if (productTypeRaw.includes('mnp')) {
+                  breakdown.mnp += 1;
+                } else if (productTypeRaw.includes('p2p') || productTypeRaw.includes('prepaid to postpaid')) {
+                  breakdown.p2p += 1;
+                } else {
+                  breakdown.newCount += 1;
+                }
+                breakdownCounts[grp] = breakdown;
+              }
+            });
+          });
+          setGroupActivations(groupCounts);
+          setGroupBreakdown(breakdownCounts);
 
           // Calculate metrics from coordinator's leads only
           // For "unassigned", count verified leads with managerAssigned: true, assigned_to_cord leads, plus later leads scheduled for today
@@ -565,11 +630,18 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           
           const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified', 'follow_up', 'later'];
 
+          // If coordinator is scoped to a single group, show activated as that group's activations
+          const scopedGroup =
+            coordinatorType === 'g1' ? 'G1' :
+            coordinatorType === 'g2' ? 'G2' :
+            coordinatorType === 'g3' ? 'G3' : null;
+          const activatedForScope = scopedGroup ? (groupCounts[scopedGroup] || 0) : totalActivations;
+
           const computedMetrics = {
             totalLeads: filteredCoordinatorLeads.length,
             verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
             assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Only actual assigned leads
-            activated: totalActivations, // Use the total number of activations
+            activated: activatedForScope, // Group-scoped activations when applicable
             followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
             later: filteredCoordinatorLeads.filter(l => l.status === 'later').length,
             rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
@@ -639,6 +711,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                 console.log(`[CoordinatorDashboard] ETS-10 leads in verified tab: ${ets10InVerifiedTab.length}`, ets10InVerifiedTab.map(l => ({ id: l.id, status: l.status })));
                 console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord in verified tab: ${ets10AssignedToCordInTab.length}`, ets10AssignedToCordInTab.map(l => ({ id: l.id, status: l.status })));
               }
+            } else if (currentStatus === 'activated') {
+              // Show activated plus activated_non_verified together for display, but counts remain unchanged
+              nextLeads = filteredCoordinatorLeads.filter(lead => 
+                lead.status === 'activated' || lead.status === 'activated_non_verified'
+              );
             } else {
               nextLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
             }
@@ -820,6 +897,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     setSelectedLead(lead);
     setActionType(action);
     setActionNote('');
+    setAssignGroup(lead?.plans?.[0]?.group || '');
     setShowActionDialog(true);
   }
 
@@ -834,6 +912,13 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         coordinatorNotes: actionNote,
         updatedAt: new Date()
       };
+
+      // If group was changed in the assign dialog, persist to plans
+      if ((actionType === 'assign' || actionType === 'activate') && assignGroup) {
+        updates.plans = (selectedLead.plans || []).map((p: any, idx: number) =>
+          idx === 0 ? { ...p, group: assignGroup } : { ...p, group: assignGroup }
+        );
+      }
 
       if (actionType === 'assign_verifier') {
         // Find appropriate verifier based on lead's groups
@@ -903,7 +988,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
 
       // Update all numbers in the lead's plans
       if (selectedLead.plans && selectedLead.plans.length > 0) {
-        const updatePromises = selectedLead.plans.map(plan => {
+        const updatePromises = selectedLead.plans.map((plan) => {
           const numberRef = doc(db, 'numberPool', plan.numberId);
           return updateDoc(numberRef, {
             status: updates.status,
@@ -1224,9 +1309,35 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                'Mark for Follow-up'}
             </h3>
             <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Notes
-              </label>
+              {/* Group selector for assignment */}
+              {actionType === 'assign' && selectedLead && (
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Group</label>
+                  <select
+                    className="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                    value={assignGroup}
+                    onChange={(e) => {
+                      const newGroup = e.target.value;
+                      setAssignGroup(newGroup);
+                      if (!selectedLead) return;
+                      setSelectedLead({
+                        ...selectedLead,
+                        plans: (selectedLead.plans || []).map((p: any, idx: number) =>
+                          idx === 0 ? { ...p, group: newGroup } : p
+                        )
+                      });
+                    }}
+                  >
+                    <option value="">Select group</option>
+                    <option value="G1">G1</option>
+                    <option value="G2">G2</option>
+                    <option value="G3">G3</option>
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">Changes only the lead's group field; no other actions.</p>
+                </div>
+              )}
+
+              <label className="block text-sm font-medium text-gray-700 mb-2">Notes</label>
               <textarea
                 rows={4}
                 className="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 resize-none"
@@ -1313,6 +1424,68 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Group Targets for coordinators */}
+      <div className="flex flex-wrap gap-4 mb-8">
+        {(
+          coordinatorType === 'all'
+            ? ['G1', 'G2', 'G3']
+            : [coordinatorType?.toString().toUpperCase()]
+        ).map((grp) => {
+          const target = groupTargets[grp] ?? 0;
+          const achieved = groupActivations[grp] ?? 0;
+          const remaining = Math.max(target - achieved, 0);
+          const color =
+            grp === 'G1' ? 'from-indigo-50 to-indigo-100 border-indigo-200 text-indigo-900' :
+            grp === 'G2' ? 'from-emerald-50 to-emerald-100 border-emerald-200 text-emerald-900' :
+            grp === 'G3' ? 'from-amber-50 to-amber-100 border-amber-200 text-amber-900' :
+            'from-slate-50 to-slate-100 border-slate-200 text-slate-900';
+          return (
+            <div key={grp} className={`flex-1 min-w-[220px] bg-gradient-to-r ${color} rounded-lg border px-5 py-4 shadow-sm`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Target className="h-5 w-5 text-gray-700" />
+                  <span className="text-sm font-semibold">{grp} Target</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3 text-sm font-semibold text-center">
+                <div className="flex flex-col items-center">
+                  <p className="text-xs text-gray-600">Target</p>
+                  <p className="text-2xl font-extrabold text-red-600">{target}</p>
+                </div>
+                <div className="flex flex-col items-center">
+                  <p className="text-xs text-gray-600">Achieved</p>
+                  <p className="text-2xl font-extrabold text-emerald-600">{achieved}</p>
+                </div>
+                <div className="flex flex-col items-center">
+                  <p className="text-xs text-gray-600">Remaining</p>
+                  <p className="text-2xl font-extrabold text-amber-600">{remaining}</p>
+                </div>
+              </div>
+              {grp === 'G2' && (
+                <div className="mt-3 flex flex-wrap justify-center gap-2 text-xs text-center">
+                  {(() => {
+                    const breakdown = groupBreakdown[grp] || { newCount: 0, mnp: 0, p2p: 0 };
+                    return (
+                      <>
+                        <span className="px-2 py-1 rounded-full bg-white/70 border text-gray-700 font-semibold">
+                          New: {breakdown.newCount}
+                        </span>
+                        <span className="px-2 py-1 rounded-full bg-white/70 border text-gray-700 font-semibold">
+                          MNP: {breakdown.mnp}
+                        </span>
+                        <span className="px-2 py-1 rounded-full bg-white/70 border text-gray-700 font-semibold">
+                          P2P: {breakdown.p2p}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {showStruckNumbers && coordinatorType === 'all' && (

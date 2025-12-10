@@ -278,6 +278,29 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [showNumberSelector, setShowNumberSelector] = useState(false);
   const [allPlans, setAllPlans] = useState<{id: string; name: string; category: string}[]>([]);
 
+  // Prefill coordinator note based on action type
+  useEffect(() => {
+    if (!showCoordinatorDialog || !coordinatorAction) {
+      return;
+    }
+
+    const actionMessages: Record<string, string> = {
+      'assign': 'Lead assigned successfully',
+      'activate': 'Lead activated successfully',
+      'activate_non_verified': 'Lead activated (pending verification)',
+      'followup': 'Lead marked for follow-up',
+      'later': 'Lead marked for later',
+      'reject': 'Lead rejected successfully',
+      'reassign': 'Lead reassigned successfully',
+      'reverification': 'Lead sent for reverification'
+    };
+
+    const message = actionMessages[coordinatorAction] || '';
+    if (message) {
+      setCoordinatorNote(message);
+    }
+  }, [showCoordinatorDialog, coordinatorAction]);
+
   // Prefill passcode, category, group, number, and plan when opening Activate dialog
   useEffect(() => {
     const prefill = async () => {
@@ -295,11 +318,15 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         const selectedGroupsArray: string[] = [];
         const srImageFilesArray: (File | null)[] = [];
         
+        // Get today's date in YYYY-MM-DD format for date input
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+        
         // Fetch passcodes and set defaults for each plan
         for (const plan of plans) {
           categories.push(plan.category || '');
           groups.push(plan.group || '');
-          activationDatesArray.push('');
+          activationDatesArray.push(todayStr); // Pre-fill with today's date
           srNumbersArray.push('');
           serviceOrderNumbersArray.push('');
           selectedGroupsArray.push(plan.group || '');
@@ -342,6 +369,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
           setOriginalNumber(firstPlan.number || '');
           setOriginalPlan(firstPlan.plan || '');
           setEditablePasscode(passcodes[0] || '');
+          setActivationDate(todayStr); // Pre-fill with today's date for backward compatibility
         }
         
         // Load all plans for the dropdown
@@ -737,13 +765,17 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     const year = now.getFullYear();
     const currentDate = `${day}/${month}/${year}`;
     
+    // Get lead number (use leadNumber field from document, fallback to id if not available)
+    const leadNumber = lead.leadNumber ? lead.leadNumber : lead.id;
+    
     // Build the message with all numbers
     // For multiple numbers, show each number's details separately
     if (plansWithPasscodes.length === 1) {
       // Single number format (backward compatible)
       const plan = plansWithPasscodes[0];
       const partner = getServiceProvider(plan.group || '');
-      return `Partner: ${partner}
+      return `Lead No.: ${leadNumber}
+Partner: ${partner}
 Date: ${currentDate}
 Etisalat Portal ID: ${etisalatId}
 Customer Details
@@ -763,7 +795,8 @@ Language: ${lead.language || 'N/A'}`;
     } else {
       // Multiple numbers format - show details for each number
       const etisalatIds = Array.isArray(etisalatId) ? etisalatId : [etisalatId];
-      let message = `Date: ${currentDate}
+      let message = `Lead No.: ${leadNumber}
+Date: ${currentDate}
 Customer Details
 Customer Name: ${lead.customerName}
 Customer Number: ${lead.customerNumber}`;
@@ -2497,10 +2530,22 @@ Language: ${lead.language || 'N/A'}`;
                 </>
               )}
               {lead.status === 'activated' && (
-                <div className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600">
-                  <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
-                  Lead Activated
-                </div>
+                <>
+                  <div className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600">
+                    <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Lead Activated
+                  </div>
+                  <button
+                    onClick={() => {
+                      setCoordinatorAction('reject');
+                      setShowCoordinatorDialog(true);
+                    }}
+                    className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                  >
+                    <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                    Reject
+                  </button>
+                </>
               )}
               {/* Follow_up leads without manager assignment show assign button, but if managerAssigned is true, it's already shown above */}
               {lead.status === 'follow_up' && !lead.managerAssigned && (

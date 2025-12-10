@@ -367,7 +367,9 @@ export function LeadDetails() {
           verificationMedia: leadData.verificationMedia || [],
           etisalatLeadId: leadData.etisalatLeadId || '',
           managerAssigned: leadData.managerAssigned || false,
-          managerNotes: leadData.managerNotes || ''
+          managerNotes: leadData.managerNotes || '',
+          leadNumber: leadData.leadNumber || '',
+          leadNumberGeneratedAt: leadData.leadNumberGeneratedAt?.toDate?.() || leadData.leadNumberGeneratedAt || undefined
         } as Lead;
         
         setLead(lead);
@@ -455,19 +457,9 @@ export function LeadDetails() {
         createdAt: doc.data().createdAt?.toDate()
       })) as ChatMessage[];
       
-      setMessages(prevMessages => {
-        // Check if a new message was added (not just an update)
-        const hasNewMessage = messagesData.length > prevMessages.length || 
-          (messagesData.length > 0 && prevMessages.length > 0 && 
-           messagesData[messagesData.length - 1].id !== prevMessages[prevMessages.length - 1].id);
-                
-        if (hasNewMessage) {
-          // Auto-scroll to bottom when new message arrives
-          setTimeout(() => {
-            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-          }, 100);
-        }
-        
+      setMessages(() => {
+        // Don't auto-scroll when new messages arrive - only scroll on initial load
+        // This prevents interrupting the user if they're reading older messages
         return messagesData;
       });
       
