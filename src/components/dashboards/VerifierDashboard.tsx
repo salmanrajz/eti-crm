@@ -217,6 +217,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [loading, setLoading] = useState(true);
   const [verificationMetrics, setVerificationMetrics] = useState({
     pendingVerificationCount: 0,
+    activatedReverificationCount: 0,
     dailyVerifiedCount: 0,
     monthlyVerifiedCount: 0
   });
@@ -536,6 +537,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   // Refs to store unsubscribe functions for cleanup
   const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
   const pendingCountUnsubscribeRef = useRef<(() => void) | null>(null);
+  const activatedReverificationUnsubscribeRef = useRef<(() => void) | null>(null);
   const countersUnsubscribeRef = useRef<(() => void) | null>(null);
 
   // Real-time listener for leads and metrics
@@ -553,6 +555,10 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       pendingCountUnsubscribeRef.current();
       pendingCountUnsubscribeRef.current = null;
     }
+    if (activatedReverificationUnsubscribeRef.current) {
+      activatedReverificationUnsubscribeRef.current();
+      activatedReverificationUnsubscribeRef.current = null;
+    }
     if (countersUnsubscribeRef.current) {
       countersUnsubscribeRef.current();
       countersUnsubscribeRef.current = null;
@@ -564,7 +570,9 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
     // Statuses to query based on current status
       const statusesToQuery = currentStatus === 'pending_verification' 
-        ? ['pending_verification', 'activated_non_verified', 'reverification']
+        ? ['pending_verification']
+        : currentStatus === 'activated_reverification'
+        ? ['activated_non_verified', 'reverification']
         : [currentStatus];
       
     // Real-time listener for leads
@@ -620,7 +628,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     // Real-time listener for pending verification count
       const pendingQuery = query(
         collection(db, 'leads'),
-        where('status', 'in', ['pending_verification', 'activated_non_verified', 'reverification'])
+        where('status', '==', 'pending_verification')
       );
 
     const pendingCountUnsubscribe = onSnapshot(pendingQuery, (snapshot) => {
@@ -663,6 +671,53 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     });
 
     pendingCountUnsubscribeRef.current = pendingCountUnsubscribe;
+
+    // Real-time listener for activated/reverification count
+    const activatedReverificationQuery = query(
+      collection(db, 'leads'),
+      where('status', 'in', ['activated_non_verified', 'reverification'])
+    );
+
+    const activatedReverificationUnsubscribe = onSnapshot(activatedReverificationQuery, (snapshot) => {
+      try {
+        let activatedReverificationLeads = snapshot.docs.map(doc => ({
+          ...doc.data(),
+          plans: doc.data().plans || []
+        })) as Lead[];
+
+        // Filter by verifier groups
+        if (!hasAllGroups) {
+          activatedReverificationLeads = activatedReverificationLeads.filter(lead => {
+            const hasMatchingGroup = lead.plans?.some(plan => {
+              const planGroup = (plan.group || '').toLowerCase();
+              return verifierGroups.some((verifierGroup: string) => {
+                const normalizedVerifierGroup = verifierGroup.toLowerCase();
+                return planGroup === normalizedVerifierGroup;
+              });
+            }) || false;
+            return hasMatchingGroup;
+          });
+        }
+
+        setVerificationMetrics(prev => ({
+          ...prev,
+          activatedReverificationCount: activatedReverificationLeads.length
+        }));
+      } catch (error) {
+        console.error('Error processing activated/reverification count snapshot:', error);
+      }
+    }, (error) => {
+      if (error.code === 'permission-denied') {
+        if (activatedReverificationUnsubscribeRef.current) {
+          activatedReverificationUnsubscribeRef.current();
+          activatedReverificationUnsubscribeRef.current = null;
+        }
+        return;
+      }
+      console.error('Error in activated/reverification count listener:', error);
+    });
+
+    activatedReverificationUnsubscribeRef.current = activatedReverificationUnsubscribe;
         
     // Real-time listener for verifier counters
     const countersUnsubscribe = onSnapshot(doc(db, 'users', user.id), (userDoc) => {
@@ -713,6 +768,10 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       if (pendingCountUnsubscribeRef.current) {
         pendingCountUnsubscribeRef.current();
         pendingCountUnsubscribeRef.current = null;
+      }
+      if (activatedReverificationUnsubscribeRef.current) {
+        activatedReverificationUnsubscribeRef.current();
+        activatedReverificationUnsubscribeRef.current = null;
       }
       if (countersUnsubscribeRef.current) {
         countersUnsubscribeRef.current();
@@ -788,7 +847,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
   const verificationStats = [
     {
-      name: 'Pending / Reverification',
+      name: 'Pending Verification',
       value: verificationMetrics.pendingVerificationCount,
       icon: Clock,
       color: 'bg-gradient-to-br from-yellow-500 to-yellow-600',
@@ -796,20 +855,23 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       status: 'pending_verification'
     },
     {
-      name: 'Daily Verified',
-      value: verificationMetrics.dailyVerifiedCount,
-      icon: CheckCircle,
-      color: 'bg-gradient-to-br from-green-500 to-green-600',
-      textColor: 'text-green-600',
-      status: 'daily_verified'
+      name: 'Active Non Verified',
+      value: verificationMetrics.activatedReverificationCount,
+      icon: AlertTriangle,
+      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
+      textColor: 'text-orange-600',
+      status: 'activated_reverification'
     },
     {
-      name: 'Monthly Verified',
-      value: verificationMetrics.monthlyVerifiedCount,
+      name: 'Verified',
+      value: `${verificationMetrics.dailyVerifiedCount} / ${verificationMetrics.monthlyVerifiedCount}`,
       icon: CheckCircle,
-      color: 'bg-gradient-to-br from-blue-500 to-blue-600',
-      textColor: 'text-blue-600',
-      status: 'monthly_verified'
+      color: 'bg-gradient-to-br from-green-500 to-blue-600',
+      textColor: 'text-green-600',
+      status: 'verified',
+      isCombined: true,
+      dailyValue: verificationMetrics.dailyVerifiedCount,
+      monthlyValue: verificationMetrics.monthlyVerifiedCount
     }
   ];
 
@@ -1149,7 +1211,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         >
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
         {verificationStats.map((stat, index) => {
-              const isClickable = index === 0; // Only Pending Verification is clickable
+              const isClickable = stat.status === 'pending_verification' || stat.status === 'activated_reverification';
+              const isCombined = (stat as any).isCombined;
           
             return (
                 <motion.div
@@ -1161,9 +1224,9 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                 >
                   {/* Single tilted background card effect - gradient colors */}
                   <div className={`absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 ${
-                    stat.name === 'Pending / Reverification' ? 'bg-gradient-to-br from-yellow-400 to-yellow-600' : 
-                    stat.name === 'Daily Verified' ? 'bg-gradient-to-br from-green-400 to-green-600' : 
-                    'bg-gradient-to-br from-blue-400 to-blue-600'
+                    stat.name === 'Pending Verification' ? 'bg-gradient-to-br from-yellow-400 to-yellow-600' : 
+                    stat.name === 'Active Non Verified' ? 'bg-gradient-to-br from-orange-400 to-orange-600' : 
+                    'bg-gradient-to-br from-green-400 to-blue-600'
                   } opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102`}></div>
                   
                   {isClickable ? (
@@ -1186,13 +1249,32 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                               <dt className="text-xs sm:text-sm font-medium text-gray-900 truncate">
                           {stat.name}
                         </dt>
-                              <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
-                          {stat.value}
-                        </dd>
-                              <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
-                                {stat.name === 'Pending / Reverification' ? 'Leads awaiting verification or reverification' : 
-                                 stat.name === 'Daily Verified' ? 'Verified today' : 'Verified this month'}
-                        </dd>
+                              {isCombined ? (
+                                <>
+                                  <dd className="flex items-baseline gap-2 mt-1">
+                                    <span className="text-lg sm:text-2xl lg:text-3xl font-bold text-green-600 drop-shadow-sm">
+                                      {(stat as any).dailyValue}
+                                    </span>
+                                    <span className="text-xs sm:text-sm text-gray-500">/</span>
+                                    <span className="text-lg sm:text-2xl lg:text-3xl font-bold text-blue-600 drop-shadow-sm">
+                                      {(stat as any).monthlyValue}
+                                    </span>
+                                  </dd>
+                                  <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
+                                    Daily / Monthly verified
+                                  </dd>
+                                </>
+                              ) : (
+                                <>
+                                  <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
+                                    {stat.value}
+                                  </dd>
+                                  <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
+                                    {stat.name === 'Pending Verification' ? 'Leads awaiting verification' : 
+                                     stat.name === 'Active Non Verified' ? 'Activated needs reverification' : ''}
+                                  </dd>
+                                </>
+                              )}
                       </dl>
                     </div>
                   </div>
@@ -1212,12 +1294,32 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                               <dt className="text-xs sm:text-sm font-medium text-gray-900 truncate">
                         {stat.name}
                       </dt>
-                              <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
-                        {stat.value}
-                      </dd>
-                              <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
-                                {stat.name === 'Daily Verified' ? 'Verified today' : 'Verified this month'}
-                      </dd>
+                              {isCombined ? (
+                                <>
+                                  <dd className="flex items-baseline gap-2 mt-1">
+                                    <span className="text-lg sm:text-2xl lg:text-3xl font-bold text-green-600 drop-shadow-sm">
+                                      {(stat as any).dailyValue}
+                                    </span>
+                                    <span className="text-xs sm:text-sm text-gray-500">/</span>
+                                    <span className="text-lg sm:text-2xl lg:text-3xl font-bold text-blue-600 drop-shadow-sm">
+                                      {(stat as any).monthlyValue}
+                                    </span>
+                                  </dd>
+                                  <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
+                                    Daily / Monthly verified
+                                  </dd>
+                                </>
+                              ) : (
+                                <>
+                                  <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
+                                    {stat.value}
+                                  </dd>
+                                  <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
+                                    {stat.name === 'Pending Verification' ? 'Leads awaiting verification' : 
+                                     stat.name === 'Active Non Verified' ? 'Activated or needs reverification' : ''}
+                                  </dd>
+                                </>
+                              )}
                     </dl>
                   </div>
                 </div>
@@ -1390,6 +1492,13 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                 <div className="mt-1">
                                   {renderStatusBadge(lead.status)}
                                 </div>
+                                {lead.leadNumber && (
+                                  <div className="mt-1">
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
+                                      {lead.leadNumber}
+                                    </span>
+                                  </div>
+                                )}
                                 <div className="flex items-center text-s text-gray-500 mt-1">
                                   <Phone className="h-3 w-3 mr-1.5" />
                       {lead.customerNumber}
@@ -1537,7 +1646,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                               <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
                                 <User2 className="h-5 w-5 text-indigo-600" />
                               </div>
-                              <div className="flex-1">
+                                  <div className="flex-1">
                                 <div className="flex items-center justify-between gap-2">
                                   <h3 className="text-sm font-semibold text-gray-900">
                                     {lead.customerName || 'Unnamed Customer'}
@@ -1554,6 +1663,13 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                     </span>
                         )}
                       </div>
+                                {lead.leadNumber && (
+                                  <div className="mt-1">
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
+                                      {lead.leadNumber}
+                                    </span>
+                                  </div>
+                                )}
                                 <div className="flex items-start justify-between mt-1 gap-3">
                                   <div className="space-y-1 text-sm text-gray-500">
                                     <div className="flex items-center">
