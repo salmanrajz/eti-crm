@@ -119,6 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               email: userData.email,
               role: userData.role,
               name: userData.name,
+              allowedGroups: userData.allowedGroups || (userData.group ? [userData.group] : undefined),
               teamId: userData.teamId,
               managerId: userData.managerId,
               coordinatorType: userData.coordinatorType,

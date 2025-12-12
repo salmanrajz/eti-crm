@@ -44,6 +44,7 @@ import { Search, Tag } from 'lucide-react';
 import { useDebounce } from '../../hooks/useDebounce';
 import { getCachedNumbers, cacheNumbers } from '../../utils/indexedDB';
 import { clsx } from 'clsx';
+import { useAuthStore } from '../../store/authStore';
 
 interface NumberSelectProps {
   value: string;
@@ -61,9 +62,19 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const debouncedSearch = useDebounce(searchTerm, SEARCH_DEBOUNCE);
+  const { user } = useAuthStore();
+  const agentAllowedGroups = user?.role === 'agent' && user?.allowedGroups?.length ? user.allowedGroups : null;
+
+  const applyAllowedGroups = useCallback((list: NumberPool[]) => {
+    if (agentAllowedGroups && agentAllowedGroups.length > 0) {
+      return list.filter(n => agentAllowedGroups.includes(n.group || ''));
+    }
+    return list;
+  }, [agentAllowedGroups]);
 
   // Optimize search with useCallback
-  const searchNumbers = useCallback((numbers: NumberPool[], term: string) => {
+  const searchNumbers = useCallback((list: NumberPool[], term: string) => {
+    const numbers = applyAllowedGroups(list);
     if (!term) return numbers.slice(0, 3);
     const searchLower = term.toLowerCase();
     return numbers
@@ -87,18 +98,28 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
     setLoading(true);
     try {
       // Try to get numbers from cache first
-        const cachedNumbers = await getCachedNumbers(numberType, INITIAL_LOAD_SIZE);
+      const cachedNumbers = await getCachedNumbers(numberType, INITIAL_LOAD_SIZE);
       if (cachedNumbers) {
-        setNumbers(cachedNumbers.numbers);
+        const cachedList = Array.isArray(cachedNumbers) ? cachedNumbers : (cachedNumbers as any).numbers;
+        setNumbers(applyAllowedGroups(cachedList || []));
       }
 
         // Set up real-time listener
-      const numbersQuery = query(
-        collection(db, 'numberPool'),
+      const constraints: any[] = [
         where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned']),
         where('category', '==', numberType),
-          orderBy('number', 'asc'),
-          limit(INITIAL_LOAD_SIZE)
+      ];
+      if (agentAllowedGroups && agentAllowedGroups.length === 1) {
+        constraints.push(where('group', '==', agentAllowedGroups[0]));
+      } else if (agentAllowedGroups && agentAllowedGroups.length > 1) {
+        constraints.push(where('group', 'in', agentAllowedGroups.slice(0, 10)));
+      }
+      constraints.push(orderBy('number', 'asc'));
+      constraints.push(limit(INITIAL_LOAD_SIZE));
+
+      const numbersQuery = query(
+        collection(db, 'numberPool'),
+        ...(constraints as any)
       );
 
         unsubscribe = onSnapshot(numbersQuery, async (snapshot) => {
@@ -107,8 +128,10 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
         ...doc.data()
       })) as NumberPool[];
 
+      const allowedFiltered = applyAllowedGroups(availableNumbers);
+
       // Get status checks for G4 and G5 numbers
-      const g4g5Numbers = availableNumbers.filter(n => n.group?.includes('G4') || n.group?.includes('G5'));
+      const g4g5Numbers = allowedFiltered.filter(n => n.group?.includes('G4') || n.group?.includes('G5'));
       if (g4g5Numbers.length > 0) {
         const statusChecksQuery = query(
           collection(db, 'statusChecks'),
@@ -130,7 +153,7 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
         );
         
         // Add status check info to the numbers
-        const numbersWithStatus = availableNumbers.map(number => ({
+        const numbersWithStatus = allowedFiltered.map(number => ({
           ...number,
           statusCheck: (number.group?.includes('G4') || number.group?.includes('G5')) && availableChecks.has(number.id)
             ? { status: 'available' as const }
@@ -139,11 +162,11 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
         
         // Cache the fetched numbers
         cacheNumbers(numbersWithStatus, numberType);
-        setNumbers(numbersWithStatus);
+        setNumbers(applyAllowedGroups(numbersWithStatus));
       } else {
         // Cache the fetched numbers
-        cacheNumbers(availableNumbers, numberType);
-        setNumbers(availableNumbers);
+        cacheNumbers(allowedFiltered, numberType);
+        setNumbers(applyAllowedGroups(allowedFiltered));
       }
         });
     } catch (error) {
@@ -161,7 +184,7 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
         unsubscribe();
       }
     };
-  }, [numberType]);
+  }, [agentAllowedGroups, numberType]);
 
   // Check if a number is selectable
   const isSelectable = (number: NumberPool) => {

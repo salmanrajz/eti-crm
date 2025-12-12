@@ -36,7 +36,7 @@
  */
 
 import { useState, useRef } from 'react';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { getStorage, ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { db } from '../../lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { Upload, X, CheckCircle } from 'lucide-react';
@@ -46,9 +46,11 @@ import { uploadVerificationFileToAzure } from '../../utils/azureUpload';
 interface MediaUploadProps {
   leadId: string;
   onUploadComplete: (files: Array<{ url: string; type: 'image' | 'video' | 'audio' | 'pdf'; name: string }>) => void;
+  onUploadingChange?: (uploading: boolean) => void;
+  onUploadProgress?: (progress: number) => void; // 0-100 overall progress
 }
 
-export function MediaUpload({ leadId, onUploadComplete }: MediaUploadProps) {
+export function MediaUpload({ leadId, onUploadComplete, onUploadingChange, onUploadProgress }: MediaUploadProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -72,35 +74,52 @@ export function MediaUpload({ leadId, onUploadComplete }: MediaUploadProps) {
     }
 
     setUploading(true);
+    onUploadingChange?.(true);
+    onUploadProgress?.(0);
 
     try {
-      const mediaFiles = await Promise.all(
-        files.map(async (file) => {
-      const isPdf = file.type === 'application/pdf';
-      const fileType = (isPdf ? 'pdf' : file.type.split('/')[0]) as 'image' | 'video' | 'audio' | 'pdf';
-      const folder = isPdf ? 'pdf' : fileType;
-      const storageRef = ref(storage, `leads/${leadId}/${folder}/${file.name}`);
+      const totalBytes = files.reduce((sum, f) => sum + f.size, 0) || 1;
+      let uploadedBytes = 0;
+      const mediaFiles: Array<{ url: string; type: 'image' | 'video' | 'audio' | 'pdf'; name: string; azureUrl?: string | null }> = [];
 
-          const firebaseUploadPromise = (async () => {
-      await uploadBytes(storageRef, file);
-      return getDownloadURL(storageRef);
-          })();
+      for (const file of files) {
+        const isPdf = file.type === 'application/pdf';
+        const fileType = (isPdf ? 'pdf' : file.type.split('/')[0]) as 'image' | 'video' | 'audio' | 'pdf';
+        const folder = isPdf ? 'pdf' : fileType;
+        const storageRef = ref(storage, `leads/${leadId}/${folder}/${file.name}`);
 
-          const azureUploadPromise = uploadVerificationFileToAzure(leadId, file).catch((error) => {
-            console.error('Azure upload failed for file:', file.name, error);
-            return null;
-          });
+        const uploadTask = uploadBytesResumable(storageRef, file);
 
-          const [url, azureResult] = await Promise.all([firebaseUploadPromise, azureUploadPromise]);
+        const url = await new Promise<string>((resolve, reject) => {
+          uploadTask.on(
+            'state_changed',
+            (snapshot) => {
+              const currentBytes = uploadedBytes + snapshot.bytesTransferred;
+              const progress = Math.min(100, Math.round((currentBytes / totalBytes) * 100));
+              onUploadProgress?.(progress);
+            },
+            (error) => reject(error),
+            async () => {
+              uploadedBytes += file.size;
+              onUploadProgress?.(Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)));
+              const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
+              resolve(downloadUrl);
+            }
+          );
+        });
 
-        return {
+        const azureResult = await uploadVerificationFileToAzure(leadId, file).catch((error) => {
+          console.error('Azure upload failed for file:', file.name, error);
+          return null;
+        });
+
+        mediaFiles.push({
           url,
-            type: fileType,
+          type: fileType,
           name: file.name,
-            azureUrl: azureResult?.url,
-        };
-        })
-      );
+          azureUrl: azureResult?.url || undefined,
+        });
+      }
 
       if (mediaFiles.some((file) => !file.url)) {
         throw new Error('One or more uploads failed');
@@ -119,6 +138,7 @@ export function MediaUpload({ leadId, onUploadComplete }: MediaUploadProps) {
       toast.error('Failed to upload files');
     } finally {
       setUploading(false);
+      onUploadingChange?.(false);
     }
   };
 
@@ -176,7 +196,7 @@ export function MediaUpload({ leadId, onUploadComplete }: MediaUploadProps) {
             ) : (
               <>
                 <CheckCircle className="h-4 w-4 mr-2" />
-                Upload and Verify
+                Upload
               </>
             )}
           </button>

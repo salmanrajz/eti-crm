@@ -58,7 +58,7 @@ import {
 } from 'lucide-react';
 import { collection, query as fsQuery, orderBy, limit as fsLimit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { fetchNumberLogs, NumberLog, NumberLogFilters, getActionColor, getActionIcon, formatActionText, formatTimestamp, formatDataValue, formatDataValueWithUserNames } from '../../utils/numberLogging';
+import { fetchNumberLogs, NumberLog, NumberLogFilters, getActionColor, getActionIcon, formatActionText, formatTimestamp, formatDataValue, formatDataValueWithUserNames, processDetailsWithAgentNames } from '../../utils/numberLogging';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 
@@ -79,6 +79,7 @@ export function NumberLogsDashboard() {
   const [showFilters, setShowFilters] = useState(false);
   const [expandedNumbers, setExpandedNumbers] = useState<Set<string>>(new Set());
   const [formattedChanges, setFormattedChanges] = useState<Record<string, string[]>>({});
+  const [processedDetails, setProcessedDetails] = useState<Record<string, string>>({});
   const [expandedActions, setExpandedActions] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -245,11 +246,17 @@ export function NumberLogsDashboard() {
     });
     // Compute details lazily if missing
     (async () => {
-      if (!formattedChanges[actionId]) {
-        const base = logs.find(l => l.id === actionId);
-        if (base) {
+      const base = logs.find(l => l.id === actionId);
+      if (base) {
+        // Process formatted changes
+        if (!formattedChanges[actionId]) {
           const changes = await formatDataChange(base.oldData, base.newData);
           setFormattedChanges(prev => ({ ...prev, [actionId]: changes || [] }));
+        }
+        // Process details to replace agent IDs with names
+        if (base.details && !processedDetails[actionId]) {
+          const processed = await processDetailsWithAgentNames(base.details);
+          setProcessedDetails(prev => ({ ...prev, [actionId]: processed }));
         }
       }
     })();
@@ -586,11 +593,13 @@ export function NumberLogsDashboard() {
                                                 exit={{ opacity: 0, height: 0 }}
                                                 className="mt-3"
                                               >
-                                                {(!formattedChanges[log.id]) && (
+                                                {(!formattedChanges[log.id] && !processedDetails[log.id] && log.details) && (
                                                   <div className="text-xs text-gray-500">Loading details…</div>
                                                 )}
                                                 {log.details && (
-                                                  <p className="text-sm text-gray-700 mb-2">{log.details}</p>
+                                                  <p className="text-sm text-gray-700 mb-2">
+                                                    {processedDetails[log.id] || log.details}
+                                                  </p>
                                                 )}
                                                 {itemChanges && itemChanges.length > 0 && (
                                                   <div className="rounded-lg bg-gray-50 p-3">

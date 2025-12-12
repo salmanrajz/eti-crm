@@ -39,7 +39,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { collection, query, where, getDocs, orderBy, limit, onSnapshot, arrayContains, arrayContainsAny } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { NumberPool } from '../../types';
 import { Search, ChevronDown, ChevronUp } from 'lucide-react';
@@ -58,7 +58,7 @@ const SEARCH_DEBOUNCE = 300;
 const MIN_SEARCH_LENGTH = 3;
 const SEARCH_LIMIT = 20;
 const SECONDARY_SCAN_LIMIT = 200; // broader scan to support substring matching
-//const INITIAL_LOAD_SIZE = 10; // Initial numbers to show when no search term
+const INITIAL_LOAD_SIZE = 10; // Initial numbers to show when no search term
 
 const numberCategories = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'] as const;
 
@@ -70,21 +70,23 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
   const [showCategories, setShowCategories] = useState(false);
   const [reservedNumbers, setReservedNumbers] = useState<NumberPool[]>([]);
   const debouncedSearch = useDebounce(searchTerm, SEARCH_DEBOUNCE);
+  const agentAllowedGroups = user?.role === 'agent' && user?.allowedGroups?.length ? user.allowedGroups : null;
 
   // Visibility guard filter for team-restricted numbers based on user role
   const filterByVisibility = useCallback((list: NumberPool[]): NumberPool[] => {
     // Admin/manager/coordinator see everything
     if (isAdmin() || user?.role === 'manager' || user?.role === 'coordinator') return list;
-    // Agents: if number has teamVisibility, it must match user's team; if missing, it's public
-    // Also hide activated numbers from agents (consistent with NumberPool)
-    if (user?.role === 'agent' && user.teamId) {
+    // Agents: enforce allowedGroups and team visibility; hide activated numbers
+    if (user?.role === 'agent') {
       return list.filter(n => {
         if (n.status === 'activated') return false;
-        return !n.teamVisibility || n.teamVisibility === user.teamId;
+        if (agentAllowedGroups && !agentAllowedGroups.includes(n.group || '')) return false;
+        if (user.teamId && n.teamVisibility && n.teamVisibility !== user.teamId) return false;
+        return true;
       });
     }
     return list;
-  }, [isAdmin, user?.role, user?.teamId]);
+  }, [isAdmin, user?.role, user?.teamId, agentAllowedGroups]);
 
   // Load reserved numbers for the current user
   const loadReservedNumbers = useCallback(async () => {
@@ -279,7 +281,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
 
     // Filter results to ensure ALL tokens are present (AND logic)
     return results.filter(number => {
-      const numberTokens = number.numberTokens || [];
+      const numberTokens = (number as any).numberTokens || [];
       return tokens.every(token => numberTokens.includes(token));
     });
   };

@@ -137,6 +137,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
   const { remainingStrikes, lastStrikeTime } = useStrikeLimit(user.id);
   const [showStruck, setShowStruck] = useState(false);
   const [payrollOpen, setPayrollOpen] = useState(false);
+  const [uaeNow, setUaeNow] = useState<Date>(() => new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Dubai' })));
 
   // ✅ OPTIMIZED: Use refs to store unsubscribe functions for proper cleanup
   const metricsUnsubscribeRef = useRef<(() => void) | null>(null);
@@ -146,6 +147,14 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
   const metricsKey = useMemo(() => `metrics_${user.id}_${format(new Date(), 'yyyy-MM')}`, [user.id]);
   const leadsKey = useMemo(() => `leads_${user.id}`, [user.id]);
   const targetKey = useMemo(() => `target_${user.id}_${format(new Date(), 'yyyy-MM')}`, [user.id]);
+
+  // Keep UAE time updated (minute resolution)
+  useEffect(() => {
+    const updateUaeTime = () => setUaeNow(new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Dubai' })));
+    updateUaeTime();
+    const interval = setInterval(updateUaeTime, 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // ✅ ENHANCED: Separate target loading with persistent caching for better performance
   const loadTarget = useCallback(async () => {
@@ -226,7 +235,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       if (lead.status === 'activated' && lead.plans) {
         const activatedAt = getActivatedAt(lead);
         if (activatedAt && activatedAt >= startOfCurrentMonth && activatedAt <= endOfCurrentMonth) {
-          acc.activated += lead.plans.length;
+        acc.activated += lead.plans.length;
         }
       }
 
@@ -674,7 +683,10 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                     </div>
                     <div className="text-center sm:text-left">
                       <p className="text-xs font-semibold text-gray-900">
-                        {format(new Date(), 'EEEE, MMMM d, yyyy')}
+                        {format(uaeNow, 'EEEE, MMMM d, yyyy')}
+                      </p>
+                      <p className="text-sm font-semibold text-gray-800">
+                        UAE Time: {format(uaeNow, 'hh:mm a')}
                       </p>
                     </div>
                   </div>

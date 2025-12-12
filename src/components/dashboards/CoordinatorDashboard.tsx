@@ -182,32 +182,24 @@ const isLeadInCoordinatorScope = (
         teamId === normalizedLeadTeamId
       );
       if (matches) {
-        return true;
+      return true;
       }
       // If coordinator has team assignments and lead's teamId doesn't match, exclude it
       return false;
-    }
+  }
     // If coordinator has team assignments but lead has no teamId, exclude it
     return false;
   }
 
-  // Group-based routing (existing behaviour) - only used when no coordinatorTeams configured
+  // Group-based routing by first number's group (primary), only when no coordinatorTeams configured
   if (!lead.plans || lead.plans.length === 0) return false;
-  const leadGroups = new Set(lead.plans.map(plan => plan.group).filter(Boolean));
+  const firstGroup = lead.plans[0]?.group?.toUpperCase?.() || '';
   
-  switch (coordinatorType) {
-    case 'g1':
-      return leadGroups.has('G1');
-    case 'g2':
-      return leadGroups.has('G2');
-    case 'g3':
-      return leadGroups.has('G3');
-    case 'all':
-      // All groups coordinator can handle any group / any team
-      return true;
-    default:
-      return false;
-  }
+  if (coordinatorType === 'all') return true;
+  if (coordinatorType === 'g1') return firstGroup === 'G1';
+  if (coordinatorType === 'g2') return firstGroup === 'G2';
+  if (coordinatorType === 'g3') return firstGroup === 'G3';
+  return false;
 };
 
 export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {

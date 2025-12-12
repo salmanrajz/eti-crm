@@ -52,7 +52,7 @@ import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serv
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
-import { logNumberAction } from '../../utils/numberLogging';
+import { logNumberAction, resolveUserName } from '../../utils/numberLogging';
 import { getPlans } from '../../utils/planService';
 import { incrementVerifierCounters } from '../../utils/verifierCounters';
 import { 
@@ -224,10 +224,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const pageEndRef = useRef<HTMLDivElement>(null);
   const hasScrolledOnMountRef = useRef(false);
   const whatsappMessagesRef = useRef<HTMLDivElement>(null);
-  const [showVerifyDialog, setShowVerifyDialog] = useState(false);
   const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'non_verified' | null>(null);
-  const [verificationNote, setVerificationNote] = useState('');
+  const [verificationNote, setVerificationNote] = useState('Verified');
   const [showMediaModal, setShowMediaModal] = useState(false);
+  const [uploadInProgress, setUploadInProgress] = useState(false);
+  const [uploadComplete, setUploadComplete] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
   const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'activate_non_verified' | 'followup' | 'later' | 'reject' | 'reassign' | 'reverification' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
@@ -865,8 +867,18 @@ Language: ${lead.language || 'N/A'}`;
         return media;
       });
       setVerificationMedia(transformedMedia);
+      setUploadComplete(transformedMedia.length > 0);
+      setUploadProgress(transformedMedia.length > 0 ? 100 : 0);
     }
   }, [lead.verificationMedia]);
+
+  useEffect(() => {
+    if (!showMediaModal) {
+      setUploadInProgress(false);
+      setUploadComplete(false);
+      setUploadProgress(0);
+    }
+  }, [showMediaModal]);
 
   useEffect(() => {
     const fetchSharedWithNames = async () => {
@@ -908,15 +920,26 @@ Language: ${lead.language || 'N/A'}`;
     return plan?.description || 'No description available';
   };
 
-  const handleVerificationAction = async () => {
+  const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified') => {
     setIsVerifyActionProcessing(true);
     try {
+      const actionToUse = actionOverride || verifyAction;
+      if (!actionToUse) {
+        setIsVerifyActionProcessing(false);
+        return;
+      }
+      if (actionToUse === 'verify' && !uploadComplete) {
+        toast.error('Please upload verification media before verifying');
+        setIsVerifyActionProcessing(false);
+        return;
+      }
+      setVerifyAction(actionToUse);
       const leadRef = doc(db, 'leads', lead.id);
       
       // Handle activated_non_verified status - convert to activated when verified
-      let leadStatus = verifyAction === 'verify' ? 
+      let leadStatus = actionToUse === 'verify' ? 
                       (lead.status === 'activated_non_verified' ? 'activated' : 'verified') 
-                      : verifyAction === 'reject' ? 'rejected'
+                      : actionToUse === 'reject' ? 'rejected'
                       : 'non_verified';
       
      // console.log('Setting lead status to:', leadStatus);
@@ -1044,13 +1067,14 @@ Language: ${lead.language || 'N/A'}`;
               });
 
               // Log status change
+              const agentName = await resolveUserName(agentId);
               await logNumberAction(
                 plan.numberId,
                 plan.number || '',
                 'status_changed',
                 { status: numberData?.status },
                 { status: 'reserved', reservedBy: agentId, leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentId}, claim timer started`
+                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName}, claim timer started`
               );
 
               // If there's a second claim, send them notification
@@ -1079,13 +1103,14 @@ Language: ${lead.language || 'N/A'}`;
                 leadId: lead.id
               });
 
+              const agentName2 = await resolveUserName(agentId);
               await logNumberAction(
                 plan.numberId,
                 plan.number || '',
                 'status_changed',
                 { status: numberData?.status },
                 { status: 'reserved', reservedBy: agentId, leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentId}, existing claim timer restarted`
+                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName2}, existing claim timer restarted`
               );
             } else {
               // No claims in queue and no existing claiming agent, just reserve for the original agent
@@ -1102,13 +1127,14 @@ Language: ${lead.language || 'N/A'}`;
                 leadId: lead.id
               });
 
+              const agentName3 = await resolveUserName(agentId);
               await logNumberAction(
                 plan.numberId,
                 plan.number || '',
                 'status_changed',
                 { status: numberData?.status },
                 { status: 'reserved', reservedBy: agentId, leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentId}`
+                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName3}`
               );
             }
           } else {
@@ -1218,9 +1244,8 @@ Language: ${lead.language || 'N/A'}`;
         }
       }
 
-      toast.success(`Lead ${verifyAction === 'verify' ? 'verified' : verifyAction === 'reject' ? 'rejected' : 'updated'} successfully`);
-      setShowVerifyDialog(false);
-      setVerificationNote('');
+      toast.success(`Lead ${actionToUse === 'verify' ? 'verified' : actionToUse === 'reject' ? 'rejected' : 'updated'} successfully`);
+      setVerificationNote('Verified');
       setVerifyAction(null);
       navigate('/dashboard');
     } catch (error) {
@@ -2641,7 +2666,7 @@ Language: ${lead.language || 'N/A'}`;
               <button
                 onClick={() => {
                   setVerifyAction('non_verified');
-                  setShowVerifyDialog(true);
+                  setShowMediaModal(true);
                 }}
                 className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
               >
@@ -2725,65 +2750,11 @@ Language: ${lead.language || 'N/A'}`;
         </div>
       </div>
 
-      {showVerifyDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg p-4 sm:p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">
-              {verifyAction === 'verify' ? 'Verify Lead' :
-               verifyAction === 'reject' ? 'Reject Lead' :
-               'Mark as Non Verified'}
-            </h3>
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Verification Notes
-              </label>
-              <textarea
-                rows={4}
-                className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                value={verificationNote}
-                onChange={(e) => setVerificationNote(e.target.value)}
-                placeholder="Enter any notes about this verification..."
-              />
-            </div>
-            <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 sm:space-x-3">
-              <button
-                onClick={() => setShowVerifyDialog(false)}
-                className="px-3 sm:px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleVerificationAction}
-                disabled={isVerifyActionProcessing}
-                className={`inline-flex items-center px-3 sm:px-4 py-2 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed ${
-                  verifyAction === 'verify' ? 'bg-green-600 hover:bg-green-700 focus:ring-green-500' :
-                  verifyAction === 'reject' ? 'bg-red-600 hover:bg-red-700 focus:ring-red-500' :
-                  'bg-yellow-600 hover:bg-yellow-700 focus:ring-yellow-500'
-                }`}
-              >
-                {isVerifyActionProcessing ? (
-                  <>
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
-                    </svg>
-                    Processing...
-                  </>
-                ) : (
-                  'Confirm'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-
       {showMediaModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4">
-          <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-6 w-full max-w-6xl mx-2 sm:mx-4 shadow-2xl max-h-[95vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 p-2 sm:p-3 pt-6 sm:pt-8">
+          <div className="bg-white rounded-xl sm:rounded-2xl p-2.5 sm:p-4 w-full max-w-6xl mx-2 sm:mx-3 shadow-2xl max-h-[92vh] overflow-y-auto">
             {/* Header */}
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-2.5">
               <div className="flex items-center space-x-2 sm:space-x-2.5">
                 <div className="w-6 h-6 sm:w-7 sm:h-7 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-md flex items-center justify-center">
                   <CheckCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-white" />
@@ -2808,7 +2779,7 @@ Language: ${lead.language || 'N/A'}`;
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-2">
               <div className="text-xs text-gray-600">
                 Progress: <span className="font-semibold text-indigo-600">{verifyChecklist.filter(Boolean).length}/{verifyChecklist.length}</span>
               </div>
@@ -2822,7 +2793,7 @@ Language: ${lead.language || 'N/A'}`;
             </div>
 
             {/* Progress Bar */}
-            <div className="mb-3">
+            <div className="mb-2.5">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-medium text-gray-600">Progress</span>
                 <span className="text-xs font-bold text-indigo-600">
@@ -2838,8 +2809,8 @@ Language: ${lead.language || 'N/A'}`;
             </div>
 
             {/* Checklist */}
-            <div className="mb-4 sm:mb-6">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3">
+            <div className="mb-3 sm:mb-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-2.5">
                 {VERIFY_CHECKLIST.map((section, idx) => {
                   const hasLongContent = section.details.length > 2 || section.details.some(item => item.length > 50);
                   const isExpanded = expandedSections[idx];
@@ -2848,7 +2819,7 @@ Language: ${lead.language || 'N/A'}`;
                   return (
                     <div 
                       key={section.header} 
-                      className={`p-2.5 sm:p-3 rounded-lg border transition-all duration-300 active:scale-95 ${
+                      className={`p-2 sm:p-2.5 rounded-lg border transition-all duration-300 active:scale-95 ${
                         verifyChecklist[idx] 
                           ? 'border-green-300 bg-green-50/70 shadow-sm' 
                           : 'border-gray-200 bg-white active:bg-gray-50'
@@ -2866,7 +2837,7 @@ Language: ${lead.language || 'N/A'}`;
                             }}
                             className="sr-only"
                           />
-                          <div className={`w-6 h-6 sm:w-5 sm:h-5 rounded-md border-2 flex items-center justify-center transition-all duration-200 ${
+                          <div className={`w-5 h-5 sm:w-5 sm:h-5 rounded-md border-2 flex items-center justify-center transition-all duration-200 ${
                             verifyChecklist[idx]
                               ? 'bg-green-500 border-green-500 shadow-sm'
                               : 'bg-white border-gray-300'
@@ -3043,10 +3014,22 @@ Language: ${lead.language || 'N/A'}`;
                             ...file,
                             type: file.type as 'image' | 'video' | 'audio'
                           })));
-                          setShowMediaModal(false);
+                          setUploadComplete(true);
+                          setUploadInProgress(false);
+                          setUploadProgress(100);
+                          setShowMediaModal(true);
                           setVerifyAction('verify');
-                          setShowVerifyDialog(true);
                         }} 
+                        onUploadingChange={(uploading) => {
+                          setUploadInProgress(uploading);
+                          if (uploading) {
+                            setUploadComplete(false);
+                            setUploadProgress(0);
+                          }
+                        }}
+                        onUploadProgress={(progress) => {
+                          setUploadProgress(progress);
+                        }}
                       />
                     </div>
                   ) : (
@@ -3063,6 +3046,76 @@ Language: ${lead.language || 'N/A'}`;
               </div>
             </div>
 
+            {/* Upload progress & Verification Notes below checklist */}
+            <div className="space-y-2.5 mt-3">
+              <div className="border border-indigo-100 rounded-xl p-2.5 sm:p-3.5 bg-indigo-50/40 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold text-gray-800">Upload Progress</div>
+                  <div className="text-xs font-bold text-indigo-700">
+                    {uploadComplete ? 'Upload completed' : `${uploadProgress}%`}
+                  </div>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden" aria-label="upload-progress">
+                  <div
+                    className={`h-2 rounded-full transition-all duration-300 ${uploadComplete ? 'bg-green-500' : 'bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500'}`}
+                    style={{ width: `${uploadComplete ? 100 : uploadProgress}%` }}
+                  ></div>
+                </div>
+                {verificationMedia && verificationMedia.length > 0 && (
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    {verificationMedia.map((media, idx) => {
+                      const name =
+                        typeof media === 'string'
+                          ? media.split('/').pop() || 'File'
+                          : media.name || media.url?.split('/').pop() || 'File';
+                      return (
+                        <span key={idx} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-white border border-gray-200 text-gray-700">
+                          <Paperclip className="w-3 h-3 text-indigo-500" />
+                          {name}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="border border-indigo-100 rounded-xl p-2.5 sm:p-3.5 bg-indigo-50/40 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-900">Verification Notes</div>
+                  <div className="text-[11px] font-medium">
+                    {uploadInProgress ? (
+                      <span className="text-indigo-600">Uploading media...</span>
+                    ) : uploadComplete ? (
+                      <span className="text-green-600">Media uploaded</span>
+                    ) : (
+                      <span className="text-amber-600">Upload required</span>
+                    )}
+                  </div>
+                </div>
+
+                <textarea
+                  rows={3}
+                  className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm"
+                  value={verificationNote}
+                  onChange={(e) => setVerificationNote(e.target.value)}
+                  placeholder="Enter any notes about this verification..."
+                />
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => {
+                      setVerifyAction('verify');
+                      handleVerificationAction('verify');
+                    }}
+                    disabled={!uploadComplete || uploadInProgress || isVerifyActionProcessing}
+                    className="px-4 py-2 text-sm font-semibold rounded-md text-white bg-green-600 hover:bg-green-700 focus:ring-2 focus:ring-offset-1 focus:ring-green-500 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {isVerifyActionProcessing ? 'Processing...' : 'Verify'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {/* Footer */}
             <div className="flex justify-end mt-3 pt-2 border-t border-gray-200">
               <button
@@ -3070,6 +3123,7 @@ Language: ${lead.language || 'N/A'}`;
                   setShowMediaModal(false);
                   setVerifyChecklist(VERIFY_CHECKLIST.map(() => false));
                   setExpandedSections(VERIFY_CHECKLIST.map(() => false));
+                  setVerificationNote('Verified');
                 }}
                 className="px-4 sm:px-6 py-2 sm:py-2.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors active:scale-95"
               >

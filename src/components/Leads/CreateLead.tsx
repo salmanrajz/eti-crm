@@ -918,8 +918,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     // Date & Time (skip strict validation for coordinators when editing)
     const skipDateTimeValidation = isEditing && user?.role === 'coordinator';
     if (!skipDateTimeValidation) {
-      if (!formData.startDate) {
-        errors.startDate = 'Date is required';
+    if (!formData.startDate) {
+      errors.startDate = 'Date is required';
       } else {
         // Check if date is in the past
         const selectedDate = new Date(formData.startDate);
@@ -953,7 +953,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       }
       // Time is only required when NOT editing
       if (!isEditing && !formData.startTime) {
-        errors.startTime = 'Time is required';
+      errors.startTime = 'Time is required';
       }
     }
     // Optional URL validation
@@ -1871,8 +1871,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                       
                       return (
                         <motion.button
-                          type="button"
-                          onClick={() => setShowNumberPool(true)}
+                        type="button"
+                        onClick={() => setShowNumberPool(true)}
                           disabled={isCoordinatorEditing}
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
@@ -2268,25 +2268,23 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             <FormInput
               label="Time"
               icon={Calendar}
-              type="text"
+              type="time"
+              step="60"
               required={!isEditing}
-              placeholder="12:34 PM"
-              value={convertTo12Hour(formData.startTime)}
+              value={formData.startTime}
               disabled={isCoordinatorEditing}
               onChange={(e) => {
-                const inputValue = e.target.value;
-                // Convert 12-hour format input to 24-hour format for storage
-                const time24 = convertTo24Hour(inputValue);
-                setFormData(prev => ({ ...prev, startTime: time24 || inputValue }));
+                const time24 = e.target.value;
+                setFormData(prev => ({ ...prev, startTime: time24 }));
                 
                 // Only validate "time cannot be in the past" when NOT editing
-                if (!isEditing && formData.startDate && inputValue) {
+                if (!isEditing && formData.startDate && time24) {
                   const selectedDate = new Date(formData.startDate);
                   const today = new Date();
                   today.setHours(0, 0, 0, 0);
                   selectedDate.setHours(0, 0, 0, 0);
                   
-                  if (selectedDate.getTime() === today.getTime() && time24 && time24.includes(':')) {
+                  if (selectedDate.getTime() === today.getTime() && time24.includes(':')) {
                     const [hours, minutes] = time24.split(':').map(Number);
                     const selectedDateTime = new Date();
                     selectedDateTime.setHours(hours, minutes, 0, 0);

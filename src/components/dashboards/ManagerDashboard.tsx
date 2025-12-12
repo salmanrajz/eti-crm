@@ -1283,8 +1283,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                 <span className="font-semibold">Team Reserved Numbers</span>
               </button>
               <div className="flex items-center space-x-2">
-                <Calendar className="h-5 w-5" />
-                <span>{format(new Date(), 'MMMM yyyy')}</span>
+              <Calendar className="h-5 w-5" />
+              <span>{format(new Date(), 'MMMM yyyy')}</span>
               </div>
             </div>
           </div>
@@ -1546,7 +1546,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                       <ChevronRight className="h-5 w-5" />
                     </button>
                   </div>
-              <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-2">
                     <button
                       onClick={() => setViewMode('table')}
                       className={clsx(
