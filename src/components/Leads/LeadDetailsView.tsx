@@ -227,6 +227,8 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'non_verified' | null>(null);
   const [verificationNote, setVerificationNote] = useState('Verified');
   const [showMediaModal, setShowMediaModal] = useState(false);
+  const [showNonVerifyDialog, setShowNonVerifyDialog] = useState(false);
+  const [nonVerifyNote, setNonVerifyNote] = useState('');
   const [uploadInProgress, setUploadInProgress] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -2665,8 +2667,9 @@ Language: ${lead.language || 'N/A'}`;
               </button>
               <button
                 onClick={() => {
-                  setVerifyAction('non_verified');
-                  setShowMediaModal(true);
+                  setShowNonVerifyDialog(true);
+                  setNonVerifyNote('');
+                  setIsVerifyActionProcessing(false); // Reset processing state when opening dialog
                 }}
                 className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
               >
@@ -4542,6 +4545,85 @@ Language: ${lead.language || 'N/A'}`;
           </div>
         </div>
       </Dialog>
+
+      {/* Non-Verify Dialog */}
+      {showNonVerifyDialog && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-2xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 bg-gradient-to-r from-yellow-500 to-yellow-600">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <Calendar className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">
+                    Non-Verify Lead
+                  </h3>
+                  <p className="text-yellow-100 text-sm">
+                    Mark this lead as non-verified. Add a note explaining why.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Content */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Verification Notes */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-900">
+                  Verification Notes (Optional)
+                </label>
+                <div className="relative">
+                  <textarea
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-yellow-300 focus:ring-2 focus:ring-yellow-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                    rows={4}
+                    value={nonVerifyNote}
+                    onChange={(e) => setNonVerifyNote(e.target.value)}
+                    placeholder="Add any additional notes or comments..."
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Actions */}
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-100">
+              <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3">
+                <button
+                  onClick={() => {
+                    setShowNonVerifyDialog(false);
+                    setNonVerifyNote('');
+                    setIsVerifyActionProcessing(false); // Reset processing state when canceling
+                  }}
+                  disabled={isVerifyActionProcessing}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    setVerificationNote(nonVerifyNote || 'Non-Verified');
+                    // Don't close dialog immediately - wait for action to complete
+                    try {
+                      await handleVerificationAction('non_verified');
+                      // Close dialog only after successful completion
+                      setShowNonVerifyDialog(false);
+                      setNonVerifyNote('');
+                    } catch (error) {
+                      // Keep dialog open on error so user can see the error message
+                      // The error is already handled in handleVerificationAction
+                    }
+                  }}
+                  disabled={isVerifyActionProcessing}
+                  className="px-4 py-2 text-sm font-medium text-white bg-yellow-600 rounded-lg hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isVerifyActionProcessing ? 'Processing...' : 'Confirm Non-Verify'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* WhatsApp Chat Modal */}
       <AnimatePresence>
