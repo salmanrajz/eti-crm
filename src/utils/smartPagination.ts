@@ -43,6 +43,8 @@ import {
   getDocs,
   getCountFromServer,
   where,
+  startAt,
+  endAt,
   WhereFilterOp
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -92,6 +94,16 @@ export class SmartPagination<T> {
     this.options.filters.forEach(filter => {
       q = query(q, where(filter.field, filter.operator, filter.value));
     });
+
+    // If initials (prefix) filter is set, use server-side equality and order by createdAt desc (like group)
+    if (this.options.initials) {
+      q = query(
+        q,
+        where('initials', '==', this.options.initials),
+        orderBy('createdAt', 'desc')
+      );
+      return q;
+    }
     
     q = query(q, orderBy(this.options.orderBy, this.options.orderDirection));
     

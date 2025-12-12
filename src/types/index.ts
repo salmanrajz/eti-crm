@@ -103,6 +103,7 @@ export interface User {
   email: string;
   role: UserRole;
   name: string;
+  allowedGroups?: string[]; // Groups the user is allowed to access (e.g., G1/G2)
   teamId?: string; // For agents
   managerId?: string; // For agents
   phoneNumbers?: string[]; // Array of phone numbers for managers
@@ -151,6 +152,7 @@ export interface NumberPool {
 export interface NumberPoolType {
   id: string;
   number: string;
+  initials?: string;
   category: string;
   code: string;
   group?: string;

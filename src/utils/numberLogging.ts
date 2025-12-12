@@ -356,6 +356,22 @@ export const resolveUserName = async (userId: string): Promise<string> => {
 };
 
 /**
+ * Resolve lead ID to lead number
+ */
+export const resolveLeadNumber = async (leadId: string): Promise<string> => {
+  try {
+    const leadDoc = await getDoc(doc(db, 'leads', leadId));
+    if (leadDoc.exists()) {
+      const leadData = leadDoc.data();
+      return leadData.leadNumber || leadId;
+    }
+    return leadId;
+  } catch (error) {
+    return leadId;
+  }
+};
+
+/**
  * Format timestamp for display
  */
 export const formatTimestamp = (timestamp: any): string => {
@@ -431,6 +447,18 @@ export const formatDataValueWithUserNames = async (value: any, key: string): Pro
     return parts.join(', ');
   }
   
+  // Resolve leadId to leadNumber
+  if (key === 'leadId') {
+    if (typeof value === 'string' && value) {
+      try {
+        const leadNumber = await resolveLeadNumber(value);
+        return leadNumber !== value ? leadNumber : value;
+      } catch {
+        return value;
+      }
+    }
+  }
+  
   // Resolve common user ID fields to names
   if (key === 'reservedBy' || key === 'claimingAgentId' || key === 'userId' || key === 'originalAgentId' || key === 'respondedBy') {
     if (typeof value === 'string') {
@@ -444,4 +472,41 @@ export const formatDataValueWithUserNames = async (value: any, key: string): Pro
   }
   
   return formatDataValue(value);
+};
+
+/**
+ * Process details string to replace agent IDs with names
+ * This function finds patterns like "agent {agentId}" and replaces them with agent names
+ */
+export const processDetailsWithAgentNames = async (details: string | null | undefined): Promise<string> => {
+  if (!details) return '';
+  
+  // Pattern to match "agent {agentId}" or "for agent {agentId}"
+  const agentIdPattern = /(?:for\s+)?agent\s+([A-Za-z0-9]{20,})/gi;
+  const matches = [...details.matchAll(agentIdPattern)];
+  
+  if (matches.length === 0) return details;
+  
+  let processedDetails = details;
+  const replacements: Map<string, string> = new Map();
+  
+  // Resolve all agent IDs to names
+  for (const match of matches) {
+    const agentId = match[1];
+    if (!replacements.has(agentId)) {
+      const agentName = await resolveUserName(agentId);
+      replacements.set(agentId, agentName);
+    }
+  }
+  
+  // Replace all occurrences
+  for (const [agentId, agentName] of replacements.entries()) {
+    const regex = new RegExp(`(?:for\\s+)?agent\\s+${agentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi');
+    processedDetails = processedDetails.replace(regex, (match) => {
+      // Preserve "for " prefix if it exists
+      return match.includes('for ') ? `for agent ${agentName}` : `agent ${agentName}`;
+    });
+  }
+  
+  return processedDetails;
 };

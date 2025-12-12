@@ -697,8 +697,10 @@ export function NumberPoolUpload() {
           teamVisibility = teamIdByName.get(teamVisibility.toLowerCase());
       }
 
+      const rawNumber = String(row.Number).trim();
       const numberData: any = {
-        number: String(row.Number).trim(),
+        number: rawNumber,
+        initials: rawNumber.slice(0, 3),
         category: String(row.Category).trim() as typeof numberCategories[number],
         code: String(row.Code).trim(),
         group: String(row.Group).trim(),

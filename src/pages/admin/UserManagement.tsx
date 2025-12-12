@@ -154,6 +154,7 @@ export function UserManagement() {
    * Coordinator types for number group management
    */
   const coordinatorTypes: CoordinatorType[] = ['g1', 'g2', 'g3', 'all'];
+  const GROUPS = ['G1', 'G2', 'G3', 'G4', 'G5'];
   
   /**
    * Verifier types for number pool access control
@@ -489,6 +490,23 @@ export function UserManagement() {
     } catch (error) {
       console.error('Error assigning team:', error);
       toast.error('Failed to assign team');
+    }
+  }
+
+  async function updateAllowedGroup(userId: string, groupValue: string) {
+    try {
+      const userRef = doc(db, 'users', userId);
+      const allowedGroups = groupValue ? [groupValue] : [];
+      await updateDoc(userRef, {
+        allowedGroups,
+        group: groupValue || null,
+        updatedAt: new Date()
+      });
+      toast.success('Allowed group updated');
+      loadUsers();
+    } catch (error) {
+      console.error('Error updating allowed group:', error);
+      toast.error('Failed to update allowed group');
     }
   }
 
@@ -1115,6 +1133,9 @@ export function UserManagement() {
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Team Assignment
                     </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Allowed Group
+                        </th>
                         {(currentUser?.role === 'verifier' || currentUser?.role === 'coordinator') && (
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Coordinator Type
@@ -1221,6 +1242,24 @@ export function UserManagement() {
                               <span className="text-sm text-gray-400 italic">Not applicable</span>
                             )}
                       </td>
+                          
+                          {/* Allowed Group */}
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            {(user.role === 'agent' || user.role === 'freelancer') ? (
+                              <select
+                                value={user.allowedGroups?.[0] || ''}
+                                onChange={(e) => updateAllowedGroup(user.id, e.target.value)}
+                                className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                              >
+                                <option value="">All Groups</option>
+                                {GROUPS.map((g) => (
+                                  <option key={g} value={g}>{g}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="text-sm text-gray-400 italic">Not applicable</span>
+                            )}
+                          </td>
                           
                           {/* Coordinator Type - Visible to admin, verifiers and coordinators */}
                           {(currentUser?.role === 'admin' || currentUser?.role === 'verifier' || currentUser?.role === 'coordinator') && (
@@ -2202,6 +2241,24 @@ const UserCard = ({
                 </option>
               ))}
             </select>
+          </div>
+        )}
+
+        {/* Allowed Group (pre-applied filter for number pool & create lead) */}
+        {(user.role === 'agent' || user.role === 'freelancer') && (
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Allowed Group</label>
+            <select
+              value={user.allowedGroups?.[0] || ''}
+              onChange={(e) => updateAllowedGroup(user.id, e.target.value)}
+              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+            >
+              <option value="">All Groups</option>
+              {GROUPS.map((g) => (
+                <option key={g} value={g}>{g}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-gray-500 mt-1">If set, the agent will only see numbers from this group in Number Pool and Create Lead.</p>
           </div>
         )}
       </div>

@@ -201,12 +201,12 @@ export class UnifiedSearch {
         currentCursor = docsToProcess[docsToProcess.length - 1];
 
         // Filter: ALL tokens must match (primary already matched by query, check others)
-        docsToProcess.forEach(doc => {
+        docsToProcess.forEach((doc: QueryDocumentSnapshot) => {
           if (results.size >= maxResults) return;
 
           const data = doc.data() as NumberPool;
           const number = (data.number || '').toString();
-          const tokens = data.numberTokens || [];
+          const tokens = (data as any).numberTokens || [];
 
           // Check if all OTHER tokens match
           const otherTokensMatch = otherTokens.every(token => {
@@ -214,7 +214,7 @@ export class UnifiedSearch {
           });
 
           if (otherTokensMatch) {
-            results.set(doc.id, { id: doc.id, ...data });
+            results.set(doc.id, { ...data, id: doc.id });
             lastDoc = doc;
           }
         });
@@ -252,21 +252,6 @@ export class UnifiedSearch {
       hasMore: hasMore && results.size >= maxResults,
       lastDoc: lastDoc
     };
-  }
-
-  /**
-   * Helper to get the next prefix for range queries
-   * "050" -> "051", "0502" -> "0503"
-   */
-  private getNextPrefix(prefix: string): string {
-    // Convert to number, increment, convert back
-    const num = parseInt(prefix);
-    if (!isNaN(num)) {
-      const next = num + 1;
-      return next.toString().padStart(prefix.length, '0');
-    }
-    // Fallback: increment last character
-    return prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
   }
 
   /**
@@ -354,27 +339,62 @@ export class UnifiedSearch {
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
     let lastDoc: QueryDocumentSnapshot | null = null;
-    const batchSize = 1000;
+    const batchSize = 450; // smaller batch to keep reads tight when using token index
     let currentCursor = cursorDoc;
     let hasMore = false;
 
     try {
       let totalFetched = 0;
-      const maxAttempts = 10;
+      const maxAttempts = 8;
       let attempts = 0;
+
+      // Choose a primary 3-digit token to query via numberTokens (faster) when possible
+      const tokenCandidates = new Set<string>();
+      for (let idx = 0; idx < searchTerms.length; idx++) {
+        const term = searchTerms[idx];
+        const len = term.length;
+        if (len === 3) {
+          tokenCandidates.add(term);
+        } else if (len > 3) {
+          // Add sliding 3-digit windows from longer tokens (e.g., "9090" -> "909", "090")
+          for (let i = 0; i <= len - 3; i++) {
+            tokenCandidates.add(term.slice(i, i + 3));
+          }
+        }
+      }
+
+      let primaryToken: string | null = null;
+      let bestScore = Number.MAX_SAFE_INTEGER;
+      tokenCandidates.forEach(token => {
+        const score = this.calculateTokenRarity(token);
+        if (score < bestScore) {
+          bestScore = score;
+          primaryToken = token;
+        }
+      });
+
+      const useTokenQuery = primaryToken && bestScore < 9000; // avoid unusable tokens
 
       while (results.size < maxResults && attempts < maxAttempts) {
         attempts++;
 
-        // Build query - only fetch by category if specified
         let numQuery = query(collection(db, 'numberPool'));
         
         if (category !== 'all') {
           numQuery = query(numQuery, where('category', '==', category));
         }
         
-        // Order by number for consistent pagination
-        numQuery = query(numQuery, orderBy('number'));
+        if (useTokenQuery) {
+          // Use array-contains on numberTokens for the chosen 3-digit token
+          numQuery = query(
+            numQuery,
+            where('numberTokens', 'array-contains', primaryToken!),
+            orderBy('number')
+          );
+        } else {
+          // Fallback to full scan ordered by number
+          numQuery = query(numQuery, orderBy('number'));
+        }
         
         if (currentCursor) {
           numQuery = query(numQuery, startAfter(currentCursor));
@@ -396,20 +416,27 @@ export class UnifiedSearch {
         currentCursor = docsToProcess[docsToProcess.length - 1];
 
         // Filter: Check if number contains ALL search terms (substring match)
-        docsToProcess.forEach(doc => {
-          if (results.size >= maxResults) return;
+        const processedDocs = docsToProcess;
+        for (let i = 0; i < processedDocs.length; i++) {
+          if (results.size >= maxResults) break;
 
+          const doc = processedDocs[i];
           const data = doc.data() as NumberPool;
           const number = (data.number || '').toString();
 
-          // Check if ALL search terms are present in the number
-          const allTermsMatch = searchTerms.every(term => number.includes(term));
+          let allTermsMatch = true;
+          for (let t = 0; t < searchTerms.length; t++) {
+            if (!number.includes(searchTerms[t])) {
+              allTermsMatch = false;
+              break;
+            }
+          }
 
           if (allTermsMatch) {
-            results.set(doc.id, { id: doc.id, ...data });
+            results.set(doc.id, { ...data, id: doc.id });
             lastDoc = doc;
           }
-        });
+        }
 
         if (results.size >= maxResults || !hasMore) {
           break;
@@ -448,7 +475,6 @@ export class UnifiedSearch {
     const results = new Map<string, NumberPool>();
     let lastDoc: QueryDocumentSnapshot | null = null;
     let snapshot: any; // Declare at function level so it's accessible everywhere
-    let queryLimit = 0; // Will be set later
     let hasMoreData = false; // Track if there's more data available
 
     try {
@@ -604,7 +630,6 @@ export class UnifiedSearch {
         
         // Update cursor for next batch
         currentCursor = docsToProcess[docsToProcess.length - 1];
-        queryLimit = batchSize; // Update for the hasMore check later
       
         // Helper to normalize strings for case-insensitive and punctuation-insensitive comparison
         const normalize = (value: any) => (value || '').toString().toLowerCase();
@@ -619,7 +644,7 @@ export class UnifiedSearch {
         });
 
         // Filter numbers where ALL search terms match in ANY column (AND logic)
-        docsToProcess.forEach(doc => {
+        docsToProcess.forEach((doc: QueryDocumentSnapshot) => {
           if (results.size >= maxResults) return; // Stop if we have enough
           
           const number = doc.data() as NumberPool;
@@ -631,20 +656,20 @@ export class UnifiedSearch {
           
           // If no field search terms (only status was searched), include all results
           if (normalizedTerms.length === 0) {
-            results.set(doc.id, { id: doc.id, ...number });
+            results.set(doc.id, { ...number, id: doc.id });
             lastDoc = doc; // Track last document
             return;
           }
           
           const numberStr = normalize(number.number);
           const codeStr = normalize(number.code);
-          const planStr = normalize(number.plan);
+          const planStr = normalize((number as any).plan);
           const categoryStr = normalize(number.category);
           const groupStr = normalize(number.group);
 
           const numberLoose = normalizeLoose(number.number);
           const codeLoose = normalizeLoose(number.code);
-          const planLoose = normalizeLoose(number.plan);
+          const planLoose = normalizeLoose((number as any).plan);
           const categoryLoose = normalizeLoose(number.category);
           const groupLoose = normalizeLoose(number.group);
           
@@ -664,7 +689,7 @@ export class UnifiedSearch {
           });
           
           if (allTermsMatch) {
-            results.set(doc.id, { id: doc.id, ...number });
+            results.set(doc.id, { ...number, id: doc.id });
             lastDoc = doc; // Track last document
           }
         });
@@ -873,7 +898,7 @@ export class UnifiedSearch {
             const data = doc.data() as NumberPool;
             const code = (data.code || '').toLowerCase();
             if (code.startsWith(term)) {
-              results.set(doc.id, { id: doc.id, ...data });
+              results.set(doc.id, { ...data, id: doc.id });
             }
           });
         } else if (matchedStatus) {
@@ -901,7 +926,7 @@ export class UnifiedSearch {
           }
           
           docs.forEach(doc => {
-            results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+            results.set(doc.id, { ...(doc.data() as NumberPool), id: doc.id });
           });
         } else {
           // For other terms with cursor, can't paginate - return empty

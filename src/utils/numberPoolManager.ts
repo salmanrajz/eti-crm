@@ -330,16 +330,6 @@ class NumberPoolManager {
       // Filter by role first
       let filteredNumbers = this.filterNumbersByRole(result.data, userRole);
       
-      // Filter by initials client-side (extract first 3 digits from number)
-      if (initials && initials !== 'all') {
-        filteredNumbers = filteredNumbers.filter(n => {
-          if (!n.number) return false;
-          const numStr = n.number.toString().trim();
-          const match = numStr.match(/^(\d{3})/);
-          return match && match[1] === initials;
-        });
-      }
-      
       this.updateState({
         numbers: filteredNumbers,
         currentPage: 1,
@@ -413,17 +403,7 @@ class NumberPoolManager {
     try {
       // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.nextPage();
-      let filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
-      
-      // Apply initials filter if set
-      if (this.state.selectedInitials && this.state.selectedInitials !== 'all') {
-        filteredNumbers = filteredNumbers.filter(n => {
-          if (!n.number) return false;
-          const numStr = n.number.toString().trim();
-          const match = numStr.match(/^(\d{3})/);
-          return match && match[1] === this.state.selectedInitials;
-        });
-      }
+      const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
       
       this.updateState({
         numbers: filteredNumbers,
@@ -500,17 +480,7 @@ class NumberPoolManager {
     try {
       // No cache with memory-only mode - always fetch fresh data
       const result = await this.pagination.loadPage(page);
-      let filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
-      
-      // Apply initials filter if set
-      if (this.state.selectedInitials && this.state.selectedInitials !== 'all') {
-        filteredNumbers = filteredNumbers.filter(n => {
-          if (!n.number) return false;
-          const numStr = n.number.toString().trim();
-          const match = numStr.match(/^(\d{3})/);
-          return match && match[1] === this.state.selectedInitials;
-        });
-      }
+      const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
       
       this.updateState({
         numbers: filteredNumbers,

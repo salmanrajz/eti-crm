@@ -52,13 +52,9 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc, setDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { 
-  getCachedPaginatedNumbers,
-  cachePaginatedNumbers,
-  searchCachedNumbersFast
-} from '../../utils/indexedDB';
+// IndexedDB helpers intentionally not used for search to keep direct Firestore fetches fast
 import { NumberPoolPagination, paginationUtils } from '../../utils/pagination';
 import { numberPoolManager } from '../../utils/numberPoolManager';
 import { unifiedSearch } from '../../utils/unifiedSearch';
@@ -280,6 +276,16 @@ const CLAIM_TIMEOUT = 15 * 60 * 1000; // 15 minutes in milliseconds
  * Maximum number of concurrent reservations per user
  */
 const MAX_RESERVATIONS = 3;
+const MAX_CLAIMS_PER_24H = 3;
+const getTodayUaeDateString = () => {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dubai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  return formatter.format(new Date());
+};
 
 /**
  * Debounce delay for button operations to prevent rapid clicking
@@ -479,6 +485,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [selectedCategory, setSelectedCategory] = useState<string | null>(propSelectedCategory || null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [selectedInitials, setSelectedInitials] = useState<string | null>(null);
+  const allowedGroups = user?.role === 'agent' && user?.allowedGroups?.length ? user.allowedGroups : null;
+  const [userClaimCount, setUserClaimCount] = useState<number>(0);
+  const [userClaimDate, setUserClaimDate] = useState<string>('');
   const [statsTotalPages, setStatsTotalPages] = useState<number>(0);
   const [statsTotalItems, setStatsTotalItems] = useState<number>(0);
   const [sortConfig, setSortConfig] = useState<{ field: SortField; direction: SortDirection }>({
@@ -494,6 +503,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [reserveConflictInfo, setReserveConflictInfo] = useState<{ number: string; status?: string; reservedByName?: string | null } | null>(null);
   const [checkingReserveId, setCheckingReserveId] = useState<string | null>(null);
   const [selectAllMode, setSelectAllMode] = useState(false);
+  const [showMyClaimsDialog, setShowMyClaimsDialog] = useState(false);
   const [showClaimDialog, setShowClaimDialog] = useState(false);
   const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
   const [showStatusCheckDialog, setShowStatusCheckDialog] = useState(false);
@@ -502,6 +512,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [claimTimer, setClaimTimer] = useState<NodeJS.Timeout | null>(null);
   const [claimCountdowns, setClaimCountdowns] = useState<Record<string, number>>({});
   const [reservationCountdowns, setReservationCountdowns] = useState<Record<string, number>>({});
+  const computeUserWaitMs = useCallback(
+    (number: NumberPoolType) => {
+      const position = number.claimQueue?.findIndex((c: any) => c?.agentId === user?.id) ?? -1;
+      const activeRemaining =
+        claimCountdowns[number.id] ??
+        (number.claimingExpiresAt
+          ? Math.max(0, new Date(number.claimingExpiresAt as any).getTime() - Date.now())
+          : undefined);
+
+      if (position >= 0) {
+        const base = activeRemaining ?? CLAIM_TIMEOUT;
+        return base + Math.max(0, position) * CLAIM_TIMEOUT;
+      }
+
+      if (number.claimingAgentId === user?.id) {
+        return activeRemaining ?? null;
+      }
+
+      return activeRemaining ?? null;
+    },
+    [claimCountdowns, user?.id]
+  );
   const [showChat, setShowChat] = useState(false);
   const [selectedNumberForChat, setSelectedNumberForChat] = useState<NumberPoolType | null>(null);
   const [searchParams] = useSearchParams();
@@ -532,6 +564,119 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [chattingNumbers, setChattingNumbers] = useState<Set<string>>(new Set());
   const [operationTimeouts, setOperationTimeouts] = useState<Map<string, NodeJS.Timeout>>(new Map());
   const [lastClaimAttempts, setLastClaimAttempts] = useState<Map<string, number>>(new Map());
+  const userClaimLimitReached = userClaimCount >= MAX_CLAIMS_PER_24H;
+  
+  // Derived claim lists for current user (claimed/being claimed)
+  const flattenSources = useCallback(() => {
+    const map = new Map<string, NumberPoolType>();
+    [numbers, reservedNumbers, searchResults, allNumbersForReserved].forEach(list => {
+      (list || []).forEach((n: any) => {
+        if (n?.id && !map.has(n.id)) {
+          map.set(n.id, n as NumberPoolType);
+        }
+      });
+    });
+    return Array.from(map.values());
+  }, [numbers, reservedNumbers, searchResults, allNumbersForReserved]);
+  
+  const myClaimedNumbers = useMemo(() => {
+    if (!user?.id) return [];
+    return flattenSources().filter(n => (n.claimQueue || []).some((c: any) => c?.agentId === user.id));
+  }, [flattenSources, user?.id]);
+  
+  const [myBeingClaimedNumbers, setMyBeingClaimedNumbers] = useState<NumberPoolType[]>([]);
+
+  // Derived list: include numbers where user is claiming OR in the claim queue (from any loaded source)
+  const myBeingClaimedAll = useMemo(() => {
+    const map = new Map<string, NumberPoolType>();
+    const userId = user?.id;
+    if (userId) {
+      // From queue membership across loaded sources
+      flattenSources().forEach((n) => {
+        if ((n.claimQueue || []).some((c: any) => c?.agentId === userId)) {
+          map.set(n.id, n);
+        }
+      });
+      // From active claiming listener
+      myBeingClaimedNumbers.forEach((n) => map.set(n.id, n));
+    }
+    return Array.from(map.values());
+  }, [flattenSources, myBeingClaimedNumbers, user?.id]);
+
+  // Fetch "Being claimed" numbers directly from Firestore for the current user
+  useEffect(() => {
+    if (!user?.id) {
+      setMyBeingClaimedNumbers([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'numberPool'),
+      where('claimingAgentId', '==', user.id)
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data() as any;
+        return {
+          ...data,
+          id: docSnap.id,
+          claimingStartedAt: data?.claimingStartedAt?.toDate
+            ? data.claimingStartedAt.toDate()
+            : data?.claimingStartedAt,
+          claimingExpiresAt: data?.claimingExpiresAt?.toDate
+            ? data.claimingExpiresAt.toDate()
+            : data?.claimingExpiresAt,
+        } as NumberPoolType;
+      });
+      setMyBeingClaimedNumbers(docs);
+    });
+    return () => unsubscribe();
+  }, [user?.id]);
+
+  // Load/reset claim quota at UAE midnight
+  useEffect(() => {
+    const loadClaimStats = async () => {
+      const today = getTodayUaeDateString();
+      if (!user?.id) {
+        setUserClaimDate(today);
+        setUserClaimCount(0);
+        return;
+      }
+      try {
+        const ref = doc(db, 'userClaimStats', user.id);
+        const snap = await getDoc(ref);
+        const data = snap.exists() ? snap.data() : {};
+        const storedDate = typeof (data as any).date === 'string' ? (data as any).date : '';
+        const storedCount = typeof (data as any).count === 'number' ? (data as any).count : 0;
+        if (storedDate === today) {
+          setUserClaimDate(storedDate);
+          setUserClaimCount(storedCount);
+        } else {
+          setUserClaimDate(today);
+          setUserClaimCount(0);
+          await setDoc(ref, { date: today, count: 0 }, { merge: true });
+        }
+      } catch (err) {
+        console.error('Error loading claim stats:', err);
+        setUserClaimDate(today);
+        setUserClaimCount(0);
+      }
+    };
+    loadClaimStats();
+  }, [user?.id]);
+
+  const recordDailyClaim = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const today = getTodayUaeDateString();
+      const newCount = (userClaimDate === today ? userClaimCount : 0) + 1;
+      setUserClaimDate(today);
+      setUserClaimCount(newCount);
+      const ref = doc(db, 'userClaimStats', user.id);
+      await setDoc(ref, { date: today, count: newCount }, { merge: true });
+    } catch (err) {
+      console.error('Error recording claim stat:', err);
+    }
+  }, [user?.id, userClaimDate, userClaimCount]);
   
   // ===============================================================================
   // COORDINATOR ADD/EDIT NUMBER STATES
@@ -689,18 +834,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const filterByVisibility = useCallback((list: NumberPoolType[]): NumberPoolType[] => {
     // Admin/manager/coordinator see everything
     if (isAdmin() || user?.role === 'manager' || user?.role === 'coordinator') return list;
-    // Agents: if number has teamVisibility, it must match user's team; if missing, it's public
-    // Also hide activated numbers from agents
-    if (user?.role === 'agent' && user.teamId) {
-      return list.filter(n => {
-        // Hide activated numbers
+    // Agents: enforce allowedGroups (if set) and team visibility; hide activated numbers
+    if (user?.role === 'agent') {
+      const allowedGroups = user.allowedGroups && user.allowedGroups.length > 0 ? user.allowedGroups : null;
+
+      const filtered = list.filter(n => {
         if (n.status === 'activated') return false;
-        // Filter by team visibility
-        return !n.teamVisibility || n.teamVisibility === user.teamId;
+        if (allowedGroups && !allowedGroups.includes(n.group || '')) return false;
+        if (user.teamId && n.teamVisibility && n.teamVisibility !== user.teamId) return false;
+        return true;
       });
+
+      return filtered;
     }
     return list;
-  }, [isAdmin, user?.role, user?.teamId]);
+  }, [isAdmin, user?.role, user?.teamId, user?.allowedGroups]);
 
   // ===============================================================================
   // EFFECTS AND LIFECYCLE MANAGEMENT
@@ -752,7 +900,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // Initialize manager (will use cache if available)
     // The manager will detect user changes and force reset internally
     numberPoolManager.setUserRole(user?.role);
-    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role, selectedGroup, selectedInitials).catch(error => {
+    const effectiveGroup = selectedGroup || (allowedGroups ? allowedGroups[0] : null);
+    if (!selectedGroup && effectiveGroup) {
+      setSelectedGroup(effectiveGroup);
+    }
+    numberPoolManager.initialize(selectedCategory, pageSize, user?.id, user?.role, effectiveGroup, selectedInitials).catch(error => {
       console.error('[NumberPool] Initialization error:', error);
       if (isMounted) {
         setLoading(false);
@@ -987,8 +1139,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       
       try {
         // Use unified search for consistent results
-      // Initially fetch 200 results for faster loading, "Load More" will fetch additional batches
-        const searchLimit = 200;
+      // Fetch a larger first batch to reduce extra roundtrips while keeping pagination client-side
+        const searchLimit = 1000;
         
         const result = await unifiedSearch.search(debouncedSearchTerm, {
           category: selectedCategory || 'all',
@@ -999,7 +1151,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         
         // Avoid race conditions: only apply if term hasn't changed
         if (termAtStart === debouncedSearchTerm) {
-          const filteredResults = filterByVisibility(result.data);
+          let filteredResults = filterByVisibility(result.data);
+          if (selectedInitials) {
+            filteredResults = filteredResults.filter(n => (n.number || '').startsWith(selectedInitials));
+          }
           
         if (loadMore) {
           // Append new results to existing ones
@@ -1224,6 +1379,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     setCurrentPage(1);
     setSearchCurrentPage(1);
   }, [selectedCategory, selectedGroup, selectedInitials, pageSize]);
+
+  // Enforce allowed group for agents (pre-applied filter)
+  useEffect(() => {
+    if (allowedGroups && allowedGroups.length > 0) {
+      setSelectedGroup(prev => {
+        if (prev && allowedGroups.includes(prev)) return prev;
+        return allowedGroups[0];
+      });
+    }
+  }, [allowedGroups]);
 
   // Pagination navigation functions using global manager
   const goToNextPage = useCallback(async () => {
@@ -1450,13 +1615,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // When a category OR group is selected, use actual pagination totalPages (from count query or stats service)
     // This ensures accurate pagination for filtered views
     if (selectedCategory || selectedGroup) {
-      return {
-        currentPage,
+    return {
+      currentPage,
         totalPages,
-        totalItems,
-        hasNextPage,
-        hasPreviousPage
-      };
+      totalItems,
+      hasNextPage,
+      hasPreviousPage
+    };
     }
     // For "all categories" view, prefer stats service (faster)
     return {
@@ -1476,6 +1641,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   useEffect(() => {
     setCurrentPage(1);
   }, [searchTerm, selectedCategory, selectedGroup, selectedInitials, pageSize]);
+
+  // Enforce allowed group for agents (pre-applied filter)
+  useEffect(() => {
+    if (allowedGroups && allowedGroups.length > 0) {
+      setSelectedGroup(prev => {
+        if (prev && allowedGroups.includes(prev)) return prev;
+        return allowedGroups[0];
+      });
+    }
+  }, [allowedGroups]);
 
   useEffect(() => {
     if (propSelectedCategory !== undefined) {
@@ -1662,11 +1837,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const newClaimCountdowns: Record<string, number> = {};
       const newReservationCountdowns: Record<string, number> = {};
 
-      // Combine all sources: current page numbers, reserved section numbers, and search results
+      // Combine all sources: current page numbers, reserved section numbers, search results, and "being claimed" numbers
       const mergedMap = new Map<string, NumberPoolType>();
       numbers.forEach(n => mergedMap.set(n.id, n));
       reservedNumbers.forEach(n => mergedMap.set(n.id, n));
       searchResults.forEach(n => mergedMap.set(n.id, n));
+      myBeingClaimedNumbers.forEach(n => mergedMap.set(n.id, n));
       
 
       mergedMap.forEach((number) => {
@@ -1679,6 +1855,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           if (claimingExpiresAt && !Number.isNaN(claimingExpiresAt.getTime())) {
             const timeLeft = Math.max(0, claimingExpiresAt.getTime() - now);
             if (timeLeft > 0) newClaimCountdowns[number.id] = timeLeft;
+          }
+        } else if (number.claimQueue && number.claimQueue.length > 0) {
+          // If not actively claiming but there is a queue, show timer based on position (15 min slots)
+          const position = number.claimQueue.findIndex((c: any) => c.agentId === user?.id);
+          if (position >= 0) {
+            const timeLeft = Math.max(0, CLAIM_TIMEOUT * (position + 1));
+            newClaimCountdowns[number.id] = timeLeft;
           }
         }
 
@@ -1884,8 +2067,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       if (!matches) return false;
     }
 
+    // Prefix/initials filter (e.g., 050/054/056)
+    if (selectedInitials && !number.number?.startsWith(selectedInitials)) {
+      return false;
+    }
+
     return true;
-  }, [isAdmin, user?.role, user?.teamId, searchTerm, debouncedSearchTerm]);
+  }, [isAdmin, user?.role, user?.teamId, searchTerm, debouncedSearchTerm, selectedInitials]);
 
   const computeSorted = useCallback((list: NumberPoolType[]) => {
     const result = [...list];
@@ -1924,6 +2112,31 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     
     return result;
   }, [sortConfig]);
+
+  // Apply column sort to search results as well (entire result set, not just current page)
+  useEffect(() => {
+    if (!debouncedSearchTerm.trim()) return;
+    const full = fullSearchResultsRef.current;
+    if (!full || full.length === 0) return;
+
+    const lastSearchTerm = (full as any).lastSearchTerm;
+    const lastCategory = (full as any).lastCategory;
+
+    const sortedFull = computeSorted(full);
+    (sortedFull as any).lastSearchTerm = lastSearchTerm;
+    (sortedFull as any).lastCategory = lastCategory;
+    fullSearchResultsRef.current = sortedFull as any;
+
+    const startIndex = (searchCurrentPage - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    const paginatedResults = sortedFull.slice(startIndex, endIndex);
+
+    setSearchResults(paginatedResults);
+    setSearchTotalPages(Math.ceil(sortedFull.length / pageSize));
+    setSearchTotalItems(sortedFull.length);
+    setSearchHasNextPage(endIndex < sortedFull.length);
+    setSearchHasPreviousPage(searchCurrentPage > 1);
+  }, [sortConfig, searchCurrentPage, pageSize, debouncedSearchTerm, searchResults.length, computeSorted]);
 
   // Recompute full order only when sort or filters change
   useEffect(() => {
@@ -2387,12 +2600,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
           setClaimTimer(timer);
 
-          // Send notification to the next claiming agent
+          // Send notification to the next claiming agent with their effective window
+          const nextClaimIdx = claimQueue.findIndex((c: any) => nextClaim && c.agentId === nextClaim.agentId);
+          const nextClaimMinutes = Math.round((CLAIM_TIMEOUT / 60000) * (nextClaimIdx >= 0 ? nextClaimIdx + 1 : 1));
           await addDoc(collection(db, 'notifications'), {
             userId: nextClaim.agentId,
             type: 'number_claimed',
             title: 'Number Claim Started',
-            message: `The number is now available for your claim. You have ${CLAIM_TIMEOUT / 60000} minutes to take ownership.`,
+            message: `The number is now available for your claim. You have ${nextClaimMinutes} minutes to take ownership.`,
             read: false,
             createdAt: serverTimestamp(),
             numberId: selectedNumber.id
@@ -2698,6 +2913,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const handleClaim = useCallback(async (number: NumberPoolType) => {
     if (!user?.id) return;
     
+    // Per-number claim queue cap
+    const queueLength = number.claimQueue?.length || 0;
+    if (queueLength >= 3) {
+      toast.error('Claim queue full (3/3) for this number');
+      return;
+    }
+
+    // Per-user daily claim limit (resets at UAE midnight)
+    if (userClaimCount >= MAX_CLAIMS_PER_24H) {
+      toast.error(`Daily claim limit reached (${MAX_CLAIMS_PER_24H} per day)`);
+      return;
+    }
+    
     // Check if this number is already being claimed
     if (claimingNumbers.has(number.id)) {
       toast.error('Claim in progress, please wait');
@@ -2714,7 +2942,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     setLastClaimAttempts(prev => new Map(prev.set(number.id, now)));
     setNumberToClaim(number);
     setShowClaimDialog(true);
-  }, [user?.id, claimingNumbers, lastClaimAttempts]);
+  }, [user?.id, claimingNumbers, lastClaimAttempts, userClaimCount]);
 
   const confirmClaim = async () => {
     if (!numberToClaim || !user?.id) return;
@@ -2725,6 +2953,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
 
     setClaimingNumbers(prev => new Set(prev.add(numberToClaim.id)));
+    let claimSucceeded = false;
     
     // Set timeout for operation
     const timeoutId = setTimeout(() => {
@@ -2876,11 +3105,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           // FIXED: Use setTimeout to prevent blocking
           setTimeout(async () => {
             try {
+              const minutesForOriginal = Math.round(CLAIM_TIMEOUT / 60000);
               await addDoc(collection(db, 'notifications'), {
               userId: numberData.reservedBy,
               type: 'number_claimed',
               title: 'Number Claim Alert',
-              message: `Number ${numberToClaim.number} has been claimed by another agent. You have ${CLAIM_TIMEOUT / 60000} minutes to respond.`,
+              message: `Number ${numberToClaim.number} has been claimed by another agent. You have ${minutesForOriginal} minutes to respond.`,
               read: false,
               createdAt: serverTimestamp(),
               numberId: numberToClaim.id
@@ -2900,6 +3130,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       toast.success(['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) 
         ? 'Number Striked successfully' 
         : 'Number claimed successfully');
+      claimSucceeded = true;
 
     } catch (error: any) {
       
@@ -2910,6 +3141,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       
       toast.error(error.message || 'Failed to claim number');
     } finally {
+      if (claimSucceeded) {
+        await recordDailyClaim();
+      }
       // Cleanup loading state and timeout
       setClaimingNumbers(prev => {
         const newSet = new Set(prev);
@@ -2997,12 +3231,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
             setClaimTimer(timer);
 
-            // Send notification to the second claiming agent
+            // Send notification to the second claiming agent with their effective window
+            const secondClaimIdx = claimQueue.findIndex((c: any) => claimQueue[1] && c.agentId === claimQueue[1].agentId);
+            const secondClaimMinutes = Math.round((CLAIM_TIMEOUT / 60000) * (secondClaimIdx >= 0 ? secondClaimIdx + 1 : 1));
             await addDoc(collection(db, 'notifications'), {
               userId: claimQueue[1].agentId,
               type: 'number_claimed',
               title: 'Number Claim Started',
-              message: `The number is now available for your claim. You have ${CLAIM_TIMEOUT / 60000} minutes to take ownership.`,
+              message: `The number is now available for your claim. You have ${secondClaimMinutes} minutes to take ownership.`,
               read: false,
               createdAt: serverTimestamp(),
               numberId: number.id
@@ -3528,47 +3764,80 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             )}
             {/* Agent Utilities */}
             {user?.role === 'agent' && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* My Claim Quota Summary */}
+                <div className="flex flex-col gap-3 bg-white border border-indigo-100 rounded-xl px-4 py-3 shadow-sm min-w-[260px]">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-2">
+                      <div className="p-2 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 text-white shadow-sm">
+                        <Shield className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <span className="text-sm font-semibold text-gray-900">My Claim Quota</span>
+                        <div className="mt-2 flex gap-2 flex-wrap">
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-blue-100 text-blue-800 text-[11px] font-semibold">
+                            Used: {userClaimCount} / {MAX_CLAIMS_PER_24H}
+                          </span>
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-semibold">
+                            Available: {Math.max(0, MAX_CLAIMS_PER_24H - userClaimCount)}
+                          </span>
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-purple-100 text-purple-800 text-[11px] font-semibold">
+                            Being claimed: {myBeingClaimedAll.length}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowMyClaimsDialog(true)}
+                      className="text-[11px] px-3 py-1 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm"
+                    >
+                      View
+                    </button>
+                  </div>
+                </div>
+
                 {/* Bulk Copy Button - Left */}
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={selectedNumbers.length > 0 ? clearSelectedNumbers : toggleBulkCopyMode}
-                  className={`inline-flex items-center px-3 py-1.5 rounded-lg shadow hover:shadow-md transition-all duration-300 border ${
-                    bulkCopyMode 
-                      ? selectedNumbers.length > 0
-                        ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white border-green-600'
-                        : 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white border-blue-600'
-                      : 'bg-white text-gray-700 border-gray-200'
-                  }`}
-                >
-                  {selectedNumbers.length > 0 ? (
-                    <>
-                      <Check className="w-4 h-4 transition-all duration-300" />
-                      <span className="ml-2 text-xs font-semibold">Done ({selectedNumbers.length})</span>
-                    </>
-                  ) : (
-                    <>
-                      <Clipboard className="w-4 h-4 transition-all duration-300" />
-                      <span className="ml-2 text-xs font-medium">Bulk Copy</span>
-                    </>
-                  )}
-                </motion.button>
-                
-                {/* Notepad Button - Right */}
-                <motion.div
-                  onMouseEnter={() => setShowNotepad(true)}
-                  className="inline-block"
-                >
+                <div className="flex items-center gap-2">
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
-                    className="inline-flex items-center px-3 py-1.5 bg-white rounded-lg shadow hover:shadow-md transition-all duration-300 border border-gray-200"
+                    onClick={selectedNumbers.length > 0 ? clearSelectedNumbers : toggleBulkCopyMode}
+                    className={`inline-flex items-center h-9 px-3 rounded-lg shadow hover:shadow-md transition-all duration-300 border ${
+                      bulkCopyMode 
+                        ? selectedNumbers.length > 0
+                          ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white border-green-600'
+                          : 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white border-blue-600'
+                        : 'bg-white text-gray-700 border-gray-200'
+                    }`}
                   >
-                    <StickyNote className={`w-4 h-4 transition-colors duration-300 ${showNotepad ? 'text-blue-600' : 'text-gray-600'}`} />
-                    <span className="ml-2 text-xs font-medium text-gray-700">Notes</span>
+                    {selectedNumbers.length > 0 ? (
+                      <>
+                        <Check className="w-4 h-4 transition-all duration-300" />
+                        <span className="ml-2 text-xs font-semibold">Done ({selectedNumbers.length})</span>
+                      </>
+                    ) : (
+                      <>
+                        <Clipboard className="w-4 h-4 transition-all duration-300" />
+                        <span className="ml-2 text-xs font-medium">Bulk Copy</span>
+                      </>
+                    )}
                   </motion.button>
-                </motion.div>
+                  
+                  {/* Notepad Button */}
+                  <motion.div
+                    onMouseEnter={() => setShowNotepad(true)}
+                    className="inline-block"
+                  >
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      className="inline-flex items-center h-9 px-3 bg-white rounded-lg shadow hover:shadow-md transition-all duration-300 border border-gray-200"
+                    >
+                      <StickyNote className={`w-4 h-4 transition-colors duration-300 ${showNotepad ? 'text-blue-600' : 'text-gray-600'}`} />
+                      <span className="ml-2 text-xs font-medium text-gray-700">Notes</span>
+                    </motion.button>
+                  </motion.div>
+                </div>
               </div>
             )}
             </div>
@@ -3772,18 +4041,25 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               </div>
               <select
                 value={selectedGroup || ''}
-                onChange={(e) => setSelectedGroup(e.target.value || null)}
-                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+                onChange={(e) => {
+                  const val = e.target.value || null;
+                  if (allowedGroups && allowedGroups.length > 0) {
+                    if (val && !allowedGroups.includes(val)) return;
+                  }
+                  setSelectedGroup(val);
+                }}
+                disabled={!!(allowedGroups && allowedGroups.length === 1)}
+                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none disabled:bg-gray-100 disabled:cursor-not-allowed"
               >
-                <option value="">All Groups</option>
-                {GROUPS.map(group => (
+                {!allowedGroups && <option value="">All Groups</option>}
+                {(allowedGroups || GROUPS).map(group => (
                   <option key={group} value={group}>{group}</option>
                 ))}
               </select>
             </div>
 
-            {/* Initials Filter - Hidden for now */}
-            {/* <div className="relative group">
+            {/* Initials Filter */}
+            <div className="relative group">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                 <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
               </div>
@@ -3797,7 +4073,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   <option key={initials} value={initials}>{initials}</option>
                 ))}
               </select>
-            </div> */}
+            </div>
 
             {/* Page Size Selector */}
             <div className="relative group">
@@ -3843,6 +4119,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
                       <Hash className="h-6 w-6" />
                     </div>
+                  </div>
+                  <div className="text-[11px] text-gray-800 leading-snug bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-100 rounded-md px-3 py-2">
+                    <div>• Max 3 claims per day</div>
+                    <div>• Per-number queue cap: 3</div>
+                    <div>• Claim window: 9 AM–8 PM (UAE time)</div>
                   </div>
                 </div>
 
@@ -4153,6 +4434,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           // Number doesn't exist, proceed with adding
                           const numberData: any = {
                             number: num,
+                            initials: num.slice(0, 3),
                             category: cat,
                             code,
                             group: group.trim(),
@@ -4748,10 +5030,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   </>
                 )}
                 <th 
-                    className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
+                    className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
                   onClick={() => handleSort('reservationCount')}
                 >
-                  <div className="flex items-center">
+                  <div className="flex items-center justify-center pr-4">
                     Status
                     <SortIcon field="reservationCount" />
                   </div>
@@ -4791,11 +5073,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const serialNumber = (displayPagination.currentPage - 1) * pageSize + index + 1;
 
   return (
-    <motion.tr 
+    <tr 
                       key={number.id}
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, delay: index * 0.05 }}
       className="hover:bg-gray-50/50 transition-colors group"
     >
                     {(isAdmin() || bulkCopyMode) && (
@@ -4862,29 +5141,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         </td>
                       </>
                     )}
-      <td className="px-6 py-4 whitespace-nowrap">
+      <td className="px-6 py-4 whitespace-nowrap min-w-[190px]">
         <motion.span
           whileHover={{ scale: 1.05 }}
           className={clsx(
-            "px-3 py-1 rounded-full text-xs font-medium inline-flex items-center shadow-sm ring-1 ring-opacity-5",
+            "px-3 py-1 rounded-lg text-xs font-medium inline-flex flex-col items-center shadow-sm ring-1 ring-opacity-5",
             number.status === 'reserved' ? STATUS_STYLES.reserved.bg : (statusStyle?.bg || STATUS_STYLES.open.bg),
             number.status === 'reserved' ? STATUS_STYLES.reserved.text : (statusStyle?.text || STATUS_STYLES.open.text),
             number.status === 'reserved' ? 'ring-indigo-200' : 'ring-gray-200'
           )}
         >
-          <StatusIcon className="h-3 w-3 mr-1" />
-          {number.status === 'reserved' ? "Reserved" : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                        {number.claimingAgentId && claimCountdowns[number.id] && (
-            <span className="ml-2 text-xs">
-                            ({formatCountdown(claimCountdowns[number.id])})
-            </span>
-          )}
-          <span className="ml-2 text-xs font-normal">
-            (R: {number.reservationCount || 0})
-          </span>
-          <span className="ml-2 text-xs font-normal">
-            (C: {number.claimQueue?.length || 0})
-          </span>
+          <div className="inline-flex items-center">
+            <StatusIcon className="h-3 w-3 mr-1" />
+            <span>{number.status === 'reserved' ? "Reserved" : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-[11px] min-w-[150px] justify-center">
+            {(() => {
+              const waitMs = computeUserWaitMs(number);
+              return waitMs ? <span className="tabular-nums">({formatCountdown(waitMs)})</span> : null;
+            })()}
+            <span>(R: {number.reservationCount || 0})</span>
+            <span>(C: {number.claimQueue?.length || 0})</span>
+          </div>
         </motion.span>
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
@@ -5096,7 +5374,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           {user?.role === 'agent' && number.status === 'reserved' && 
                            number.reservedBy !== user?.id && 
                            number.claimingAgentId !== user?.id &&
-                           isWithinClaimWindow && (
+                           isWithinClaimWindow &&
+                           (number.claimQueue?.length || 0) < 3 &&
+                           !userClaimLimitReached && (
             <motion.button
                               whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
                               whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
@@ -5109,7 +5389,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   ? "bg-gray-100 text-gray-600 ring-gray-200 cursor-not-allowed"
                   : "bg-gradient-to-r from-blue-50 to-indigo-50 text-blue-600 hover:from-blue-100 hover:to-indigo-100 ring-blue-100"
               )}
-                              disabled={claimingNumbers.has(number.id) || number.claimQueue?.some((claim: any) => claim.agentId === user?.id)}
+                               disabled={
+                                 claimingNumbers.has(number.id) ||
+                                 number.claimQueue?.some((claim: any) => claim.agentId === user?.id) ||
+                                 (number.claimQueue?.length || 0) >= 3 ||
+                                 userClaimLimitReached
+                               }
             >
                               {claimingNumbers.has(number.id) ? (
                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
@@ -5183,7 +5468,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           )}
         </div>
       </td>
-    </motion.tr>
+    </tr>
   );
               })}
             </tbody>
@@ -5385,6 +5670,71 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 >
                   OK
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* My Claims Dialog */}
+        {showMyClaimsDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-6 max-w-xl w-full mx-4 shadow-2xl">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">My Claim Quota</h3>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-blue-100 text-blue-800 text-xs font-semibold">
+                      Used: {userClaimCount} / {MAX_CLAIMS_PER_24H}
+                    </span>
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold">
+                      Available: {Math.max(0, MAX_CLAIMS_PER_24H - userClaimCount)}
+                    </span>
+                  </div>
+                  <div className="mt-2 text-[11px] text-gray-800 leading-snug bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-100 rounded-md px-3 py-2">
+                    <div>• Max 3 claims per day</div>
+                    <div>• Per-number queue cap: 3</div>
+                    <div>• Claim window: 9 AM–8 PM (UAE time)</div>
+                  </div>
+                  </div>
+                <button
+                  onClick={() => setShowMyClaimsDialog(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4 max-h-[60vh] overflow-y-auto">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Shield className="h-4 w-4 text-purple-600" />
+                    <h4 className="text-sm font-semibold text-gray-800">Being claimed</h4>
+                  </div>
+                  {myBeingClaimedAll.length === 0 ? (
+                    <p className="text-sm text-gray-500">No numbers currently being claimed by you.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {myBeingClaimedAll.map((n) => {
+                        const queueSize = n.claimQueue?.length || 0;
+                        const timeLeft = computeUserWaitMs(n);
+                        return (
+                          <div key={n.id} className="border border-purple-200 bg-purple-50 rounded-lg px-3 py-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm font-semibold text-purple-900">{n.number}</span>
+                              {n.group && <span className="text-[11px] px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">{n.group}</span>}
+                            </div>
+                            <div className="text-xs text-purple-700">Queue size: {queueSize}</div>
+                            {timeLeft != null && (
+                              <div className="text-[11px] text-purple-700 mt-1">
+                                Remaining: {formatCountdown(timeLeft)}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
