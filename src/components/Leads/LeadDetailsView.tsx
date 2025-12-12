@@ -228,7 +228,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [verificationNote, setVerificationNote] = useState('Verified');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showNonVerifyDialog, setShowNonVerifyDialog] = useState(false);
-  const [nonVerifyNote, setNonVerifyNote] = useState('');
+  const [nonVerifyNote, setNonVerifyNote] = useState('Non Verified');
   const [uploadInProgress, setUploadInProgress] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -922,7 +922,7 @@ Language: ${lead.language || 'N/A'}`;
     return plan?.description || 'No description available';
   };
 
-  const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified') => {
+  const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified', noteOverride?: string) => {
     setIsVerifyActionProcessing(true);
     try {
       const actionToUse = actionOverride || verifyAction;
@@ -937,6 +937,9 @@ Language: ${lead.language || 'N/A'}`;
       }
       setVerifyAction(actionToUse);
       const leadRef = doc(db, 'leads', lead.id);
+      
+      // Use noteOverride if provided, otherwise use verificationNote
+      const noteToUse = noteOverride !== undefined ? noteOverride : verificationNote;
       
       // Handle activated_non_verified status - convert to activated when verified
       let leadStatus = actionToUse === 'verify' ? 
@@ -956,7 +959,7 @@ Language: ${lead.language || 'N/A'}`;
         status: leadStatus,
         verifierId: user?.id,
         verifiedBy: user?.id, // ✅ Add this field for dashboard metrics
-        verificationNotes: verificationNote,
+        verificationNotes: noteToUse,
         verificationMedia: verificationMedia,
         plans: updatedPlans,
         updatedAt: serverTimestamp(),
@@ -1227,19 +1230,20 @@ Language: ${lead.language || 'N/A'}`;
       }
 
       // Add verification note as a chat message if it exists
-      if (verificationNote && verificationNote.trim() !== '') {
+      // Use noteToUse (which includes noteOverride if provided) for chat message
+      if (noteToUse && noteToUse.trim() !== '') {
         try {
           await addDoc(collection(db, 'chatMessages'), {
             leadId: lead.id,
             userId: user?.id || '',
             userRole: user?.role || 'verifier',
-            message: verificationNote.trim(),
+            message: noteToUse.trim(),
             createdAt: new Date()
           });
 
           // Send WhatsApp notification to manager after message is added to chat
           const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
-          await sendChatMessageWhatsAppNotification(lead, verificationNote.trim(), user?.name || 'Unknown');
+          await sendChatMessageWhatsAppNotification(lead, noteToUse.trim(), user?.name || 'Unknown');
         } catch (chatError) {
           console.error('Error creating verification chat message:', chatError);
           // Don't fail verification action if chat message fails
@@ -2668,7 +2672,7 @@ Language: ${lead.language || 'N/A'}`;
               <button
                 onClick={() => {
                   setShowNonVerifyDialog(true);
-                  setNonVerifyNote('');
+                  setNonVerifyNote('Non Verified');
                   setIsVerifyActionProcessing(false); // Reset processing state when opening dialog
                 }}
                 className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
@@ -4592,7 +4596,7 @@ Language: ${lead.language || 'N/A'}`;
                 <button
                   onClick={() => {
                     setShowNonVerifyDialog(false);
-                    setNonVerifyNote('');
+                    setNonVerifyNote('Non Verified');
                     setIsVerifyActionProcessing(false); // Reset processing state when canceling
                   }}
                   disabled={isVerifyActionProcessing}
@@ -4602,13 +4606,15 @@ Language: ${lead.language || 'N/A'}`;
                 </button>
                 <button
                   onClick={async () => {
-                    setVerificationNote(nonVerifyNote || 'Non-Verified');
+                    const noteToSend = nonVerifyNote || 'Non-Verified';
+                    setVerificationNote(noteToSend);
                     // Don't close dialog immediately - wait for action to complete
                     try {
-                      await handleVerificationAction('non_verified');
+                      // Pass the note directly to avoid async state update issue
+                      await handleVerificationAction('non_verified', noteToSend);
                       // Close dialog only after successful completion
                       setShowNonVerifyDialog(false);
-                      setNonVerifyNote('');
+                      setNonVerifyNote('Non Verified');
                     } catch (error) {
                       // Keep dialog open on error so user can see the error message
                       // The error is already handled in handleVerificationAction
