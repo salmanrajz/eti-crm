@@ -147,6 +147,10 @@ export interface NumberPool {
     status: 'available' | 'unavailable' | 'pending';
     expiresAt?: Date;
   };
+  last2Digits?: string; // Last 2 digits for "ends with" search
+  last3Digits?: string; // Last 3 digits for "ends with" search
+  last4Digits?: string; // Last 4 digits for "ends with" search
+  last5Digits?: string; // Last 5 digits for "ends with" search
 }
 
 export interface NumberPoolType {
@@ -182,6 +186,10 @@ export interface NumberPoolType {
     agentId: string;
     claimedAt: Date;
   }>;
+  last2Digits?: string; // Last 2 digits for "ends with" search
+  last3Digits?: string; // Last 3 digits for "ends with" search
+  last4Digits?: string; // Last 4 digits for "ends with" search
+  last5Digits?: string; // Last 5 digits for "ends with" search
 }
 
 export interface CustomerNumber {

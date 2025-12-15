@@ -234,28 +234,39 @@ export function Login() {
       sessionStorage.removeItem('freshLogin');
       
       const errorCode = (error as { code?: string })?.code;
+      const errorMessage = (error as { message?: string })?.message || '';
       
-      let errorMessage = 'Login failed. Please try again.';
+      let errorMessageToShow = 'Login failed. Please try again.';
       
-      switch (errorCode) {
-        case 'auth/invalid-credential':
-        case 'auth/user-not-found':
-        case 'auth/wrong-password':
-          errorMessage = 'Invalid email or password. Please check your credentials and try again.';
-          break;
-        case 'auth/invalid-email':
-          errorMessage = 'Invalid email format.';
-          break;
-        case 'auth/too-many-requests':
-          errorMessage = 'Too many failed attempts. Please try again later.';
-          break;
-        case 'auth/user-disabled':
-          errorMessage = 'This account has been disabled. Please contact support.';
-          break;
+      // Check for network/internet connectivity issues first
+      if (!navigator.onLine || 
+          errorCode === 'auth/network-request-failed' || 
+          errorMessage.toLowerCase().includes('network') ||
+          errorMessage.toLowerCase().includes('fetch') ||
+          errorMessage.toLowerCase().includes('connection') ||
+          errorMessage.toLowerCase().includes('offline')) {
+        errorMessageToShow = 'No internet connection. Please check your network and try again.';
+      } else {
+        switch (errorCode) {
+          case 'auth/invalid-credential':
+          case 'auth/user-not-found':
+          case 'auth/wrong-password':
+            errorMessageToShow = 'Invalid email or password. Please check your credentials and try again.';
+            break;
+          case 'auth/invalid-email':
+            errorMessageToShow = 'Invalid email format.';
+            break;
+          case 'auth/too-many-requests':
+            errorMessageToShow = 'Too many failed attempts. Please try again later.';
+            break;
+          case 'auth/user-disabled':
+            errorMessageToShow = 'This account has been disabled. Please contact support.';
+            break;
+        }
       }
       
-      setErrors({ general: errorMessage });
-      toast.error(errorMessage);
+      setErrors({ general: errorMessageToShow });
+      toast.error(errorMessageToShow);
     } finally {
       setLoading(false);
     }

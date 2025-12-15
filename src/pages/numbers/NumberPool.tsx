@@ -482,6 +482,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [selectedNumber, setSelectedNumber] = useState<NumberPoolType | null>(null);
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [endsWithToggle, setEndsWithToggle] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(propSelectedCategory || null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [selectedInitials, setSelectedInitials] = useState<string | null>(null);
@@ -1082,45 +1083,100 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return;
     }
 
-    // Check if we have cached results and only pageSize/page changed (not search term or category)
+    // Check if we have cached results and only pageSize/page changed (not search term or filters)
     // This allows fast re-pagination without re-searching
     const hasCachedResults = fullSearchResultsRef.current.length > 0;
     const lastSearchTerm = (fullSearchResultsRef.current as any).lastSearchTerm;
     const lastCategory = (fullSearchResultsRef.current as any).lastCategory;
+    const lastGroup = (fullSearchResultsRef.current as any).lastGroup;
+    const lastInitials = (fullSearchResultsRef.current as any).lastInitials;
+    const lastEndsWithToggle = (fullSearchResultsRef.current as any).lastEndsWithToggle;
     
-    // Determine if search term or category changed
+    // Determine if search term or any filter changed
     const searchTermChanged = debouncedSearchTerm !== lastSearchTerm;
     const categoryChanged = selectedCategory !== lastCategory;
+    const groupChanged = selectedGroup !== lastGroup;
+    const initialsChanged = selectedInitials !== lastInitials;
+    const endsWithToggleChanged = endsWithToggle !== lastEndsWithToggle;
     
-    // IMPORTANT: If we have cached results and search term/category haven't changed,
+    // IMPORTANT: If we have cached results and search term/filters haven't changed,
     // ONLY re-paginate - DO NOT call performSearch() which would reset everything
-    if (hasCachedResults && !searchTermChanged && !categoryChanged) {
+    // Note: Sorting is handled by a separate useEffect, so we just paginate here
+    if (hasCachedResults && !searchTermChanged && !categoryChanged && !groupChanged && !initialsChanged && !endsWithToggleChanged) {
       // Use cached results - just re-slice for new pageSize/page
+      // Sorting will be applied by the sort effect if needed
       const filteredResults = fullSearchResultsRef.current;
       const startIndex = (searchCurrentPage - 1) * pageSize;
       const endIndex = startIndex + pageSize;
+      const paginatedResults = filteredResults.slice(startIndex, endIndex);
+      
+      const calculatedTotalPages = Math.ceil(filteredResults.length / pageSize);
+      const calculatedHasNextPage = endIndex < filteredResults.length;
+      const calculatedHasPreviousPage = searchCurrentPage > 1;
+      
+      setSearchResults(paginatedResults);
+      setSearchTotalPages(calculatedTotalPages);
+      setSearchTotalItems(filteredResults.length);
+      setSearchHasNextPage(calculatedHasNextPage);
+      setSearchHasPreviousPage(calculatedHasPreviousPage);
+      setIsSearching(false);
+      setIsLoadingMore(false);
+      return; // CRITICAL: Return early to prevent performSearch() from being called
+    }
+
+    // OPTIMIZATION: If only group or initial filter changed (not search term or category),
+    // filter cached results in memory instead of doing a new Firebase search
+    if (hasCachedResults && !searchTermChanged && !categoryChanged && (groupChanged || initialsChanged)) {
+      // Filter cached results in memory by group and/or initial
+      let filteredResults = [...fullSearchResultsRef.current];
+      
+      // Apply group filter
+      if (selectedGroup) {
+        filteredResults = filteredResults.filter(n => n.group === selectedGroup);
+      }
+      
+      // Apply initial filter
+      if (selectedInitials) {
+        filteredResults = filteredResults.filter(n => (n.number || '').startsWith(selectedInitials));
+      }
+      
+      // Update cached results with filtered data
+      fullSearchResultsRef.current = filteredResults;
+      (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+      (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+      (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
+      (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
+      (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+      
+      // Reset to page 1 when filter changes
+      setSearchCurrentPage(1);
+      
+      // Paginate filtered results
+      const startIndex = 0;
+      const endIndex = pageSize;
       const paginatedResults = filteredResults.slice(startIndex, endIndex);
       
       setSearchResults(paginatedResults);
       setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
       setSearchTotalItems(filteredResults.length);
       setSearchHasNextPage(endIndex < filteredResults.length);
-      setSearchHasPreviousPage(searchCurrentPage > 1);
+      setSearchHasPreviousPage(false);
       setIsSearching(false);
       setIsLoadingMore(false);
-      return; // CRITICAL: Return early to prevent performSearch() from being called
+      return; // Return early - no Firebase query needed
     }
 
-    // Only perform new search if we don't have cached results OR search term/category changed
-    // This prevents resetting results when only page changes
-    if (!hasCachedResults || searchTermChanged || categoryChanged) {
-      // Reset to page 1 when search term or category changes
-      if (searchTermChanged || categoryChanged) {
+    // Only perform new Firebase search if search term, category, or endsWith toggle changed
+    // (Category needs Firebase query because it's passed to unifiedSearch)
+    // (endsWith toggle changes the search behavior, so we need a new search)
+    if (!hasCachedResults || searchTermChanged || categoryChanged || endsWithToggleChanged) {
+      // Reset to page 1 when search term, category, or toggle changes
+      if (searchTermChanged || categoryChanged || endsWithToggleChanged) {
         setSearchCurrentPage(1);
       }
       performSearch();
     }
-  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize]);
+  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, endsWithToggle]);
 
   // Perform search function - accessible for "Load More" button
   const performSearch = useCallback(async (loadMore: boolean = false) => {
@@ -1146,12 +1202,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           category: selectedCategory || 'all',
           limit: searchLimit,
         startAfter: loadMore ? searchLastDoc : null,
-          includeStale: false
+          includeStale: false,
+          endsWith: endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         });
         
         // Avoid race conditions: only apply if term hasn't changed
         if (termAtStart === debouncedSearchTerm) {
           let filteredResults = filterByVisibility(result.data);
+          
+          // Apply group filter
+          if (selectedGroup) {
+            filteredResults = filteredResults.filter(n => n.group === selectedGroup);
+          }
+          
+          // Apply initials filter
           if (selectedInitials) {
             filteredResults = filteredResults.filter(n => (n.number || '').startsWith(selectedInitials));
           }
@@ -1163,6 +1227,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           // Preserve search metadata for pagination checks
           (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+          (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
+          (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
+          (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
           
           // Update pagination
           const startIndex = (searchCurrentPage - 1) * pageSize;
@@ -1184,6 +1251,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           fullSearchResultsRef.current = filteredResults;
           (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+          (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
+          (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
+          (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
           
           // For new searches, always start at page 1
           const pageForNewSearch = 1;
@@ -1191,10 +1261,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           const endIndex = startIndex + pageSize;
           const paginatedResults = filteredResults.slice(startIndex, endIndex);
           
+          const calculatedTotalPages = Math.ceil(filteredResults.length / pageSize);
+          const calculatedHasNextPage = endIndex < filteredResults.length;
+          
           setSearchResults(paginatedResults);
-          setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
+          setSearchTotalPages(calculatedTotalPages);
           setSearchTotalItems(filteredResults.length);
-          setSearchHasNextPage(endIndex < filteredResults.length);
+          setSearchHasNextPage(calculatedHasNextPage);
           setSearchHasPreviousPage(false); // Always false for page 1
           
           // Ensure we're on page 1 for new searches
@@ -1216,7 +1289,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         setIsLoadingMore(false);
         }
       }
-  }, [debouncedSearchTerm, selectedCategory, searchCurrentPage, pageSize, searchLastDoc]);
+  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle]);
 
   // DISABLED: Real-time listeners for search results
   // Search already fetches fresh data, no need for additional real-time listeners
@@ -1604,13 +1677,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // Get display pagination info
   const displayPagination = useMemo(() => {
     if (debouncedSearchTerm.trim()) {
-      return {
+      const pagination = {
         currentPage: searchCurrentPage,
         totalPages: searchTotalPages,
         totalItems: searchTotalItems,
         hasNextPage: searchHasNextPage,
         hasPreviousPage: searchHasPreviousPage
       };
+      return pagination;
     }
     // When a category OR group is selected, use actual pagination totalPages (from count query or stats service)
     // This ensures accurate pagination for filtered views
@@ -2119,24 +2193,36 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const full = fullSearchResultsRef.current;
     if (!full || full.length === 0) return;
 
+    // Preserve all metadata from cached results
     const lastSearchTerm = (full as any).lastSearchTerm;
     const lastCategory = (full as any).lastCategory;
+    const lastGroup = (full as any).lastGroup;
+    const lastInitials = (full as any).lastInitials;
+    const lastEndsWithToggle = (full as any).lastEndsWithToggle;
 
     const sortedFull = computeSorted(full);
+    // Preserve all metadata
     (sortedFull as any).lastSearchTerm = lastSearchTerm;
     (sortedFull as any).lastCategory = lastCategory;
+    (sortedFull as any).lastGroup = lastGroup;
+    (sortedFull as any).lastInitials = lastInitials;
+    (sortedFull as any).lastEndsWithToggle = lastEndsWithToggle;
     fullSearchResultsRef.current = sortedFull as any;
 
     const startIndex = (searchCurrentPage - 1) * pageSize;
     const endIndex = startIndex + pageSize;
     const paginatedResults = sortedFull.slice(startIndex, endIndex);
+    
+    const calculatedTotalPages = Math.ceil(sortedFull.length / pageSize);
+    const calculatedHasNextPage = endIndex < sortedFull.length;
+    const calculatedHasPreviousPage = searchCurrentPage > 1;
 
     setSearchResults(paginatedResults);
-    setSearchTotalPages(Math.ceil(sortedFull.length / pageSize));
+    setSearchTotalPages(calculatedTotalPages);
     setSearchTotalItems(sortedFull.length);
-    setSearchHasNextPage(endIndex < sortedFull.length);
-    setSearchHasPreviousPage(searchCurrentPage > 1);
-  }, [sortConfig, searchCurrentPage, pageSize, debouncedSearchTerm, searchResults.length, computeSorted]);
+    setSearchHasNextPage(calculatedHasNextPage);
+    setSearchHasPreviousPage(calculatedHasPreviousPage);
+  }, [sortConfig, searchCurrentPage, pageSize, debouncedSearchTerm, computeSorted]);
 
   // Recompute full order only when sort or filters change
   useEffect(() => {
@@ -3963,13 +4049,51 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 placeholder="Search numbers or codes..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-12 pr-20 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200"
+                className="pl-12 pr-32 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200"
               />
               {isSearching && (
-                <div className="absolute inset-y-0 right-12 pr-4 flex items-center">
+                <div className="absolute inset-y-0 right-24 pr-4 flex items-center">
                   <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
                 </div>
               )}
+              {/* Ends With Toggle (switch) */}
+              <div className="absolute inset-y-0 right-12 flex items-center">
+                <label
+                  className="flex items-center gap-2 text-xs font-medium select-none cursor-pointer"
+                  title={
+                    searchTerm.trim() && !/^\d{2,5}$/.test(searchTerm.trim())
+                      ? "Ends with search only works for 2-5 digit numbers"
+                      : endsWithToggle
+                      ? "Ends with search enabled (2-5 digits)"
+                      : "Toggle ends with search"
+                  }
+                >
+                  <span className={clsx("text-gray-600 hidden sm:inline", endsWithToggle && "text-indigo-700")}>
+                    Ends
+                  </span>
+                  <input
+                    type="checkbox"
+                    className="sr-only"
+                    checked={endsWithToggle}
+                    onChange={() => setEndsWithToggle(!endsWithToggle)}
+                    disabled={!!(searchTerm.trim() && !/^\d{2,5}$/.test(searchTerm.trim()))}
+                  />
+                  <span
+                    className={clsx(
+                      "relative inline-flex h-5 w-10 items-center rounded-full transition-colors",
+                      endsWithToggle ? "bg-indigo-500" : "bg-gray-300",
+                      searchTerm.trim() && !/^\d{2,5}$/.test(searchTerm.trim()) && "opacity-40 cursor-not-allowed"
+                    )}
+                  >
+                    <span
+                      className={clsx(
+                        "inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform",
+                        endsWithToggle ? "translate-x-5" : "translate-x-1"
+                      )}
+                    />
+                  </span>
+                </label>
+              </div>
               {/* Manual Refresh Button */}
               <button
                 onClick={async () => {
@@ -4006,6 +4130,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   {isSearching ? 'Searching…' : (
                     <>
                       Found {fullSearchResultsRef.current.length} result{fullSearchResultsRef.current.length === 1 ? '' : 's'}
+                      {endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim()) && (
+                        <span className="ml-2 text-indigo-600 font-medium">(Ends with: {debouncedSearchTerm.trim()})</span>
+                      )}
                       {numberPoolManager.getPreSearchPage() > 1 && (
                         <span className="ml-2 text-blue-600">
                           (Will return to page {numberPoolManager.getPreSearchPage()})
@@ -4435,6 +4562,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           const numberData: any = {
                             number: num,
                             initials: num.slice(0, 3),
+                            last2Digits: num.slice(-2),
+                            last3Digits: num.slice(-3),
+                            last4Digits: num.slice(-4),
+                            last5Digits: num.slice(-5),
                             category: cat,
                             code,
                             group: group.trim(),
@@ -5152,7 +5283,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           )}
         >
           <div className="inline-flex items-center">
-            <StatusIcon className="h-3 w-3 mr-1" />
+          <StatusIcon className="h-3 w-3 mr-1" />
             <span>{number.status === 'reserved' ? "Reserved" : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
           </div>
           <div className="mt-0.5 flex items-center gap-2 text-[11px] min-w-[150px] justify-center">

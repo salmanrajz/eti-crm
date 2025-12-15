@@ -49,6 +49,7 @@ interface SearchOptions {
   limit?: number;
   startAfter?: QueryDocumentSnapshot | null;
   includeStale?: boolean; // Kept for API compatibility, but always returns fresh data
+  endsWith?: boolean; // When true, search only for numbers ending with the search term
 }
 
 /**
@@ -73,11 +74,17 @@ export class UnifiedSearch {
     searchTerm: string,
     options: SearchOptions = {}
   ): Promise<SearchResult> {
-    const { category = 'all', limit: maxResults = 200, startAfter: cursorDoc } = options;
+    const { category = 'all', limit: maxResults = 200, startAfter: cursorDoc, endsWith = false } = options;
     const rawTerm = searchTerm.trim();
 
     if (!rawTerm) {
       return { data: [], totalItems: 0, source: 'firebase', isComplete: true, hasMore: false, lastDoc: null };
+    }
+
+    // If "ends with" toggle is enabled, use ends-with search
+    if (endsWith) {
+      const result = await this.performEndsWithSearch(rawTerm, category, maxResults, cursorDoc);
+      return result;
     }
 
     // Parse multiple search terms (separated by spaces)
@@ -104,6 +111,88 @@ export class UnifiedSearch {
     const result = await this.performFastFirebaseSearch(term, rawTerm, category, maxResults, cursorDoc);
 
     return result;
+  }
+
+  /**
+   * Performs "ends with" search using last2Digits, last3Digits, last4Digits, or last5Digits fields
+   * Only works for 2, 3, 4, or 5 digit numeric search terms
+   */
+  private async performEndsWithSearch(
+    searchTerm: string,
+    category: string,
+    maxResults: number,
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null
+  ): Promise<SearchResult> {
+    const results = new Map<string, NumberPool>();
+    let lastDoc: QueryDocumentSnapshot | null = null;
+    let hasMore = false;
+
+    // Only support 2, 3, 4, or 5 digit searches
+    if (!/^\d{2,5}$/.test(searchTerm)) {
+      return {
+        data: [],
+        totalItems: 0,
+        source: 'firebase',
+        isComplete: true,
+        hasMore: false,
+        lastDoc: null
+      };
+    }
+
+    try {
+      let baseQuery = query(collection(db, 'numberPool'));
+      
+      if (category !== 'all') {
+        baseQuery = query(baseQuery, where('category', '==', category));
+      }
+
+      // Determine which field to use based on search term length
+      const fieldName = searchTerm.length === 2 ? 'last2Digits' : 
+                        searchTerm.length === 3 ? 'last3Digits' : 
+                        searchTerm.length === 4 ? 'last4Digits' :
+                        'last5Digits';
+
+      let endsWithQuery = query(
+        baseQuery,
+        where(fieldName, '==', searchTerm),
+        orderBy('number')
+      );
+
+      if (cursorDoc) {
+        endsWithQuery = query(endsWithQuery, startAfter(cursorDoc));
+      }
+
+      endsWithQuery = query(endsWithQuery, limit(maxResults + 1));
+
+      const snapshot = await getDocs(endsWithQuery);
+      const docs = snapshot.docs;
+
+      hasMore = docs.length > maxResults;
+      const docsToProcess = hasMore ? docs.slice(0, maxResults) : docs;
+
+      if (docsToProcess.length > 0) {
+        lastDoc = docsToProcess[docsToProcess.length - 1];
+      }
+
+      docsToProcess.forEach(doc => {
+        results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+      });
+
+    } catch (error) {
+      // Surface errors (e.g., missing index) so Firestore can provide index creation links
+      throw error;
+    }
+
+    const finalResults = Array.from(results.values());
+
+    return {
+      data: finalResults,
+      totalItems: finalResults.length,
+      source: 'firebase',
+      isComplete: !hasMore || finalResults.length < maxResults,
+      hasMore: hasMore && finalResults.length >= maxResults,
+      lastDoc: lastDoc
+    };
   }
 
   /**
@@ -744,6 +833,10 @@ export class UnifiedSearch {
       const isNumeric = /^\d+$/.test(term);
       const normalized = term.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
       
+    // Check if this is an "ends with" search (2, 3, 4, or 5 digits)
+    const isEndsWithSearch = isNumeric && (rawTerm.length === 2 || rawTerm.length === 3 || rawTerm.length === 4 || rawTerm.length === 5);
+    const endsWithField = rawTerm.length === 2 ? 'last2Digits' : rawTerm.length === 3 ? 'last3Digits' : rawTerm.length === 4 ? 'last4Digits' : rawTerm.length === 5 ? 'last5Digits' : null;
+      
     // Check if search term is a pattern with wildcards (x or X)
     const isPattern = /[xX]/.test(term);
     let patternRegex: RegExp | null = null;
@@ -826,7 +919,34 @@ export class UnifiedSearch {
       // If cursor is provided, we're loading more - only use primary strategy
       if (usePrimaryPagination) {
         // Determine which strategy to use based on search term
-        if (isNumeric && term.length >= 3) {
+        // Priority 1: "Ends with" search (2, 3, or 4 digits)
+        if (isEndsWithSearch && endsWithField) {
+          let endsWithQuery = query(
+            base,
+            where(endsWithField, '==', rawTerm),
+            orderBy('number'),
+            startAfter(cursorDoc),
+            limit(maxResults + 1)
+          );
+          
+          const snap = await getDocs(endsWithQuery);
+          const docs = snap.docs;
+          
+          // Check if we have more results
+          if (docs.length > maxResults) {
+            primaryHasMore = true;
+            docs.pop(); // Remove the extra doc
+          }
+          
+          // Store lastDoc for next "Load More"
+          if (docs.length > 0) {
+            primaryLastDoc = docs[docs.length - 1];
+          }
+          
+          docs.forEach(doc => {
+            results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+          });
+        } else if (isNumeric && term.length >= 3) {
           // Primary: Prefix search for numeric terms
           let prefixQuery = query(
             base,
@@ -943,7 +1063,40 @@ export class UnifiedSearch {
         // First page: Run all strategies in parallel for comprehensive results
       const queries: Promise<void>[] = [];
 
-        // Strategy 0: Pattern-based search (HIGHEST PRIORITY if pattern detected)
+        // Strategy 0: "Ends with" search (HIGHEST PRIORITY for 2-4 digit numeric terms)
+        if (isEndsWithSearch && endsWithField) {
+          queries.push(
+            getDocs(
+              query(
+                base,
+                where(endsWithField, '==', rawTerm),
+                orderBy('number'),
+                limit(maxResults + 1)
+              )
+            )
+            .then(snap => {
+              const docs = snap.docs;
+              
+              // Check if we have more results
+              if (docs.length > maxResults) {
+                primaryHasMore = true;
+                docs.pop(); // Remove the extra doc
+              }
+              
+              // Store lastDoc for "Load More"
+              if (docs.length > 0) {
+                primaryLastDoc = docs[docs.length - 1];
+              }
+              
+              docs.forEach(doc => {
+                results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+              });
+            })
+            .catch(() => {})
+          );
+        }
+
+        // Strategy 0.5: Pattern-based search (HIGHEST PRIORITY if pattern detected)
         if (isPattern && patternRegex) {
           const fixedDigits = term.replace(/[xX]/g, '').replace(/[^0-9]/g, '');
           if (fixedDigits.length >= 2) {

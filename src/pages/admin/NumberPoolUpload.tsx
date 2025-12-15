@@ -701,6 +701,10 @@ export function NumberPoolUpload() {
       const numberData: any = {
         number: rawNumber,
         initials: rawNumber.slice(0, 3),
+        last2Digits: rawNumber.slice(-2),
+        last3Digits: rawNumber.slice(-3),
+        last4Digits: rawNumber.slice(-4),
+        last5Digits: rawNumber.slice(-5),
         category: String(row.Category).trim() as typeof numberCategories[number],
         code: String(row.Code).trim(),
         group: String(row.Group).trim(),

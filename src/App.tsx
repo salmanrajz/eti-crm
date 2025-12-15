@@ -32,6 +32,7 @@ import { AuthProvider } from './components/auth/AuthProvider';
 import { AppRoutes } from './routes';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { SystemTimeCheck } from './components/SystemTimeCheck';
+import { NetworkStatus } from './components/NetworkStatus';
 // Removed custom PWAInstallPrompt to keep only the native small prompt
 import { useEffect } from 'react';
 
@@ -67,6 +68,9 @@ function App() {
     <Router future={router.future}>
       {/* Authentication context provider for user state management */}
       <AuthProvider>
+        {/* Network status monitor - shows banner when offline */}
+        <NetworkStatus />
+        
         {/* System time check - blocks access if time is incorrect */}
         <SystemTimeCheck />
         
