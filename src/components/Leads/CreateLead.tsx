@@ -328,7 +328,7 @@ function loadFormDraft() {
 
 function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProps) {
   const navigate = useNavigate();
-  const { user, isVerifier, isCoordinator } = useAuthStore();
+  const { user, isVerifier, isCoordinator, isAdmin } = useAuthStore();
   const [loading, setLoading] = useState(false);
   const [teamMembers, setTeamMembers] = useState<User[]>([]);
   const [formErrors, setFormErrors] = useState<FormErrors>({});
@@ -772,32 +772,35 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         
       } else {
         // Check number status before adding - verify it's not active
-        setIsCheckingNumber(true);
-        try {
-          toast.loading('Checking number status...', { id: 'number-check' });
-          const { NumberCheckService } = await import('../../services/numberCheckService');
-          const canReserve = await NumberCheckService.canReserveNumber(currentNumber);
-          toast.dismiss('number-check');
-          setIsCheckingNumber(false);
-          
-          if (!canReserve) {
-            // Number is active, show dialog
-            setActiveNumberInfo({
-              number: currentNumber,
-              etiStatus: 200, // ETI API returned 200 for active numbers
-              message: 'Number is active'
+        // Skip this check for admins - they can add active numbers
+        if (!isAdmin()) {
+          setIsCheckingNumber(true);
+          try {
+            toast.loading('Checking number status...', { id: 'number-check' });
+            const { NumberCheckService } = await import('../../services/numberCheckService');
+            const canReserve = await NumberCheckService.canReserveNumber(currentNumber);
+            toast.dismiss('number-check');
+            setIsCheckingNumber(false);
+            
+            if (!canReserve) {
+              // Number is active, show dialog
+              setActiveNumberInfo({
+                number: currentNumber,
+                etiStatus: 200, // ETI API returned 200 for active numbers
+                message: 'Number is active'
+              });
+              setShowNumberActiveDialog(true);
+              return;
+            }
+          } catch (error: any) {
+            console.error('Error checking number status:', error);
+            toast.dismiss('number-check');
+            setIsCheckingNumber(false);
+            toast.error('Failed to verify number status. Please try again.', {
+              duration: 3000
             });
-            setShowNumberActiveDialog(true);
             return;
           }
-        } catch (error: any) {
-          console.error('Error checking number status:', error);
-          toast.dismiss('number-check');
-          setIsCheckingNumber(false);
-          toast.error('Failed to verify number status. Please try again.', {
-            duration: 3000
-          });
-          return;
         }
 
         // Add new number with plan
@@ -1062,11 +1065,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       ? (initialData?.status || 'pending_verification')
       : 'pending_verification';
 
+      // Get the first plan's group - all plans in the lead will use this group
+      const firstPlanGroup = selectedPlans[0]?.group || (
+        (formData.productType === 'MNP' ||
+         formData.productType === 'Prepaid to postpaid' ||
+         formData.productType === 'Home Wifi')
+          ? 'G2' 
+          : 'Standard'
+      );
+
       const leadData: Partial<Lead> = {
         ...cleanedFormData,
         customerAddress: formData.customerAddress,
         customerAge: parseInt(formData.customerAge),
-        plans: selectedPlans.map((plan) => {
+        plans: selectedPlans.map((plan, index) => {
           // Default to G2 for MNP, Prepaid to postpaid and Home Wifi
           const defaultGroup = (
             formData.productType === 'MNP' ||
@@ -1076,11 +1088,16 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             ? 'G2' 
             : 'Standard';
           
+          // Use first plan's group for all plans in the lead (only in lead document, not numberPool)
+          const groupToUse = index === 0 
+            ? (plan.group || defaultGroup)
+            : firstPlanGroup; // All subsequent plans use the first plan's group
+          
           const p: any = {
             numberId: plan.numberId,
             number: plan.number,
             plan: plan.plan,
-            group: plan.group || defaultGroup,
+            group: groupToUse,
             type: plan.type || 'standard',
             status: 'pending_verification'
           };

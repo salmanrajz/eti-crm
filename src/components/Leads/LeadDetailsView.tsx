@@ -2566,6 +2566,18 @@ Language: ${lead.language || 'N/A'}`;
                     <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Lead Activated
                   </div>
+                  {isAdmin() && (
+                    <button
+                      onClick={() => {
+                        setCoordinatorAction('activate_non_verified');
+                        setShowCoordinatorDialog(true);
+                      }}
+                      className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
+                    >
+                      <AlertTriangle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                      Active Non Verified
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setCoordinatorAction('reject');

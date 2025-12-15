@@ -62,7 +62,7 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const debouncedSearch = useDebounce(searchTerm, SEARCH_DEBOUNCE);
-  const { user } = useAuthStore();
+  const { user, isAdmin } = useAuthStore();
   const agentAllowedGroups = user?.role === 'agent' && user?.allowedGroups?.length ? user.allowedGroups : null;
 
   const applyAllowedGroups = useCallback((list: NumberPool[]) => {
@@ -105,8 +105,12 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
       }
 
         // Set up real-time listener
+      // For admins editing, include 'activated' status numbers
+      const statusList = isAdmin() && isEditing 
+        ? ['open', 'pending_verification', 'verified', 'assigned', 'activated']
+        : ['open', 'pending_verification', 'verified', 'assigned'];
       const constraints: any[] = [
-        where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned']),
+        where('status', 'in', statusList),
         where('category', '==', numberType),
       ];
       if (agentAllowedGroups && agentAllowedGroups.length === 1) {
@@ -196,6 +200,11 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
       return hasAvailableStatusCheck;
     }
 
+    // For admins editing, allow selection of activated numbers
+    if (isAdmin() && isEditing && number.status === 'activated') {
+      return true;
+    }
+
     // For other numbers, they are selectable if they're in the available list
     return true;
   };
@@ -257,6 +266,11 @@ export function NumberSelect({ value, onChange, numberType, existingNumberId, is
                           : "bg-amber-100 text-amber-800"
                       )}>
                         {number.statusCheck?.status === 'available' ? 'Available' : 'Check with coordinator'}
+                      </span>
+                    )}
+                    {isAdmin() && isEditing && number.status === 'activated' && (
+                      <span className="ml-2 px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                        Active
                       </span>
                     )}
                   </div>

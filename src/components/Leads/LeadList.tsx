@@ -222,17 +222,18 @@ const isLeadInCoordinatorScope = (
     return false;
   }
 
-  // Group-based routing (existing behaviour) - only used when no coordinatorTeams configured
+  // Group-based routing by first number's group (primary), only used when no coordinatorTeams configured
   if (!lead.plans || lead.plans.length === 0) return false;
-  const leadGroups = new Set(lead.plans.map(plan => plan.group).filter(Boolean));
+  // Use only the first plan's group for visibility decision
+  const firstGroup = lead.plans[0]?.group?.toUpperCase?.() || lead.plans[0]?.group || '';
   
   switch (coordinatorType) {
     case 'g1':
-      return leadGroups.has('G1');
+      return firstGroup === 'G1';
     case 'g2':
-      return leadGroups.has('G2');
+      return firstGroup === 'G2';
     case 'g3':
-      return leadGroups.has('G3');
+      return firstGroup === 'G3';
     case 'all':
       // All groups coordinator can handle any group / any team
       return true;
