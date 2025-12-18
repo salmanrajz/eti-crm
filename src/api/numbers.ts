@@ -25,7 +25,7 @@
  * ===============================================================================
  */
 
-import { collection, query, where, getDocs, writeBatch } from 'firebase/firestore';
+import { collection, query, where, getDocs, writeBatch, doc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 
 /**
@@ -34,9 +34,11 @@ import { db } from '../lib/firebase';
  * ===============================================================================
  * 
  * Efficiently deletes multiple phone numbers from the numberPool collection
- * in batches to respect Firebase Firestore limitations.
+ * in batches to respect Firebase Firestore limitations. Numbers are moved to
+ * the returnedNumbers collection with status "returned" before deletion.
  * 
  * @param numbers - Array of phone number strings to delete from the number pool
+ * @param userId - Optional user ID of the user performing the deletion
  * @returns Promise resolving to deletion results object
  * 
  * Returns object with:
@@ -52,10 +54,10 @@ import { db } from '../lib/firebase';
  * - Processes numbers in chunks of 10 to avoid Firebase "in" query limit
  * - Uses batch operations for atomic, efficient deletions
  */
-export const deleteNumbersInBatch = async (numbers: string[]) => {
+export const deleteNumbersInBatch = async (numbers: string[], userId?: string) => {
   try {
-    const batch = writeBatch(db);
     const numbersRef = collection(db, 'numberPool');
+    const returnedNumbersRef = collection(db, 'returnedNumbers');
     
     // Process numbers in chunks of 10 to avoid Firebase's "in" query limit
     const chunkSize = 10;
@@ -69,17 +71,38 @@ export const deleteNumbersInBatch = async (numbers: string[]) => {
       const q = query(numbersRef, where('number', 'in', chunk));
       const querySnapshot = await getDocs(q);
       
-      // Add each found document to the batch for deletion
-      querySnapshot.forEach((doc) => {
-        batch.delete(doc.ref);
+      // Create batches for this chunk
+      const deleteBatch = writeBatch(db);
+      const returnedBatch = writeBatch(db);
+      
+      // Process each document: move to returnedNumbers, then delete
+      querySnapshot.forEach((docSnapshot) => {
+        const numberData = docSnapshot.data();
+        
+        // Create returned number document with status "returned"
+        const returnedNumberData = {
+          ...numberData,
+          status: 'returned' as const,
+          returnedAt: serverTimestamp(),
+          deletedBy: userId || null,
+          id: docSnapshot.id, // Keep original id for reference
+        };
+        
+        // Add to returnedNumbers collection
+        const returnedDocRef = doc(returnedNumbersRef, docSnapshot.id);
+        returnedBatch.set(returnedDocRef, returnedNumberData);
+        
+        // Delete from numberPool
+        deleteBatch.delete(docSnapshot.ref);
       });
+      
+      // Commit both batches for this chunk
+      await returnedBatch.commit();
+      await deleteBatch.commit();
       
       // Track total deleted documents
       totalDeleted += querySnapshot.size;
     }
-    
-    // Commit all batch deletions atomically
-    await batch.commit();
     
     // Return detailed results for UI feedback
     return { 

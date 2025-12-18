@@ -1,4 +1,5 @@
 import { getWhatsAppVerificationGroups } from './configService';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 
 type GroupKey = 'G1' | 'G2' | 'G3' | 'OTHER';
 
@@ -267,6 +268,91 @@ export async function sendWhatsAppWithComponentsByGroup(options: {
     return responseJson;
   } catch (error: any) {
     throw error;
+  }
+}
+
+/**
+ * Trigger WhatsApp verification flow using the new API endpoint
+ * @param options - Flow trigger options
+ * @returns API response
+ */
+export async function triggerFlowExternal(options: {
+  phoneNumber: string; // Customer phone number (with country code, e.g., "971501234567")
+  group?: string; // Group (G1, G2, G3, or OTHER)
+  language?: string; // Language code (e.g., "English", "Arabic")
+  templateVariables: {
+    value1: string;
+    value2: string;
+    value3: string;
+    value4: string;
+  };
+}) {
+  const { phoneNumber, group, language, templateVariables } = options;
+  
+  try {
+    const functions = getFunctions();
+    const triggerFlow = httpsCallable(functions, 'triggerWhatsAppFlow');
+    
+    const result = await triggerFlow({
+      phoneNumber: phoneNumber,
+      group: group,
+      language: language,
+      templateVariables: {
+        value1: templateVariables.value1,
+        value2: templateVariables.value2,
+        value3: templateVariables.value3,
+        value4: templateVariables.value4
+      }
+    });
+    
+    return result.data as any;
+  } catch (error: any) {
+    // Re-throw with a more descriptive message if it's a Firebase error
+    if (error?.code === 'functions/internal') {
+      throw new Error(error.message || 'Failed to trigger WhatsApp flow');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Check WhatsApp conversation status
+ * @param phoneNumber - Customer phone number (with country code, e.g., "971501234567")
+ * @returns Conversation data
+ */
+export async function checkConversation(phoneNumber: string, leadId?: string) {
+  try {
+    const functions = getFunctions();
+    const checkConversationFunc = httpsCallable(functions, 'checkWhatsAppConversation');
+    
+    const result = await checkConversationFunc({
+      phoneNumber: phoneNumber,
+      leadId: leadId
+    });
+    
+    const data = result.data as any;
+    
+    // If the function returned an error response, return it gracefully
+    if (data && data.success === false) {
+      console.warn('Conversation check returned error:', data.error);
+      return {
+        success: false,
+        error: data.error,
+        messages: []
+      };
+    }
+    
+    return data;
+  } catch (error: any) {
+    // Handle Firebase function errors gracefully
+    console.error('Error calling checkConversation:', error);
+    
+    // Return error object instead of throwing
+    return {
+      success: false,
+      error: error?.message || 'Failed to check WhatsApp conversation',
+      messages: []
+    };
   }
 }
 

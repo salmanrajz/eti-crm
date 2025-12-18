@@ -367,6 +367,18 @@ const STATUS_STYLES = {
     text: 'text-blue-800',
     icon: Clock,
     gradient: 'from-blue-50 to-blue-100'
+  },
+  returned: {
+    bg: 'bg-gray-200',
+    text: 'text-gray-700',
+    icon: XCircle,
+    gradient: 'from-gray-100 to-gray-200'
+  },
+  non_verified: {
+    bg: 'bg-orange-100',
+    text: 'text-orange-800',
+    icon: AlertTriangle,
+    gradient: 'from-orange-50 to-orange-100'
   }
 };
 
@@ -503,7 +515,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showReserveConflictDialog, setShowReserveConflictDialog] = useState(false);
   const [reserveConflictInfo, setReserveConflictInfo] = useState<{ number: string; status?: string; reservedByName?: string | null } | null>(null);
   const [checkingReserveId, setCheckingReserveId] = useState<string | null>(null);
-  const [selectAllMode, setSelectAllMode] = useState(false);
   const [showMyClaimsDialog, setShowMyClaimsDialog] = useState(false);
   const [showClaimDialog, setShowClaimDialog] = useState(false);
   const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
@@ -762,13 +773,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   };
 
   const handleExportNumbers = async () => {
-    if (!isAdmin()) return;
+    if (!isAdmin()) {
+      toast.error('Only admins can export numbers');
+      return;
+    }
     setExportingNumbers(true);
     try {
       const snapshot = await getDocs(collection(db, 'numberPool'));
       const rows = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as any[];
       if (!rows.length) {
         toast.error('No numbers to export');
+        setExportingNumbers(false);
         return;
       }
 
@@ -1179,6 +1194,71 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, endsWithToggle]);
 
   // Perform search function - accessible for "Load More" button
+  // Helper function to search deletedNumbers collection (admin only)
+  const searchDeletedNumbers = useCallback(async (searchTerm: string, category: string, endsWith: boolean) => {
+    if (!isAdmin()) {
+      return [];
+    }
+
+    try {
+      const deletedNumbersRef = collection(db, 'deletedNumbers');
+      const cleanTerm = searchTerm.trim();
+      const isNumeric = /^\d+$/.test(cleanTerm);
+      
+      let deletedQuery: any = deletedNumbersRef;
+      const constraints: any[] = [];
+      
+      // Apply category filter if not 'all'
+      if (category !== 'all') {
+        constraints.push(where('category', '==', category));
+      }
+
+      // Build search query based on search type
+      if (isNumeric) {
+        // For numeric searches, check if it's an "ends with" search
+        if (endsWith && /^\d{2,5}$/.test(cleanTerm)) {
+          const length = cleanTerm.length;
+          const fieldName = length === 2 ? 'last2Digits' : 
+                           length === 3 ? 'last3Digits' : 
+                           length === 4 ? 'last4Digits' :
+                           'last5Digits';
+          constraints.push(where(fieldName, '==', cleanTerm));
+          constraints.push(orderBy('number'));
+        } else {
+          // Search in number field (contains) - requires orderBy
+          constraints.push(where('number', '>=', cleanTerm));
+          constraints.push(where('number', '<=', cleanTerm + '\uf8ff'));
+          constraints.push(orderBy('number'));
+        }
+      } else {
+        // For non-numeric searches, search in code field
+        constraints.push(where('code', '>=', cleanTerm.toLowerCase()));
+        constraints.push(where('code', '<=', cleanTerm.toLowerCase() + '\uf8ff'));
+        constraints.push(orderBy('code'));
+      }
+      
+      constraints.push(limit(500));
+      deletedQuery = query(deletedNumbersRef, ...constraints);
+
+      const snapshot = await getDocs(deletedQuery);
+      const deletedNumbers = snapshot.docs.map(doc => {
+        const data = doc.data() as any;
+        return {
+          ...data,
+          id: doc.id,
+          status: 'returned' as NumberStatus,
+          isDeleted: true // Flag to identify deleted numbers
+        } as NumberPoolType & { isDeleted?: boolean };
+      });
+
+      return deletedNumbers;
+    } catch (error) {
+      console.error('Error searching deleted numbers:', error);
+      // If query fails (e.g., missing index), return empty array
+      return [];
+    }
+  }, [isAdmin]);
+
   const performSearch = useCallback(async (loadMore: boolean = false) => {
     if (loadMore) {
       setIsLoadingMore(true);
@@ -1206,9 +1286,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           endsWith: endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         });
         
+        // Also search deletedNumbers collection if admin
+        const deletedResults = await searchDeletedNumbers(
+          debouncedSearchTerm, 
+          selectedCategory || 'all',
+          endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
+        );
+        
         // Avoid race conditions: only apply if term hasn't changed
         if (termAtStart === debouncedSearchTerm) {
           let filteredResults = filterByVisibility(result.data);
+          
+          // Add deleted numbers to results (they already have status 'returned')
+          filteredResults = [...filteredResults, ...deletedResults];
           
           // Apply group filter
           if (selectedGroup) {
@@ -1289,7 +1379,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         setIsLoadingMore(false);
         }
       }
-  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle]);
+  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers]);
 
   // DISABLED: Real-time listeners for search results
   // Search already fetches fresh data, no need for additional real-time listeners
@@ -2793,8 +2883,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const q = query(numbersRef, where('id', 'in', chunk));
         const querySnapshot = await getDocs(q);
         
-        querySnapshot.forEach((doc) => {
-          batch.delete(doc.ref);
+        querySnapshot.forEach((numberDoc) => {
+          const numberData = numberDoc.data();
+          
+          // Create document in deletedNumbers collection with status "returned"
+          const deletedNumberRef = doc(db, 'deletedNumbers', numberDoc.id);
+          batch.set(deletedNumberRef, {
+            ...numberData,
+            status: 'returned',
+            deletedAt: serverTimestamp(),
+            originalId: numberDoc.id,
+            originalCollection: 'numberPool'
+          });
+          
+          // Delete from numberPool
+          batch.delete(numberDoc.ref);
         });
         
         // Commit the batch for this chunk
@@ -3773,11 +3876,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </div>
                   </div>
                 </motion.button>
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={() => setShowExportModal(true)}
-                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
+                <button
+                  onClick={() => {
+                    setShowExportModal(true);
+                  }}
+                  type="button"
+                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 cursor-pointer"
                 >
                   <div className="flex items-center">
                     <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-2 rounded-lg mr-3">
@@ -3790,43 +3894,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       <span className="block text-xs text-gray-500">Choose columns</span>
                     </div>
                   </div>
-                </motion.button>
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handleSelectAll}
-                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
-                >
-                  <div className="flex items-center">
-                    <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-2 rounded-lg mr-3">
-                      <Hash className="w-5 h-5 text-white" />
-            </div>
-                    <div>
-                      <span className="block text-sm font-semibold text-gray-900">
-                        {selectAllMode ? 'Deselect All' : 'Select All'}
-                      </span>
-          </div>
-        </div>
-                </motion.button>
-                {selectedNumbers.length > 0 && (
-                  <motion.button
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={handleBulkDelete}
-                    className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 rounded-lg shadow-lg hover:shadow-xl transition-all duration-300"
-                  >
-                    <div className="flex items-center">
-                      <div className="bg-white/10 p-2 rounded-lg mr-3">
-                        <Trash2 className="w-5 h-5 text-white" />
-            </div>
-                      <div>
-                        <span className="block text-sm font-semibold text-white">
-                          Delete Selected ({selectedNumbers.length})
-                        </span>
-          </div>
-        </div>
-                  </motion.button>
-                )}
+                </button>
               </div>
             )}
             {(isCoordinator || isAdmin()) && (
@@ -5089,7 +5157,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <table className="min-w-full divide-y divide-gray-200">
             <thead>
                 <tr className="bg-gradient-to-r from-gray-50 to-gray-100">
-                {(isAdmin() || bulkCopyMode) && (
+                {bulkCopyMode && (
                   <th className="px-6 py-4 text-left">
                     <input
                       type="checkbox"
@@ -5208,7 +5276,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       key={number.id}
       className="hover:bg-gray-50/50 transition-colors group"
     >
-                    {(isAdmin() || bulkCopyMode) && (
+                    {bulkCopyMode && (
         <td className="px-6 py-4">
           <input
             type="checkbox"
@@ -5228,7 +5296,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
               number.status === 'reserved'
                 ? `${STATUS_STYLES.reserved.bg} text-gray-800`
-                : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`
+                : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`,
+              (number as any).isDeleted && 'line-through'
             )}
           >
             {number.number}
@@ -5334,87 +5403,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </p>
                   </div>
                 </div>
-      {isAdmin() && (
-        <AnimatePresence>
-          {showExportModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
-              onClick={() => !exportingNumbers && setShowExportModal(false)}
-            >
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold text-gray-900">Export Number Pool</h3>
-                    <p className="text-sm text-gray-500">Choose the columns to include in the Excel file.</p>
-                  </div>
-                  <button
-                    onClick={() => setShowExportModal(false)}
-                    className="text-gray-500 hover:text-gray-700"
-                    disabled={exportingNumbers}
-                  >
-                    <X className="h-5 w-5" />
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  {exportFields.map(field => (
-                    <label key={field.key} className="flex items-center gap-2 text-sm text-gray-700">
-                      <input
-                        type="checkbox"
-                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                        checked={selectedExportFields.includes(field.key)}
-                        onChange={() => toggleExportField(field.key)}
-                        disabled={exportingNumbers}
-                      />
-                      {field.label}
-                    </label>
-                  ))}
-                </div>
-
-                <div className="flex items-center justify-between text-xs text-gray-500">
-                  <button
-                    type="button"
-                    className="underline"
-                    onClick={() => setSelectedExportFields(exportFields.map(f => f.key))}
-                    disabled={exportingNumbers}
-                  >
-                    Select all
-                  </button>
-                  <span>Exports current number pool snapshot</span>
-                </div>
-
-                <div className="flex justify-end gap-3">
-                  <button
-                    type="button"
-                    className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    onClick={() => setShowExportModal(false)}
-                    disabled={exportingNumbers}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="inline-flex items-center px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
-                    onClick={handleExportNumbers}
-                    disabled={exportingNumbers || selectedExportFields.length === 0}
-                  >
-                    {exportingNumbers ? 'Exporting...' : 'Export to Excel'}
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      )}
               </div>
             ) : (
               <div className="text-sm text-gray-400">-</div>
@@ -6627,6 +6615,83 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           )}
         </AnimatePresence>
       </div>
+
+      {/* Export Modal - Moved to root level */}
+      {isAdmin() && showExportModal && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 px-4"
+          onClick={() => {
+            if (!exportingNumbers) setShowExportModal(false);
+          }}
+          style={{ zIndex: 9999 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4"
+            style={{ position: 'relative', zIndex: 10000 }}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Export Number Pool</h3>
+                <p className="text-sm text-gray-500">Choose the columns to include in the Excel file.</p>
+              </div>
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+                disabled={exportingNumbers}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {exportFields.map(field => (
+                <label key={field.key} className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    checked={selectedExportFields.includes(field.key)}
+                    onChange={() => toggleExportField(field.key)}
+                    disabled={exportingNumbers}
+                  />
+                  {field.label}
+                </label>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-gray-500">
+              <button
+                type="button"
+                className="underline"
+                onClick={() => setSelectedExportFields(exportFields.map(f => f.key))}
+                disabled={exportingNumbers}
+              >
+                Select all
+              </button>
+              <span>Exports current number pool snapshot</span>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => setShowExportModal(false)}
+                disabled={exportingNumbers}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                onClick={handleExportNumbers}
+                disabled={exportingNumbers || selectedExportFields.length === 0}
+              >
+                {exportingNumbers ? 'Exporting...' : 'Export to Excel'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   ) : null;
 }

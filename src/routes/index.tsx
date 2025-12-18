@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
 import { Login } from '../pages/Login';
 import { Dashboard } from '../pages/Dashboard';
@@ -23,24 +23,29 @@ import { ModernLoading } from '../components/ModernLoading';
 import { useMinimumLoading } from '../hooks/useMinimumLoading';
 import { NumberLogsDashboard } from '../components/dashboards/NumberLogsDashboard';
 import { Reports } from '../components/admin/Reports';
+import { CustomerPortal } from '../pages/CustomerPortal';
 
 export function AppRoutes() {
   const { user, loading } = useAuthStore();
+  const location = useLocation();
+  const isCustomerPortal = location.pathname.startsWith('/customer/');
+  
   // Reduce minimum loading time to 800ms to prevent issues with Firebase init delays
   const showLoading = useMinimumLoading(loading, 800);
 
-  if (showLoading) {
+  // Skip loading animation on customer portal
+  if (showLoading && !isCustomerPortal) {
     return <ModernLoading />;
   }
 
   return (
     <Routes>
-      <Route 
-        path="/login" 
-        element={user ? <Navigate to="/dashboard" replace /> : <Login />} 
+      <Route
+        path="/login"
+        element={user ? <Navigate to="/dashboard" replace /> : <Login />}
       />
-      <Route 
-        path="/dashboard" 
+      <Route
+        path="/dashboard"
         element={
           <ProtectedRoute>
             <DashboardLayout />
@@ -50,95 +55,96 @@ export function AppRoutes() {
         <Route index element={<Dashboard />} />
         <Route path="numbers" element={<NumberPool />} />
         <Route path="leads" element={<LeadList />} />
-        <Route 
-          path="leads/create" 
+        <Route
+          path="leads/create"
           element={
             <RoleBasedRoute allowedRoles={['agent', 'freelancer']}>
               <CreateLead />
             </RoleBasedRoute>
-          } 
+          }
         />
         <Route path="leads/:id" element={<LeadDetails />} />
         <Route path="setup/indexes" element={<FirebaseIndexes />} />
         <Route path="settings" element={<Settings />} />
-        <Route 
-          path="performance" 
+        <Route
+          path="performance"
           element={
             <RoleBasedRoute allowedRoles={['agent', 'freelancer']}>
               <AgentPerformance user={user!} />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="team-performance" 
+        <Route
+          path="team-performance"
           element={
             <RoleBasedRoute allowedRoles={['agent', 'freelancer']}>
               <TeamPerformance user={user!} />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="bonus-management" 
+        <Route
+          path="bonus-management"
           element={
             <RoleBasedRoute allowedRoles={['manager']}>
               <ManagerDashboard user={user!} />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="admin" 
-          element={<Navigate to="/dashboard" replace />} 
+        <Route
+          path="admin"
+          element={<Navigate to="/dashboard" replace />}
         />
-        <Route 
-          path="admin/users" 
+        <Route
+          path="admin/users"
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <UserManagement />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="admin/users/bulk-upload" 
+        <Route
+          path="admin/users/bulk-upload"
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <BulkUserUpload />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="admin/teams" 
+        <Route
+          path="admin/teams"
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <TeamManagement />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="admin/numbers/upload" 
+        <Route
+          path="admin/numbers/upload"
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <NumberPoolUpload />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="number-logs" 
+        <Route
+          path="number-logs"
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <NumberLogsDashboard />
             </RoleBasedRoute>
-          } 
+          }
         />
-        <Route 
-          path="admin/reports" 
+        <Route
+          path="admin/reports"
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <Reports />
             </RoleBasedRoute>
-          } 
+          }
         />
       </Route>
       <Route path="/unauthorized" element={<Unauthorized />} />
+      <Route path="/customer/:linkId" element={<CustomerPortal />} />
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       {/* Catch-all route: redirect any unmatched paths to dashboard */}
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

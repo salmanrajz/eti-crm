@@ -50,6 +50,7 @@ interface SearchOptions {
   startAfter?: QueryDocumentSnapshot | null;
   includeStale?: boolean; // Kept for API compatibility, but always returns fresh data
   endsWith?: boolean; // When true, search only for numbers ending with the search term
+  statusFilter?: string; // Filter by status (e.g., 'open' for customer portal)
 }
 
 /**
@@ -74,7 +75,7 @@ export class UnifiedSearch {
     searchTerm: string,
     options: SearchOptions = {}
   ): Promise<SearchResult> {
-    const { category = 'all', limit: maxResults = 200, startAfter: cursorDoc, endsWith = false } = options;
+    const { category = 'all', limit: maxResults = 200, startAfter: cursorDoc, endsWith = false, statusFilter } = options;
     const rawTerm = searchTerm.trim();
 
     if (!rawTerm) {
@@ -83,7 +84,7 @@ export class UnifiedSearch {
 
     // If "ends with" toggle is enabled, use ends-with search
     if (endsWith) {
-      const result = await this.performEndsWithSearch(rawTerm, category, maxResults, cursorDoc);
+      const result = await this.performEndsWithSearch(rawTerm, category, maxResults, cursorDoc, statusFilter);
       return result;
     }
 
@@ -97,18 +98,18 @@ export class UnifiedSearch {
       
       if (allNumeric) {
         // All numeric terms - use efficient token-based search
-        const result = await this.performNumericMultiTokenSearch(searchTerms, category, maxResults, cursorDoc);
+        const result = await this.performNumericMultiTokenSearch(searchTerms, category, maxResults, cursorDoc, statusFilter);
         return result;
       } else {
         // Mixed terms - use multi-column search with cursor support
-        const result = await this.performMultiColumnSearch(searchTerms, category, maxResults, cursorDoc);
+        const result = await this.performMultiColumnSearch(searchTerms, category, maxResults, cursorDoc, statusFilter);
         return result;
       }
     }
 
     // Single term - use existing fast search with cursor support
     const term = rawTerm.toLowerCase();
-    const result = await this.performFastFirebaseSearch(term, rawTerm, category, maxResults, cursorDoc);
+    const result = await this.performFastFirebaseSearch(term, rawTerm, category, maxResults, cursorDoc, statusFilter);
 
     return result;
   }
@@ -121,7 +122,8 @@ export class UnifiedSearch {
     searchTerm: string,
     category: string,
     maxResults: number,
-    cursorDoc: QueryDocumentSnapshot | null | undefined = null
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null,
+    statusFilter?: string
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
     let lastDoc: QueryDocumentSnapshot | null = null;
@@ -144,6 +146,11 @@ export class UnifiedSearch {
       
       if (category !== 'all') {
         baseQuery = query(baseQuery, where('category', '==', category));
+      }
+
+      // Add status filter if provided (required for anonymous users)
+      if (statusFilter) {
+        baseQuery = query(baseQuery, where('status', '==', statusFilter));
       }
 
       // Determine which field to use based on search term length
@@ -209,7 +216,8 @@ export class UnifiedSearch {
     searchTerms: string[],
     category: string,
     maxResults: number,
-    cursorDoc: QueryDocumentSnapshot | null | undefined = null
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null,
+    statusFilter?: string
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
     let lastDoc: QueryDocumentSnapshot | null = null;
@@ -223,7 +231,7 @@ export class UnifiedSearch {
       
       if (!allNumeric) {
         // Has non-numeric tokens (code, plan, status, etc.) - use multi-column
-        return await this.performMultiColumnSearch(searchTerms, category, maxResults, cursorDoc);
+        return await this.performMultiColumnSearch(searchTerms, category, maxResults, cursorDoc, statusFilter);
       }
       
       // ALL tokens are numeric! Check if all are exactly 3 digits
@@ -231,7 +239,7 @@ export class UnifiedSearch {
       
       if (!allExactly3Digits) {
         // Numeric but not all 3-digit - use optimized number-only substring search
-        return await this.performNumericSubstringSearch(searchTerms, category, maxResults, cursorDoc);
+        return await this.performNumericSubstringSearch(searchTerms, category, maxResults, cursorDoc, statusFilter);
       }
       
       // All tokens are exactly 3-digit - use ULTRA-FAST array-contains on numberTokens!
@@ -260,6 +268,11 @@ export class UnifiedSearch {
         
         if (category !== 'all') {
           tokenQuery = query(tokenQuery, where('category', '==', category));
+        }
+
+        // Add status filter if provided (required for anonymous users)
+        if (statusFilter) {
+          tokenQuery = query(tokenQuery, where('status', '==', statusFilter));
         }
 
         // Use array-contains for the most selective token
@@ -424,7 +437,8 @@ export class UnifiedSearch {
     searchTerms: string[],
     category: string,
     maxResults: number,
-    cursorDoc: QueryDocumentSnapshot | null | undefined = null
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null,
+    statusFilter?: string
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
     let lastDoc: QueryDocumentSnapshot | null = null;
@@ -471,6 +485,11 @@ export class UnifiedSearch {
         
         if (category !== 'all') {
           numQuery = query(numQuery, where('category', '==', category));
+        }
+
+        // Add status filter if provided (required for anonymous users)
+        if (statusFilter) {
+          numQuery = query(numQuery, where('status', '==', statusFilter));
         }
         
         if (useTokenQuery) {
@@ -559,7 +578,8 @@ export class UnifiedSearch {
     searchTerms: string[],
     category: string,
     maxResults: number,
-    cursorDoc: QueryDocumentSnapshot | null | undefined = null
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null,
+    statusFilter?: string
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
     let lastDoc: QueryDocumentSnapshot | null = null;
@@ -820,7 +840,8 @@ export class UnifiedSearch {
     rawTerm: string,
     category: string,
     maxResults: number,
-    cursorDoc: QueryDocumentSnapshot | null | undefined = null
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null,
+    statusFilter?: string
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
     
@@ -912,6 +933,11 @@ export class UnifiedSearch {
       let base = query(collection(db, 'numberPool'));
       if (category !== 'all') {
         base = query(base, where('category', '==', category));
+      }
+
+      // Add status filter if provided (required for anonymous users)
+      if (statusFilter) {
+        base = query(base, where('status', '==', statusFilter));
       }
 
       // Primary strategy will be used for cursor-based "Load More" pagination

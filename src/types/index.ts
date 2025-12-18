@@ -85,7 +85,7 @@ export type VerifierGroups = VerifierType[];
  * Defines all possible states for phone numbers in the number pool
  * Each status represents a specific stage in the number lifecycle
  */
-export type NumberStatus = 
+export type NumberStatus =
   | 'open'                    // Available for reservation
   | 'reserved'               // Temporarily reserved by an agent
   | 'pending_verification'   // Awaiting verification by verifier
@@ -96,7 +96,8 @@ export type NumberStatus =
   | 'later'                 // Marked for later action
   | 'rejected'              // Rejected during verification
   | 'claimed'               // Claimed by an agent
-  | 'non_verified';   // Non verified (previously follow-up verification)
+  | 'non_verified'   // Non verified (previously follow-up verification)
+  | 'returned';      // Returned/deleted from the pool
 
 export interface User {
   id: string;
@@ -190,6 +191,17 @@ export interface NumberPoolType {
   last3Digits?: string; // Last 3 digits for "ends with" search
   last4Digits?: string; // Last 4 digits for "ends with" search
   last5Digits?: string; // Last 5 digits for "ends with" search
+}
+
+/**
+ * Deleted/Returned Number - stores numbers that were deleted from numberPool
+ * Contains all original number data plus deletion metadata
+ */
+export interface DeletedNumber extends NumberPool {
+  deletedAt: Date;
+  originalId: string;
+  originalCollection: 'numberPool';
+  status: 'returned';
 }
 
 export interface CustomerNumber {
@@ -347,7 +359,7 @@ export interface PerformanceMetrics {
   createdAt: Date;
 }
 
-export type NotificationType = 
+export type NotificationType =
   | 'new_lead'
   | 'lead_update'
   | 'new_message'
@@ -502,6 +514,21 @@ export interface TrustedDevice {
   expiresAt: Date;
   isActive: boolean;
   trustLevel: 'high' | 'medium' | 'low';
+}
+
+export interface AgentLink {
+  id: string;
+  agentId: string;
+  agentName?: string;
+  linkId: string; // Unique identifier for the link (used in URL)
+  allowedGroups: string[]; // Groups of numbers to show (e.g., ['G1', 'G2'])
+  isActive: boolean;
+  otp?: string; // OTP required to access the customer portal
+  createdAt: Date;
+  updatedAt: Date;
+  expiresAt?: Date; // Optional expiration date
+  usageCount?: number; // Number of times link was used
+  lastUsedAt?: Date;
 }
 
 export interface DeviceFingerprint {

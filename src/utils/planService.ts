@@ -32,25 +32,7 @@
 
 import { collection, query, getDocs, orderBy, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-
-export interface Plan {
-  id: string;
-  name: string;
-  category: string;
-  description?: string;
-  isActive: boolean;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
-
-export interface PlanCategory {
-  id: string;
-  name: string;
-  description?: string;
-  isActive: boolean;
-  createdAt?: Date;
-  updatedAt?: Date;
-}
+import { Plan, PlanCategory } from '../types';
 
 export interface PlanOption {
   value: string;
