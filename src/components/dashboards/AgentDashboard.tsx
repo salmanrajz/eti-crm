@@ -67,7 +67,9 @@ import {
   FileText,
   Shield,
   MessageCircle,
-  AlertCircle
+  AlertCircle,
+  MapPin,
+  ShoppingCart
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { clsx } from 'clsx';
@@ -77,6 +79,7 @@ import PayrollAndAttendanceDashboard from '../PayrollAndAttendanceDashboard';
 import { dashboardPerf } from '../../utils/performance';
 // ✅ ENHANCED: Import enhanced cache system
 import { metricsCache, leadsCache, targetCache } from '../../utils/cache';
+import { AgentLinkGenerator } from '../AgentLinkGenerator';
 
 // ===============================================================================
 // INTERFACE DEFINITIONS
@@ -132,6 +135,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
   });
   const [loading, setLoading] = useState(true);
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [customerSubmissions, setCustomerSubmissions] = useState<any[]>([]);
   const navigate = useNavigate();
   const { struckNumbers, loading: struckLoading } = useStruckNumbers(user.id);
   const { remainingStrikes, lastStrikeTime } = useStrikeLimit(user.id);
@@ -142,6 +146,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
   // ✅ OPTIMIZED: Use refs to store unsubscribe functions for proper cleanup
   const metricsUnsubscribeRef = useRef<(() => void) | null>(null);
   const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
+  const submissionsUnsubscribeRef = useRef<(() => void) | null>(null);
 
   // ✅ ENHANCED: Memoize cache keys with better specificity
   const metricsKey = useMemo(() => `metrics_${user.id}_${format(new Date(), 'yyyy-MM')}`, [user.id]);
@@ -457,6 +462,42 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
     }
   }, [user.id, leadsKey]);
 
+  // Load customer portal submissions
+  const loadCustomerSubmissions = useCallback(async () => {
+    if (!user?.id) return;
+
+    try {
+      const submissionsQuery = query(
+        collection(db, 'customerPortalSubmissions'),
+        where('agentId', '==', user.id),
+        orderBy('submittedAt', 'desc'),
+        limit(20)
+      );
+
+      const unsubscribe = onSnapshot(submissionsQuery, (snapshot) => {
+        const submissions = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            submittedAt: data.submittedAt?.toDate(),
+            createdAt: data.createdAt?.toDate(),
+          };
+        });
+        setCustomerSubmissions(submissions);
+      }, (error) => {
+        if (error.code === 'permission-denied') {
+          return;
+        }
+        console.error('Error loading customer submissions:', error);
+      });
+
+      return unsubscribe;
+    } catch (error) {
+      console.error('Error loading customer submissions:', error);
+    }
+  }, [user.id]);
+
   // ✅ OPTIMIZED: Enhanced data loading with parallel execution and better error handling
   useEffect(() => {
     if (!user?.id) return;
@@ -467,7 +508,11 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       
       setLoading(true);
       try {
-        // ✅ OPTIMIZED: Load metrics and leads in parallel for better performance
+        // ✅ OPTIMIZED: Load metrics, leads, and customer submissions in parallel
+        const submissionsUnsubscribe = await loadCustomerSubmissions();
+        if (submissionsUnsubscribe) {
+          submissionsUnsubscribeRef.current = submissionsUnsubscribe;
+        }
         await Promise.all([
           loadMetrics(),
           loadRecentLeads()
@@ -494,6 +539,10 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       if (leadsUnsubscribeRef.current) {
         leadsUnsubscribeRef.current();
         leadsUnsubscribeRef.current = null;
+      }
+      if (submissionsUnsubscribeRef.current) {
+        submissionsUnsubscribeRef.current();
+        submissionsUnsubscribeRef.current = null;
       }
 
       // Remove from active listeners
@@ -624,26 +673,26 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
             
             {/* 3D Hexagons */}
             <div className="absolute top-1/2 left-1/8 w-20 h-20 transform rotate-30">
-              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)'}}></div>
+              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
             </div>
             <div className="absolute bottom-1/4 right-1/8 w-16 h-16 transform -rotate-15">
-              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)'}}></div>
+              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
             </div>
             
             {/* 3D Triangles */}
             <div className="absolute top-1/3 right-1/3 w-12 h-12 transform rotate-45">
-              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)'}}></div>
+              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{ clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)' }}></div>
             </div>
             <div className="absolute bottom-1/3 left-1/2 w-10 h-10 transform -rotate-30">
-              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)'}}></div>
+              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{ clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)' }}></div>
             </div>
             
             {/* 3D Diamonds */}
             <div className="absolute top-1/4 left-3/4 w-14 h-14 transform rotate-45">
-              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)'}}></div>
+              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{ clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' }}></div>
             </div>
             <div className="absolute bottom-1/4 left-1/8 w-18 h-18 transform -rotate-15">
-              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)'}}></div>
+              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{ clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' }}></div>
             </div>
           </div>
         </div>
@@ -717,6 +766,9 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                   </div>
                 </button>
               </motion.div>
+
+              {/* Customer Link Generator */}
+              <AgentLinkGenerator agentId={user.id} agentName={user.name} />
 
               {/* Submit Lead Button */}
               <motion.div
@@ -1298,6 +1350,144 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                     );
                   })}
                 </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Customer Portal Submissions Section */}
+        {customerSubmissions.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className="mt-8 sm:mt-12 relative"
+          >
+            <div className="absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 bg-gradient-to-br from-orange-400 to-amber-600 opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102"></div>
+
+            <div className="relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
+              <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
+
+              <div className="relative px-4 sm:px-8 py-4 sm:py-6 bg-gradient-to-br from-orange-600 via-amber-600 to-yellow-600 overflow-hidden">
+                <div className="absolute inset-0 opacity-10">
+                  <div className="absolute top-0 left-0 w-32 h-32 bg-white rounded-full -translate-x-16 -translate-y-16"></div>
+                  <div className="absolute top-0 right-0 w-24 h-24 bg-white rounded-full translate-x-12 -translate-y-12"></div>
+                </div>
+
+                <div className="relative flex items-center justify-between">
+                  <div className="flex items-center space-x-3 sm:space-x-4">
+                    <div className="p-2 sm:p-3 bg-white/20 backdrop-blur-sm rounded-xl sm:rounded-2xl shadow-lg">
+                      <ShoppingCart className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg sm:text-2xl lg:text-3xl font-bold text-white">
+                        Customer Portal Submissions
+                      </h2>
+                      <p className="text-sm text-white/90 mt-1">
+                        {customerSubmissions.length} submission{customerSubmissions.length !== 1 ? 's' : ''} from your customer link
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="relative">
+                {customerSubmissions.map((submission, index) => (
+                  <motion.div
+                    key={submission.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.05 }}
+                    className={clsx(
+                      "group hover:bg-gradient-to-r hover:from-orange-50/50 hover:to-amber-50/50 transition-all duration-200 relative",
+                      index < customerSubmissions.length - 1 && "border-b border-gray-200"
+                    )}
+                  >
+                    <div className="px-6 py-5">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-2">
+                            <div className="p-2 bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl">
+                              <User2 className="h-5 w-5 text-orange-600" />
+                            </div>
+                            <div>
+                              <h3 className="text-base font-semibold text-gray-900">
+                                {submission.customerName || 'Unnamed Customer'}
+                              </h3>
+                              <div className="flex items-center text-sm text-gray-500 mt-1">
+                                <Phone className="h-3 w-3 mr-1.5" />
+                                {submission.customerPhone}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="ml-12 space-y-2">
+                            <div className="flex items-center text-sm text-gray-600">
+                              <MapPin className="h-3 w-3 mr-1.5 text-gray-400" />
+                              {submission.customerAddress}
+                            </div>
+                            
+                            {submission.plans && submission.plans.length > 0 && (
+                              <div className="mt-3 space-y-2">
+                                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Selected Numbers & Plans:</div>
+                                {submission.plans.map((plan: any, planIndex: number) => (
+                                  <div key={planIndex} className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg">
+                                    <Hash className="h-4 w-4 text-orange-500" />
+                                    <span className="text-sm font-medium text-gray-700">{plan.number}</span>
+                                    <span className="text-xs text-gray-500">•</span>
+                                    <span className="text-sm text-gray-600">{plan.plan}</span>
+                                    {plan.category && (
+                                      <>
+                                        <span className="text-xs text-gray-500">•</span>
+                                        <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full font-semibold">
+                                          {plan.category}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            <div className="flex flex-wrap gap-2 mt-3 text-xs text-gray-500">
+                              {submission.emirate && (
+                                <span className="bg-gray-100 px-2 py-1 rounded">Emirate: {submission.emirate}</span>
+                              )}
+                              {submission.nationality && (
+                                <span className="bg-gray-100 px-2 py-1 rounded">Nationality: {submission.nationality}</span>
+                              )}
+                              {submission.gender && (
+                                <span className="bg-gray-100 px-2 py-1 rounded">Gender: {submission.gender}</span>
+                              )}
+                              {submission.language && (
+                                <span className="bg-gray-100 px-2 py-1 rounded">Language: {submission.language}</span>
+                              )}
+                              {submission.hasEmirateId && (
+                                <span className="bg-green-100 text-green-700 px-2 py-1 rounded font-semibold">Has Emirates ID</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col items-end gap-2">
+                          <div className="text-xs text-gray-500">
+                            {submission.submittedAt && format(submission.submittedAt, 'MMM d, yyyy h:mm a')}
+                          </div>
+                          <span className={clsx(
+                            "px-3 py-1 rounded-full text-xs font-semibold",
+                            submission.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                            submission.status === 'reviewed' ? 'bg-blue-100 text-blue-800' :
+                            'bg-green-100 text-green-800'
+                          )}>
+                            {submission.status === 'pending' ? 'Pending Review' :
+                             submission.status === 'reviewed' ? 'Reviewed' :
+                             'Converted'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
             </div>
           </motion.div>
         )}

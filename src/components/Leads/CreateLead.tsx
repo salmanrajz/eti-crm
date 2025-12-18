@@ -1251,84 +1251,16 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
         // If WhatsApp verification is requested, mark method on lead and send the message
         if (isWhatsAppVerification) {
-          try {
-            await updateDoc(doc(db, 'leads', docRef.id), {
-              verificationMethod: 'whatsapp',
-              whatsappInitiatedAt: new Date()
-            });
-          } catch (e) {
-            // Error updating lead with verification method
-          }
-          
-          // Format the phone number to ensure it has the country code
+          // Format the phone number the same way as VerifierDashboard
+          // Remove non-digits, remove leading 0, add 971 if not present
           let formattedNumber = formData.customerNumber;
-          
-          // Remove any existing country code or plus sign
-          if (formattedNumber.startsWith('+')) {
-            formattedNumber = formattedNumber.substring(1);
+          formattedNumber = formattedNumber.replace(/\D/g, ''); // Remove non-digits
+          if (formattedNumber.startsWith('0')) {
+            formattedNumber = formattedNumber.substring(1); // Remove leading 0
           }
-          
-          // Get the country code from the selected country
-          // Map country code; fallback to 971
-          const countryCode = formData.country === 'AE' ? '971'
-            : formData.country === 'SA' ? '966'
-            : formData.country === 'QA' ? '974'
-            : formData.country === 'KW' ? '965'
-            : formData.country === 'BH' ? '973'
-            : formData.country === 'OM' ? '968'
-            : formData.country === 'IN' ? '91'
-            : formData.country === 'PK' ? '92'
-            : formData.country === 'EG' ? '20'
-            : formData.country === 'PH' ? '63'
-            : formData.country === 'ID' ? '62'
-            : formData.country === 'MY' ? '60'
-            : formData.country === 'SG' ? '65'
-            : formData.country === 'TH' ? '66'
-            : formData.country === 'VN' ? '84'
-            : formData.country === 'CN' ? '86'
-            : formData.country === 'JP' ? '81'
-            : formData.country === 'KR' ? '82'
-            : formData.country === 'AU' ? '61'
-            : formData.country === 'NZ' ? '64'
-            : formData.country === 'GB' ? '44'
-            : formData.country === 'US' ? '1'
-            : formData.country === 'CA' ? '1'
-            : formData.country === 'FR' ? '33'
-            : formData.country === 'DE' ? '49'
-            : formData.country === 'IT' ? '39'
-            : formData.country === 'ES' ? '34'
-            : formData.country === 'PT' ? '351'
-            : formData.country === 'NL' ? '31'
-            : formData.country === 'BE' ? '32'
-            : formData.country === 'CH' ? '41'
-            : formData.country === 'AT' ? '43'
-            : formData.country === 'SE' ? '46'
-            : formData.country === 'NO' ? '47'
-            : formData.country === 'DK' ? '45'
-            : formData.country === 'FI' ? '358'
-            : formData.country === 'PL' ? '48'
-            : formData.country === 'CZ' ? '420'
-            : formData.country === 'SK' ? '421'
-            : formData.country === 'HU' ? '36'
-            : formData.country === 'RO' ? '40'
-            : formData.country === 'BG' ? '359'
-            : formData.country === 'GR' ? '30'
-            : formData.country === 'TR' ? '90'
-            : formData.country === 'IL' ? '972'
-            : formData.country === 'ZA' ? '27'
-            : formData.country === 'NG' ? '234'
-            : formData.country === 'KE' ? '254'
-            : formData.country === 'GH' ? '233'
-            : formData.country === 'ET' ? '251'
-            : '971';
-          
-          // Remove any existing country code
-          if (formattedNumber.startsWith(countryCode)) {
-            formattedNumber = formattedNumber.substring(countryCode.length);
+          if (!formattedNumber.startsWith('971')) {
+            formattedNumber = `971${formattedNumber}`; // Add 971 if not present
           }
-          
-          // Add the country code
-          formattedNumber = `${countryCode}${formattedNumber}`;
 
           // Write routing map to ensure inbound replies map to this lead
           try {
@@ -1367,13 +1299,11 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           if (planDetails) {
               const group = selectedPlans?.[0]?.group || undefined;
             
-            const { sendWhatsAppWithComponentsByGroup, resolveWhatsAppRoute } = await import('../../utils/whatsappRouter');
-            const routeConfig = await resolveWhatsAppRoute(group);
-            const { template } = routeConfig;
-            const dynamicTemplateName = template.templateName;
+            const { triggerFlowExternal } = await import('../../utils/whatsappRouter');
+            const language = formData.language || 'English';
 
               const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
-              const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
+              const monthlyLabel = amountDigits ? `${amountDigits} AED + 5% VAT` : planDetails.amount || 'N/A';
             const templateParameters = [
                   selectedPlans[0]?.number || 'N/A',
                   monthlyLabel,
@@ -1382,37 +1312,27 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             ];
 
             try {
-              const payload = {
-                to: formattedNumber,
+              // Trigger flow using new API (same as VerifierDashboard's Resend Flow)
+              const sendResponse = await triggerFlowExternal({
+                phoneNumber: formattedNumber,
                 group,
-                templateName: dynamicTemplateName,
-                components: [
-                  {
-                    type: 'body',
-                    parameters: [
-                      { type: 'text', text: selectedPlans[0]?.number || 'N/A' },
-                      { type: 'text', text: planDetails.amount },
-                      { type: 'text', text: planDetails.benefits },
-                      { type: 'text', text: planDetails.duration }
-                    ]
-                  },
-                  {
-                    type: 'button',
-                    sub_type: 'flow',
-                    index: 0
-                  }
-                ]
-              };
-              
-              // Send WhatsApp message and capture response with messageId
-              const sendResponse = await sendWhatsAppWithComponentsByGroup(payload);
+                language,
+                templateVariables: {
+                  value1: selectedPlans[0]?.number || 'N/A',
+                  value2: monthlyLabel,
+                  value3: planDetails.benefits,
+                  value4: planDetails.duration
+                }
+              });
               
               // Log outbound verification message with messageId from response
               try {
+                // Determine flowId for logging
+                const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
                 await logOutboundVerificationMessage(
                   docRef.id,
                   formattedNumber,
-                  dynamicTemplateName,
+                  flowId,
                   templateParameters,
                   {
                     sendResponse
@@ -1421,6 +1341,17 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               } catch (e) {
                 // Error logging outbound message
                 console.error('Failed to log outbound message:', e);
+              }
+              
+              // Update whatsappInitiatedAt AFTER successfully sending the flow (same as VerifierDashboard)
+              try {
+                await updateDoc(doc(db, 'leads', docRef.id), {
+                  verificationMethod: 'whatsapp',
+                  whatsappInitiatedAt: new Date()
+                });
+              } catch (e) {
+                // Error updating lead with verification method
+                console.error('Failed to update whatsappInitiatedAt:', e);
               }
               
               setSuccessMessage('Lead created and verification message sent to customer');
@@ -1432,10 +1363,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               }, 2000);
             } catch (e: any) {
               try {
+                // Determine flowId for logging
+                const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
                 await logOutboundVerificationMessage(
                   docRef.id,
                   formattedNumber,
-                  dynamicTemplateName,
+                  flowId,
                   templateParameters,
                   {
                     status: 'failed',

@@ -46,6 +46,8 @@ import { db } from '../../lib/firebase';
 import { User, Lead } from '../../types';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { format } from 'date-fns';
+import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppConversationView';
+import { normalizeTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 import { 
   CheckCircle, 
   XCircle, 
@@ -77,7 +79,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { MediaUpload } from '../Leads/MediaUpload';
 import { logOutboundVerificationMessage } from '../../utils/whatsappVerification';
-import { resolveWhatsAppRoute, sendWhatsAppWithComponentsByGroup } from '../../utils/whatsappRouter';
+import { resolveWhatsAppRoute } from '../../utils/whatsappRouter';
 import { incrementVerifierCounters } from '../../utils/verifierCounters';
 
 // Ready-made message templates for verifiers
@@ -251,15 +253,9 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const [replyText, setReplyText] = useState('');
   const [resendingLogId, setResendingLogId] = useState<string | null>(null);
-  
-  const normalizeLogDate = (value: any): Date | null => {
-    if (!value) return null;
-    if (value instanceof Date) return value;
-    if (typeof value.toDate === 'function') return value.toDate();
-    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
-    const parsed = new Date(value);
-    return isNaN(parsed.getTime()) ? null : parsed;
-  };
+  // Flow state tracking
+  const [flowState, setFlowState] = useState<'welcome' | 'terms' | 'delivery' | 'address' | 'nationality' | 'complete'>('welcome');
+  const [deliveryData, setDeliveryData] = useState({ name: '', address: '', nationality: '' });
   
   const [expandedSections, setExpandedSections] = useState<boolean[]>(() => {
     const baseExpanded = VERIFY_CHECKLIST.map(() => false);
@@ -271,6 +267,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [sendingReply, setSendingReply] = useState(false);
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
+  const previousMessageCountRef = useRef<number>(0);
+  const lastMessageIdRef = useRef<string | null>(null);
 
   // Load plan details from Firebase when selectedLead changes
   useEffect(() => {
@@ -321,6 +319,109 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     setReplyText(message);
   };
 
+  // Handle resending the flow message (can be called without an existing log)
+  const handleResendFlow = async () => {
+    if (!selectedLead) {
+      toast.error('Select a lead before resending');
+      return;
+    }
+
+    try {
+      const firstPlan = selectedLead?.plans?.[0];
+      if (!firstPlan || !planDetails) {
+        toast.error('Plan information missing');
+        return;
+      }
+
+      // Format customer number
+      let to = selectedLead.customerNumber;
+      if (!to) {
+        toast.error('Customer number missing in lead');
+        return;
+      }
+      to = to.replace(/\D/g, '');
+      if (to.startsWith('0')) {
+        to = to.substring(1);
+      }
+      if (!to.startsWith('971')) {
+        to = `971${to}`;
+      }
+
+      const group = selectedLead.plans?.[0]?.group || undefined;
+      const language = (selectedLead as any).language || 'English';
+      const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
+      const monthlyLabel = amountDigits ? `${amountDigits} AED + 5% VAT` : planDetails.amount || 'N/A';
+      
+      const parameters = [
+        firstPlan.number || 'N/A',
+        monthlyLabel,
+        planDetails.benefits || 'N/A',
+        planDetails.duration || 'N/A'
+      ];
+
+      const { triggerFlowExternal } = await import('../../utils/whatsappRouter');
+      const sendResponse = await triggerFlowExternal({
+        phoneNumber: to,
+        group,
+        language,
+        templateVariables: {
+          value1: parameters[0],
+          value2: parameters[1],
+          value3: parameters[2],
+          value4: parameters[3]
+        }
+      });
+
+      // Determine flowId for logging
+      const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
+      await logOutboundVerificationMessage(
+        selectedLead.id,
+        to,
+        flowId,
+        parameters,
+        { sendResponse }
+      );
+
+      // Add optimistic message to chat immediately
+      const optimisticMessage = {
+        id: 'temp-flow-' + Date.now(),
+        direction: 'outbound',
+        from: to,
+        to: to,
+        messageText: `Verification flow triggered successfully`,
+        templateName: flowId,
+        status: 'sent',
+        createdAt: new Date(),
+        parameters: parameters
+      };
+      setWhatsAppLogs(prev => {
+        // Check if similar message already exists
+        const exists = prev.some(msg => 
+          msg.templateName === flowId && 
+          msg.direction === 'outbound' &&
+          Math.abs(new Date(msg.createdAt).getTime() - optimisticMessage.createdAt.getTime()) < 5000
+        );
+        if (exists) return prev;
+        return [...prev, optimisticMessage];
+      });
+
+      // Update whatsappInitiatedAt to current time for the resent flow
+      await updateDoc(doc(db, 'leads', selectedLead.id), {
+        whatsappInitiatedAt: new Date()
+      });
+
+      // Trigger immediate fetch
+      setTimeout(() => {
+        fetchWhatsAppMessagesFromAPI();
+      }, 1000);
+
+      toast.success('Flow message resent successfully');
+    } catch (error: any) {
+      toast.error('Failed to resend flow message');
+      console.error('Resend flow error:', error);
+    }
+  };
+
   const handleResendVerificationMessage = async (log: any) => {
     if (!selectedLead) {
       toast.error('Select a lead before resending');
@@ -354,50 +455,111 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
       toast.error('Customer number missing in lead');
       return;
     }
-    // Format the number properly
+    // Format the number properly for API - Simple logic: remove first 0, add 971
+    // Example: 0506789345 -> 971506789345
     to = to.replace(/\D/g, ''); // Remove non-digits
+    
+    // Remove leading zero if present
     if (to.startsWith('0')) {
-      to = to.substring(1); // Remove leading zero
+      to = to.substring(1);
     }
+    
+    // Add 971 prefix
     if (!to.startsWith('971')) {
-      to = `971${to}`; // Add UAE country code if not present
+      to = `971${to}`;
     }
     try {
       setResendingLogId(log.id);
-      const components: any[] = [
-        {
-          type: 'body',
-          parameters: parameters.map((text: string) => ({ type: 'text', text }))
-        },
-        {
-          type: 'button',
-          sub_type: 'flow',
-          index: 0
-        }
-      ];
       const group = selectedLead.plans?.[0]?.group || undefined;
-      const sendResponse = await sendWhatsAppWithComponentsByGroup({
-        to,
+      const language = (selectedLead as any).language || 'English';
+      
+      // Extract template variables (ensure we have at least 4 values)
+      const value1 = parameters[0] || 'N/A';
+      const value2 = parameters[1] || 'N/A';
+      const value3 = parameters[2] || 'N/A';
+      const value4 = parameters[3] || 'N/A';
+      
+      const { triggerFlowExternal } = await import('../../utils/whatsappRouter');
+      const sendResponse = await triggerFlowExternal({
+        phoneNumber: to,
         group,
-        templateName: log.templateName,
-        components
+        language,
+        templateVariables: {
+          value1,
+          value2,
+          value3,
+          value4
+        }
       });
+      
+      // Determine flowId for logging
+      const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
       await logOutboundVerificationMessage(
         selectedLead.id,
         to,
-        log.templateName,
+        flowId,
         parameters,
         { sendResponse }
       );
+      
+      // Immediately check for new conversations, then poll
+      const checkAndPoll = async () => {
+        try {
+          const { checkConversation } = await import('../../utils/whatsappRouter');
+          const conversationData = await checkConversation(to);
+          
+          if (conversationData?.success === false) {
+            // API error - log but don't show to user (it's expected during polling)
+            console.warn('Conversation check failed (will retry):', conversationData.error);
+            return;
+          }
+          
+          // The Cloud Function will process any new messages and the real-time listener will update
+        } catch (error) {
+          // This shouldn't happen now since checkConversation returns error objects
+          console.error('Unexpected error checking conversation:', error);
+        }
+      };
+      
+      // Check immediately
+      await checkAndPoll();
+      
+      // Poll aggressively: every 2 seconds for first 30 seconds, then every 5 seconds for 2 minutes
+      let pollCount = 0;
+      const aggressivePolls = 15; // 15 * 2 seconds = 30 seconds
+      const normalPolls = 24; // 24 * 5 seconds = 2 minutes
+      let isAggressivePhase = true;
+      
+      const pollInterval = setInterval(async () => {
+        pollCount++;
+        
+        if (isAggressivePhase && pollCount > aggressivePolls) {
+          isAggressivePhase = false;
+          pollCount = 0;
+        } else if (!isAggressivePhase && pollCount > normalPolls) {
+          clearInterval(pollInterval);
+          return;
+        }
+        
+        await checkAndPoll();
+      }, isAggressivePhase ? 2000 : 5000);
+      
+      // Cleanup after 2.5 minutes
+      setTimeout(() => {
+        clearInterval(pollInterval);
+      }, 150000);
+      
       toast.success('Verification message resent');
     } catch (error: any) {
       toast.error('Failed to resend WhatsApp message');
       console.error('Resend WhatsApp error:', error);
       try {
+        const language = (selectedLead as any).language || 'English';
+        const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
         await logOutboundVerificationMessage(
           selectedLead.id,
           to,
-          log.templateName,
+          flowId,
           parameters,
           {
             status: 'failed',
@@ -485,18 +647,71 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         throw new Error(responseJson?.error?.message || 'Failed to send WhatsApp reply');
       }
 
+      // Get message ID from response
+      const msgId = responseJson.messages?.[0]?.id;
+      const messageText = replyText.trim();
+      
+      // Format customer number for message (same format as API uses)
+      let formattedCustomerNumber = to;
+      // Remove country code to match API format (API uses normalized customer number)
+      if (formattedCustomerNumber.startsWith('971')) {
+        formattedCustomerNumber = '0' + formattedCustomerNumber.slice(3);
+      }
+      
+      // Optimistically add the sent message to the UI immediately
+      // Match the format that the API returns (from = customer number, to = customer number for outbound)
+      const newMessage = {
+        id: 'temp-' + Date.now(),
+        direction: 'outbound' as const,
+        from: formattedCustomerNumber, // API uses customer number as 'from' for outbound
+        to: formattedCustomerNumber, // API uses customer number as 'to' for outbound
+        messageText: messageText,
+        messageId: msgId || undefined,
+        status: msgId ? 'sent' : undefined,
+        createdAt: new Date()
+      };
+      
+      // Add to UI immediately
+      setWhatsAppLogs(prev => {
+        // Check if message already exists (avoid duplicates)
+        const exists = prev.some(msg => 
+          msg.messageText === messageText && 
+          msg.direction === 'outbound' &&
+          Math.abs(new Date(msg.createdAt).getTime() - new Date().getTime()) < 5000 // Within 5 seconds
+        );
+        if (exists) return prev;
+        return [...prev, newMessage];
+      });
+
+      // Update message tracking refs
+      previousMessageCountRef.current = whatsAppLogs.length + 1;
+      lastMessageIdRef.current = newMessage.id;
+
+      // Scroll to bottom to show the new message
+      setTimeout(() => {
+        if (logsContainerRef.current) {
+          logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+        }
+      }, 100);
+
       await logOutboundVerificationMessage(
         selectedLead.id,
         to,
         'verifier_text',
         [],
         {
-          messageText: replyText.trim(),
+          messageText: messageText,
           sendResponse: responseJson
         }
       );
+      
         toast.success('Reply sent');
         setReplyText('');
+      
+      // Trigger immediate fetch to get the real message from API (will replace temp message)
+      setTimeout(() => {
+        fetchWhatsAppMessagesFromAPI();
+      }, 1000);
     } catch (e: any) {
       console.error('Error sending reply:', e);
       toast.error(e?.message || 'Error sending reply');
@@ -523,13 +738,370 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
     }
   };
 
-  useEffect(() => {
-    if (showWhatsAppLogs && logsContainerRef.current) {
-      try {
-        logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
-      } catch {}
+  // Fetch WhatsApp messages from API
+  const fetchWhatsAppMessagesFromAPI = async () => {
+    if (!selectedLead?.customerNumber) {
+      console.warn('No customer number found for lead');
+      return;
     }
-  }, [whatsAppLogs, showWhatsAppLogs]);
+
+    try {
+      // Format customer number for API - Simple logic: remove first 0, add 971
+      let formattedNumber = selectedLead.customerNumber.toString().replace(/\D/g, '');
+      
+      // Remove leading zero if present
+      if (formattedNumber.startsWith('0')) {
+        formattedNumber = formattedNumber.substring(1);
+      }
+      
+      // Add 971 prefix
+      if (!formattedNumber.startsWith('971')) {
+        formattedNumber = `971${formattedNumber}`;
+      }
+
+      const { checkConversation } = await import('../../utils/whatsappRouter');
+      const conversationData = await checkConversation(formattedNumber, selectedLead.id);
+      
+      if (conversationData?.success === false) {
+        console.warn('Failed to fetch WhatsApp messages:', conversationData.error);
+        return;
+      }
+
+      if (conversationData?.messages && Array.isArray(conversationData.messages)) {
+        // Format messages for display
+        const formattedMessages = conversationData.messages.map((msg: any) => ({
+          id: msg.messageId || msg.id,
+          direction: msg.direction,
+          from: msg.from,
+          to: msg.to,
+          messageText: msg.messageText || '',
+          messageId: msg.messageId,
+          status: msg.status,
+          templateName: msg.templateName,
+          consents: msg.consents,
+          readStatus: msg.readStatus,
+          deliveryStatus: msg.deliveryStatus,
+          messageType: msg.messageType,
+          replyTo: msg.replyTo,
+          repliedMessage: msg.repliedMessage,
+          mediaId: msg.mediaId,
+          mediaPath: msg.mediaPath,
+          mime: msg.mime,
+          userId: msg.userId,
+          userName: msg.userName,
+          senderName: msg.senderName,
+          buttons: msg.buttons,
+          payload: msg.payload,
+          // Normalize timestamp once when first received from API
+          // Store as Date object to preserve timezone information
+          createdAt: msg.createdAt 
+            ? (msg.createdAt instanceof Date 
+                ? msg.createdAt 
+                : normalizeTimestamp(msg.createdAt) || new Date(msg.createdAt))
+            : new Date()
+        }));
+
+        // Sort by timestamp (oldest first), with secondary sort by messageId for messages with same timestamp
+        formattedMessages.sort((a: any, b: any) => {
+          const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
+          const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
+          if (timeA !== timeB) {
+            return timeA - timeB;
+          }
+          // If timestamps are equal, sort by messageId to maintain consistent order
+          const idA = a.messageId || a.id || '';
+          const idB = b.messageId || b.id || '';
+          return idA.localeCompare(idB);
+        });
+
+        
+        // Merge with existing optimistic messages (temp messages that haven't been confirmed by API yet)
+        // IMPORTANT: Preserve existing message timestamps to prevent timestamp changes on re-fetch
+        setWhatsAppLogs(prev => {
+          // Get all temporary messages (those with temp- prefix)
+          const tempMessages = prev.filter(msg => msg.id?.toString().startsWith('temp-'));
+          
+          // Create a map of existing messages by messageId to preserve their timestamps
+          const existingMessageMap = new Map();
+          prev.forEach((msg: any) => {
+            const msgId = msg.messageId || msg.id;
+            if (msgId && !msgId.toString().startsWith('temp-')) {
+              existingMessageMap.set(msgId, msg);
+            }
+          });
+          
+          // Create a map of API messages by messageId and messageText+timestamp for matching
+          const apiMessageMap = new Map();
+          formattedMessages.forEach((msg: any) => {
+            if (msg.messageId) {
+              apiMessageMap.set(msg.messageId, msg);
+            }
+            // Also index by text + direction + approximate time (within 10 seconds)
+            const msgTime = msg.createdAt instanceof Date ? msg.createdAt.getTime() : new Date(msg.createdAt).getTime();
+            const key = `${msg.messageText}_${msg.direction}_${Math.floor(msgTime / 10000)}`;
+            if (!apiMessageMap.has(key)) {
+              apiMessageMap.set(key, msg);
+            }
+            // For flow messages, also index by templateName since messageText might differ
+            if (msg.templateName) {
+              const templateKey = `${msg.templateName}_${msg.direction}_${Math.floor(msgTime / 10000)}`;
+              if (!apiMessageMap.has(templateKey)) {
+                apiMessageMap.set(templateKey, msg);
+              }
+            }
+          });
+          
+          // Keep temp messages that don't have a match in API yet (within 60 seconds)
+          const now = Date.now();
+          const unmatchedTempMessages = tempMessages.filter(tempMsg => {
+            const tempTime = getTimestampForSort(normalizeTimestamp(tempMsg.createdAt));
+            // If temp message is older than 60 seconds, remove it (API should have it by now)
+            if (now - tempTime > 60000) {
+              return false;
+            }
+            
+            // Check if this temp message matches any API message
+            const matchesById = tempMsg.messageId && apiMessageMap.has(tempMsg.messageId);
+            const tempMsgTime = tempTime;
+            const matchesByContent = apiMessageMap.has(`${tempMsg.messageText}_${tempMsg.direction}_${Math.floor(tempMsgTime / 10000)}`);
+            
+            // For flow messages, also check by templateName
+            let matchesByTemplate = false;
+            if (tempMsg.templateName) {
+              matchesByTemplate = apiMessageMap.has(`${tempMsg.templateName}_${tempMsg.direction}_${Math.floor(tempMsgTime / 10000)}`);
+            }
+            
+            // If it matches, don't keep the temp message (API has the real one)
+            return !matchesById && !matchesByContent && !matchesByTemplate;
+          });
+          
+          // Merge API messages with existing messages, preserving timestamps from existing messages
+          const mergedMessages = formattedMessages.map((apiMsg: any) => {
+            const msgId = apiMsg.messageId || apiMsg.id;
+            const existingMsg = existingMessageMap.get(msgId);
+            
+            // If this message already exists, ALWAYS preserve its timestamp to prevent changes
+            // This is critical to prevent timestamp flickering when API polls
+            if (existingMsg && existingMsg.createdAt) {
+              // Use the existing timestamp as-is (it's already a Date object from first load)
+              // Don't re-normalize as it might change the timezone interpretation
+              // IMPORTANT: Preserve the optimistic message's timestamp (which is correct local time)
+              return {
+                ...apiMsg,
+                createdAt: existingMsg.createdAt, // Preserve the original timestamp exactly
+                // Also preserve the messageId from existing if it's a temp message that hasn't been confirmed yet
+                messageId: existingMsg.messageId || apiMsg.messageId
+              };
+            }
+            
+            // New message, normalize API timestamp once and store as Date object
+            const apiDate = normalizeTimestamp(apiMsg.createdAt);
+            if (!apiDate) {
+              console.warn('Failed to normalize timestamp for message:', apiMsg.messageId, apiMsg.createdAt);
+            }
+            
+            return {
+              ...apiMsg,
+              createdAt: apiDate || new Date(apiMsg.createdAt)
+            };
+          });
+          
+          // Combine merged API messages with unmatched temp messages
+          const combined = [...mergedMessages, ...unmatchedTempMessages];
+          
+          // Sort by timestamp (oldest first), with secondary sort by messageId for messages with same timestamp
+          combined.sort((a: any, b: any) => {
+            const timeA = getTimestampForSort(normalizeTimestamp(a.createdAt));
+            const timeB = getTimestampForSort(normalizeTimestamp(b.createdAt));
+            if (timeA !== timeB) {
+              return timeA - timeB;
+            }
+            // If timestamps are equal, sort by messageId to maintain consistent order
+            const idA = a.messageId || a.id || '';
+            const idB = b.messageId || b.id || '';
+            return idA.localeCompare(idB);
+          });
+          
+          // Check if messages actually changed to prevent unnecessary re-renders
+          const prevMessageIds = prev.map(m => m.id || m.messageId).join(',');
+          const newMessageIds = combined.map(m => m.id || m.messageId).join(',');
+          
+          // Only update if messages actually changed
+          if (prevMessageIds === newMessageIds && prev.length === combined.length) {
+            return prev; // No change, return previous state
+          }
+          
+          // Update refs for scrolling detection
+          const currentMessageCount = combined.length;
+          const currentLastMessageId = combined.length > 0 ? combined[combined.length - 1].id : null;
+          const hasNewMessages = currentMessageCount > previousMessageCountRef.current || 
+            (currentLastMessageId && currentLastMessageId !== lastMessageIdRef.current);
+          
+          previousMessageCountRef.current = currentMessageCount;
+          lastMessageIdRef.current = currentLastMessageId;
+          
+          // Handle scrolling in a separate effect to avoid state update loops
+          if (hasNewMessages) {
+            setTimeout(() => {
+              if (logsContainerRef.current) {
+                const container = logsContainerRef.current;
+                const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+                if (isNearBottom) {
+                  container.scrollTop = container.scrollHeight;
+                }
+              }
+            }, 150);
+          }
+          
+          return combined;
+        });
+      }
+    } catch (error: any) {
+      console.error('Error fetching WhatsApp messages from API:', error);
+    }
+  };
+
+  // Auto-poll WhatsApp messages from API when lead is selected
+  useEffect(() => {
+    if (!selectedLead?.id || !selectedLead?.customerNumber || !showWhatsAppLogs) {
+      // Clear logs when no lead is selected or panel is closed
+      if (!selectedLead || !showWhatsAppLogs) {
+        setWhatsAppLogs([]);
+        previousMessageCountRef.current = 0;
+        lastMessageIdRef.current = null;
+      }
+      // Clear polling interval
+      if (whatsappLogsPollIntervalRef.current) {
+        clearInterval(whatsappLogsPollIntervalRef.current);
+        whatsappLogsPollIntervalRef.current = null;
+      }
+      return;
+    }
+
+    // Reset message tracking when switching leads
+    previousMessageCountRef.current = 0;
+    lastMessageIdRef.current = null;
+
+    // Fetch immediately
+    fetchWhatsAppMessagesFromAPI();
+
+    // Set up polling interval - every 3 seconds for instant updates
+    whatsappLogsPollIntervalRef.current = setInterval(() => {
+      fetchWhatsAppMessagesFromAPI();
+    }, 3000);
+
+    // Cleanup on unmount or when dependencies change
+    return () => {
+      if (whatsappLogsPollIntervalRef.current) {
+        clearInterval(whatsappLogsPollIntervalRef.current);
+        whatsappLogsPollIntervalRef.current = null;
+      }
+    };
+  }, [selectedLead?.id, selectedLead?.customerNumber, showWhatsAppLogs]);
+
+  // Only scroll on initial open or when panel is first shown
+  useEffect(() => {
+    if (showWhatsAppLogs && logsContainerRef.current && whatsAppLogs.length > 0) {
+      // Only scroll on initial open, not on every update
+      const shouldScroll = previousMessageCountRef.current === 0;
+      if (shouldScroll) {
+        setTimeout(() => {
+          if (logsContainerRef.current) {
+            logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+          }
+        }, 100);
+      }
+    }
+  }, [showWhatsAppLogs]); // Only depend on showWhatsAppLogs, not whatsAppLogs
+
+  // Track flow progress based on customer responses
+  useEffect(() => {
+    if (!selectedLead || whatsAppLogs.length === 0) {
+      setFlowState('welcome');
+      return;
+    }
+
+    // Check for welcome message (outbound with template)
+    const hasWelcomeMessage = whatsAppLogs.some(log => 
+      log.direction === 'outbound' && 
+      (log.templateName || log.messageText?.includes('Welcome to Express Dial'))
+    );
+
+    if (!hasWelcomeMessage) {
+      setFlowState('welcome');
+      return;
+    }
+
+    // Check customer responses in chronological order
+    const sortedLogs = [...whatsAppLogs].sort((a, b) => 
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+
+    let currentState: typeof flowState = 'welcome';
+    const responses: { name?: string; address?: string; nationality?: string } = {};
+
+    for (const log of sortedLogs) {
+      if (log.direction !== 'inbound') continue;
+
+      const text = (log.messageText || '').toLowerCase().trim();
+      // Get messageType from formatted message or from payload (API returns 'type' field)
+      const messageType = log.messageType || log.payload?.type || log.type || 'text';
+
+      // Check for "Continue" button click (after welcome) - button type or exact text match
+      if ((messageType === 'button' && text === 'continue') || (text === 'continue' && currentState === 'welcome')) {
+        currentState = 'terms';
+      }
+      // Check for "Agree & Continue" or "Continue & Agree" button click
+      else if (messageType === 'button' && (text.includes('agree') && text.includes('continue'))) {
+        currentState = 'delivery';
+      }
+      else if ((text.includes('agree') && text.includes('continue')) || text === 'continue & agree') {
+        currentState = 'delivery';
+      }
+      // Check for "Talk to Live Agent" - skip this button option
+      else if (text.includes('talk to live agent') || (messageType === 'button' && text.includes('talk'))) {
+        continue;
+      }
+      // Check if it's a delivery detail response (name, address, nationality)
+      // These come after "Agree & Continue" button click
+      else if (currentState === 'delivery' || currentState === 'address' || currentState === 'nationality') {
+        // Skip button clicks, very short responses, and common button texts
+        const isButtonClick = messageType === 'button' || 
+                             text === 'continue' || 
+                             text.includes('agree') || 
+                             text === 'no' || 
+                             text === 'yes' || 
+                             text.includes('talk to live agent') || 
+                             text.length <= 1 ||
+                             text === 'tab'; // Skip "Tab" as it's likely a keyboard input, not actual response
+        
+        if (!isButtonClick) {
+          // First non-button response after delivery state = name
+          if (!responses.name) {
+            responses.name = log.messageText || text;
+            currentState = 'address';
+          } 
+          // Second non-button response = address
+          else if (!responses.address) {
+            responses.address = log.messageText || text;
+            currentState = 'nationality';
+          } 
+          // Third non-button response = nationality
+          else if (!responses.nationality) {
+            responses.nationality = log.messageText || text;
+            currentState = 'complete';
+          }
+        }
+      }
+    }
+
+    setDeliveryData(prev => ({
+      name: responses.name || prev.name,
+      address: responses.address || prev.address,
+      nationality: responses.nationality || prev.nationality
+    }));
+    setFlowState(currentState);
+  }, [whatsAppLogs, selectedLead]);
 
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'pending_verification';
@@ -539,6 +1111,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const pendingCountUnsubscribeRef = useRef<(() => void) | null>(null);
   const activatedReverificationUnsubscribeRef = useRef<(() => void) | null>(null);
   const countersUnsubscribeRef = useRef<(() => void) | null>(null);
+  const whatsappLogsPollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Real-time listener for leads and metrics
   useEffect(() => {
@@ -674,7 +1247,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
     // Real-time listener for activated/reverification count
     const activatedReverificationQuery = query(
-      collection(db, 'leads'),
+        collection(db, 'leads'),
       where('status', 'in', ['activated_non_verified', 'reverification'])
     );
 
@@ -1267,8 +1840,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                               ) : (
                                 <>
                                   <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
-                                    {stat.value}
-                                  </dd>
+                          {stat.value}
+                        </dd>
                                   <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
                                     {stat.name === 'Pending Verification' ? 'Leads awaiting verification' : 
                                      stat.name === 'Active Non Verified' ? 'Activated needs reverification' : ''}
@@ -1312,8 +1885,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                               ) : (
                                 <>
                                   <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
-                                    {stat.value}
-                                  </dd>
+                        {stat.value}
+                      </dd>
                                   <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
                                     {stat.name === 'Pending Verification' ? 'Leads awaiting verification' : 
                                      stat.name === 'Active Non Verified' ? 'Activated or needs reverification' : ''}
@@ -1608,16 +2181,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                                   onClick={() => {
                                     setSelectedLead(lead);
                                     setShowWhatsAppLogs(true);
-                                    const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
-                                    onSnapshot(query(logsCol, orderBy('createdAt', 'asc')), (snap) => {
-                                      const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                                      setWhatsAppLogs(rows as any[]);
-                                    }, (error) => {
-                                      if (error.code === 'permission-denied') {
-                                        return;
-                                      }
-                                      console.error('Error in VerifierDashboard WhatsApp logs listener:', error);
-                                    });
+                                    // Messages will be fetched via API polling in useEffect
                                   }}
                                   title="WhatsApp Verification"
                                   className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
@@ -1749,16 +2313,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                             onClick={() => {
                               setSelectedLead(lead);
                               setShowWhatsAppLogs(true);
-                              const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
-                              onSnapshot(query(logsCol, orderBy('createdAt', 'asc')), (snap) => {
-                                const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                                setWhatsAppLogs(rows as any[]);
-                              }, (error) => {
-                                if (error.code === 'permission-denied') {
-                                  return;
-                                }
-                                console.error('Error in VerifierDashboard WhatsApp logs listener:', error);
-                              });
+                              // Messages will be fetched via API polling in useEffect
                             }}
                             title="WhatsApp Verification"
                                 className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
@@ -2313,6 +2868,15 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                     )}
                   </div>
                 </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleResendFlow}
+                    className="inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 shadow-sm"
+                    title="Resend verification flow message"
+                  >
+                    <ArrowRight className="w-3.5 h-3.5 mr-1.5" />
+                    Resend Flow
+                  </button>
                 <button
                   onClick={() => {
                     setShowWhatsAppLogs(false);
@@ -2323,244 +2887,128 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                   <X className="h-5 w-5" />
                 </button>
               </div>
-                              <div ref={logsContainerRef} className="px-6 sm:px-8 py-5 max-h-[70vh] overflow-y-auto space-y-4">
-                {whatsAppLogs.length === 0 ? (
-                  <div className="text-sm text-gray-500">No WhatsApp messages found for this lead.</div>
-                ) : (
-                  whatsAppLogs.map((log) => {
-                    const created = normalizeLogDate(log.createdAt);
-                    const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
-                    const fromDigits = (log.from || '').toString().replace(/\D/g, '');
-                    const fromDisplay = fromDigits ? `+${fromDigits}` : '';
-                    const firstPlan = selectedLead?.plans?.[0];
-                    const planInfo = planDetails;
-                    const isOutbound = log.direction === 'outbound';
-                    const createdTime = created?.getTime() ?? 0;
-                    const hasCustomerReplyAfter =
-                      isOutbound &&
-                      whatsAppLogs.some(other => {
-                        if (other.id === log.id || other.direction !== 'inbound') return false;
-                        const otherCreated = normalizeLogDate(other.createdAt);
-                        return (otherCreated?.getTime() ?? 0) > createdTime;
-                      });
-                    const deriveStatus = (): 'read' | 'delivered' | 'sent' | 'failed' | undefined => {
-                      if (!isOutbound) return undefined;
-                      if (log.status === 'failed') return 'failed';
-                      if (log.status === 'read' || hasCustomerReplyAfter) return 'read';
-                      if (log.status === 'delivered') return 'delivered';
-                      if (log.status === 'sent' || log.status === 'accepted') return 'sent';
-                      return log.status ? 'sent' : undefined;
-                    };
-                    const effectiveStatus = deriveStatus();
-                    const statusLabelMap: Record<string, string> = {
-                      read: 'Read',
-                      delivered: 'Delivered',
-                      sent: 'Sent',
-                      failed: 'Failed'
-                    };
-                    const CONSENT_ORDER: Array<{ key: string; label: string }> = [
-                      {
-                        key: 'ownershipAfterContract',
-                        label:
-                          'The chosen number becomes yours only after completing the contract. During this period, transfer of ownership is not permitted, and porting out to other telecom providers is restricted. Plan upgrades (within the same category) are allowed; downgrades or switching to prepaid are not allowed.'
-                      },
-                      {
-                        key: 'proRatedAgree',
-                        label:
-                          'Multi-SIM is available exclusively with the Limited Data Packages; this feature is not available with Non-Stop Data plans. The plan will be pro-rated. In case of early cancellation, all pending bills must be cleared along with one-month rental + 5% VAT, and the number will be reclaimed by Etisalat.'
-                      },
-                      {
-                        key: 'gracePeriodAcknowledge',
-                        label:
-                          'If you are not a UAE citizen, you must pay half or full monthly rental in advance at activation, which will be adjusted in the 4th month of your billing cycle. In case of technical or network-related issues, or misinformation, you can cancel the plan without charges within the first five days.'
-                      },
-                      {
-                        key: 'dataAccuracyAcknowledge',
-                        label:
-                          'The information provided regarding the number and plan is accurate. Any other information received will not be considered valid. Please read this carefully and confirm, as this communication will be referenced in the event of any future complaints regarding the number or plan.'
-                      },
-                      {
-                        key: 'acceptAllTerms',
-                        label: 'Accept all the Terms & Conditions.'
-                      }
-                    ];
-                    const accepted = Array.isArray(CONSENT_ORDER)
-                      ? CONSENT_ORDER.filter(i => log.consents?.[i.key] === true)
-                      : [];
-                    return (
-                      <div key={log.id} className={clsx('flex', isOutbound ? 'justify-end' : 'justify-start')}>
-                        <div className={clsx('max-w-[85%] rounded-2xl px-4 py-3 shadow-sm border',
-                          isOutbound ? 'bg-indigo-50 text-indigo-900 border-indigo-100' : 'bg-emerald-50 text-emerald-900 border-emerald-100'
-                        )}>
-                          <div className="flex items-center justify-between text-[11px] text-gray-500/80 mb-2">
-                            <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
-                              {isOutbound ? 'Outbound' : 'Inbound'}
-                            </span>
-                            <span className="ml-2 flex items-center gap-1.5">
-                              {fromDisplay && (
-                                <span className="font-bold text-blue-600">From {fromDisplay}</span>
-                              )}
-                              {createdStr && ` · ${createdStr}`}
-                              {isOutbound && (
-                                <span
-                                  className="ml-1.5 inline-flex items-center"
-                                  title={effectiveStatus ? `Message ${statusLabelMap[effectiveStatus] || effectiveStatus}` : 'Message sent'}
-                                >
-                                  {effectiveStatus === 'read' && (
-                                    <CheckCheck className="w-4 h-4 text-green-500" />
-                                  )}
-                                  {effectiveStatus === 'delivered' && (
-                                    <CheckCheck className="w-4 h-4 text-gray-600" />
-                                  )}
-                                  {(!effectiveStatus || effectiveStatus === 'sent') && (
-                                    <Check className="w-3.5 h-3.5 text-gray-500" />
-                                  )}
-                                  {effectiveStatus === 'failed' && (
-                                    <XCircle className="w-4 h-4 text-red-500" />
-                                  )}
-                                </span>
-                              )}
-                            </span>
+              </div>
+                              <div ref={logsContainerRef} className="px-6 sm:px-8 py-5 max-h-[70vh] overflow-y-auto">
+                <WhatsAppConversationView
+                  messages={whatsAppLogs as WhatsAppMessage[]}
+                  lead={selectedLead}
+                  planDetails={planDetails || undefined}
+                  onResendMessage={handleResendVerificationMessage}
+                  resendingLogId={resendingLogId}
+                  showResendButton={true}
+                  containerRef={logsContainerRef}
+                />
+
+
+                {/* Interactive Flow UI - Delivery Details Form - REMOVED: Only show messages, not UI forms */}
+                {false && (flowState === 'delivery' || flowState === 'address' || flowState === 'nationality' || flowState === 'complete') && (
+                  <div className="mt-4 bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-200 rounded-xl p-5 shadow-lg">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+                      <h3 className="text-lg font-bold text-emerald-900">🚚 Delivery Details</h3>
+                    </div>
+                    <div className="bg-white rounded-lg p-4 space-y-4">
+                      <p className="text-sm text-gray-700 mb-4">
+                        Please provide the full delivery address and area where you would like us to deliver your new number.
+                      </p>
+                      
+                      {/* Full Name Field */}
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-gray-900">
+                          Type Your Full Name:
+                          {deliveryData.name && (
+                            <span className="ml-2 text-green-600 text-xs font-normal">✓ Received</span>
+                          )}
+                        </label>
+                        {deliveryData.name ? (
+                          <div className="bg-green-50 border-2 border-green-200 rounded-lg p-3">
+                            <p className="text-sm font-medium text-green-900">{deliveryData.name}</p>
                           </div>
-                          {/* Summary only for the acceptance message (when consents are present) */}
-                          {accepted.length > 0 && firstPlan && (
-                            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 mb-3 shadow-sm">
-                              <div className="flex items-center gap-2 mb-3">
-                                <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                                <h4 className="text-sm font-semibold text-blue-900">Plan & Number Summary</h4>
+                        ) : (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 italic">
+                            Waiting for customer response...
                               </div>
-                              <div className="space-y-2 text-sm">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-gray-700">Selected Number:</span>
-                                  <span className="font-semibold text-gray-900">{firstPlan.number}</span>
+                        )}
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-gray-700">Monthly Plan:</span>
-                                  <span className="font-semibold text-gray-900">
-                                    {firstPlan.plan ? 
-                                      (() => {
-                                        const match = firstPlan.plan.match(/\d+/);
-                                        return match ? `${match[0]} AED + 5% VAT` : firstPlan.plan;
-                                      })() 
-                                      : ''
-                                    }
-                                  </span>
+
+                      {/* Full Address Field - Show after name is received */}
+                      {(flowState === 'address' || flowState === 'nationality' || flowState === 'complete' || deliveryData.address) && (
+                        <div className="space-y-2">
+                          <label className="block text-sm font-semibold text-gray-900">
+                            Type Your Full Address: (e.g., Building Name/Number, Street Name/Number)
+                            {deliveryData.address && (
+                              <span className="ml-2 text-green-600 text-xs font-normal">✓ Received</span>
+                            )}
+                          </label>
+                          {deliveryData.address ? (
+                            <div className="bg-green-50 border-2 border-green-200 rounded-lg p-3">
+                              <p className="text-sm font-medium text-green-900">{deliveryData.address}</p>
                                 </div>
-                                {planInfo?.benefits && planInfo.benefits !== 'N/A' && (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-gray-700">Benefits:</span>
-                                    <span className="font-semibold text-gray-900">{planInfo.benefits}</span>
+                          ) : (
+                            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 italic">
+                              Waiting for customer response...
                                   </div>
                                 )}
-                                {planInfo?.duration && planInfo.duration !== 'N/A' && (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-gray-700">Contract Duration:</span>
-                                    <span className="font-semibold text-gray-900">{planInfo.duration}</span>
                                   </div>
                                 )}
+
+                      {/* Nationality Field - Show after address is received */}
+                      {(flowState === 'nationality' || flowState === 'complete' || deliveryData.nationality) && (
+                        <div className="space-y-2">
+                          <label className="block text-sm font-semibold text-gray-900">
+                            Type Your Nationality: (Ex: Type "UAE" if you're Local)
+                            {deliveryData.nationality && (
+                              <span className="ml-2 text-green-600 text-xs font-normal">✓ Received</span>
+                            )}
+                          </label>
+                          {deliveryData.nationality ? (
+                            <div className="bg-green-50 border-2 border-green-200 rounded-lg p-3">
+                              <p className="text-sm font-medium text-green-900">{deliveryData.nationality}</p>
                               </div>
+                          ) : (
+                            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 italic">
+                              Waiting for customer response...
                             </div>
-                          )}
-                          {log.messageText && (
-                            <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
-                          )}
-                          {/* Show error message if status is failed */}
-                          {effectiveStatus === 'failed' && log.error && (() => {
-                            const errorObj = log.error as any;
-                            let errorText = '';
-                            let errorCode = '';
-                            let errorExplanation = '';
-                            
-                            if (typeof log.error === 'string') {
-                              errorText = log.error;
-                            } else if (errorObj) {
-                              // WhatsApp error structure: { code, title, message, error_data }
-                              const parts = [];
-                              if (errorObj.title) parts.push(errorObj.title);
-                              // Only add message if it's different from title (avoid duplication)
-                              if (errorObj.message && errorObj.message !== errorObj.title) {
-                                parts.push(errorObj.message);
-                              }
-                              errorText = parts.length > 0 ? parts.join(' - ') : '';
-                              errorCode = errorObj.code || '';
-                              
-                              // Provide user-friendly explanations for common error codes
-                              const errorExplanations: Record<string, string> = {
-                                '131026': 'The customer\'s phone number is not registered on WhatsApp or has blocked your business number.',
-                                '131047': 'The customer has not replied within the 24-hour messaging window. Send a template message to re-engage.',
-                                '131051': 'This type of message is not supported. Try using a different message format.',
-                                '131052': 'Media download failed. The media file may be corrupted or too large.',
-                                '131053': 'Media upload failed. Check the file format and size.',
-                                '133000': 'The phone number format is invalid. Use international format (e.g., 971XXXXXXXXX).',
-                                '133004': 'The template message was rejected. Verify the template name and parameters.',
-                                '133005': 'Template not found. Make sure the template is approved in Meta Business Manager.',
-                                '133006': 'Invalid template parameters. Check parameter count and format.',
-                                '133010': 'Message limit exceeded. You\'ve reached the messaging limit for this customer.',
-                                '130472': 'The customer has opted out of marketing messages. They must opt back in before you can send them marketing content.',
-                                '135000': 'Generic WhatsApp Business API error. Contact support if this persists.',
-                                '136000': 'Insufficient WhatsApp Business Account balance. Add funds to continue messaging.',
-                                '368': 'Temporarily blocked for spammy behavior. Reduce message frequency.',
-                                '131031': 'Rate limit exceeded. Too many messages sent in a short time. Wait before retrying.',
-                              };
-                              
-                              errorExplanation = errorExplanations[errorCode] || '';
-                            }
-                            
-                            return (
-                              <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-2.5">
-                                <div className="flex items-start gap-2">
-                                  <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                                  <div className="flex-1 text-xs text-red-800">
-                                    <div className="font-semibold mb-1">Message Failed</div>
-                                    {errorText && <div className="text-red-700 mb-1">{errorText}</div>}
-                                    {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
-                                    {errorExplanation && (
-                                      <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
-                                        <span className="font-semibold">💡 What to do: </span>
-                                        {errorExplanation}
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })()}
-                          {isOutbound && log.templateName && Array.isArray(log.parameters) && log.parameters.length > 0 && (
-                            <div className="mt-2 flex justify-end">
-                              <button
-                                onClick={() => handleResendVerificationMessage(log)}
-                                disabled={resendingLogId === log.id}
-                                className={clsx(
-                                  'inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium shadow-sm',
-                                  resendingLogId === log.id
-                                    ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
-                                    : 'bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500'
-                                )}
-                              >
-                                {resendingLogId === log.id ? 'Resending…' : 'Resend Message'}
-                              </button>
-                            </div>
-                          )}
-                          {accepted.length > 0 && (
-                            <ol className="mt-1 space-y-2 text-sm">
-                              {accepted.map((item, idx) => (
-                                <li key={item.key} className="flex items-start">
-                                  <span className="mr-2 text-gray-700">{idx + 1}.</span>
-                                  <span className="text-gray-900">
-                                    {item.label}
-                                    <span className="ml-2 inline-flex items-center text-green-600 text-xs font-medium align-middle">
-                                      <svg className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M16.704 5.29a1 1 0 00-1.408-1.418L7.5 11.66 4.704 8.864a1 1 0 10-1.408 1.418l3.5 3.5a1 1 0 001.408 0l8.5-8.5z" clipRule="evenodd"/></svg>
-                                      Accepted
-                                    </span>
-                                  </span>
-                                </li>
-                              ))}
-                            </ol>
                           )}
                         </div>
+                      )}
+
+                      {/* Completion Message */}
+                      {flowState === 'complete' && deliveryData.name && deliveryData.address && deliveryData.nationality && (
+                        <div className="mt-4 pt-4 border-t border-gray-200 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-2xl">✅</span>
+                            <p className="text-sm font-semibold text-green-900">All delivery details received!</p>
+                          </div>
+                          {deliveryData.nationality.toLowerCase().trim() === 'uae' ? (
+                            <>
+                              <p className="text-xs text-gray-700 mt-2">
+                                I will forward your details to our delivery team. They will contact you to confirm the time and location for the delivery of your number.
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                If you experience any network issues in your area or if the plan I described is not available in your package, you can cancel it within five days without any penalty.
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                Thank you so much for your time, sir. Have a wonderful day and take care.
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs text-gray-700 mt-2">
+                                Non-local residents are required to pay one month's advance Monthly Recurring Charge (MRC).
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                I will forward your details to our delivery team. They will contact you to confirm the time and location for the delivery of your number.
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                If you experience any network issues in your area or if the plan I described is not available in your package, you can cancel it within five days without any penalty.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      )}
                       </div>
-                    );
-                  })
+                  </div>
                 )}
               </div>
               {/* Reply composer */}

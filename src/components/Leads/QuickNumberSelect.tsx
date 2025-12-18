@@ -42,7 +42,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { collection, query, where, getDocs, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { NumberPool } from '../../types';
-import { Search, ChevronDown, ChevronUp } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, CheckCircle } from 'lucide-react';
 import { useDebounce } from '../../hooks/useDebounce';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../../store/authStore';
@@ -52,6 +52,7 @@ interface QuickNumberSelectProps {
   onSelect: (number: NumberPool) => void;
   selectedCategory: string;
   onCategoryChange: (category: string) => void;
+  selectedNumberId?: string; // ID of the currently selected number
 }
 
 const SEARCH_DEBOUNCE = 300;
@@ -62,7 +63,7 @@ const INITIAL_LOAD_SIZE = 10; // Initial numbers to show when no search term
 
 const numberCategories = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'] as const;
 
-export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange }: QuickNumberSelectProps) {
+export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange, selectedNumberId }: QuickNumberSelectProps) {
   const { user, isAdmin } = useAuthStore();
   const [numbers, setNumbers] = useState<NumberPool[]>([]);
   const [loading, setLoading] = useState(false);
@@ -454,6 +455,7 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
           numbers.map((number) => {
             const selectable = isSelectable(number);
             const isG4OrG5 = number.group?.includes('G4') || number.group?.includes('G5');
+            const isSelected = selectedNumberId === number.id;
             
             return (
               <button
@@ -462,22 +464,44 @@ export function QuickNumberSelect({ onSelect, selectedCategory, onCategoryChange
                 onClick={() => selectable ? onSelect(number) : null}
                 disabled={!selectable}
                 className={clsx(
-                  "w-full p-3 text-left rounded-lg border transition-all",
-                  selectable 
-                    ? "hover:border-indigo-200 hover:bg-gray-50" 
-                    : "opacity-50 cursor-not-allowed"
+                  "w-full p-3 text-left rounded-lg border-2 transition-all",
+                  isSelected
+                    ? "border-indigo-500 bg-indigo-50 shadow-md"
+                    : selectable 
+                    ? "border-gray-200 hover:border-indigo-300 hover:bg-indigo-50/50" 
+                    : "border-gray-200 opacity-50 cursor-not-allowed"
                 )}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex-1">
                     <div className="flex items-center space-x-4">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{number.number}</p>
-                        <p className="text-sm text-gray-500">{number.category}</p>
+                      <div className="flex items-center space-x-2">
+                        {isSelected && (
+                          <CheckCircle className="h-5 w-5 text-indigo-600 flex-shrink-0" />
+                        )}
+                        <div>
+                          <p className={clsx(
+                            "text-sm font-medium",
+                            isSelected ? "text-indigo-900" : "text-gray-900"
+                          )}>
+                            {number.number}
+                          </p>
+                          <p className={clsx(
+                            "text-sm",
+                            isSelected ? "text-indigo-700" : "text-gray-500"
+                          )}>
+                            {number.category}
+                          </p>
+                        </div>
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
+                    {isSelected && (
+                      <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-600 text-white">
+                        SELECTED
+                      </span>
+                    )}
                     {isG4OrG5 && (
                       <span className={clsx(
                         "px-2.5 py-1 rounded-full text-xs font-medium",

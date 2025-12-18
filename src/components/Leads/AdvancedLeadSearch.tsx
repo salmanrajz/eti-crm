@@ -38,8 +38,8 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useMemo } from 'react';
-import { collection, getDocs, query } from 'firebase/firestore';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { collection, getDocs, query, where, orderBy, Timestamp, startAfter, QueryDocumentSnapshot, DocumentData, limit } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead } from '../../types';
@@ -100,7 +100,7 @@ interface AdvancedSearchFilters {
     from: string;
     to: string;
   };
-  updatedDateRange: {
+  activatedDateRange: {
     from: string;
     to: string;
   };
@@ -201,7 +201,7 @@ export function AdvancedLeadSearch({
     
     // Date Filters
     createdDateRange: { from: '', to: '' },
-    updatedDateRange: { from: '', to: '' },
+    activatedDateRange: { from: '', to: '' },
     followUpDateRange: { from: '', to: '' },
     startDateRange: { from: '', to: '' },
     
@@ -227,6 +227,8 @@ export function AdvancedLeadSearch({
   const [showResults, setShowResults] = useState(false);
   const [availablePlanNames, setAvailablePlanNames] = useState<string[]>([]);
   const [loadingPlans, setLoadingPlans] = useState(false);
+  const [fetchedLeads, setFetchedLeads] = useState<Lead[]>([]);
+  const [loadingLeads, setLoadingLeads] = useState(false);
 
   // Only render for admin and coordinator roles
   if (!isAdmin() && !isCoordinator()) {
@@ -263,9 +265,253 @@ export function AdvancedLeadSearch({
     fetchPlanNames();
   }, []);
 
+  // Fetch all leads from Firebase based on filters
+  const fetchLeadsFromFirebase = useCallback(async (searchFilters: AdvancedSearchFilters) => {
+    setLoadingLeads(true);
+    try {
+      let baseQuery = collection(db, 'leads');
+      let constraints: any[] = [];
+
+      // Build Firestore query constraints based on filters
+      // Status filter
+      if (searchFilters.status) {
+        constraints.push(where('status', '==', searchFilters.status));
+      }
+
+      // Date range filters - these can be added to Firestore queries
+      if (searchFilters.createdDateRange.from) {
+        const fromDate = new Date(searchFilters.createdDateRange.from);
+        fromDate.setHours(0, 0, 0, 0);
+        constraints.push(where('createdAt', '>=', Timestamp.fromDate(fromDate)));
+      }
+      if (searchFilters.createdDateRange.to) {
+        const toDate = new Date(searchFilters.createdDateRange.to);
+        toDate.setHours(23, 59, 59, 999);
+        constraints.push(where('createdAt', '<=', Timestamp.fromDate(toDate)));
+      }
+
+      // Agent filter
+      if (searchFilters.agentId) {
+        constraints.push(where('agentId', '==', searchFilters.agentId));
+      }
+
+      // Coordinator filter
+      if (searchFilters.coordinatorId) {
+        constraints.push(where('coordinatorId', '==', searchFilters.coordinatorId));
+      }
+
+      // Team filter
+      if (searchFilters.teamId) {
+        constraints.push(where('teamId', '==', searchFilters.teamId));
+      }
+
+      // Add ordering
+      constraints.push(orderBy('createdAt', 'desc'));
+
+      // Fetch all leads with pagination to ensure we get ALL matching leads
+      let allLeads: Lead[] = [];
+      let lastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+      const BATCH_SIZE = 1000; // Firestore can handle up to several thousand, but we'll paginate to be safe
+      let hasMore = true;
+      let batchIndex = 0;
+
+      while (hasMore) {
+        let batchConstraints = [...constraints];
+        
+        // Add pagination if we have a last document
+        if (lastDoc) {
+          batchConstraints.push(startAfter(lastDoc));
+        }
+        
+        // Add limit for this batch
+        batchConstraints.push(limit(BATCH_SIZE));
+
+        const q = query(baseQuery, ...batchConstraints);
+        const snapshot = await getDocs(q);
+
+        // Convert Firestore documents to Lead objects
+        const batchLeads = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+            updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : data.updatedAt,
+          } as Lead;
+        });
+
+        allLeads = [...allLeads, ...batchLeads];
+
+        // Check if there are more documents to fetch
+        hasMore = snapshot.docs.length === BATCH_SIZE;
+        if (hasMore && snapshot.docs.length > 0) {
+          lastDoc = snapshot.docs[snapshot.docs.length - 1];
+        } else {
+          hasMore = false;
+        }
+        batchIndex += 1;
+      }
+      // Apply in-memory filters for complex queries that can't be done in Firestore
+      // (plan names, number categories, number groups, customer info, etc.)
+      allLeads = allLeads.filter(lead => {
+        // Plan Name filter
+        if (searchFilters.planName.length > 0 && !lead.plans?.some(plan => 
+          searchFilters.planName.some(selectedPlan => 
+            plan.plan?.toLowerCase().includes(selectedPlan.toLowerCase())
+          )
+        )) {
+          return false;
+        }
+
+        // Number Category filter
+        if (searchFilters.numberCategory.length > 0 && !lead.plans?.some(plan => 
+          searchFilters.numberCategory.includes(plan.category)
+        )) {
+          return false;
+        }
+
+        // Number Group filter
+        if (searchFilters.numberGroup.length > 0 && !lead.plans?.some(plan => 
+          plan.group && searchFilters.numberGroup.includes(plan.group)
+        )) {
+          return false;
+        }
+
+        // Customer Name filter
+        if (searchFilters.customerName && !lead.customerName?.toLowerCase().includes(searchFilters.customerName.toLowerCase())) {
+          return false;
+        }
+
+        // Customer Phone filter
+        if (searchFilters.customerPhone && !lead.customerNumber?.includes(searchFilters.customerPhone) && !lead.customerPhone?.includes(searchFilters.customerPhone)) {
+          return false;
+        }
+
+        // Customer Address filter
+        if (searchFilters.customerAddress && !lead.customerAddress?.toLowerCase().includes(searchFilters.customerAddress.toLowerCase())) {
+          return false;
+        }
+
+        // Activated Date Range filter (in-memory since we can only have one range query in Firestore)
+        if (searchFilters.activatedDateRange.from) {
+          const activationDate = (lead as any).activationDate;
+          if (!activationDate) return false;
+          const leadActivationDate = new Date(activationDate);
+          const fromDate = new Date(searchFilters.activatedDateRange.from);
+          if (leadActivationDate < fromDate) return false;
+        }
+        if (searchFilters.activatedDateRange.to) {
+          const activationDate = (lead as any).activationDate;
+          if (!activationDate) return false;
+          const leadActivationDate = new Date(activationDate);
+          const toDate = new Date(searchFilters.activatedDateRange.to);
+          toDate.setHours(23, 59, 59, 999);
+          if (leadActivationDate > toDate) return false;
+        }
+
+        // Follow-up Date Range filter
+        if (searchFilters.followUpDateRange.from || searchFilters.followUpDateRange.to) {
+          const followUpDate = (lead as any).followUpDate;
+          if (!followUpDate) return false;
+          const leadFollowUpDate = new Date(followUpDate);
+          if (searchFilters.followUpDateRange.from) {
+            const fromDate = new Date(searchFilters.followUpDateRange.from);
+            if (leadFollowUpDate < fromDate) return false;
+          }
+          if (searchFilters.followUpDateRange.to) {
+            const toDate = new Date(searchFilters.followUpDateRange.to);
+            toDate.setHours(23, 59, 59, 999);
+            if (leadFollowUpDate > toDate) return false;
+          }
+        }
+
+        // Emirate filter
+        if (searchFilters.emirate && (lead as any).emirate !== searchFilters.emirate) {
+          return false;
+        }
+
+        // Area filter
+        if (searchFilters.area && (lead as any).area !== searchFilters.area) {
+          return false;
+        }
+
+        // Gender filter
+        if (searchFilters.gender && (lead as any).gender !== searchFilters.gender) {
+          return false;
+        }
+
+        // Language filter
+        if (searchFilters.language && (lead as any).language !== searchFilters.language) {
+          return false;
+        }
+
+        // Has Emirate ID filter
+        if (searchFilters.hasEmirateId === 'yes' && !(lead as any).emirateId) {
+          return false;
+        }
+        if (searchFilters.hasEmirateId === 'no' && (lead as any).emirateId) {
+          return false;
+        }
+
+        // Advance Payment filter
+        if (searchFilters.advancePayment === 'yes' && !(lead as any).advancePayment) {
+          return false;
+        }
+        if (searchFilters.advancePayment === 'no' && (lead as any).advancePayment) {
+          return false;
+        }
+
+        // Has Verification Media filter
+        if (searchFilters.hasVerificationMedia === 'yes' && !(lead as any).verificationMedia) {
+          return false;
+        }
+        if (searchFilters.hasVerificationMedia === 'no' && (lead as any).verificationMedia) {
+          return false;
+        }
+
+        // Verification Notes filter
+        if (searchFilters.verificationNotes && !(lead as any).verificationNotes?.toLowerCase().includes(searchFilters.verificationNotes.toLowerCase())) {
+          return false;
+        }
+
+        // Coordinator Notes filter
+        if (searchFilters.coordinatorNotes && !(lead as any).coordinatorNotes?.toLowerCase().includes(searchFilters.coordinatorNotes.toLowerCase())) {
+          return false;
+        }
+
+        return true;
+      });
+
+      setFetchedLeads(allLeads);
+      return allLeads;
+    } catch (error) {
+      console.error('[ADV SEARCH] Error fetching leads from Firebase:', error);
+      toast.error('Failed to fetch leads. Please try again.');
+      setFetchedLeads([]);
+      return [];
+    } finally {
+      setLoadingLeads(false);
+    }
+  }, []);
+
   // Apply filters and get filtered leads
   const filteredLeads = useMemo(() => {
-    return leads.filter(lead => {
+    // If filters have been applied (showResults is true) or we are loading, ALWAYS use fetchedLeads
+    // Never fall back to the local 200-lead cache once search is active
+    let leadsToFilter: Lead[];
+    if (showResults || loadingLeads) {
+      leadsToFilter = fetchedLeads;
+
+      // If we're showing results and not loading, but fetchedLeads is empty, return empty to avoid 200-limit cache
+      if (!loadingLeads && fetchedLeads.length === 0) {
+        return [];
+      }
+    } else {
+      // Before filters are applied, use leads prop for preview
+      leadsToFilter = leads;
+    }
+    
+    const result = leadsToFilter.filter(lead => {
       // Plan and Number Filters
       if (filters.planName.length > 0 && !lead.plans?.some(plan => 
         filters.planName.some(selectedPlan => 
@@ -301,20 +547,25 @@ export function AdvancedLeadSearch({
         const toDate = new Date(filters.createdDateRange.to);
         if (createdDate > toDate) return false;
       }
-      if (filters.updatedDateRange.from) {
-        const updatedDate = new Date(lead.updatedAt);
-        const fromDate = new Date(filters.updatedDateRange.from);
-        if (updatedDate < fromDate) return false;
+      if (filters.activatedDateRange.from) {
+        const activationDate = (lead as any).activationDate;
+        if (!activationDate) return false;
+        const leadActivationDate = new Date(activationDate);
+        const fromDate = new Date(filters.activatedDateRange.from);
+        if (leadActivationDate < fromDate) return false;
       }
-      if (filters.updatedDateRange.to) {
-        const updatedDate = new Date(lead.updatedAt);
-        const toDate = new Date(filters.updatedDateRange.to);
-        if (updatedDate > toDate) return false;
+      if (filters.activatedDateRange.to) {
+        const activationDate = (lead as any).activationDate;
+        if (!activationDate) return false;
+        const leadActivationDate = new Date(activationDate);
+        const toDate = new Date(filters.activatedDateRange.to);
+        if (leadActivationDate > toDate) return false;
       }
 
       return true;
     });
-  }, [leads, filters]);
+    return result;
+  }, [leads, filters, fetchedLeads, showResults, loadingLeads]);
 
   const handleFilterChange = (key: keyof AdvancedSearchFilters, value: any) => {
     setFilters(prev => ({
@@ -357,7 +608,7 @@ export function AdvancedLeadSearch({
       area: '',
       country: '',
       createdDateRange: { from: '', to: '' },
-      updatedDateRange: { from: '', to: '' },
+      activatedDateRange: { from: '', to: '' },
       followUpDateRange: { from: '', to: '' },
       startDateRange: { from: '', to: '' },
       advancePayment: 'all',
@@ -367,6 +618,7 @@ export function AdvancedLeadSearch({
       sharedWith: '',
       startTime: ''
     });
+    setFetchedLeads([]);
     setShowResults(false);
   };
 
@@ -387,10 +639,25 @@ export function AdvancedLeadSearch({
     }));
   };
 
-  const applyFilters = () => {
-    onFiltersChange(filters);
+  const applyFilters = async () => {
+    // Clear previous results and immediately mark that we're showing results
+    setFetchedLeads([]);
     setShowResults(true);
+    
+    // Fetch all leads from Firebase based on filters
+    await fetchLeadsFromFirebase(filters);
+    onFiltersChange(filters);
   };
+
+  // Export handler that guarantees Firebase fetch (all leads) before exporting
+  const handleExport = useCallback(async () => {
+    setLoadingLeads(true);
+    // Always fetch fresh from Firebase to avoid 200-lead cache
+    const firebaseLeads = await fetchLeadsFromFirebase(filters);
+    const leadsToExport = firebaseLeads && firebaseLeads.length > 0 ? firebaseLeads : fetchedLeads;
+    onExportResults(leadsToExport);
+    setLoadingLeads(false);
+  }, [fetchLeadsFromFirebase, filters, fetchedLeads, onExportResults]);
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections(prev => ({
@@ -698,19 +965,19 @@ export function AdvancedLeadSearch({
                       </div>
                     </div>
 
-                    {/* Updated Date Range */}
+                    {/* Activated Date Range */}
                     <div className="space-y-3">
                       <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
                         <Clock className="h-4 w-4 mr-2 text-pink-600" />
-                        Updated Date Range
+                        Activated Date Range
                       </label>
                       <div className="bg-white rounded-xl border-2 border-gray-200 p-4 space-y-3">
                         <div className="flex items-center space-x-2">
                           <Clock className="h-4 w-4 text-gray-400" />
                           <input
                             type="date"
-                            value={filters.updatedDateRange.from}
-                            onChange={(e) => handleNestedFilterChange('updatedDateRange', 'from', e.target.value)}
+                            value={filters.activatedDateRange.from}
+                            onChange={(e) => handleNestedFilterChange('activatedDateRange', 'from', e.target.value)}
                             className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-pink-500 transition-all duration-200"
                             placeholder="From Date"
                           />
@@ -719,21 +986,21 @@ export function AdvancedLeadSearch({
                           <Clock className="h-4 w-4 text-gray-400" />
                           <input
                             type="date"
-                            value={filters.updatedDateRange.to}
-                            onChange={(e) => handleNestedFilterChange('updatedDateRange', 'to', e.target.value)}
+                            value={filters.activatedDateRange.to}
+                            onChange={(e) => handleNestedFilterChange('activatedDateRange', 'to', e.target.value)}
                             className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-pink-500 transition-all duration-200"
                             placeholder="To Date"
                           />
                         </div>
                         <div className="flex space-x-2">
                           <button
-                            onClick={() => handleNestedFilterChange('updatedDateRange', 'from', datePresets.today)}
+                            onClick={() => handleNestedFilterChange('activatedDateRange', 'from', datePresets.today)}
                             className="flex-1 px-3 py-2 bg-pink-100 text-pink-700 rounded-lg hover:bg-pink-200 transition-colors text-sm font-medium"
                           >
                             Today
                           </button>
                           <button
-                            onClick={() => handleNestedFilterChange('updatedDateRange', 'from', datePresets.lastWeek)}
+                            onClick={() => handleNestedFilterChange('activatedDateRange', 'from', datePresets.lastWeek)}
                             className="flex-1 px-3 py-2 bg-pink-100 text-pink-700 rounded-lg hover:bg-pink-200 transition-colors text-sm font-medium"
                           >
                             Last Week
@@ -760,18 +1027,44 @@ export function AdvancedLeadSearch({
                   <h3 className="text-2xl font-bold text-gray-900 mb-2">
                     Search Results
                   </h3>
-                  <p className="text-gray-600">
-                    Found <span className="font-semibold text-blue-600">{filteredLeads.length}</span> leads matching your criteria
-                  </p>
+                  {loadingLeads ? (
+                    <p className="text-gray-600">
+                      <span className="inline-flex items-center">
+                        <RefreshCw className="h-4 w-4 mr-2 animate-spin text-blue-600" />
+                        Fetching all leads from Firebase...
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-gray-600">
+                      Found <span className="font-semibold text-blue-600">{filteredLeads.length}</span> leads matching your criteria
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center space-x-2">
-                  <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-sm text-gray-600">Live Results</span>
+                  {loadingLeads ? (
+                    <>
+                      <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
+                      <span className="text-sm text-gray-600">Loading...</span>
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                      <span className="text-sm text-gray-600">Live Results</span>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
             
-            {filteredLeads.length > 0 ? (
+            {loadingLeads ? (
+              <div className="px-6 py-12">
+                <div className="text-center">
+                  <RefreshCw className="h-12 w-12 text-blue-600 animate-spin mx-auto mb-4" />
+                  <h3 className="text-xl font-semibold text-gray-900 mb-2">Fetching Leads</h3>
+                  <p className="text-gray-600">Loading all matching leads from Firebase. This may take a moment...</p>
+                </div>
+              </div>
+            ) : filteredLeads.length > 0 ? (
               <div className="px-6 py-6 max-h-[50vh] overflow-y-auto">
                 {/* Table Header */}
                 <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
@@ -997,19 +1290,39 @@ export function AdvancedLeadSearch({
           
           <div className="flex items-center space-x-3">
             <button
-              onClick={() => onExportResults(filteredLeads)}
-              className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+              onClick={handleExport}
+              className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={loadingLeads}
             >
-              <Download className="h-4 w-4" />
-              <span>Export Results</span>
+              {loadingLeads ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span>Exporting...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="h-4 w-4" />
+                  <span>Export Results</span>
+                </>
+              )}
             </button>
             
             <button
               onClick={applyFilters}
-              className="flex items-center space-x-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              disabled={loadingLeads}
+              className="flex items-center space-x-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Search className="h-4 w-4" />
-              <span>Apply Filters</span>
+              {loadingLeads ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span>Loading...</span>
+                </>
+              ) : (
+                <>
+                  <Search className="h-4 w-4" />
+                  <span>Apply Filters</span>
+                </>
+              )}
             </button>
           </div>
         </div>

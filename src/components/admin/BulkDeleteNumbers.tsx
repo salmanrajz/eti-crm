@@ -86,7 +86,7 @@ export function BulkDeleteNumbers() {
 
       if (data.success) {
         toast.success(
-          `Successfully deleted ${data.deletedCount} number(s)`,
+          `Successfully changed status to "returned" for ${data.deletedCount} number(s)`,
           { duration: 5000 }
         );
         
@@ -216,7 +216,7 @@ export function BulkDeleteNumbers() {
               <div className="bg-green-50 rounded-lg p-4 border border-green-200">
                 <div className="flex items-center gap-2 text-green-700 mb-1">
                   <CheckCircle className="h-5 w-5" />
-                  <span className="font-medium">Deleted</span>
+                  <span className="font-medium">Status Changed to "Returned"</span>
                 </div>
                 <p className="text-2xl font-bold text-green-900">{result.deletedCount}</p>
               </div>
@@ -240,11 +240,29 @@ export function BulkDeleteNumbers() {
               </div>
             </div>
 
+            {/* Info Message */}
+            {result.deletedCount > 0 && (
+              <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                <div className="flex items-start gap-3">
+                  <CheckCircle className="h-5 w-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium text-blue-900 mb-1">
+                      Status Changed to "Returned"
+                    </p>
+                    <p className="text-xs text-blue-700">
+                      {result.deletedCount} number{result.deletedCount !== 1 ? 's have' : ' has'} been changed to status "returned". 
+                      These numbers will appear in search results when you search for them in the Number Pool.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Details */}
             {(result.deletedNumbers && result.deletedNumbers.length > 0) && (
               <div className="bg-gray-50 rounded-lg p-4">
                 <p className="text-sm font-medium text-gray-700 mb-2">
-                  Sample Deleted Numbers (first 10):
+                  Sample Numbers with Status "Returned" (first 10):
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {result.deletedNumbers.map((num, idx) => (
@@ -321,7 +339,10 @@ export function BulkDeleteNumbers() {
 
               <p className="text-gray-600 mb-6">
                 Are you sure you want to delete <strong>{numbersCount}</strong> number
-                {numbersCount !== 1 ? 's' : ''}? This action cannot be undone.
+                {numbersCount !== 1 ? 's' : ''}? 
+                <br /><br />
+                The status of these numbers will be changed to "returned" and they will appear in search results. 
+                This action cannot be undone.
               </p>
 
               <div className="flex gap-3">

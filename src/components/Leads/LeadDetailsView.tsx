@@ -46,6 +46,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { format } from 'date-fns';
+import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppConversationView';
+import { normalizeTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, onSnapshot, orderBy } from 'firebase/firestore';
@@ -63,7 +65,7 @@ import {
   MapPinned, FileSpreadsheet, Briefcase,
   Clock as ClockIcon, CheckCircle2, AlertCircle, AlertTriangle, ThumbsDown,
   MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
-  MessageCircle, Check, CheckCheck, Paperclip, RefreshCw
+  MessageCircle, Check, CheckCheck, Paperclip, RefreshCw, Trash2
 } from 'lucide-react';
 import { countryList } from '../../utils/countries';
 import type { Lead, UserRole } from '../../types';
@@ -281,6 +283,39 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [originalPlan, setOriginalPlan] = useState<string>('');
   const [showNumberSelector, setShowNumberSelector] = useState(false);
   const [allPlans, setAllPlans] = useState<{id: string; name: string; category: string}[]>([]);
+  
+  // States for managing multiple numbers (arrays for each plan index)
+  const [editableNumbers, setEditableNumbers] = useState<string[]>([]);
+  const [editableNumberIds, setEditableNumberIds] = useState<string[]>([]);
+  const [editablePlans, setEditablePlans] = useState<string[]>([]);
+  const [originalNumbers, setOriginalNumbers] = useState<string[]>([]);
+  const [originalPlans, setOriginalPlans] = useState<string[]>([]);
+  const [showNumberSelectors, setShowNumberSelectors] = useState<boolean[]>([]);
+  const [removedPlanIndices, setRemovedPlanIndices] = useState<Set<number>>(new Set());
+  
+  // States for adding new numbers
+  const [newNumbers, setNewNumbers] = useState<Array<{
+    numberId: string;
+    number: string;
+    plan: string;
+    category: string;
+    group?: string;
+    passcode?: string;
+    activationDate: string;
+    srNumber: string;
+    serviceOrderNumber: string;
+    selectedGroup: string;
+    srImageFile: File | null;
+  }>>([]);
+  const [showAddNumberForm, setShowAddNumberForm] = useState(false);
+  const [newNumberData, setNewNumberData] = useState<{
+    id: string;
+    number: string;
+    category: string;
+    passcode: string;
+  } | null>(null);
+  const [newNumberPlan, setNewNumberPlan] = useState<string>('');
+  const [newNumberCategory, setNewNumberCategory] = useState<string>('Standard');
 
   // Prefill coordinator note based on action type
   useEffect(() => {
@@ -321,6 +356,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         const serviceOrderNumbersArray: string[] = [];
         const selectedGroupsArray: string[] = [];
         const srImageFilesArray: (File | null)[] = [];
+        const numbersArray: string[] = [];
+        const numberIdsArray: string[] = [];
+        const plansArray: string[] = [];
+        const originalNumbersArray: string[] = [];
+        const originalPlansArray: string[] = [];
+        const showSelectorsArray: boolean[] = [];
         
         // Get today's date in YYYY-MM-DD format for date input
         const today = new Date();
@@ -335,6 +376,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
           serviceOrderNumbersArray.push('');
           selectedGroupsArray.push(plan.group || '');
           srImageFilesArray.push(null);
+          numbersArray.push(plan.number || '');
+          numberIdsArray.push(plan.numberId || '');
+          plansArray.push(plan.plan || '');
+          originalNumbersArray.push(plan.number || '');
+          originalPlansArray.push(plan.plan || '');
+          showSelectorsArray.push(false);
           
           if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
             try {
@@ -361,6 +408,13 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         setSrNumbers(srNumbersArray);
         setServiceOrderNumbers(serviceOrderNumbersArray);
         setSrImageFiles(srImageFilesArray);
+        setEditableNumbers(numbersArray);
+        setEditableNumberIds(numberIdsArray);
+        setEditablePlans(plansArray);
+        setOriginalNumbers(originalNumbersArray);
+        setOriginalPlans(originalPlansArray);
+        setShowNumberSelectors(showSelectorsArray);
+        setRemovedPlanIndices(new Set());
         
         // Also set first plan values for backward compatibility
         const firstPlan = plans[0];
@@ -388,6 +442,13 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         setSrNumbers([]);
         setServiceOrderNumbers([]);
         setSrImageFiles([]);
+        setEditableNumbers([]);
+        setEditableNumberIds([]);
+        setEditablePlans([]);
+        setOriginalNumbers([]);
+        setOriginalPlans([]);
+        setShowNumberSelectors([]);
+        setRemovedPlanIndices(new Set());
       }
     };
     prefill();
@@ -495,26 +556,114 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const whatsappLogsUnsubRef = useRef<null | (() => void)>(null);
   const [sendingVerification, setSendingVerification] = useState(false);
+  // Flow state tracking
+  const [flowState, setFlowState] = useState<'welcome' | 'terms' | 'delivery' | 'name' | 'address' | 'nationality' | 'complete'>('welcome');
+  const [deliveryData, setDeliveryData] = useState({ name: '', address: '', nationality: '' });
+
+  // Track flow progress based on customer responses
+  useEffect(() => {
+    if (whatsAppLogs.length === 0) {
+      setFlowState('welcome');
+      return;
+    }
+
+    // Check for welcome message (outbound with template)
+    const hasWelcomeMessage = whatsAppLogs.some(log => 
+      log.direction === 'outbound' && 
+      (log.templateName || log.messageText?.includes('Welcome to Express Dial'))
+    );
+
+    if (!hasWelcomeMessage) {
+      setFlowState('welcome');
+      return;
+    }
+
+    // Check customer responses in chronological order
+    const sortedLogs = [...whatsAppLogs].sort((a, b) => 
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+
+    let currentState: typeof flowState = 'welcome';
+    const responses: { name?: string; address?: string; nationality?: string } = {};
+
+    for (const log of sortedLogs) {
+      if (log.direction !== 'inbound') continue;
+
+      const text = (log.messageText || '').toLowerCase().trim();
+      // Get messageType from formatted message or from payload (API returns 'type' field)
+      const messageType = log.messageType || log.payload?.type || log.type || 'text';
+
+      // Check for "Continue" button click (after welcome) - button type or exact text match
+      if ((messageType === 'button' && text === 'continue') || (text === 'continue' && currentState === 'welcome')) {
+        currentState = 'terms';
+      }
+      // Check for "Agree & Continue" or "Continue & Agree" button click
+      else if (messageType === 'button' && (text.includes('agree') && text.includes('continue'))) {
+        currentState = 'delivery';
+      }
+      else if ((text.includes('agree') && text.includes('continue')) || text === 'continue & agree') {
+        currentState = 'delivery';
+      }
+      // Check for "Talk to Live Agent" - skip this button option
+      else if (text.includes('talk to live agent') || (messageType === 'button' && text.includes('talk'))) {
+        continue;
+      }
+      // Check if it's a delivery detail response (name, address, nationality)
+      // These come after "Agree & Continue" button click
+      else if (currentState === 'delivery' || currentState === 'address' || currentState === 'nationality') {
+        // Skip button clicks, very short responses, and common button texts
+        const isButtonClick = messageType === 'button' || 
+                             text === 'continue' || 
+                             text.includes('agree') || 
+                             text === 'no' || 
+                             text === 'yes' || 
+                             text.includes('talk to live agent') || 
+                             text.length <= 1 ||
+                             text === 'tab'; // Skip "Tab" as it's likely a keyboard input, not actual response
+        
+        if (!isButtonClick) {
+          // First non-button response after delivery state = name
+          if (!responses.name) {
+            responses.name = log.messageText || text;
+            currentState = 'address';
+          } 
+          // Second non-button response = address
+          else if (!responses.address) {
+            responses.address = log.messageText || text;
+            currentState = 'nationality';
+          } 
+          // Third non-button response = nationality
+          else if (!responses.nationality) {
+            responses.nationality = log.messageText || text;
+            currentState = 'complete';
+          }
+        }
+      }
+    }
+
+    setDeliveryData(prev => ({
+      name: responses.name || prev.name,
+      address: responses.address || prev.address,
+      nationality: responses.nationality || prev.nationality
+    }));
+    setFlowState(currentState);
+  }, [whatsAppLogs]);
   const [showVerificationDialog, setShowVerificationDialog] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [sendingReply, setSendingReply] = useState(false);
   const [resendingLogId, setResendingLogId] = useState<string | null>(null);
 
-  // Auto-scroll to bottom when new messages are added
+  // Auto-scroll to bottom when new messages are added (only when chat is open)
   useEffect(() => {
-    if (whatsappMessagesRef.current) {
-      whatsappMessagesRef.current.scrollTop = whatsappMessagesRef.current.scrollHeight;
+    if (showWhatsAppChat && whatsappMessagesRef.current && whatsAppLogs.length > 0) {
+      // Small delay to ensure DOM is updated
+      setTimeout(() => {
+        if (whatsappMessagesRef.current) {
+          whatsappMessagesRef.current.scrollTop = whatsappMessagesRef.current.scrollHeight;
+        }
+      }, 100);
     }
-  }, [whatsAppLogs]);
-
-  const normalizeLogDate = (value: any): Date | null => {
-    if (!value) return null;
-    if (value instanceof Date) return value;
-    if (typeof value.toDate === 'function') return value.toDate();
-    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
-    const parsed = new Date(value);
-    return isNaN(parsed.getTime()) ? null : parsed;
-  };
+  }, [whatsAppLogs, showWhatsAppChat]);
 
   const stopWhatsAppLogsListener = () => {
     if (whatsappLogsUnsubRef.current) {
@@ -523,56 +672,168 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     }
   };
 
-  const startWhatsAppLogsListener = async () => {
-    const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
-    
-    // First load existing messages immediately
+  const fetchWhatsAppMessagesFromAPI = async () => {
+    if (!lead?.customerNumber) {
+      console.warn('No customer number found for lead');
+      return;
+    }
+
     try {
-      const logsQuery = query(logsCol, orderBy('createdAt', 'asc'));
-      const snapshot = await getDocs(logsQuery);
-      const rows = snapshot.docs.map(docSnap => ({
-        id: docSnap.id,
-        ...docSnap.data(),
-        createdAt: docSnap.data().createdAt
-      }));
-      setWhatsAppLogs(rows as any[]);
+      // Format customer number for API - Simple logic: remove first 0, add 971
+      // This matches VerifierDashboard to ensure consistent phone number formatting
+      let formattedNumber = lead.customerNumber.toString().replace(/\D/g, '');
       
-      // Then set up real-time listener for updates
-      const unsubscribe = onSnapshot(
-        logsQuery,
-        snapshot => {
-          const rows = snapshot.docs.map(docSnap => ({
-            id: docSnap.id,
-            ...docSnap.data(),
-            createdAt: docSnap.data().createdAt
-          }));
-          setWhatsAppLogs(rows as any[]);
-        },
-        error => {
-          if (error.code !== 'permission-denied') {
-            console.error('Error listening to WhatsApp logs:', error);
-          }
-        }
-      );
-      
-      whatsappLogsUnsubRef.current = unsubscribe;
-    } catch (error: any) {
-      if (error.code === 'permission-denied') {
-        toast.error('Permission denied: Cannot access WhatsApp logs');
-      } else if (error.message?.includes('index')) {
-        toast.error('Missing Firestore index');
+      // Remove leading zero if present
+      if (formattedNumber.startsWith('0')) {
+        formattedNumber = formattedNumber.substring(1);
       }
+      
+      // Add 971 prefix
+      if (!formattedNumber.startsWith('971')) {
+        formattedNumber = `971${formattedNumber}`;
+      }
+
+      const { checkConversation } = await import('../../utils/whatsappRouter');
+      const conversationData = await checkConversation(formattedNumber, lead.id);
+      
+      if (conversationData?.success === false) {
+        console.warn('Failed to fetch WhatsApp messages:', conversationData.error);
+        return;
+      }
+
+      if (conversationData?.messages && Array.isArray(conversationData.messages)) {
+        // Format messages for display
+        const formattedMessages = conversationData.messages.map((msg: any) => ({
+          id: msg.messageId || msg.id,
+          direction: msg.direction,
+          from: msg.from,
+          to: msg.to,
+          messageText: msg.messageText || '',
+          messageId: msg.messageId,
+          status: msg.status,
+          templateName: msg.templateName,
+          consents: msg.consents,
+          readStatus: msg.readStatus,
+          deliveryStatus: msg.deliveryStatus,
+          messageType: msg.messageType,
+          replyTo: msg.replyTo,
+          repliedMessage: msg.repliedMessage,
+          mediaId: msg.mediaId,
+          mediaPath: msg.mediaPath,
+          mime: msg.mime,
+          userId: msg.userId,
+          userName: msg.userName,
+          senderName: msg.senderName,
+          buttons: msg.buttons,
+          payload: msg.payload,
+          // Normalize timestamp once when first received from API
+          // Store as Date object to preserve timezone information
+          createdAt: msg.createdAt 
+            ? (msg.createdAt instanceof Date 
+                ? msg.createdAt 
+                : normalizeTimestamp(msg.createdAt) || new Date(msg.createdAt))
+            : new Date()
+        }));
+
+        // Sort by timestamp (oldest first), with secondary sort by messageId for messages with same timestamp
+        formattedMessages.sort((a: any, b: any) => {
+          const timeA = getTimestampForSort(normalizeTimestamp(a.createdAt));
+          const timeB = getTimestampForSort(normalizeTimestamp(b.createdAt));
+          if (timeA !== timeB) {
+            return timeA - timeB;
+          }
+          // If timestamps are equal, sort by messageId to maintain consistent order
+          const idA = a.messageId || a.id || '';
+          const idB = b.messageId || b.id || '';
+          return idA.localeCompare(idB);
+        });
+
+        
+        // Only update if messages actually changed to prevent unnecessary re-renders
+        // IMPORTANT: Preserve existing message timestamps to prevent timestamp changes on re-fetch
+        setWhatsAppLogs(prev => {
+          // Create a map of existing messages by messageId to preserve their timestamps
+          const existingMessageMap = new Map();
+          prev.forEach((msg: any) => {
+            const msgId = msg.messageId || msg.id;
+            if (msgId) {
+              existingMessageMap.set(msgId, msg);
+            }
+          });
+          
+          // Merge API messages with existing messages, preserving timestamps from existing messages
+          const mergedMessages = formattedMessages.map((apiMsg: any) => {
+            const msgId = apiMsg.messageId || apiMsg.id;
+            const existingMsg = existingMessageMap.get(msgId);
+            
+            // If this message already exists, ALWAYS preserve its timestamp to prevent changes
+            // This is critical to prevent timestamp flickering when API polls
+            if (existingMsg && existingMsg.createdAt) {
+              // Use the existing timestamp as-is (it's already a Date object from first load)
+              // Don't re-normalize as it might change the timezone interpretation
+              // IMPORTANT: Preserve the optimistic message's timestamp (which is correct local time)
+              return {
+                ...apiMsg,
+                createdAt: existingMsg.createdAt, // Preserve the original timestamp exactly
+                // Also preserve the messageId from existing if it's a temp message that hasn't been confirmed yet
+                messageId: existingMsg.messageId || apiMsg.messageId
+              };
+            }
+            
+            // New message, normalize API timestamp once and store as Date object
+            const apiDate = normalizeTimestamp(apiMsg.createdAt);
+            if (!apiDate) {
+              console.warn('Failed to normalize timestamp for message:', apiMsg.messageId, apiMsg.createdAt);
+            }
+            
+            return {
+              ...apiMsg,
+              createdAt: apiDate || new Date(apiMsg.createdAt)
+            };
+          });
+          
+          const prevMessageIds = prev.map((m: any) => m.id || m.messageId).join(',');
+          const newMessageIds = mergedMessages.map((m: any) => m.id || m.messageId).join(',');
+          
+          // Only update if messages actually changed
+          if (prevMessageIds === newMessageIds && prev.length === mergedMessages.length) {
+            return prev; // No change, return previous state
+          }
+          
+          return mergedMessages;
+        });
+      }
+    } catch (error: any) {
+      console.error('Error fetching WhatsApp messages from API:', error);
     }
   };
 
+  // Auto-poll WhatsApp messages from API (only when chat is open)
   useEffect(() => {
-    if (!showWhatsAppChat) {
-      stopWhatsAppLogsListener();
+    if (!lead?.id || !lead?.customerNumber || !showWhatsAppChat) {
+      return;
     }
-    return () => {
-      stopWhatsAppLogsListener();
+
+    // Fetch immediately
+    fetchWhatsAppMessagesFromAPI();
+
+    // Set up polling interval - every 3 seconds for instant updates
+    const pollInterval = setInterval(() => {
+      fetchWhatsAppMessagesFromAPI();
+    }, 3000);
+
+    // Store cleanup function
+    whatsappLogsUnsubRef.current = () => {
+      clearInterval(pollInterval);
     };
-  }, [showWhatsAppChat]);
+
+    return () => {
+      if (whatsappLogsUnsubRef.current) {
+        whatsappLogsUnsubRef.current();
+        whatsappLogsUnsubRef.current = null;
+      }
+    };
+  }, [lead?.id, lead?.customerNumber, showWhatsAppChat]);
   
   // Determine if we need to show the postpaid campaign checklist
   const showPostpaidCampaignChecklist = hasPostpaidCampaignPlan(lead);
@@ -1397,35 +1658,18 @@ Language: ${lead.language || 'N/A'}`;
         planDetails.duration
       ];
       
-      let to = (freshLead.customerNumber || '').toString().replace(/\D/g, '');
-      const country = (freshLead as any).country || 'AE';
-      const code = country === 'AE' ? '971'
-        : country === 'SA' ? '966'
-        : country === 'QA' ? '974'
-        : country === 'KW' ? '965'
-        : country === 'BH' ? '973'
-        : country === 'OM' ? '968'
-        : country === 'IN' ? '91'
-        : country === 'PK' ? '92'
-        : country === 'EG' ? '20'
-        : country === 'PH' ? '63'
-        : country === 'ID' ? '62'
-        : country === 'MY' ? '60'
-        : country === 'SG' ? '65'
-        : country === 'TH' ? '66'
-        : country === 'VN' ? '84'
-        : country === 'CN' ? '86'
-        : country === 'JP' ? '81'
-        : country === 'KR' ? '82'
-        : country === 'AU' ? '61'
-        : country === 'NZ' ? '64'
-        : country === 'GB' ? '44'
-        : country === 'US' ? '1'
-        : country === 'CA' ? '1'
-        : '971';
+      // Format phone number for API - Simple logic: remove first 0, add 971
+      // Example: 0506789345 -> 971506789345
+      let to = (freshLead.customerNumber || '').toString().replace(/\D/g, ''); // Remove non-digits
       
-      if (!to.startsWith(code)) {
-        to = `${code}${to}`;
+      // Remove leading zero if present
+      if (to.startsWith('0')) {
+        to = to.substring(1);
+      }
+      
+      // Add 971 prefix
+      if (!to.startsWith('971')) {
+        to = `971${to}`;
       }
       
       const components: any[] = [
@@ -1668,13 +1912,12 @@ Language: ${lead.language || 'N/A'}`;
       
       const group = firstPlan.group || undefined;
       
-      // Import WhatsApp utilities
-      const { sendWhatsAppWithComponentsByGroup, resolveWhatsAppRoute } = await import('../../utils/whatsappRouter');
-      const { logOutboundVerificationMessage } = await import('../../utils/whatsappVerification');
+      // Get language from lead
+      const language = (lead as any).language || 'English';
       
-      const routeConfig = await resolveWhatsAppRoute(group);
-      const { template } = routeConfig;
-      const dynamicTemplateName = template.templateName;
+      // Import WhatsApp utilities
+      const { triggerFlowExternal } = await import('../../utils/whatsappRouter');
+      const { logOutboundVerificationMessage } = await import('../../utils/whatsappVerification');
       
       const amountDigits = (planDetails.amount || '').toString().match(/\d+/)?.[0];
       const monthlyLabel = amountDigits ? `AED ${amountDigits}/Month` : (planDetails.amount || 'N/A');
@@ -1685,37 +1928,25 @@ Language: ${lead.language || 'N/A'}`;
         planDetails.duration
       ];
       
-      const payload = {
-        to: formattedNumber,
+      // Trigger flow using new API
+      const sendResponse = await triggerFlowExternal({
+        phoneNumber: formattedNumber,
         group,
-        templateName: dynamicTemplateName,
-        components: [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: firstPlan.number || 'N/A' },
-              { type: 'text', text: planDetails.amount },
-              { type: 'text', text: planDetails.benefits },
-              { type: 'text', text: planDetails.duration }
-            ]
-          },
-          {
-            type: 'button',
-            sub_type: 'flow',
-            index: 0
-          }
-        ]
-      };
-      
-      // Send WhatsApp message
-      const sendResponse = await sendWhatsAppWithComponentsByGroup(payload);
+        language,
+        templateVariables: {
+          value1: firstPlan.number || 'N/A',
+          value2: monthlyLabel,
+          value3: planDetails.benefits,
+          value4: planDetails.duration
+        }
+      });
       
       // Optimistically add verification message to UI
       const verificationMessage = {
         direction: 'outbound',
         to: formattedNumber,
-        messageText: `Verification message sent with template: ${dynamicTemplateName}`,
-        templateName: dynamicTemplateName,
+        messageText: `Verification flow triggered successfully`,
+        templateName: 'TestingBot2',
         status: 'sent',
         createdAt: new Date()
       };
@@ -1723,10 +1954,12 @@ Language: ${lead.language || 'N/A'}`;
       
       // Log outbound verification message
       try {
+        // Determine flowId for logging
+        const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
         await logOutboundVerificationMessage(
           lead.id,
           formattedNumber,
-          dynamicTemplateName,
+          flowId,
           templateParameters,
           {
             sendResponse
@@ -1747,11 +1980,130 @@ Language: ${lead.language || 'N/A'}`;
       toast.success('Verification message sent successfully!');
       setShowVerificationDialog(false);
       
+      // Messages are now auto-fetched via polling in useEffect, no need for manual polling
+      // The useEffect will automatically fetch new messages every 3 seconds
+      
     } catch (error: any) {
       console.error('Error sending verification message:', error);
       toast.error(error?.message || 'Failed to send verification message');
     } finally {
       setSendingVerification(false);
+    }
+  };
+
+  // Handler to change number for a specific plan index
+  const handleChangeNumber = async (index: number, numberData: { id: string; number: string; passcode?: string; category?: string }) => {
+    const newNumbers = [...editableNumbers];
+    const newNumberIds = [...editableNumberIds];
+    const newPasscodes = [...editablePasscodes];
+    const newCategories = [...editableCategories];
+    const newSelectors = [...showNumberSelectors];
+    
+    newNumbers[index] = numberData.number;
+    newNumberIds[index] = numberData.id;
+    if (numberData.passcode) newPasscodes[index] = numberData.passcode;
+    if (numberData.category) newCategories[index] = numberData.category;
+    newSelectors[index] = false;
+    
+    setEditableNumbers(newNumbers);
+    setEditableNumberIds(newNumberIds);
+    setEditablePasscodes(newPasscodes);
+    setEditableCategories(newCategories);
+    setShowNumberSelectors(newSelectors);
+  };
+
+  // Handler to change plan for a specific plan index
+  const handleChangePlan = (index: number, planName: string) => {
+    const newPlans = [...editablePlans];
+    newPlans[index] = planName;
+    setEditablePlans(newPlans);
+  };
+
+  // Handler to add a new number
+  const handleAddNewNumber = async (numberData: { id: string; number: string; passcode?: string; category?: string }) => {
+    if (!newNumberPlan) {
+      toast.error('Please select a plan for the new number');
+      return;
+    }
+    
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    
+    const newNumberEntry = {
+      numberId: numberData.id,
+      number: numberData.number,
+      plan: newNumberPlan,
+      category: numberData.category || newNumberCategory || 'Standard',
+      group: 'G1', // Default group, can be changed
+      passcode: numberData.passcode || '',
+      activationDate: todayStr,
+      srNumber: '',
+      serviceOrderNumber: '',
+      selectedGroup: 'G1',
+      srImageFile: null as File | null
+    };
+    
+    setNewNumbers(prev => [...prev, newNumberEntry]);
+    setNewNumberData(null);
+    setNewNumberPlan('');
+    setNewNumberCategory('Standard');
+    setShowAddNumberForm(false);
+    toast.success('New number added. Please fill in activation details.');
+  };
+
+  // Handler to remove a new number from the list
+  const handleRemoveNewNumber = (index: number) => {
+    setNewNumbers(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // Handler to remove number from lead (make it available in pool)
+  const handleRemoveNumber = async (index: number) => {
+    if (!confirm(`Are you sure you want to remove this number from the lead? It will become available in the pool.`)) {
+      return;
+    }
+    
+    const plan = lead.plans?.[index];
+    if (!plan?.numberId || plan.numberId.startsWith('virtual-')) {
+      // Just mark as removed in UI
+      setRemovedPlanIndices(prev => new Set([...prev, index]));
+      return;
+    }
+
+    try {
+      // Update number pool to make it available
+      const numberRef = doc(db, 'numberPool', plan.numberId);
+      const numberDoc = await getDoc(numberRef);
+      
+      if (numberDoc.exists()) {
+        const numberData = numberDoc.data();
+        await updateDoc(numberRef, {
+          status: 'open',
+          lastStatusChange: new Date(),
+          leadId: null,
+          reservedBy: null,
+          reservedAt: null,
+          claimingAgentId: null,
+          claimingStartedAt: null,
+          claimingExpiresAt: null,
+          claimQueue: []
+        });
+        
+        await logNumberAction(
+          plan.numberId,
+          plan.number || '',
+          'status_changed',
+          { status: numberData?.status, leadId: lead.id },
+          { status: 'open', leadId: null },
+          `Number removed from lead by ${user?.name || 'Unknown'} during activation`
+        );
+      }
+      
+      // Mark as removed in UI
+      setRemovedPlanIndices(prev => new Set([...prev, index]));
+      toast.success('Number removed and made available in pool');
+    } catch (error: any) {
+      console.error('Error removing number:', error);
+      toast.error('Failed to remove number');
     }
   };
 
@@ -1783,8 +2135,12 @@ Language: ${lead.language || 'N/A'}`;
     if (isActivationAction) {
       const plansCount = lead.plans?.length || 0;
       if (plansCount > 1) {
-        // Multiple numbers - validate all activation fields
+        // Multiple numbers - validate all activation fields (skip removed plans)
         for (let i = 0; i < plansCount; i++) {
+          // Skip validation for removed plans
+          if (removedPlanIndices.has(i)) {
+            continue;
+          }
           if (!activationDates[i]) {
             toast.error(`Activation Date is required for Number ${i + 1}`);
             return;
@@ -1799,6 +2155,27 @@ Language: ${lead.language || 'N/A'}`;
           }
           if (!selectedGroups[i]) {
             toast.error(`Please select a Group for Number ${i + 1}`);
+            return;
+          }
+        }
+        
+        // Validate new numbers
+        for (let i = 0; i < newNumbers.length; i++) {
+          const newNum = newNumbers[i];
+          if (!newNum.activationDate) {
+            toast.error(`Activation Date is required for New Number ${i + 1}`);
+            return;
+          }
+          if (!newNum.srNumber?.trim()) {
+            toast.error(`SR No. is required for New Number ${i + 1}`);
+            return;
+          }
+          if (!newNum.serviceOrderNumber?.trim()) {
+            toast.error(`Service Order number is required for New Number ${i + 1}`);
+            return;
+          }
+          if (!newNum.selectedGroup) {
+            toast.error(`Please select a Group for New Number ${i + 1}`);
             return;
           }
         }
@@ -1859,6 +2236,7 @@ Language: ${lead.language || 'N/A'}`;
         (updateData as any).assignedAt = serverTimestamp();
       }
     } else if (coordinatorAction === 'activate') {
+      // Check if numbers were changed or new numbers added (will be set later in activation logic)
       updateData.status = hasChanges ? 'activated_non_verified' : 'activated';
     } else if (coordinatorAction === 'activate_non_verified') {
       updateData.status = 'activated_non_verified';
@@ -1901,30 +2279,114 @@ Language: ${lead.language || 'N/A'}`;
       if (isActivationAction) {
         const plansCount = lead.plans?.length || 0;
         
+        // Check if any numbers were changed or new numbers were added
+        let hasNumberChanges = false;
+        let hasNewNumbers = newNumbers.length > 0;
+        
         if (plansCount > 1) {
-          // Multiple numbers - store activation data for each
-          (updateData as any).activationDates = activationDates.map(date => new Date(date));
-          (updateData as any).srNumbers = srNumbers.map(sr => sr.trim());
-          (updateData as any).serviceOrderNumbers = serviceOrderNumbers.map(so => so.trim());
-          (updateData as any).activationGroups = selectedGroups;
-          
-          // Update plans with activation data
+          // Multiple numbers - filter out removed plans and store activation data for each
           const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
-          (updateData as any).plans = currentPlans.map((p: any, index: number) => ({
+          
+          // Check for number changes
+          currentPlans.forEach((p: any, index: number) => {
+            if (!removedPlanIndices.has(index)) {
+              const numberChanged = editableNumberIds[index] && editableNumberIds[index] !== p.numberId;
+              if (numberChanged) {
+                hasNumberChanges = true;
+              }
+            }
+          });
+          
+          // Filter out removed plans and map to new plans array
+          const updatedPlans = currentPlans
+            .map((p: any, index: number) => {
+              // Skip removed plans
+              if (removedPlanIndices.has(index)) {
+                return null;
+              }
+              
+              // Check if number or plan changed
+              const numberChanged = editableNumbers[index] && editableNumbers[index] !== originalNumbers[index];
+              const planChanged = editablePlans[index] && editablePlans[index] !== originalPlans[index];
+              
+              return {
             ...p,
+                // Update number and numberId if changed
+                number: editableNumbers[index] || p.number,
+                numberId: editableNumberIds[index] || p.numberId,
+                // Update plan if changed
+                plan: editablePlans[index] || p.plan,
+                // Update category if number changed
+                category: editableCategories[index] || p.category,
             group: selectedGroups[index] || p.group,
             activationDate: activationDates[index] ? new Date(activationDates[index]) : null,
             srNumber: srNumbers[index]?.trim() || null,
             serviceOrderNumber: serviceOrderNumbers[index]?.trim() || null
+              };
+            })
+            .filter((p: any) => p !== null); // Remove null entries (removed plans)
+          
+          // Store activation data arrays (filtered for non-removed plans)
+          const filteredActivationDates: Date[] = [];
+          const filteredSrNumbers: string[] = [];
+          const filteredServiceOrderNumbers: string[] = [];
+          const filteredGroups: string[] = [];
+          const filteredPasscodes: string[] = [];
+          const filteredCategories: string[] = [];
+          
+          currentPlans.forEach((p: any, index: number) => {
+            if (!removedPlanIndices.has(index)) {
+              filteredActivationDates.push(activationDates[index] ? new Date(activationDates[index]) : new Date());
+              filteredSrNumbers.push(srNumbers[index]?.trim() || '');
+              filteredServiceOrderNumbers.push(serviceOrderNumbers[index]?.trim() || '');
+              filteredGroups.push(selectedGroups[index] || '');
+              filteredPasscodes.push(editablePasscodes[index]?.trim() || '');
+              filteredCategories.push(editableCategories[index]?.trim() || '');
+            }
+          });
+          
+          // Add new numbers to the plans array
+          const newPlansEntries = newNumbers.map((newNum) => ({
+            numberId: newNum.numberId,
+            number: newNum.number,
+            plan: newNum.plan,
+            category: newNum.category,
+            group: newNum.selectedGroup,
+            activationDate: new Date(newNum.activationDate),
+            srNumber: newNum.srNumber.trim(),
+            serviceOrderNumber: newNum.serviceOrderNumber.trim()
           }));
           
-          // Store passcodes and categories for all numbers
-          (updateData as any).activationPasscodes = editablePasscodes.map(p => p.trim());
-          (updateData as any).activationCategories = editableCategories.map(c => c.trim());
+          (updateData as any).plans = [...updatedPlans, ...newPlansEntries];
           
-          // Handle SR images for all numbers
-          const srImagePromises = srImageFiles.map(async (file, imgIndex) => {
-            if (file) {
+          // Add new numbers' activation data to arrays
+          newNumbers.forEach((newNum) => {
+            filteredActivationDates.push(new Date(newNum.activationDate));
+            filteredSrNumbers.push(newNum.srNumber.trim());
+            filteredServiceOrderNumbers.push(newNum.serviceOrderNumber.trim());
+            filteredGroups.push(newNum.selectedGroup);
+            filteredPasscodes.push(newNum.passcode?.trim() || '');
+            filteredCategories.push(newNum.category.trim());
+          });
+          
+          (updateData as any).activationDates = filteredActivationDates;
+          (updateData as any).srNumbers = filteredSrNumbers;
+          (updateData as any).serviceOrderNumbers = filteredServiceOrderNumbers;
+          (updateData as any).activationGroups = filteredGroups;
+          (updateData as any).activationPasscodes = filteredPasscodes;
+          (updateData as any).activationCategories = filteredCategories;
+          
+          // If numbers were changed or new numbers added, set lead status to activated_non_verified
+          if (hasNumberChanges || hasNewNumbers) {
+            updateData.status = 'activated_non_verified';
+          }
+          
+          // Handle SR images for all numbers (including new ones)
+          const allSrImagePromises: Promise<{ dataUrl: string; name: string; index: number } | null>[] = [];
+          
+          // Existing numbers' SR images
+          srImageFiles.forEach(async (file, imgIndex) => {
+            if (file && !removedPlanIndices.has(imgIndex)) {
               const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = () => resolve((reader.result as string) || '');
@@ -1933,15 +2395,37 @@ Language: ${lead.language || 'N/A'}`;
               });
               try {
                 const dataUrl = await toDataUrl(file);
-                return { dataUrl, name: file.name, index: imgIndex };
+                allSrImagePromises.push(Promise.resolve({ dataUrl, name: file.name, index: imgIndex }));
               } catch (_) {
-                return null;
+                allSrImagePromises.push(Promise.resolve(null));
               }
+            } else {
+              allSrImagePromises.push(Promise.resolve(null));
             }
-            return null;
           });
           
-          const srImageResults = await Promise.all(srImagePromises);
+          // New numbers' SR images
+          newNumbers.forEach(async (newNum, newIndex) => {
+            if (newNum.srImageFile) {
+              const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve((reader.result as string) || '');
+                reader.onerror = reject;
+                reader.readAsDataURL(f);
+              });
+              try {
+                const dataUrl = await toDataUrl(newNum.srImageFile);
+                const actualIndex = (lead.plans?.length || 0) - removedPlanIndices.size + newIndex;
+                allSrImagePromises.push(Promise.resolve({ dataUrl, name: newNum.srImageFile.name, index: actualIndex }));
+              } catch (_) {
+                allSrImagePromises.push(Promise.resolve(null));
+              }
+            } else {
+              allSrImagePromises.push(Promise.resolve(null));
+            }
+          });
+          
+          const srImageResults = await Promise.all(allSrImagePromises);
           const srImages = srImageResults.filter((r): r is { dataUrl: string; name: string; index: number } => r !== null);
           if (srImages.length > 0) {
             (updateData as any).srImages = srImages.map(img => ({
@@ -2028,8 +2512,142 @@ Language: ${lead.language || 'N/A'}`;
 
       await updateDoc(leadRef, updateData);
 
-      // Handle number pool updates for activation with number change
-      if (isActivationAction && numberChanged) {
+      // Handle number pool updates for multiple numbers activation
+      const plansCountForUpdate = lead.plans?.length || 0;
+      if (isActivationAction && plansCountForUpdate > 1) {
+        const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
+        const numberPoolUpdates: Promise<void>[] = [];
+        
+        currentPlans.forEach(async (p: any, index: number) => {
+          // Skip removed plans (they were already handled in handleRemoveNumber)
+          if (removedPlanIndices.has(index)) {
+            return;
+          }
+          
+          const originalPlan = currentPlans[index];
+          const newNumberId = editableNumberIds[index];
+          const newNumber = editableNumbers[index];
+          const oldNumberId = originalPlan?.numberId;
+          const oldNumber = originalNumbers[index] || originalPlan?.number;
+          
+          // Check if number changed
+          if (newNumberId && newNumberId !== oldNumberId && !newNumberId.startsWith('virtual-')) {
+            // Release the old number if it exists and is not virtual
+            if (oldNumberId && !oldNumberId.startsWith('virtual-')) {
+              const oldNumberRef = doc(db, 'numberPool', oldNumberId);
+              const oldNumberDoc = await getDoc(oldNumberRef);
+              if (oldNumberDoc.exists()) {
+                numberPoolUpdates.push(
+                  updateDoc(oldNumberRef, {
+                    status: 'open',
+                    lastStatusChange: new Date(),
+                    leadId: null,
+                    reservedBy: null,
+                    reservedAt: null,
+                    claimingAgentId: null,
+                    claimingStartedAt: null,
+                    claimingExpiresAt: null,
+                    claimQueue: []
+                  }).then(() =>
+                    logNumberAction(
+                      oldNumberId,
+                      oldNumber || '',
+                      'status_changed',
+                      { status: oldNumberDoc.data()?.status, leadId: lead.id },
+                      { status: 'open', leadId: null },
+                      `Number released - Coordinator ${user?.name || 'Unknown'} changed to ${newNumber} during activation`
+                    )
+                  )
+                );
+              }
+            }
+            
+            // Activate the new number - always set to activated_non_verified when number is changed
+            if (newNumberId && !newNumberId.startsWith('virtual-')) {
+              const newNumberRef = doc(db, 'numberPool', newNumberId);
+              const newNumberDoc = await getDoc(newNumberRef);
+              if (newNumberDoc.exists()) {
+                // When number is changed, always set to activated_non_verified
+                numberPoolUpdates.push(
+                  updateDoc(newNumberRef, {
+                    status: 'activated_non_verified',
+                    lastStatusChange: new Date(),
+                    leadId: lead.id,
+                    ...(selectedGroups[index] ? { group: selectedGroups[index] } : {})
+                  }).then(() =>
+                    logNumberAction(
+                      newNumberId,
+                      newNumber || '',
+                      'status_changed',
+                      { status: newNumberDoc.data()?.status },
+                      { status: 'activated_non_verified', leadId: lead.id },
+                      `Coordinator ${user?.name || 'Unknown'} activated with number change`
+                    )
+                  )
+                );
+              }
+            }
+          } else if (oldNumberId && !oldNumberId.startsWith('virtual-')) {
+            // Number didn't change, just update status to activated
+            const numberRef = doc(db, 'numberPool', oldNumberId);
+            const numberDoc = await getDoc(numberRef);
+            if (numberDoc.exists()) {
+              const finalStatus = coordinatorAction === 'activate_non_verified'
+                ? 'activated_non_verified'
+                : 'activated';
+              numberPoolUpdates.push(
+                updateDoc(numberRef, {
+                  status: finalStatus,
+                  lastStatusChange: new Date(),
+                  leadId: lead.id,
+                  ...(selectedGroups[index] ? { group: selectedGroups[index] } : {})
+                }).then(() =>
+                  logNumberAction(
+                    oldNumberId,
+                    oldNumber || '',
+                    'status_changed',
+                    { status: numberDoc.data()?.status },
+                    { status: finalStatus, leadId: lead.id },
+                    `Coordinator ${user?.name || 'Unknown'} activated number`
+                  )
+                )
+              );
+            }
+          }
+        });
+        
+        // Handle new numbers - activate them (always set to activated_non_verified)
+        newNumbers.forEach(async (newNum) => {
+          if (newNum.numberId && !newNum.numberId.startsWith('virtual-')) {
+            const numberRef = doc(db, 'numberPool', newNum.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (numberDoc.exists()) {
+              // New numbers are always set to activated_non_verified
+              numberPoolUpdates.push(
+                updateDoc(numberRef, {
+                  status: 'activated_non_verified',
+                  lastStatusChange: new Date(),
+                  leadId: lead.id,
+                  ...(newNum.selectedGroup ? { group: newNum.selectedGroup } : {})
+                }).then(() =>
+                  logNumberAction(
+                    newNum.numberId,
+                    newNum.number,
+                    'status_changed',
+                    { status: numberDoc.data()?.status },
+                    { status: 'activated_non_verified', leadId: lead.id },
+                    `Coordinator ${user?.name || 'Unknown'} added and activated new number`
+                  )
+                )
+              );
+            }
+          }
+        });
+        
+        // Wait for all number pool updates to complete
+        await Promise.all(numberPoolUpdates);
+      } else if (isActivationAction && numberChanged) {
+      // Handle number pool updates for activation with number change (single number)
         // Release the old number (set back to available/open)
         const oldNumberId = lead.plans?.[0]?.numberId;
         if (oldNumberId && !oldNumberId.startsWith('virtual-')) {
@@ -2055,15 +2673,14 @@ Language: ${lead.language || 'N/A'}`;
           }
         }
         
-        // Update the new number to activated or activated_non_verified
+        // Update the new number - when number is changed, always set to activated_non_verified
         if (editableNumberId && !editableNumberId.startsWith('virtual-')) {
           const newNumberRef = doc(db, 'numberPool', editableNumberId);
           const newNumberDoc = await getDoc(newNumberRef);
           if (newNumberDoc.exists()) {
+            // When number is changed, always set to activated_non_verified
             await updateDoc(newNumberRef, {
-              status: coordinatorAction === 'activate_non_verified'
-                ? 'activated_non_verified'
-                : (hasChanges ? 'activated_non_verified' : 'activated'),
+              status: 'activated_non_verified',
               lastStatusChange: new Date(),
               leadId: lead.id,
               ...(selectedGroup ? { group: selectedGroup } : {})
@@ -2074,12 +2691,15 @@ Language: ${lead.language || 'N/A'}`;
               editableNumber,
               'status_changed',
               { status: newNumberDoc.data()?.status },
-              { status: coordinatorAction === 'activate_non_verified'
-                  ? 'activated_non_verified'
-                  : (hasChanges ? 'activated_non_verified' : 'activated'), leadId: lead.id },
+              { status: 'activated_non_verified', leadId: lead.id },
               `Coordinator ${user?.name || 'Unknown'} activated with number change`
             );
           }
+        }
+        
+        // Update lead status to activated_non_verified when number is changed
+        if (numberChanged) {
+          updateData.status = 'activated_non_verified';
         }
       } else if (coordinatorAction === 'reject') {
         // Reject flow - Set number status to 'open'
@@ -2756,9 +3376,7 @@ Language: ${lead.language || 'N/A'}`;
             <button
               onClick={() => {
                 setShowWhatsAppChat(true);
-                if (!whatsappLogsUnsubRef.current) {
-                  startWhatsAppLogsListener();
-                }
+                // Messages are auto-fetched via polling, no need to manually start
               }}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
             >
@@ -3206,31 +3824,62 @@ Language: ${lead.language || 'N/A'}`;
                   {lead.plans && lead.plans.length > 1 ? (
                     // Multiple numbers - show separate form for each
                     <div className="space-y-6">
-                      {lead.plans.map((plan, index) => (
+                      {lead.plans.map((plan, index) => {
+                        if (removedPlanIndices.has(index)) {
+                          return null; // Don't render removed plans
+                        }
+                        return (
                         <div key={index} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
-                          <div className="mb-4 pb-3 border-b border-gray-200">
-                            <h4 className="text-sm font-semibold text-gray-700">Number {index + 1} - {plan.number}</h4>
+                          <div className="mb-4 pb-3 border-b border-gray-200 flex items-center justify-between">
+                            <h4 className="text-sm font-semibold text-gray-700">Number {index + 1} - {editableNumbers[index] || plan.number}</h4>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveNumber(index)}
+                              className="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors flex items-center gap-1.5"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                              Remove
+                            </button>
                           </div>
                           
                           {/* Number & Plan & Passcode & Category */}
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
                             <div>
                               <label className="block text-sm font-semibold text-gray-900">Number</label>
+                              <div className="flex gap-2 mt-1">
                               <input
                                 type="text"
-                                className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
-                                value={plan.number || ''}
+                                  className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={editableNumbers[index] || plan.number || ''}
                                 readOnly
                               />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const newSelectors = [...showNumberSelectors];
+                                    newSelectors[index] = !newSelectors[index];
+                                    setShowNumberSelectors(newSelectors);
+                                  }}
+                                  className="px-3 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors"
+                                >
+                                  {showNumberSelectors[index] ? 'Cancel' : 'Change'}
+                                </button>
+                              </div>
                             </div>
                             <div>
                               <label className="block text-sm font-semibold text-gray-900">Plan</label>
-                              <input
-                                type="text"
+                              <select
                                 className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
-                                value={plan.plan || ''}
-                                readOnly
-                              />
+                                value={editablePlans[index] || plan.plan || ''}
+                                onChange={(e) => handleChangePlan(index, e.target.value)}
+                              >
+                                <option value="">Select plan</option>
+                                {allPlans.map((p) => (
+                                  <option key={p.id} value={p.name}>
+                                    {p.name} ({p.category})
+                                  </option>
+                                ))}
+                              </select>
                             </div>
                             <div>
                               <label className="block text-sm font-semibold text-gray-900">Passcode</label>
@@ -3252,6 +3901,24 @@ Language: ${lead.language || 'N/A'}`;
                               />
                             </div>
                           </div>
+                          
+                          {/* Number Selector */}
+                          {showNumberSelectors[index] && (
+                            <div className="border border-gray-200 rounded-xl p-4 bg-white mb-4">
+                              <QuickNumberSelect
+                                onSelect={async (numberData) => {
+                                  await handleChangeNumber(index, numberData);
+                                }}
+                                selectedCategory={editableCategories[index] || plan.category || ''}
+                                onCategoryChange={(category) => {
+                                  const newCategories = [...editableCategories];
+                                  newCategories[index] = category;
+                                  setEditableCategories(newCategories);
+                                }}
+                                selectedNumberId={editableNumberIds[index]}
+                              />
+                            </div>
+                          )}
 
                           {/* Activation Details */}
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -3334,7 +4001,267 @@ Language: ${lead.language || 'N/A'}`;
                             />
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
+                      
+                      {/* Display new numbers being added */}
+                      {newNumbers.map((newNum, newIndex) => {
+                        const actualIndex = (lead.plans?.length || 0) + newIndex;
+                        return (
+                          <div key={`new-${newIndex}`} className="border border-green-200 rounded-xl p-4 bg-green-50">
+                            <div className="mb-4 pb-3 border-b border-green-200 flex items-center justify-between">
+                              <h4 className="text-sm font-semibold text-green-700">New Number {newIndex + 1} - {newNum.number}</h4>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveNewNumber(newIndex)}
+                                className="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors flex items-center gap-1.5"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                                Remove
+                              </button>
+                            </div>
+                            
+                            {/* Number & Plan & Passcode & Category */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Number</label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.number}
+                                  readOnly
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Plan</label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.plan}
+                                  readOnly
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.passcode || ''}
+                                  readOnly
+                                  placeholder="Passcode from number pool"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Category</label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.category}
+                                  readOnly
+                                />
+                              </div>
+                            </div>
+
+                            {/* Activation Details */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
+                                <input
+                                  type="date"
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.activationDate}
+                                  onChange={(e) => {
+                                    const updated = [...newNumbers];
+                                    updated[newIndex].activationDate = e.target.value;
+                                    setNewNumbers(updated);
+                                  }}
+                                  required
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">SR No. <span className="text-red-500">*</span></label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.srNumber}
+                                  onChange={(e) => {
+                                    const updated = [...newNumbers];
+                                    updated[newIndex].srNumber = e.target.value;
+                                    setNewNumbers(updated);
+                                  }}
+                                  placeholder="Enter SR number"
+                                  required
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Service Order number <span className="text-red-500">*</span></label>
+                                <input
+                                  type="text"
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.serviceOrderNumber}
+                                  onChange={(e) => {
+                                    const updated = [...newNumbers];
+                                    updated[newIndex].serviceOrderNumber = e.target.value;
+                                    setNewNumbers(updated);
+                                  }}
+                                  placeholder="Enter Service Order number"
+                                  required
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-semibold text-gray-900">Select Activation Group <span className="text-red-500">*</span></label>
+                                <select
+                                  className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                  value={newNum.selectedGroup}
+                                  onChange={(e) => {
+                                    const updated = [...newNumbers];
+                                    updated[newIndex].selectedGroup = e.target.value;
+                                    setNewNumbers(updated);
+                                  }}
+                                  required
+                                >
+                                  <option value="">Select group</option>
+                                  {['G1','G2','G3','G4','G5'].map(g => (
+                                    <option key={g} value={g}>{g}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* SR Image (optional) */}
+                            <div className="mt-4">
+                              <label className="block text-sm font-semibold text-gray-900">SR Image (optional)</label>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="mt-1 block w-full text-sm text-gray-900 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                                onChange={(e) => {
+                                  const updated = [...newNumbers];
+                                  updated[newIndex].srImageFile = e.target.files?.[0] || null;
+                                  setNewNumbers(updated);
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                      
+                      {/* Add New Number Button */}
+                      <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 bg-gray-50">
+                        {!showAddNumberForm ? (
+                          <button
+                            type="button"
+                            onClick={() => setShowAddNumberForm(true)}
+                            className="w-full px-4 py-3 text-sm font-semibold text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <CheckCircle className="w-5 h-5" />
+                            Add New Number
+                          </button>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="flex items-center justify-between mb-4">
+                              <h4 className="text-sm font-semibold text-gray-900">Select New Number and Plan</h4>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShowAddNumberForm(false);
+                                  setNewNumberData(null);
+                                  setNewNumberPlan('');
+                                  setNewNumberCategory('Standard');
+                                }}
+                                className="px-3 py-1.5 text-sm font-medium text-gray-600 bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200 transition-colors"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            
+                            {/* Number Selector */}
+                            <div className="border border-gray-200 rounded-xl p-4 bg-white">
+                              <QuickNumberSelect
+                                onSelect={async (numberData) => {
+                                  setNewNumberData({
+                                    id: numberData.id,
+                                    number: numberData.number,
+                                    category: numberData.category || newNumberCategory || 'Standard',
+                                    passcode: numberData.passcode || ''
+                                  });
+                                }}
+                                selectedCategory={newNumberCategory}
+                                onCategoryChange={(category) => setNewNumberCategory(category)}
+                                selectedNumberId={newNumberData?.id}
+                              />
+                            </div>
+                            
+                            {/* Selected Number Display */}
+                            {newNumberData && (
+                              <div className="border border-indigo-200 rounded-xl p-4 bg-indigo-50">
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+                                  <div>
+                                    <label className="block text-sm font-semibold text-gray-900">Selected Number</label>
+                                    <input
+                                      type="text"
+                                      className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                      value={newNumberData.number}
+                                      readOnly
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-sm font-semibold text-gray-900">Category</label>
+                                    <input
+                                      type="text"
+                                      className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                      value={newNumberData.category}
+                                      readOnly
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-sm font-semibold text-gray-900">Passcode</label>
+                                    <input
+                                      type="text"
+                                      className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                      value={newNumberData.passcode}
+                                      readOnly
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-sm font-semibold text-gray-900">Plan <span className="text-red-500">*</span></label>
+                                    <select
+                                      className="mt-1 w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-900 text-sm"
+                                      value={newNumberPlan}
+                                      onChange={(e) => setNewNumberPlan(e.target.value)}
+                                      required
+                                    >
+                                      <option value="">Select plan</option>
+                                      {allPlans.map((p) => (
+                                        <option key={p.id} value={p.name}>
+                                          {p.name} ({p.category})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (newNumberData) {
+                                      handleAddNewNumber({
+                                        id: newNumberData.id,
+                                        number: newNumberData.number,
+                                        passcode: newNumberData.passcode,
+                                        category: newNumberData.category
+                                      });
+                                    }
+                                  }}
+                                  disabled={!newNumberPlan || !newNumberData}
+                                  className="w-full px-4 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  Add Number
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ) : (
                     // Single number - use existing form
@@ -3409,6 +4336,7 @@ Language: ${lead.language || 'N/A'}`;
                               }}
                               selectedCategory={editableCategory}
                               onCategoryChange={(category) => setEditableCategory(category)}
+                              selectedNumberId={editableNumberId}
                             />
                           </div>
                         )}
@@ -3817,6 +4745,12 @@ Language: ${lead.language || 'N/A'}`;
                     setCoordinatorNote('');
                     setScheduledForDate('');
                     setCoordinatorAction(null);
+                    setNewNumbers([]);
+                    setShowAddNumberForm(false);
+                    setNewNumberData(null);
+                    setNewNumberPlan('');
+                    setNewNumberCategory('Standard');
+                    setRemovedPlanIndices(new Set());
                   }}
                   disabled={isCoordinatorActionProcessing}
                   className="px-6 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-xl hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
@@ -4696,7 +5630,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                 </div>
               </div>
-              <div ref={whatsappMessagesRef} className="flex-1 px-4 sm:px-6 py-4 overflow-y-auto space-y-3">
+              <div ref={whatsappMessagesRef} className="flex-1 px-4 sm:px-6 py-4 overflow-y-auto">
                {/* Verification Message Dialog - Inside Modal */}
                {showVerificationDialog && (
                  <div className="mb-4 bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
@@ -4735,225 +5669,125 @@ Language: ${lead.language || 'N/A'}`;
                  </div>
                )}
                
-               {whatsAppLogs.length === 0 ? (
-                 <div className="text-center text-gray-500 py-8">
-                   <MessageCircle className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-                   <p>No WhatsApp messages found for this lead.</p>
-                 </div>
-               ) : (
-                 <div className="space-y-4">
-                  {whatsAppLogs
-                    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-                    .map((log) => {
-                    const created = normalizeLogDate(log.createdAt);
-                      const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
-                      const fromDigits = (log.from || '').toString().replace(/\D/g, '');
-                      const fromDisplay = fromDigits ? `+${fromDigits}` : '';
-                      const firstPlan = lead.plans?.[0];
-                      const planInfo = planDetails;
-                      const isOutbound = log.direction === 'outbound';
-                    const createdTime = created?.getTime() ?? 0;
-                    const hasCustomerReplyAfter =
-                      isOutbound &&
-                      whatsAppLogs.some(other => {
-                        if (other.id === log.id || other.direction !== 'inbound') return false;
-                        const otherCreated = normalizeLogDate(other.createdAt);
-                        return (otherCreated?.getTime() ?? 0) > createdTime;
-                      });
-                    const deriveStatus = (): 'read' | 'delivered' | 'sent' | 'failed' | undefined => {
-                      if (!isOutbound) return undefined;
-                      if (log.status === 'failed') return 'failed';
-                      if (log.status === 'read' || hasCustomerReplyAfter) return 'read';
-                      if (log.status === 'delivered') return 'delivered';
-                      if (log.status === 'sent' || log.status === 'accepted') return 'sent';
-                      return log.status ? 'sent' : undefined;
-                    };
-                    const effectiveStatus = deriveStatus();
-                    const statusLabelMap: Record<string, string> = {
-                      read: 'Read',
-                      delivered: 'Delivered',
-                      sent: 'Sent',
-                      failed: 'Failed'
-                    };
-                      const CONSENT_ORDER: Array<{ key: string; label: string }> = [
-                        {
-                          key: 'ownershipAfterContract',
-                          label:
-                            'The chosen number becomes yours only after completing the contract. During this period, transfer of ownership is not permitted, and porting out to other telecom providers is restricted. Plan upgrades (within the same category) are allowed; downgrades or switching to prepaid are not allowed.'
-                        },
-                        {
-                          key: 'proRatedAgree',
-                          label:
-                            'Multi-SIM is available exclusively with the Limited Data Packages; this feature is not available with Non-Stop Data plans. The plan will be pro-rated. In case of early cancellation, all pending bills must be cleared along with one-month rental + 5% VAT, and the number will be reclaimed by Etisalat.'
-                        },
-                        {
-                          key: 'gracePeriodAcknowledge',
-                          label:
-                            'If you are not a UAE citizen, you must pay half or full monthly rental in advance at activation, which will be adjusted in the 4th month of your billing cycle. In case of technical or network-related issues, or misinformation, you can cancel the plan without charges within the first five days.'
-                        },
-                        {
-                          key: 'dataAccuracyAcknowledge',
-                          label:
-                            'The information provided regarding the number and plan is accurate. Any other information received will not be considered valid. Please read this carefully and confirm, as this communication will be referenced in the event of any future complaints regarding the number or plan.'
-                        },
-                        {
-                          key: 'acceptAllTerms',
-                          label: 'Accept all the Terms & Conditions.'
-                        }
-                      ];
-                      const accepted = Array.isArray(CONSENT_ORDER)
-                        ? CONSENT_ORDER.filter(i => log.consents?.[i.key] === true)
-                        : [];
-                      
-                      return (
-                        <div key={log.id} className={clsx('flex', isOutbound ? 'justify-end' : 'justify-start')}>
-                          <div className={clsx('max-w-[85%] rounded-2xl px-4 py-3 shadow-sm border',
-                            isOutbound ? 'bg-indigo-50 text-indigo-900 border-indigo-100' : 'bg-emerald-50 text-emerald-900 border-emerald-100'
-                          )}>
-                            <div className="flex items-center justify-between text-[11px] text-gray-500/80 mb-2">
-                              <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
-                                {isOutbound ? 'Outbound' : 'Inbound'}
-                              </span>
-                              <span className="ml-2 flex items-center gap-1.5">
-                                {fromDisplay && (
-                                  <span className="font-bold text-blue-600">From {fromDisplay}</span>
-                                )}
-                                {createdStr && ` · ${createdStr}`}
-                                {isOutbound && (
-                                  <span
-                                    className="ml-1.5 inline-flex items-center"
-                                    title={effectiveStatus ? `Message ${statusLabelMap[effectiveStatus] || effectiveStatus}` : 'Message sent'}
-                                  >
-                                    {effectiveStatus === 'read' && (
-                                      <CheckCheck className="w-4 h-4 text-green-500" />
-                                    )}
-                                    {effectiveStatus === 'delivered' && (
-                                      <CheckCheck className="w-4 h-4 text-gray-600" />
-                                    )}
-                                    {(!effectiveStatus || effectiveStatus === 'sent') && (
-                                      <Check className="w-3.5 h-3.5 text-gray-500" />
-                                    )}
-                                    {effectiveStatus === 'failed' && (
-                                      <XCircle className="w-4 h-4 text-red-500" />
-                                    )}
-                                  </span>
-                                )}
-                              </span>
-                            </div>
-                            {/* Summary only for the acceptance message (when consents are present) */}
-                            {accepted.length > 0 && firstPlan && (
-                              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 mb-3 shadow-sm">
-                                <div className="flex items-center gap-2 mb-3">
-                                  <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                                  <h4 className="text-sm font-semibold text-blue-900">Plan & Number Summary</h4>
-                                </div>
-                                <div className="space-y-2 text-sm">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-gray-700">Selected Number:</span>
-                                    <span className="font-semibold text-gray-900">{firstPlan.number}</span>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-gray-700">Monthly Plan:</span>
-                                    <span className="font-semibold text-gray-900">
-                                      {firstPlan.plan ? 
-                                        (() => {
-                                          const match = firstPlan.plan.match(/\d+/);
-                                          return match ? `${match[0]} AED + 5% VAT` : firstPlan.plan;
-                                        })() 
-                                        : ''
-                                      }
-                                    </span>
-                                  </div>
-                                  {planInfo?.benefits && planInfo.benefits !== 'N/A' && (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-gray-700">Benefits:</span>
-                                      <span className="font-semibold text-gray-900">{planInfo.benefits}</span>
-                                    </div>
-                                  )}
-                                  {planInfo?.duration && planInfo.duration !== 'N/A' && (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-gray-700">Contract Duration:</span>
-                                      <span className="font-semibold text-gray-900">{planInfo.duration} Year</span>
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                            {log.messageText && (
-                              <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
-                            )}
-                            {/* Show error message if status is failed */}
-                            {effectiveStatus === 'failed' && log.error && (() => {
-                              const errorObj = log.error as any;
-                              let errorText = '';
-                              let errorCode = '';
-                              let errorExplanation = '';
-                              
-                              if (typeof errorObj === 'object') {
-                                errorText = errorObj.message || errorObj.details || JSON.stringify(errorObj);
-                                if (errorObj.code) {
-                                  errorCode = String(errorObj.code);
-                                }
-                              } else if (typeof errorObj === 'string') {
-                                errorText = errorObj;
-                              }
-                              
-                              return (
-                                <div className="mt-2 bg-red-50 border border-red-200 rounded-lg p-3">
-                                  <div className="flex items-start gap-2">
-                                    <AlertCircle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
-                                    <div className="flex-1 text-sm">
-                                      <div className="font-semibold text-red-800 mb-1">Message Failed</div>
-                                      <div className="text-red-700 leading-relaxed">{errorText}</div>
-                                      {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
-                                      {errorExplanation && (
-                                        <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
-                                          <span className="font-semibold">💡 What to do: </span>
-                                          {errorExplanation}
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                            {/* Resend button for outbound template messages (coordinators/admins only) */}
-                            {(isCoordinator() || isAdmin()) && isOutbound && log.templateName && Array.isArray(log.parameters) && log.parameters.length > 0 && (
-                              <div className="mt-2 flex justify-end">
-                                <button
-                                  onClick={() => handleResendVerificationMessage(log)}
-                                  disabled={resendingLogId === log.id}
-                                  className={clsx(
-                                    'inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium shadow-sm',
-                                    resendingLogId === log.id
-                                      ? 'bg-gray-300 text-gray-600 cursor-not-allowed'
-                                      : 'bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500'
-                                  )}
-                                >
-                                  {resendingLogId === log.id ? 'Resending…' : 'Resend Message'}
-                                </button>
-                              </div>
-                            )}
-                            {accepted.length > 0 && (
-                              <ol className="mt-1 space-y-2 text-sm">
-                                {accepted.map((item, idx) => (
-                                  <li key={item.key} className="flex items-start">
-                                    <span className="mr-2 text-gray-700">{idx + 1}.</span>
-                                    <span className="text-gray-900">
-                                      {item.label}
-                                      <span className="ml-2 inline-flex items-center text-green-600 text-xs font-medium align-middle">
-                                        <svg className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M16.704 5.29a1 1 0 00-1.408-1.418L7.5 11.66 4.704 8.864a1 1 0 10-1.408 1.418l3.5 3.5a1 1 0 001.408 0l8.5-8.5z" clipRule="evenodd"/></svg>
-                                        Accepted
-                                      </span>
-                                    </span>
-                                  </li>
-                                ))}
-                              </ol>
-                            )}
-                          </div>
+               <WhatsAppConversationView
+                 messages={whatsAppLogs as WhatsAppMessage[]}
+                 lead={lead}
+                 planDetails={planDetails || undefined}
+                 onResendMessage={handleResendVerificationMessage}
+                 resendingLogId={resendingLogId}
+                 showResendButton={isCoordinator() || isAdmin()}
+                 containerRef={whatsappMessagesRef}
+               />
+
+
+              {/* Interactive Flow UI - Delivery Details Form - REMOVED: Only show messages, not UI forms */}
+              {false && (flowState === 'delivery' || flowState === 'name' || flowState === 'address' || flowState === 'nationality' || flowState === 'complete') && (
+                <div className="mt-4 bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-200 rounded-xl p-5 shadow-lg">
+                  <div className="flex items-center gap-2 mb-4">
+                    <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+                    <h3 className="text-lg font-bold text-emerald-900">🚚 Delivery Details</h3>
+                  </div>
+                  <div className="bg-white rounded-lg p-4 space-y-4">
+                    <p className="text-sm text-gray-700 mb-4">
+                      Please provide the full delivery address and area where you would like us to deliver your new number.
+                    </p>
+                    
+                    {/* Full Name Field */}
+                    <div className="space-y-2">
+                      <label className="block text-sm font-semibold text-gray-900">
+                        Type Your Full Name:
+                        {deliveryData.name && (
+                          <span className="ml-2 text-green-600 text-xs font-normal">✓ Received</span>
+                        )}
+                      </label>
+                      {deliveryData.name ? (
+                        <div className="bg-green-50 border-2 border-green-200 rounded-lg p-3">
+                          <p className="text-sm font-medium text-green-900">{deliveryData.name}</p>
                         </div>
-                      );
-                    })}
+                      ) : (
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 italic">
+                          Waiting for customer response...
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Full Address Field - Show after name is received */}
+                    {(flowState === 'address' || flowState === 'nationality' || flowState === 'complete' || deliveryData.address) && (
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-gray-900">
+                          Type Your Full Address: (e.g., Building Name/Number, Street Name/Number)
+                          {deliveryData.address && (
+                            <span className="ml-2 text-green-600 text-xs font-normal">✓ Received</span>
+                          )}
+                        </label>
+                        {deliveryData.address ? (
+                          <div className="bg-green-50 border-2 border-green-200 rounded-lg p-3">
+                            <p className="text-sm font-medium text-green-900">{deliveryData.address}</p>
+                          </div>
+                        ) : (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 italic">
+                            Waiting for customer response...
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Nationality Field - Show after address is received */}
+                    {(flowState === 'nationality' || flowState === 'complete' || deliveryData.nationality) && (
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-gray-900">
+                          Type Your Nationality: (Ex: Type "UAE" if you're Local)
+                          {deliveryData.nationality && (
+                            <span className="ml-2 text-green-600 text-xs font-normal">✓ Received</span>
+                          )}
+                        </label>
+                        {deliveryData.nationality ? (
+                          <div className="bg-green-50 border-2 border-green-200 rounded-lg p-3">
+                            <p className="text-sm font-medium text-green-900">{deliveryData.nationality}</p>
+                          </div>
+                        ) : (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-500 italic">
+                            Waiting for customer response...
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                      {/* Completion Message */}
+                      {flowState === 'complete' && deliveryData.name && deliveryData.address && deliveryData.nationality && (
+                        <div className="mt-4 pt-4 border-t border-gray-200 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-2xl">✅</span>
+                            <p className="text-sm font-semibold text-green-900">All delivery details received!</p>
+                          </div>
+                          {deliveryData.nationality.toLowerCase().trim() === 'uae' ? (
+                            <>
+                              <p className="text-xs text-gray-700 mt-2">
+                                I will forward your details to our delivery team. They will contact you to confirm the time and location for the delivery of your number.
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                If you experience any network issues in your area or if the plan I described is not available in your package, you can cancel it within five days without any penalty.
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                Thank you so much for your time, sir. Have a wonderful day and take care.
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs text-gray-700 mt-2">
+                                Non-local residents are required to pay one month's advance Monthly Recurring Charge (MRC).
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                I will forward your details to our delivery team. They will contact you to confirm the time and location for the delivery of your number.
+                              </p>
+                              <p className="text-xs text-gray-700 mt-1">
+                                If you experience any network issues in your area or if the plan I described is not available in your package, you can cancel it within five days without any penalty.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      )}
+                  </div>
                 </div>
               )}
             </div>

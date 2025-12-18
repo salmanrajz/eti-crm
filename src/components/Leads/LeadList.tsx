@@ -51,7 +51,7 @@ import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, CoordinatorType, VerifierGroups } from '../../types';
 import { Link, useSearchParams } from 'react-router-dom';
-import { format, formatDistanceToNow, formatDistance } from 'date-fns';
+import { format, formatDistanceToNow, formatDistance, differenceInHours, differenceInMinutes } from 'date-fns';
 import { 
   Plus, 
   Search, 
@@ -90,6 +90,9 @@ import { dashboardPerf } from '../../utils/performance';
 import { leadsCache, userCache } from '../../utils/cache';
 import { AdvancedLeadSearch } from './AdvancedLeadSearch';
 import { TransferLeadModal } from './TransferLeadModal';
+import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppConversationView';
+import { checkConversation } from '../../utils/whatsappRouter';
+import { normalizeTimestamp, formatTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 
 // ✅ PERFORMANCE: Optimized load sizes for faster initial loading
 const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
@@ -271,20 +274,11 @@ export function LeadList() {
   const [selectedLeadForChat, setSelectedLeadForChat] = useState<Lead | null>(null);
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
-  const whatsAppLogsUnsubscribeRef = useRef<(() => void) | null>(null);
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [selectedLeadForTransfer, setSelectedLeadForTransfer] = useState<Lead | null>(null);
+  const [statusTimers, setStatusTimers] = useState<Record<string, number>>({});
 
-  // Helper function to normalize log dates
-  const normalizeLogDate = (value: any): Date | null => {
-    if (!value) return null;
-    if (value instanceof Date) return value;
-    if (typeof value.toDate === 'function') return value.toDate();
-    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
-    const parsed = new Date(value);
-    return isNaN(parsed.getTime()) ? null : parsed;
-  };
 
   // Load plan details from Firebase when selectedLeadForChat changes
   useEffect(() => {
@@ -318,6 +312,65 @@ export function LeadList() {
 
   // ✅ OPTIMIZED: Use refs to store unsubscribe functions for proper cleanup
   const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
+
+  // Helper function to normalize date from Firestore
+  const normalizeDate = useCallback((value: any): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value.toDate === 'function') return value.toDate();
+    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }, []);
+
+  // Format countdown timer (hours and minutes)
+  const formatCountdown = useCallback((ms: number): string => {
+    const totalSeconds = Math.ceil(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+  }, []);
+
+  // Calculate time elapsed since status changed to verified/follow_up
+  const getStatusTimeElapsed = useCallback((lead: Lead): number | null => {
+    if (lead.status !== 'verified' && lead.status !== 'follow_up') {
+      return null;
+    }
+
+    const statusChangeDate = normalizeDate(lead.updatedAt);
+    if (!statusChangeDate) {
+      return null;
+    }
+
+    const now = new Date();
+    const elapsedMs = now.getTime() - statusChangeDate.getTime();
+    return elapsedMs;
+  }, [normalizeDate]);
+
+  // Update status timers every second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const newTimers: Record<string, number> = {};
+      const allLeads = [...leads, ...firebaseSearchResults];
+      
+      allLeads.forEach(lead => {
+        if (lead.status === 'verified' || lead.status === 'follow_up') {
+          const elapsed = getStatusTimeElapsed(lead);
+          if (elapsed !== null) {
+            newTimers[lead.id] = elapsed;
+          }
+        }
+      });
+
+      setStatusTimers(newTimers);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [leads, firebaseSearchResults, getStatusTimeElapsed]);
   
   // ✅ PERFORMANCE: Debounced update mechanism to prevent excessive re-renders
   const debouncedUpdateRef = useRef<NodeJS.Timeout | null>(null);
@@ -686,24 +739,139 @@ export function LeadList() {
     return () => window.removeEventListener('focus', handleFocus);
   }, [user, loading, loadLeads]);
 
-  // Cleanup WhatsApp logs listener on unmount or modal close
+  // Fetch WhatsApp messages from API (similar to VerifierDashboard and LeadDetailsView)
+  const fetchWhatsAppMessagesFromAPI = async () => {
+    if (!selectedLeadForChat?.customerNumber) {
+      console.warn('No customer number for WhatsApp fetch');
+      return;
+    }
+
+    try {
+      // Format phone number (remove leading 0, add 971)
+      const customerNumber = selectedLeadForChat.customerNumber.toString().replace(/^0+/, '');
+      const formattedNumber = customerNumber.startsWith('971') ? customerNumber : `971${customerNumber}`;
+
+      const conversationData = await checkConversation(formattedNumber, selectedLeadForChat.id);
+
+      if (conversationData?.success && conversationData?.messages && Array.isArray(conversationData.messages)) {
+        // Format messages for display
+        const formattedMessages = conversationData.messages.map((msg: any) => ({
+          id: msg.messageId || msg.id,
+          direction: msg.direction,
+          from: msg.from,
+          to: msg.to,
+          messageText: msg.messageText || '',
+          messageId: msg.messageId,
+          status: msg.status,
+          templateName: msg.templateName,
+          consents: msg.consents,
+          readStatus: msg.readStatus,
+          deliveryStatus: msg.deliveryStatus,
+          messageType: msg.messageType,
+          replyTo: msg.replyTo,
+          repliedMessage: msg.repliedMessage,
+          mediaId: msg.mediaId,
+          mediaPath: msg.mediaPath,
+          mime: msg.mime,
+          userId: msg.userId,
+          userName: msg.userName,
+          senderName: msg.senderName,
+          buttons: msg.buttons,
+          payload: msg.payload,
+          // Normalize timestamp once when first received from API
+          createdAt: msg.createdAt 
+            ? (msg.createdAt instanceof Date 
+                ? msg.createdAt 
+                : normalizeTimestamp(msg.createdAt) || new Date(msg.createdAt))
+            : new Date()
+        }));
+
+        // Sort by timestamp (oldest first), with secondary sort by messageId
+        formattedMessages.sort((a: any, b: any) => {
+          const timeA = getTimestampForSort(normalizeTimestamp(a.createdAt));
+          const timeB = getTimestampForSort(normalizeTimestamp(b.createdAt));
+          if (timeA !== timeB) {
+            return timeA - timeB;
+          }
+          const idA = a.messageId || a.id || '';
+          const idB = b.messageId || b.id || '';
+          return idA.localeCompare(idB);
+        });
+
+        // Only update if messages actually changed to prevent unnecessary re-renders
+        setWhatsAppLogs(prev => {
+          // Create a map of existing messages by messageId to preserve their timestamps
+          const existingMessageMap = new Map();
+          prev.forEach((msg: any) => {
+            const msgId = msg.messageId || msg.id;
+            if (msgId && !msgId.toString().startsWith('temp-')) {
+              existingMessageMap.set(msgId, msg);
+            }
+          });
+
+          // Merge API messages with existing messages, preserving timestamps from existing messages
+          const mergedMessages = formattedMessages.map((apiMsg: any) => {
+            const msgId = apiMsg.messageId || apiMsg.id;
+            const existingMsg = existingMessageMap.get(msgId);
+            
+            // If this message already exists, ALWAYS preserve its timestamp to prevent changes
+            if (existingMsg && existingMsg.createdAt) {
+              return {
+                ...apiMsg,
+                createdAt: existingMsg.createdAt,
+                messageId: existingMsg.messageId || apiMsg.messageId
+              };
+            }
+            
+            // New message, normalize API timestamp once and store as Date object
+            const apiDate = normalizeTimestamp(apiMsg.createdAt);
+            return {
+              ...apiMsg,
+              createdAt: apiDate || new Date(apiMsg.createdAt)
+            };
+          });
+
+          const prevMessageIds = prev.map((m: any) => m.id || m.messageId).join(',');
+          const newMessageIds = mergedMessages.map((m: any) => m.id || m.messageId).join(',');
+          
+          // Only update if messages actually changed
+          if (prevMessageIds === newMessageIds && prev.length === mergedMessages.length) {
+            return prev;
+          }
+          
+          return mergedMessages;
+        });
+      }
+    } catch (error: any) {
+      console.error('Error fetching WhatsApp messages from API:', error);
+    }
+  };
+
+  // Auto-poll WhatsApp messages from API
+  useEffect(() => {
+    if (!selectedLeadForChat?.id || !selectedLeadForChat?.customerNumber || !showWhatsAppChat) {
+      return;
+    }
+
+    // Fetch immediately
+    fetchWhatsAppMessagesFromAPI();
+
+    // Set up polling interval - every 3 seconds for instant updates
+    const pollInterval = setInterval(() => {
+      fetchWhatsAppMessagesFromAPI();
+    }, 3000);
+
+    return () => {
+      clearInterval(pollInterval);
+    };
+  }, [selectedLeadForChat?.id, selectedLeadForChat?.customerNumber, showWhatsAppChat]);
+
+  // Cleanup on unmount (no longer needed for Firestore listeners, but keeping for consistency)
   useEffect(() => {
     return () => {
-      if (whatsAppLogsUnsubscribeRef.current) {
-        whatsAppLogsUnsubscribeRef.current();
-        whatsAppLogsUnsubscribeRef.current = null;
-      }
+      // Cleanup handled by polling interval cleanup
     };
   }, []);
-
-  // Auto-scroll WhatsApp logs container when new messages arrive
-  useEffect(() => {
-    if (showWhatsAppChat && logsContainerRef.current) {
-      try {
-        logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
-      } catch {}
-    }
-  }, [whatsAppLogs, showWhatsAppChat]);
 
   // ✅ PERFORMANCE: Optimized batch processing with efficient queries
   const processLeadsWithInfo = useCallback(async (leadsData: Lead[]) => {
@@ -2141,10 +2309,37 @@ export function LeadList() {
                               <div className="flex items-center text-[10px] text-indigo-600 mt-1 px-2 py-0.5 bg-indigo-50 rounded border border-indigo-200 whitespace-nowrap">
                                 <Clock className="h-3 w-3 mr-1 flex-shrink-0" />
                                 <span className="font-semibold">Assigned in: {duration}</span>
-                              </div>
+                    </div>
                             );
                           }
                           return null;
+                        })()}
+                        {/* Countdown Timer / At Risk Indicator for Desktop */}
+                        {(lead.status === 'verified' || lead.status === 'follow_up') && (() => {
+                          const elapsed = statusTimers[lead.id] ?? getStatusTimeElapsed(lead);
+                          if (elapsed === null) return null;
+
+                          const hoursElapsed = elapsed / (1000 * 60 * 60);
+                          const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+                          const remainingMs = twentyFourHoursMs - elapsed;
+
+                                if (hoursElapsed >= 24) {
+                            // More than 24 hours - show "At Risk"
+                            return (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700 border border-red-200 mt-1 whitespace-nowrap">
+                                <AlertCircle className="h-3 w-3 mr-1" />
+                                At Risk
+                              </span>
+                            );
+                          } else {
+                            // Less than 24 hours - show countdown
+                            return (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-yellow-100 text-yellow-700 border border-yellow-200 mt-1 whitespace-nowrap">
+                                <Clock className="h-3 w-3 mr-1" />
+                                {formatCountdown(remainingMs)} remaining
+                              </span>
+                            );
+                          }
                         })()}
                       </div>
                     </div>
@@ -2159,29 +2354,8 @@ export function LeadList() {
                             onClick={() => {
                               setSelectedLeadForChat(lead);
                               setShowWhatsAppChat(true);
-                              const logsCol = collection(db, 'leads', lead.id, 'whatsappLogs');
-                              if (whatsAppLogsUnsubscribeRef.current) {
-                                whatsAppLogsUnsubscribeRef.current();
-                              }
-                              const unsubscribe = onSnapshot(
-                                query(logsCol, orderBy('createdAt', 'asc')),
-                                (snap) => {
-                                  const rows = snap.docs.map(d => ({
-                                    id: d.id,
-                                    ...d.data(),
-                                    createdAt: d.data().createdAt
-                                  }));
-                                  setWhatsAppLogs(rows as any[]);
-                                },
-                                (error) => {
-                                  if (error.code === 'permission-denied') {
-                                    return;
-                                  }
-                                  console.error('Error fetching WhatsApp logs:', error);
-                                  toast.error('Failed to load WhatsApp chat');
-                                }
-                              );
-                              whatsAppLogsUnsubscribeRef.current = unsubscribe;
+                              setWhatsAppLogs([]); // Clear previous messages
+                              // Messages will be fetched via API polling in useEffect
                             }}
                             title="WhatsApp Verification"
                             className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200"
@@ -2269,6 +2443,7 @@ export function LeadList() {
                             whileHover={{ scale: 1.02 }}
                             className="flex-shrink-0"
                           >
+                            <div className="flex flex-col items-end gap-1">
                             <motion.span
                               className={clsx(
                                 "inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-medium shadow-sm ring-1 ring-opacity-5",
@@ -2277,8 +2452,36 @@ export function LeadList() {
                               )}
                             >
                               {getStatusIcon(lead.status)}
-                              {getStatusDisplayText(lead.status)}
+                                {getStatusDisplayText(lead.status)}
                             </motion.span>
+                              {/* Countdown Timer / At Risk Indicator */}
+                              {(lead.status === 'verified' || lead.status === 'follow_up') && (() => {
+                                const elapsed = statusTimers[lead.id] ?? getStatusTimeElapsed(lead);
+                                if (elapsed === null) return null;
+
+                                const hoursElapsed = elapsed / (1000 * 60 * 60);
+                                const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+                                const remainingMs = twentyFourHoursMs - elapsed;
+
+                                if (hoursElapsed >= 24) {
+                                  // More than 24 hours - show "At Risk"
+                                  return (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700 border border-red-200 whitespace-nowrap">
+                                      <AlertCircle className="h-3 w-3 mr-1" />
+                                      At Risk
+                                    </span>
+                                  );
+                                } else {
+                                  // Less than 24 hours - show countdown
+                                  return (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-yellow-100 text-yellow-700 border border-yellow-200 whitespace-nowrap">
+                                      <Clock className="h-3 w-3 mr-1" />
+                                      {formatCountdown(remainingMs)} remaining
+                                    </span>
+                                  );
+                                }
+                              })()}
+                            </div>
                           </motion.div>
                         </div>
                       </div>
@@ -2538,10 +2741,6 @@ export function LeadList() {
                   onClick={() => {
                     setShowWhatsAppChat(false);
                     setSelectedLeadForChat(null);
-                    if (whatsAppLogsUnsubscribeRef.current) {
-                      whatsAppLogsUnsubscribeRef.current();
-                      whatsAppLogsUnsubscribeRef.current = null;
-                    }
                     setWhatsAppLogs([]);
                   }}
                   className="inline-flex items-center justify-center h-9 w-9 rounded-full text-emerald-700 hover:bg-emerald-100/60"
@@ -2549,227 +2748,14 @@ export function LeadList() {
                   <X className="h-5 w-5" />
                 </button>
               </div>
-              <div ref={logsContainerRef} className="px-6 sm:px-8 py-5 max-h-[70vh] overflow-y-auto space-y-4">
-                {whatsAppLogs.length === 0 ? (
-                  <div className="text-sm text-gray-500">No WhatsApp messages found for this lead.</div>
-                ) : (
-                  whatsAppLogs.map((log) => {
-                    const created = normalizeLogDate(log.createdAt);
-                    const createdStr = created ? `${format(created, 'MMM d, yyyy HH:mm')}` : '';
-                    const fromDigits = (log.from || '').toString().replace(/\D/g, '');
-                    const fromDisplay = fromDigits ? `+${fromDigits}` : '';
-                    const firstPlan = selectedLeadForChat?.plans?.[0];
-                    const isOutbound = log.direction === 'outbound';
-                    const createdTime = created?.getTime() ?? 0;
-                    const hasCustomerReplyAfter =
-                      isOutbound &&
-                      whatsAppLogs.some(other => {
-                        if (other.id === log.id || other.direction !== 'inbound') return false;
-                        const otherCreated = normalizeLogDate(other.createdAt);
-                        return (otherCreated?.getTime() ?? 0) > createdTime;
-                      });
-                    const deriveStatus = (): 'read' | 'delivered' | 'sent' | 'failed' | undefined => {
-                      if (!isOutbound) return undefined;
-                      if (log.status === 'failed') return 'failed';
-                      if (log.status === 'read' || hasCustomerReplyAfter) return 'read';
-                      if (log.status === 'delivered') return 'delivered';
-                      if (log.status === 'sent' || log.status === 'accepted') return 'sent';
-                      return log.status ? 'sent' : undefined;
-                    };
-                    const effectiveStatus = deriveStatus();
-                    const statusLabelMap: Record<string, string> = {
-                      read: 'Read',
-                      delivered: 'Delivered',
-                      sent: 'Sent',
-                      failed: 'Failed'
-                    };
-                    const CONSENT_ORDER: Array<{ key: string; label: string }> = [
-                      {
-                        key: 'ownershipAfterContract',
-                        label:
-                          'The chosen number becomes yours only after completing the contract. During this period, transfer of ownership is not permitted, and porting out to other telecom providers is restricted. Plan upgrades (within the same category) are allowed; downgrades or switching to prepaid are not allowed.'
-                      },
-                      {
-                        key: 'proRatedAgree',
-                        label:
-                          'Multi-SIM is available exclusively with the Limited Data Packages; this feature is not available with Non-Stop Data plans. The plan will be pro-rated. In case of early cancellation, all pending bills must be cleared along with one-month rental + 5% VAT, and the number will be reclaimed by Etisalat.'
-                      },
-                      {
-                        key: 'gracePeriodAcknowledge',
-                        label:
-                          'If you are not a UAE citizen, you must pay half or full monthly rental in advance at activation, which will be adjusted in the 4th month of your billing cycle. In case of technical or network-related issues, or misinformation, you can cancel the plan without charges within the first five days.'
-                      },
-                      {
-                        key: 'dataAccuracyAcknowledge',
-                        label:
-                          'The information provided regarding the number and plan is accurate. Any other information received will not be considered valid. Please read this carefully and confirm, as this communication will be referenced in the event of any future complaints regarding the number or plan.'
-                      },
-                      {
-                        key: 'acceptAllTerms',
-                        label: 'Accept all the Terms & Conditions.'
-                      }
-                    ];
-                    const accepted = Array.isArray(CONSENT_ORDER)
-                      ? CONSENT_ORDER.filter(i => log.consents?.[i.key] === true)
-                      : [];
-                    return (
-                      <div key={log.id} className={clsx('flex', isOutbound ? 'justify-end' : 'justify-start')}>
-                        <div className={clsx('max-w-[85%] rounded-2xl px-4 py-3 shadow-sm border',
-                          isOutbound ? 'bg-indigo-50 text-indigo-900 border-indigo-100' : 'bg-emerald-50 text-emerald-900 border-emerald-100'
-                        )}>
-                          <div className="flex items-center justify-between text-[11px] text-gray-500/80 mb-2">
-                            <span className={clsx('px-2 py-0.5 rounded-full border', isOutbound ? 'bg-white text-indigo-700 border-indigo-100' : 'bg-white text-emerald-700 border-emerald-100')}>
-                              {isOutbound ? 'Outbound' : 'Inbound'}
-                            </span>
-                            <span className="ml-2 flex items-center gap-1.5">
-                              {fromDisplay && (
-                                <span className="font-bold text-blue-600">From {fromDisplay}</span>
-                              )}
-                              {createdStr && ` · ${createdStr}`}
-                              {isOutbound && (
-                                <span
-                                  className="ml-1.5 inline-flex items-center"
-                                  title={effectiveStatus ? `Message ${statusLabelMap[effectiveStatus] || effectiveStatus}` : 'Message sent'}
-                                >
-                                  {effectiveStatus === 'read' && (
-                                    <CheckCheck className="w-4 h-4 text-green-500" />
-                                  )}
-                                  {effectiveStatus === 'delivered' && (
-                                    <CheckCheck className="w-4 h-4 text-gray-600" />
-                                  )}
-                                  {(!effectiveStatus || effectiveStatus === 'sent') && (
-                                    <Check className="w-3.5 h-3.5 text-gray-500" />
-                                  )}
-                                  {effectiveStatus === 'failed' && (
-                                    <XCircle className="w-4 h-4 text-red-500" />
-                                  )}
-                                </span>
-                              )}
-                            </span>
-                          </div>
-                          {accepted.length > 0 && firstPlan && (
-                            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4 mb-3 shadow-sm">
-                              <div className="flex items-center gap-2 mb-3">
-                                <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                                <h4 className="text-sm font-semibold text-blue-900">Plan & Number Summary</h4>
-                              </div>
-                              <div className="space-y-2 text-sm">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-gray-700">Selected Number:</span>
-                                  <span className="font-semibold text-gray-900">{firstPlan.number}</span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-gray-700">Monthly Plan:</span>
-                                  <span className="font-semibold text-gray-900">
-                                    {firstPlan.plan ? 
-                                      (() => {
-                                        const match = firstPlan.plan.match(/\d+/);
-                                        return match ? `${match[0]} AED + 5% VAT` : firstPlan.plan;
-                                      })() 
-                                      : ''
-                                    }
-                                  </span>
-                                </div>
-                                {planDetails?.benefits && planDetails.benefits !== 'N/A' && (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-gray-700">Benefits:</span>
-                                    <span className="font-semibold text-gray-900">{planDetails.benefits}</span>
-                                  </div>
-                                )}
-                                {planDetails?.duration && planDetails.duration !== 'N/A' && (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-gray-700">Contract Duration:</span>
-                                    <span className="font-semibold text-gray-900">{planDetails.duration}</span>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {log.messageText && (
-                            <div className="text-sm whitespace-pre-wrap mb-2">{log.messageText}</div>
-                          )}
-                          {/* Show error message if status is failed */}
-                          {effectiveStatus === 'failed' && log.error && (() => {
-                            const errorObj = log.error as any;
-                            let errorText = '';
-                            let errorCode = '';
-                            let errorExplanation = '';
-                            
-                            if (typeof log.error === 'string') {
-                              errorText = log.error;
-                            } else if (errorObj) {
-                              // WhatsApp error structure: { code, title, message, error_data }
-                              const parts = [];
-                              if (errorObj.title) parts.push(errorObj.title);
-                              // Only add message if it's different from title (avoid duplication)
-                              if (errorObj.message && errorObj.message !== errorObj.title) {
-                                parts.push(errorObj.message);
-                              }
-                              errorText = parts.length > 0 ? parts.join(' - ') : '';
-                              errorCode = errorObj.code || '';
-                              
-                              // Provide user-friendly explanations for common error codes
-                              const errorExplanations: Record<string, string> = {
-                                '131026': 'The customer\'s phone number is not registered on WhatsApp or has blocked your business number.',
-                                '131047': 'The customer has not replied within the 24-hour messaging window. Send a template message to re-engage.',
-                                '131051': 'This type of message is not supported. Try using a different message format.',
-                                '131052': 'Media download failed. The media file may be corrupted or too large.',
-                                '131053': 'Media upload failed. Check the file format and size.',
-                                '133000': 'The phone number format is invalid. Use international format (e.g., 971XXXXXXXXX).',
-                                '133004': 'The template message was rejected. Verify the template name and parameters.',
-                                '133005': 'Template not found. Make sure the template is approved in Meta Business Manager.',
-                                '133006': 'Invalid template parameters. Check parameter count and format.',
-                                '133010': 'Message limit exceeded. You\'ve reached the messaging limit for this customer.',
-                                '130472': 'The customer has opted out of marketing messages. They must opt back in before you can send them marketing content.',
-                                '135000': 'Generic WhatsApp Business API error. Contact support if this persists.',
-                                '136000': 'Insufficient WhatsApp Business Account balance. Add funds to continue messaging.',
-                                '368': 'Temporarily blocked for spammy behavior. Reduce message frequency.',
-                                '131031': 'Rate limit exceeded. Too many messages sent in a short time. Wait before retrying.',
-                              };
-                              
-                              errorExplanation = errorExplanations[errorCode] || '';
-                            }
-                            
-                            return (
-                              <div className="mt-2 bg-red-100 border border-red-300 rounded-lg p-2.5">
-                                <div className="flex items-start gap-2">
-                                  <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                                  <div className="flex-1 text-xs text-red-800">
-                                    <div className="font-semibold mb-1">Message Failed</div>
-                                    {errorText && <div className="text-red-700 mb-1">{errorText}</div>}
-                                    {errorCode && <div className="text-red-600 font-mono mb-1">Error Code: {errorCode}</div>}
-                                    {errorExplanation && (
-                                      <div className="mt-2 pt-2 border-t border-red-200 text-red-900 leading-relaxed">
-                                        <span className="font-semibold">💡 What to do: </span>
-                                        {errorExplanation}
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })()}
-                          {accepted.length > 0 && (
-                            <ol className="mt-1 space-y-2 text-sm">
-                              {accepted.map((item, idx) => (
-                                <li key={item.key} className="flex items-start">
-                                  <span className="mr-2 text-gray-700">{idx + 1}.</span>
-                                  <span className="text-gray-900">
-                                    {item.label}
-                                    <span className="ml-2 inline-flex items-center text-green-600 text-xs font-medium align-middle">
-                                      <svg className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M16.704 5.29a1 1 0 00-1.408-1.418L7.5 11.66 4.704 8.864a1 1 0 10-1.408 1.418l3.5 3.5a1 1 0 001.408 0l8.5-8.5z" clipRule="evenodd"/></svg>
-                                      Accepted
-                                    </span>
-                                  </span>
-                                </li>
-                              ))}
-                            </ol>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
+              <div ref={logsContainerRef} className="px-6 sm:px-8 py-5 max-h-[70vh] overflow-y-auto">
+                <WhatsAppConversationView
+                  messages={whatsAppLogs as WhatsAppMessage[]}
+                  lead={selectedLeadForChat || undefined}
+                  planDetails={planDetails || undefined}
+                  containerRef={logsContainerRef}
+                  className=""
+                />
               </div>
             </motion.div>
           </motion.div>

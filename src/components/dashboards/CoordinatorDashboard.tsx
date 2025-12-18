@@ -40,13 +40,13 @@
  * ===============================================================================
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, getDoc, doc, updateDoc, orderBy, addDoc, onSnapshot, serverTimestamp, limit } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { getWhatsAppCredentials } from '../../utils/configService';
-import { format, formatDistanceToNow } from 'date-fns';
+import { format, formatDistanceToNow, startOfMonth, endOfMonth, subMonths } from 'date-fns';
 import {
   CheckCircle,
   XCircle,
@@ -62,13 +62,20 @@ import {
   Search,
   Eye,
   AlertTriangle,
+  AlertCircle,
   CheckSquare,
   Hash,
   CheckCircle2,
   Users,
   UserCheck,
   X,
-  Target
+  Target,
+  Smartphone,
+  Tag,
+  RefreshCw,
+  CheckCircle as CheckCircleIcon,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { clsx } from 'clsx';
@@ -214,6 +221,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     verified: 0,
     assigned: 0,
     activated: 0,
+    activatedNonVerified: 0,
     followUp: 0,
     rejected: 0,
     later: 0,
@@ -226,6 +234,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [pageSize, setPageSize] = useState<typeof PAGE_SIZES[number]>(20);
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => {
+    // Default to current month in YYYY-MM format
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
   const [currentPage, setCurrentPage] = useState(1);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -239,8 +252,51 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [assignSearching, setAssignSearching] = useState(false);
   const [assignError, setAssignError] = useState('');
   const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [showAssignDialog, setShowAssignDialog] = useState(false);
+  const [leadToAssign, setLeadToAssign] = useState<Lead | null>(null);
+  const [managerLocationUrl, setManagerLocationUrl] = useState('');
+  const [managerNote, setManagerNote] = useState('');
+  const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
   const [assignDebounce, setAssignDebounce] = useState<number | undefined>(undefined);
+  const leadsTableRef = useRef<HTMLDivElement>(null);
   const [assignGroup, setAssignGroup] = useState<string>('');
+  const [showCalendarPicker, setShowCalendarPicker] = useState(false);
+  const [calendarView, setCalendarView] = useState<'month' | 'year'>('month');
+  const calendarPickerRef = useRef<HTMLDivElement>(null);
+  
+  // Initialize calendar year and month from selectedMonth
+  const [calendarYear, setCalendarYear] = useState(() => {
+    const [year] = selectedMonth.split('-');
+    return parseInt(year);
+  });
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const [, month] = selectedMonth.split('-');
+    return parseInt(month) - 1;
+  });
+  
+  // Update calendar year/month when selectedMonth changes
+  useEffect(() => {
+    const [year, month] = selectedMonth.split('-');
+    setCalendarYear(parseInt(year));
+    setCalendarMonth(parseInt(month) - 1);
+  }, [selectedMonth]);
+  
+  // Close calendar when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (calendarPickerRef.current && !calendarPickerRef.current.contains(event.target as Node)) {
+        setShowCalendarPicker(false);
+      }
+    };
+    
+    if (showCalendarPicker) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showCalendarPicker]);
 
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'verified';
@@ -331,25 +387,73 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     return () => clearTimeout(handle);
   }, [assignSearchTerm]);
 
-  const handleAssignToCoordinator = async (lead: Lead) => {
+  const handleAssignToCoordinator = (lead: Lead) => {
+    setLeadToAssign(lead);
+    setManagerLocationUrl(((lead as any).url as string) || '');
+    setManagerNote('');
+    setShowAssignDialog(true);
+  };
+
+  const confirmAssignToCoordinator = async () => {
+    if (!leadToAssign) return;
+    
+    setIsManagerActionProcessing(true);
     try {
-      setAssigningId(lead.id);
-      const leadRef = doc(db, 'leads', lead.id);
-      await updateDoc(leadRef, {
+      const leadRef = doc(db, 'leads', leadToAssign.id);
+      const trimmedLocationUrl = managerLocationUrl.trim();
+
+      // Change status to 'assigned_to_cord' when manager assigns to coordinator
+      const updatePayload: any = {
         status: 'assigned_to_cord',
         managerAssigned: true,
-        assignedToCordAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      toast.success('Lead assigned to coordinator');
+        managerNotes: managerNote.trim() || '',
+        updatedAt: serverTimestamp(),
+        assignedToCordAt: serverTimestamp() // Track when assigned to coordinator
+      };
+
+      // Only set URL if provided to avoid clearing existing data
+      if (trimmedLocationUrl) {
+        updatePayload.url = trimmedLocationUrl;
+      }
+
+      await updateDoc(leadRef, updatePayload);
+
+      // Add manager note as a chat message if it exists
+      if (managerNote && managerNote.trim() !== '') {
+        try {
+          await addDoc(collection(db, 'chatMessages'), {
+            leadId: leadToAssign.id,
+            userId: user?.id || '',
+            userRole: user?.role || 'coordinator',
+            message: managerNote.trim(),
+            createdAt: new Date()
+          });
+          
+          // Send WhatsApp notification for the chat message
+          const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
+          await sendChatMessageWhatsAppNotification(leadToAssign, managerNote.trim(), user?.name || 'Unknown');
+        } catch (chatError) {
+          console.error('Error creating manager chat message:', chatError);
+          // Don't fail manager action if chat message fails
+        }
+      }
+
+      toast.success('Lead assigned to coordinator successfully');
+      
       // Update local lists
-      setAssignResults(prev => prev.map(l => l.id === lead.id ? { ...l, status: 'assigned_to_cord', managerAssigned: true } : l));
-      setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, status: 'assigned_to_cord', managerAssigned: true } : l));
+      setAssignResults(prev => prev.map(l => l.id === leadToAssign.id ? { ...l, status: 'assigned_to_cord', managerAssigned: true } : l));
+      setLeads(prev => prev.map(l => l.id === leadToAssign.id ? { ...l, status: 'assigned_to_cord', managerAssigned: true } : l));
+      
+      // Close dialog and reset
+      setShowAssignDialog(false);
+      setManagerNote('');
+      setManagerLocationUrl(trimmedLocationUrl || '');
+      setLeadToAssign(null);
     } catch (error) {
       console.error('[CoordinatorDashboard] Failed to assign lead to coordinator:', error);
       toast.error('Failed to assign lead');
     } finally {
-      setAssigningId(null);
+      setIsManagerActionProcessing(false);
     }
   };
 
@@ -530,15 +634,37 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord in filteredCoordinatorLeads: ${ets10AssignedToCordInFiltered.length}`, ets10AssignedToCordInFiltered.map(l => ({ id: l.id, status: l.status })));
           }
 
-          // Get current month's start and end dates
+          // Get selected month's start and end dates
           const now = new Date();
-          const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-          const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+          let startOfMonth: Date;
+          let endOfMonth: Date;
+          
+          if (selectedMonth) {
+            const [year, month] = selectedMonth.split('-').map(Number);
+            startOfMonth = new Date(year, month - 1, 1, 0, 0, 0, 0);
+            endOfMonth = new Date(year, month, 0, 23, 59, 59, 999);
+          } else {
+            // Fallback to current month if no month selected
+            startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+          }
+          
           const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
           const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
 
-          // Filter activated leads for current month using activatedAt (fallback updatedAt)
-          const currentMonthActivatedLeads = filteredCoordinatorLeads.filter(lead => {
+          // Filter leads by selected month for metrics calculation
+          let leadsForMetrics = filteredCoordinatorLeads;
+          if (selectedMonth) {
+            leadsForMetrics = filteredCoordinatorLeads.filter(lead => {
+              const leadDate = lead.createdAt || lead.updatedAt;
+              if (!leadDate) return false;
+              const leadDateObj = leadDate instanceof Date ? leadDate : new Date(leadDate);
+              return leadDateObj >= startOfMonth && leadDateObj <= endOfMonth;
+            });
+          }
+
+          // Filter activated leads for selected month using activatedAt (fallback updatedAt)
+          const currentMonthActivatedLeads = leadsForMetrics.filter(lead => {
             if (lead.status !== 'activated') return false;
             const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
             if (!activatedAtRaw) return false;
@@ -588,7 +714,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           // EXCLUDE: follow_up, activated, rejected, assigned leads, and later leads with scheduledFor date in the future
           const todayDate = new Date();
           todayDate.setHours(0, 0, 0, 0);
-          const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
+          const managerAssignedUnassignedCount = leadsForMetrics.filter(
             l => {
               // Exclude follow_up, activated, rejected, and assigned leads
               if (l.status === 'follow_up' || l.status === 'activated' || l.status === 'rejected' || l.status === 'assigned') {
@@ -630,14 +756,15 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           const activatedForScope = scopedGroup ? (groupCounts[scopedGroup] || 0) : totalActivations;
 
           const computedMetrics = {
-            totalLeads: filteredCoordinatorLeads.length,
+            totalLeads: leadsForMetrics.length,
             verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
-            assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Only actual assigned leads
+            assigned: leadsForMetrics.filter(l => l.status === 'assigned').length, // Only actual assigned leads
             activated: activatedForScope, // Group-scoped activations when applicable
-            followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
-            later: filteredCoordinatorLeads.filter(l => l.status === 'later').length,
-            rejected: filteredCoordinatorLeads.filter(l => l.status === 'rejected').length,
-            yesterday: filteredCoordinatorLeads.filter(l => {
+            activatedNonVerified: leadsForMetrics.filter(l => l.status === 'activated_non_verified').length,
+            followUp: leadsForMetrics.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
+            later: leadsForMetrics.filter(l => l.status === 'later').length,
+            rejected: leadsForMetrics.filter(l => l.status === 'rejected').length,
+            yesterday: leadsForMetrics.filter(l => {
               const ts = (l.updatedAt || l.createdAt);
               return ts &&
               ts >= yesterdayStart &&
@@ -736,7 +863,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     return () => {
       unsubscribe();
     };
-  }, [user?.id, currentStatus, coordinatorType]);
+  }, [user?.id, currentStatus, coordinatorType, selectedMonth]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -814,6 +941,22 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
       matchesStatus = !!(lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification' && lead.status !== 'follow_up' && lead.status !== 'later');
     }
+
+    // Filter by selected month
+    if (selectedMonth) {
+      const [year, month] = selectedMonth.split('-').map(Number);
+      const monthStart = new Date(year, month - 1, 1, 0, 0, 0, 0);
+      const monthEnd = new Date(year, month, 0, 23, 59, 59, 999);
+      const leadDate = lead.createdAt || lead.updatedAt;
+      if (leadDate) {
+        const leadDateObj = leadDate instanceof Date ? leadDate : new Date(leadDate);
+        if (leadDateObj < monthStart || leadDateObj > monthEnd) {
+          return false;
+        }
+      } else {
+        return false; // Exclude leads without dates when filtering by month
+      }
+    }
     
     return matchesSearch && matchesStatus;
   });
@@ -849,6 +992,14 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       color: 'bg-purple-500',
       textColor: 'text-purple-600',
       status: 'activated'
+    },
+    {
+      name: 'Active Non Verified',
+      value: metrics.activatedNonVerified,
+      icon: AlertCircle,
+      color: 'bg-amber-500',
+      textColor: 'text-amber-600',
+      status: 'activated_non_verified'
     },
     {
       name: 'Follow Up',
@@ -1150,6 +1301,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
 
   const handleStatClick = (status: string) => {
     setSearchParams({ status });
+    // Scroll to leads table after a short delay to allow state update
+    setTimeout(() => {
+      leadsTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
   };
 
   // Update handleStatusResponse function
@@ -1379,7 +1534,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               {coordinatorType === 'all' && 'You are assigned to handle leads from all groups (G1, G2, G3, G4, G5).'}
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             {coordinatorType === 'all' && (
               <>
                 <motion.button
@@ -1410,9 +1565,133 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                 </motion.button>
               </>
             )}
-            <div className="hidden sm:flex items-center space-x-2 text-sm text-gray-600">
-              <Calendar className="h-5 w-5" />
-              <span>{format(new Date(), 'EEEE, MMMM d, yyyy')}</span>
+            {/* Calendar Picker - Calendar Selector on same line */}
+            <div className="relative flex items-center" ref={calendarPickerRef}>
+              <button
+                onClick={() => setShowCalendarPicker(!showCalendarPicker)}
+                className="inline-flex items-center pl-3 pr-4 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium hover:bg-gray-50 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              >
+                <Calendar className="h-5 w-5 text-gray-400 mr-2" />
+                <span>{format(new Date(parseInt(selectedMonth.split('-')[0]), parseInt(selectedMonth.split('-')[1]) - 1, 1), 'MMMM yyyy')}</span>
+              </button>
+              
+              {/* Calendar Picker Dropdown */}
+              {showCalendarPicker && (
+                <div className="absolute top-full right-0 mt-2 bg-white rounded-lg shadow-xl border border-gray-200 p-4 z-50 min-w-[280px]">
+                  {calendarView === 'month' ? (
+                    <>
+                      {/* Year/Month Navigation */}
+                      <div className="flex items-center justify-between mb-4">
+                        <button
+                          onClick={() => {
+                            if (calendarYear > 2020) {
+                              setCalendarYear(calendarYear - 1);
+                            }
+                          }}
+                          className="p-1 hover:bg-gray-100 rounded"
+                          disabled={calendarYear <= 2020}
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => setCalendarView('year')}
+                          className="px-3 py-1 font-semibold text-gray-900 hover:bg-gray-100 rounded"
+                        >
+                          {format(new Date(calendarYear, calendarMonth, 1), 'MMMM yyyy')}
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (calendarYear < 2030) {
+                              setCalendarYear(calendarYear + 1);
+                            }
+                          }}
+                          className="p-1 hover:bg-gray-100 rounded"
+                          disabled={calendarYear >= 2030}
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+            </div>
+                      
+                      {/* Month Grid */}
+                      <div className="grid grid-cols-3 gap-2">
+                        {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((month, index) => {
+                          const monthValue = `${calendarYear}-${String(index + 1).padStart(2, '0')}`;
+                          const isSelected = selectedMonth === monthValue;
+                          const isCurrentMonth = calendarYear === new Date().getFullYear() && index === new Date().getMonth();
+                          
+                          return (
+                            <button
+                              key={index}
+                              onClick={() => {
+                                setSelectedMonth(monthValue);
+                                setShowCalendarPicker(false);
+                              }}
+                              className={`p-2 text-sm rounded-lg transition-colors ${
+                                isSelected
+                                  ? 'bg-indigo-600 text-white font-semibold'
+                                  : isCurrentMonth
+                                  ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                                  : 'text-gray-700 hover:bg-gray-100'
+                              }`}
+                            >
+                              {month}
+                            </button>
+                          );
+                        })}
+          </div>
+                    </>
+                  ) : (
+                    <>
+                      {/* Year Navigation */}
+                      <div className="flex items-center justify-between mb-4">
+                        <button
+                          onClick={() => setCalendarYear(calendarYear - 12)}
+                          className="p-1 hover:bg-gray-100 rounded"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+                        <span className="font-semibold text-gray-900">
+                          {calendarYear - 5} - {calendarYear + 6}
+                        </span>
+                        <button
+                          onClick={() => setCalendarYear(calendarYear + 12)}
+                          className="p-1 hover:bg-gray-100 rounded"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+        </div>
+                      
+                      {/* Year Grid */}
+                      <div className="grid grid-cols-4 gap-2">
+                        {Array.from({ length: 12 }, (_, i) => {
+                          const year = calendarYear - 5 + i;
+                          const isSelected = selectedMonth.startsWith(`${year}-`);
+                          const isCurrentYear = year === new Date().getFullYear();
+                          
+                          return (
+                            <button
+                              key={year}
+                              onClick={() => {
+                                setCalendarYear(year);
+                                setCalendarView('month');
+                              }}
+                              className={`p-2 text-sm rounded-lg transition-colors ${
+                                isSelected
+                                  ? 'bg-indigo-600 text-white font-semibold'
+                                  : isCurrentYear
+                                  ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                                  : 'text-gray-700 hover:bg-gray-100'
+                              }`}
+                            >
+                              {year}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1517,87 +1796,205 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       </div>
 
       {/* Global Verified Leads search & assign to coordinator */}
-      <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-6 mb-8">
-        <div className="flex flex-col sm:flex-row sm:items-end gap-4">
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Search verified leads (any group)</label>
-            <div className="relative">
-              <Search className="h-5 w-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Enter customer number, lead number, or number"
-                value={assignSearchTerm}
-                onChange={(e) => setAssignSearchTerm(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    searchVerifiedLeadsForAssign();
-                  }
-                }}
-                className="pl-10 pr-4 py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              />
-            </div>
-              <div className="text-xs text-gray-500 mt-1">
-                Only verified leads are shown. Search by customer number, lead number, or plan number.
-              </div>
+      {/* Compact Search Section */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+        <div className="flex items-center gap-3">
+          <div className="flex-1 relative">
+            <Search className="h-4 w-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search verified leads by customer number, lead number, or plan number..."
+              value={assignSearchTerm}
+              onChange={(e) => setAssignSearchTerm(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  searchVerifiedLeadsForAssign();
+                }
+              }}
+              className="pl-9 pr-4 py-2 w-full text-sm rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+            />
           </div>
           <button
             onClick={searchVerifiedLeadsForAssign}
             disabled={assignSearching || !assignSearchTerm.trim()}
-            className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
           >
-            {assignSearching ? 'Searching...' : 'Search'}
+            {assignSearching ? (
+              <span className="flex items-center gap-2">
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Searching
+              </span>
+            ) : (
+              'Search'
+            )}
           </button>
         </div>
-
         {assignError && !assignSearching && (
-          <div className="mt-4 text-sm text-red-600">{assignError}</div>
-        )}
-
-        {assignResults.length > 0 && (
-          <div className="mt-6 space-y-3">
-            {assignResults.map(lead => (
-              <div key={lead.id} className="flex flex-col md:flex-row md:items-center justify-between gap-3 border border-gray-100 rounded-xl p-4 hover:border-indigo-200 transition">
-                <div>
-                  <div className="text-sm font-semibold text-gray-900">{lead.customerName || 'No name'}</div>
-                  <div className="text-sm text-gray-600">Customer: {lead.customerNumber || 'N/A'} · Lead: {lead.leadNumber || lead.id}</div>
-                      <div className="text-xs">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${
-                          lead.status === 'verified' ? 'bg-green-100 text-green-700' :
-                          lead.status === 'assigned_to_cord' ? 'bg-indigo-100 text-indigo-700' :
-                          'bg-gray-100 text-gray-700'
-                        }`}>
-                          {getStatusDisplayText(lead.status)}
-                        </span>
-                      </div>
-                <div className="text-xs text-gray-500">
-                  {(() => {
-                    const primaryPlan: any = Array.isArray(lead.plans) && lead.plans.length > 0 ? lead.plans[0] : null;
-                    const number = primaryPlan?.number || 'N/A';
-                    const group = primaryPlan?.group || 'N/A';
-                    return `Number: ${number} · Group: ${group}`;
-                  })()}
-                </div>
-                </div>
-                <button
-                  onClick={() => handleAssignToCoordinator(lead)}
-                  disabled={lead.status === 'assigned_to_cord' || assigningId === lead.id}
-                  className="inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed gap-2"
-                >
-                  {assigningId === lead.id ? 'Assigning...' : (lead.status === 'assigned_to_cord' ? 'Already Assigned' : 'Assign to Coordinator')}
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {!assignSearching && assignResults.length === 0 && assignSearchTerm.trim().length > 0 && !assignError && (
-          <div className="mt-4 text-sm text-gray-500">No results found.</div>
+          <div className="mt-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{assignError}</div>
         )}
       </div>
 
+      {/* Search Results */}
+      {assignResults.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+          <div className="space-y-2">
+            {assignResults.map(lead => {
+              const primaryPlan: any = Array.isArray(lead.plans) && lead.plans.length > 0 ? lead.plans[0] : null;
+              const number = primaryPlan?.number || 'N/A';
+              const group = primaryPlan?.group || 'N/A';
+              
+              return (
+                <div key={lead.id} className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50/30 transition-all">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-semibold text-gray-900 truncate">{lead.customerName || 'No name'}</span>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                        lead.status === 'verified' ? 'bg-green-100 text-green-700' :
+                        lead.status === 'assigned_to_cord' ? 'bg-indigo-100 text-indigo-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>
+                        {getStatusDisplayText(lead.status)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-gray-600 flex-wrap">
+                      <span className="flex items-center gap-1">
+                        <Phone className="h-3 w-3 text-blue-500" />
+                        <span className="font-medium text-blue-600">Customer number:</span>
+                        <span className="text-gray-900">{lead.customerNumber || 'N/A'}</span>
+                      </span>
+                      <span className="text-gray-300">•</span>
+                      <span className="flex items-center gap-1">
+                        <Hash className="h-3 w-3 text-purple-500" />
+                        <span className="font-medium text-purple-600">Lead:</span>
+                        <span className="text-gray-900">{lead.leadNumber || lead.id}</span>
+                      </span>
+                      <span className="text-gray-300">•</span>
+                      <span className="flex items-center gap-1">
+                        <Smartphone className="h-3 w-3 text-green-500" />
+                        <span className="font-medium text-green-600">Selected number:</span>
+                        <span className="text-gray-900">{number}</span>
+                      </span>
+                      <span className="text-gray-300">•</span>
+                      <span className="flex items-center gap-1">
+                        <Tag className="h-3 w-3 text-orange-500" />
+                        <span className="font-medium text-orange-600">Group:</span>
+                        <span className="text-gray-900">{group}</span>
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleAssignToCoordinator(lead)}
+                    disabled={lead.status === 'assigned_to_cord' || isManagerActionProcessing}
+                    className="px-4 py-2 text-xs font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    {lead.status === 'assigned_to_cord' ? 'Assigned' : 'Assign'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!assignSearching && assignResults.length === 0 && assignSearchTerm.trim().length > 0 && !assignError && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+          <div className="text-sm text-gray-500 text-center py-4">No verified leads found.</div>
+        </div>
+      )}
+
+      {/* Assignment Dialog - Same as Manager/Agent */}
+      {showAssignDialog && leadToAssign && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-lg w-full mx-4 overflow-hidden">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-purple-500 to-purple-600 px-6 py-4">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <User2 className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Assign to Coordinator</h3>
+                  <p className="text-purple-100 text-sm">
+                    Assign this verified lead to the coordinator for final processing
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Content */}
+            <div className="p-6 space-y-6">
+              {/* Location URL */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-900">
+                  Google Maps Location URL (Optional)
+                </label>
+                <input
+                  type="url"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-purple-300 focus:ring-2 focus:ring-purple-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500"
+                  value={managerLocationUrl}
+                  onChange={(e) => setManagerLocationUrl(e.target.value)}
+                  placeholder="Paste Google Maps link to the customer location"
+                />
+                <p className="text-xs text-gray-500">
+                  This link will be saved on the lead for coordinators to access.
+                </p>
+              </div>
+
+              {/* Comment Box */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-900">
+                  Comments (Optional)
+                </label>
+                <textarea
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-purple-300 focus:ring-2 focus:ring-purple-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                  rows={4}
+                  value={managerNote}
+                  onChange={(e) => setManagerNote(e.target.value)}
+                  placeholder="Add any comments or notes for the coordinator..."
+                />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-100">
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => {
+                    setShowAssignDialog(false);
+                    setManagerNote('');
+                    setManagerLocationUrl(((leadToAssign as any).url as string) || '');
+                  }}
+                  disabled={isManagerActionProcessing}
+                  className="px-6 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmAssignToCoordinator}
+                  disabled={isManagerActionProcessing}
+                  className="px-6 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isManagerActionProcessing ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin inline" />
+                      Assigning...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircleIcon className="h-4 w-4 mr-2 inline" />
+                      Assign to Coordinator
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Filters */}
-      <div className="mb-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="mb-8 grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="relative">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
             <Search className="h-5 w-5 text-gray-400" />
@@ -1645,7 +2042,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       </div>
 
       {/* Leads Table */}
-      <div className="bg-white shadow-xl rounded-2xl overflow-hidden border border-gray-100">
+      <div ref={leadsTableRef} className="bg-white shadow-xl rounded-2xl overflow-hidden border border-gray-100">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
