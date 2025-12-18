@@ -41,12 +41,13 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { collection, query, where, getDocs, orderBy, Timestamp, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, Timestamp, addDoc, serverTimestamp, getDoc, doc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { NumberPoolType } from '../../types';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../store/authStore';
+import { getUserDetails } from '../../utils/dncService';
 import { 
   AlertTriangle, 
   Hash, 
@@ -68,7 +69,10 @@ import {
   RefreshCw,
   Eye,
   AlertOctagon,
-  X
+  X,
+  UserCheck,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { format, subHours } from 'date-fns';
 import { clsx } from 'clsx';
@@ -172,8 +176,14 @@ const NumberCard = ({ number, index }: { number: NumberPoolType; index: number }
   const [isExpanded, setIsExpanded] = useState(false);
   const [isRequestingOpen, setIsRequestingOpen] = useState(false);
   const [openRequested, setOpenRequested] = useState(false);
-  const navigate = useNavigate();
+  const [strikersInfo, setStrikersInfo] = useState<Array<{userId: string; name: string; teamName: string; claimedAt: Date}>>([]);
+  const [leadOwnerInfo, setLeadOwnerInfo] = useState<{name: string; teamName: string} | null>(null);
+  const [loadingStrikers, setLoadingStrikers] = useState(false);
   const { user } = useAuthStore();
+  const isCoordinator = user?.role === 'coordinator';
+  // Show strikers list by default for coordinators
+  const [showStrikersList, setShowStrikersList] = useState(isCoordinator);
+  const navigate = useNavigate();
 
   const pendingClaims = (number.claims || []).filter((claim: any) => claim.status === 'pending').length;
   const lastClaimTime = (number.claims || [])[(number.claims || []).length - 1]?.claimedAt;
@@ -195,6 +205,104 @@ const NumberCard = ({ number, index }: { number: NumberPoolType; index: number }
     checkPendingRequest();
     return () => { unsub = true; };
   }, [number.id, user?.id]);
+
+  // Fetch strikers information (for coordinators)
+  useEffect(() => {
+    if (!isCoordinator || !number.claims || number.claims.length === 0) {
+      setStrikersInfo([]);
+      return;
+    }
+
+    async function fetchStrikersInfo() {
+      setLoadingStrikers(true);
+      try {
+        // Get all unique user IDs from pending claims
+        const pendingClaimUserIds = (number.claims || [])
+          .filter((claim: any) => claim.status === 'pending')
+          .map((claim: any) => claim.userId)
+          .filter((id: string) => id); // Remove duplicates and nulls
+
+        if (pendingClaimUserIds.length === 0) {
+          setStrikersInfo([]);
+          return;
+        }
+
+        // Get user details for all strikers
+        const userDetails = await getUserDetails([...new Set(pendingClaimUserIds)]);
+
+        // Map claims to include user info
+        const strikers = (number.claims || [])
+          .filter((claim: any) => claim.status === 'pending' && claim.userId)
+          .map((claim: any) => {
+            const details = userDetails[claim.userId] || { name: 'Unknown User', teamName: 'No Team' };
+            return {
+              userId: claim.userId,
+              name: details.name,
+              teamName: details.teamName,
+              claimedAt: claim.claimedAt?.toDate ? claim.claimedAt.toDate() : (claim.claimedAt instanceof Date ? claim.claimedAt : new Date())
+            };
+          })
+          .sort((a, b) => b.claimedAt.getTime() - a.claimedAt.getTime()); // Sort by most recent first
+
+        setStrikersInfo(strikers);
+      } catch (error) {
+        console.error('Error fetching strikers info:', error);
+        setStrikersInfo([]);
+      } finally {
+        setLoadingStrikers(false);
+      }
+    }
+
+    fetchStrikersInfo();
+  }, [number.claims, isCoordinator]);
+
+  // Fetch lead owner information
+  useEffect(() => {
+    if (!isCoordinator) {
+      setLeadOwnerInfo(null);
+      return;
+    }
+
+    async function fetchLeadOwner() {
+      try {
+        // Find the lead that contains this number
+        const leadsQuery = query(collection(db, 'leads'));
+        const leadsSnapshot = await getDocs(leadsQuery);
+        
+        let leadOwnerId: string | null = null;
+        leadsSnapshot.docs.forEach(doc => {
+          const data = doc.data();
+          if (data.plans && Array.isArray(data.plans)) {
+            const hasNumber = data.plans.some((plan: any) => plan.numberId === number.id);
+            if (hasNumber) {
+              leadOwnerId = data.agentId;
+            }
+          }
+        });
+
+        if (leadOwnerId) {
+          // Get user details for lead owner
+          const userDetails = await getUserDetails([leadOwnerId]);
+          const ownerDetails = userDetails[leadOwnerId];
+          if (ownerDetails) {
+            setLeadOwnerInfo({
+              name: ownerDetails.name,
+              teamName: ownerDetails.teamName
+            });
+          } else {
+            setLeadOwnerInfo(null);
+          }
+        } else {
+          setLeadOwnerInfo(null);
+        }
+      } catch (error) {
+        console.error('Error fetching lead owner:', error);
+        setLeadOwnerInfo(null);
+      }
+    }
+
+    fetchLeadOwner();
+  }, [number.id, isCoordinator]);
 
   const handleViewDetails = async () => {
     try {
@@ -257,10 +365,6 @@ const NumberCard = ({ number, index }: { number: NumberPoolType; index: number }
       setIsRequestingOpen(false);
     }
   };
-
-
-  // Check if user is coordinator
-  const isCoordinator = user?.role === 'coordinator';
 
   return (
     <motion.div
@@ -344,6 +448,94 @@ const NumberCard = ({ number, index }: { number: NumberPoolType; index: number }
             </motion.div>
           </div>
 
+          {/* Lead Owner Info (for coordinators) */}
+          {isCoordinator && leadOwnerInfo && (
+            <div className="mb-4 p-3 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-100/50">
+              <div className="flex items-center gap-2 mb-2">
+                <UserCheck className="w-4 h-4 text-blue-600" />
+                <span className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Lead Owner</span>
+              </div>
+              <div className="text-sm font-semibold text-blue-900">{leadOwnerInfo.name}</div>
+              <div className="text-xs text-blue-700">{leadOwnerInfo.teamName}</div>
+            </div>
+          )}
+
+          {/* Strikers List (for coordinators) */}
+          {isCoordinator && pendingClaims > 0 && (
+            <div className="mb-4">
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => setShowStrikersList(!showStrikersList)}
+                className="w-full flex items-center justify-between p-3 bg-gradient-to-br from-red-50 to-orange-50 rounded-xl border border-red-100/50 hover:border-red-200 transition-all"
+              >
+                <div className="flex items-center gap-2 flex-1">
+                  <Users className="w-4 h-4 text-red-600" />
+                  <div className="flex-1 text-left">
+                    <span className="text-sm font-semibold text-red-700">
+                      {pendingClaims} Agent{pendingClaims > 1 ? 's' : ''} Struck
+                    </span>
+                    {!showStrikersList && strikersInfo.length > 0 && (
+                      <div className="text-xs text-red-600 mt-0.5">
+                        {strikersInfo.slice(0, 2).map(s => s.name).join(', ')}
+                        {strikersInfo.length > 2 && ` +${strikersInfo.length - 2} more`}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {showStrikersList ? (
+                  <ChevronUp className="w-4 h-4 text-red-600" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-red-600" />
+                )}
+              </motion.button>
+
+              {showStrikersList && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="mt-2 space-y-2 max-h-64 overflow-y-auto"
+                >
+                  {loadingStrikers ? (
+                    <div className="p-3 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Loading strikers...
+                    </div>
+                  ) : strikersInfo.length > 0 ? (
+                    strikersInfo.map((striker, idx) => (
+                      <motion.div
+                        key={striker.userId}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: idx * 0.05 }}
+                        className="p-3 bg-white rounded-lg border border-red-100 shadow-sm hover:shadow-md transition-shadow"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0"></div>
+                              <span className="text-sm font-semibold text-gray-900 truncate">{striker.name}</span>
+                            </div>
+                            <div className="flex items-center gap-2 ml-4">
+                              <UserCheck className="w-3 h-3 text-gray-400" />
+                              <span className="text-xs text-gray-600 truncate">{striker.teamName}</span>
+                            </div>
+                          </div>
+                          <div className="text-xs text-gray-500 whitespace-nowrap flex-shrink-0">
+                            {format(striker.claimedAt, 'd MMM, h:mm a')}
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))
+                  ) : (
+                    <div className="p-3 text-center text-sm text-gray-500">No striker information available</div>
+                  )}
+                </motion.div>
+              )}
+            </div>
+          )}
+
           {/* Status Badge - Centered */}
           <div className="flex justify-center mb-4">
             <StatusBadge status={number.status} />
@@ -364,25 +556,6 @@ const NumberCard = ({ number, index }: { number: NumberPoolType; index: number }
               </span>
               <ChevronRight className="w-5 h-5" />
             </motion.button>
-
-
-            {isCoordinator && (
-              <motion.button
-                whileHover={{ scale: openRequested ? 1 : 1.03, y: openRequested ? 0 : -2 }}
-                whileTap={{ scale: openRequested ? 1 : 0.98 }}
-                onClick={openRequested ? undefined : handleRequestOpen}
-                className={`w-full flex items-center justify-between px-5 py-3 rounded-2xl font-semibold shadow-md transition-all duration-200 group/btn border-0 outline-none focus:ring-2 focus:ring-orange-400 focus:ring-offset-2
-                  ${openRequested ? 'bg-gradient-to-r from-gray-300 to-gray-400 text-gray-500 cursor-not-allowed' : 'bg-gradient-to-r from-orange-500 to-red-500 text-white hover:shadow-xl'}`}
-                disabled={openRequested || isRequestingOpen}
-                style={{ fontSize: '1rem', letterSpacing: '0.01em' }}
-              >
-                <span className="flex items-center gap-2">
-                  <AlertOctagon className="w-5 h-5" />
-                  {openRequested ? 'Pending' : 'Request to Set Open'}
-                </span>
-                <ChevronRight className="w-5 h-5" />
-              </motion.button>
-            )}
           </div>
         </div>
       </motion.div>
@@ -563,7 +736,11 @@ export function useStruckNumbers(userId: string) {
             claim.status === 'pending'
           ) &&
           // 3. Are not activated
-          number.status !== 'activated'
+          number.status !== 'activated' &&
+          // 4. Are not reserved
+          number.status !== 'reserved' &&
+          // 5. Are not open
+          number.status !== 'open'
         );
 
 
@@ -637,7 +814,11 @@ export function useStruckNumbersForCoordinator() {
             claim.status === 'pending'
           ) &&
           // 2. Are not activated
-          number.status !== 'activated'
+          number.status !== 'activated' &&
+          // 3. Are not reserved
+          number.status !== 'reserved' &&
+          // 4. Are not open
+          number.status !== 'open'
         );
 
       setStruckNumbers(struckNumbers);
