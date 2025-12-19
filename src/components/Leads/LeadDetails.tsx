@@ -211,6 +211,7 @@ export function LeadDetails() {
   const [changeList, setChangeList] = useState<Array<{ field: string; original: string; edited: string }>>([]);
   const [isConfirmSaving, setIsConfirmSaving] = useState(false);
   const [isResubmitting, setIsResubmitting] = useState(false);
+  const [resubmitError, setResubmitError] = useState<{ reason: string; number: string } | null>(null);
   const [sendingMessage, setSendingMessage] = useState(false);
   const [recordingElapsed, setRecordingElapsed] = useState<number>(0);
   const [fileSizeError, setFileSizeError] = useState<string | null>(null);
@@ -1586,13 +1587,60 @@ export function LeadDetails() {
                   const data = current.data();
                   // Allow agent resubmission for both 'non_verified' and legacy 'follow_verification' statuses
                   if (user.role === 'agent' && (data.status === 'non_verified' || data.status === 'follow_verification')) {
+                    // Get all numbers attached to this lead
+                    const plans = (data.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+                    
+                    // Validate that all numbers are either open or reserved by this agent
+                    const numberChecks = await Promise.all(
+                      plans.map(async (p: any) => {
+                        try {
+                          const numberRef = doc(db, 'numberPool', p.numberId);
+                          const numberDoc = await getDoc(numberRef);
+                          if (!numberDoc.exists()) {
+                            return { numberId: p.numberId, valid: false, reason: 'Number not found' };
+                          }
+                          const numberData = numberDoc.data();
+                          const numberStatus = numberData?.status;
+                          const reservedBy = numberData?.reservedBy;
+                          
+                          // Number is valid if it's open OR reserved by this agent
+                          const isValid = numberStatus === 'open' || reservedBy === user.id;
+                          
+                          if (!isValid) {
+                            const reason = numberStatus === 'reserved' 
+                              ? 'Number is reserved by another agent'
+                              : `Number status is ${numberStatus}`;
+                            return { numberId: p.numberId, valid: false, reason, number: numberData?.number || p.numberId };
+                          }
+                          
+                          return { numberId: p.numberId, valid: true };
+                        } catch (error) {
+                          console.error(`Error checking number ${p.numberId}:`, error);
+                          return { numberId: p.numberId, valid: false, reason: 'Error checking number status' };
+                        }
+                      })
+                    );
+                    
+                    // Check if any numbers are invalid
+                    const invalidNumbers = numberChecks.filter(check => !check.valid);
+                    if (invalidNumbers.length > 0) {
+                      const invalidNumber = invalidNumbers[0];
+                      const numberDisplay = invalidNumber.number || invalidNumber.numberId;
+                      setResubmitError({
+                        reason: invalidNumber.reason,
+                        number: numberDisplay
+                      });
+                      setIsResubmitting(false);
+                      return;
+                    }
+                    
+                    // All numbers are valid, proceed with resubmission
                     await updateDoc(leadRef, {
                       status: 'pending_verification',
                       updatedAt: new Date(),
                       updatedBy: user.id
                     });
                     // Update numbers to pending_verification
-                    const plans = (data.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
                     await Promise.all(
                       plans.map((p: any) => updateDoc(doc(db, 'numberPool', p.numberId), {
                         status: 'pending_verification',
@@ -1669,6 +1717,39 @@ export function LeadDetails() {
                       {isConfirmSaving ? 'Saving...' : 'Confirm & Save'}
                     </button>
                   )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Resubmit Error Card */}
+          {resubmitError && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-2xl p-6 sm:p-8 max-w-md w-full mx-4 shadow-xl">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex-shrink-0 w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+                    <AlertCircle className="w-6 h-6 text-red-600" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900">Cannot Resubmit Lead</h3>
+                </div>
+                <div className="mb-6">
+                  <p className="text-gray-700 mb-2">
+                    <span className="font-medium">Reason:</span> {resubmitError.reason}
+                  </p>
+                  <p className="text-gray-700">
+                    <span className="font-medium">Number:</span> {resubmitError.number}
+                  </p>
+                  <p className="text-sm text-gray-500 mt-3">
+                    The number attached to this lead is not available for resubmission. Please ensure the number is either open or reserved by you.
+                  </p>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setResubmitError(null)}
+                    className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                  >
+                    Close
+                  </button>
                 </div>
               </div>
             </div>
