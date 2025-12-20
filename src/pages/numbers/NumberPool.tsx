@@ -2417,6 +2417,91 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // Use displayNumbers instead of paginatedNumbers for the new pagination system
   const paginatedNumbers = displayNumbers;
 
+  // Check and mark active numbers with strike-through
+  const checkAndMarkActiveNumbers = useCallback(async (numbersToCheck: NumberPoolType[]) => {
+    if (!user?.id || numbersToCheck.length === 0) return;
+
+    // Check each number that doesn't already have struckThrough set
+    for (const number of numbersToCheck) {
+      // First check: If status is 'activated', mark as struck through immediately
+      if (number.status === 'activated') {
+        if (number.struckThrough !== true) {
+          try {
+            const numberRef = doc(db, 'numberPool', number.id);
+            await updateDoc(numberRef, {
+              struckThrough: true
+            });
+            // Update local state
+            setNumbers(prev => prev.map(n => 
+              n.id === number.id ? { ...n, struckThrough: true } : n
+            ));
+          } catch (error) {
+            console.error(`Error updating struckThrough for number ${number.id}:`, error);
+          }
+        }
+        continue; // Skip API check if status is already 'activated'
+      }
+
+      // Skip if already checked
+      if (number.struckThrough === true) {
+        continue;
+      }
+
+      // Check if number is active via API (only for numbers not already marked)
+      try {
+        const { NumberCheckService } = await import('../../services/numberCheckService');
+        const result = await NumberCheckService.checkNumberStatus(number.number);
+        
+        if (result.isActive) {
+          // Number is active, mark as struck through
+          try {
+            const numberRef = doc(db, 'numberPool', number.id);
+            await updateDoc(numberRef, {
+              struckThrough: true
+            });
+            // Update local state
+            setNumbers(prev => prev.map(n => 
+              n.id === number.id ? { ...n, struckThrough: true } : n
+            ));
+          } catch (error) {
+            console.error(`Error updating struckThrough for number ${number.id}:`, error);
+          }
+        } else {
+          // Number is not active, ensure struckThrough is false
+          if (number.struckThrough) {
+            try {
+              const numberRef = doc(db, 'numberPool', number.id);
+              await updateDoc(numberRef, {
+                struckThrough: false
+              });
+              // Update local state
+              setNumbers(prev => prev.map(n => 
+                n.id === number.id ? { ...n, struckThrough: false } : n
+              ));
+            } catch (error) {
+              console.error(`Error updating struckThrough for number ${number.id}:`, error);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error checking number status for ${number.number}:`, error);
+      }
+    }
+  }, [user?.id]);
+
+  // Check numbers when they're displayed (debounced to avoid too many API calls)
+  useEffect(() => {
+    if (!loading && paginatedNumbers.length > 0) {
+      // Only check numbers that are visible on current page
+      // Add a small delay to batch checks
+      const timeoutId = setTimeout(() => {
+        checkAndMarkActiveNumbers(paginatedNumbers);
+      }, 1000); // Wait 1 second after numbers are loaded
+
+      return () => clearTimeout(timeoutId);
+    }
+  }, [paginatedNumbers, loading, checkAndMarkActiveNumbers]);
+
   async function handleReserve(number: NumberPoolType) {
     // Enforce cap using global reservedNumbers (listener-backed, not page-limited)
     if (reservedNumbers.length >= MAX_RESERVATIONS) {
@@ -5294,7 +5379,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <div
             className={clsx(
               "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
-              number.status === 'reserved'
+              (number.status === 'activated' || number.struckThrough)
+                ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
+                : number.status === 'reserved'
                 ? `${STATUS_STYLES.reserved.bg} text-gray-800`
                 : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`,
               (number as any).isDeleted && 'line-through'

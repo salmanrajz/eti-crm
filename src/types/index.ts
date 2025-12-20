@@ -152,6 +152,7 @@ export interface NumberPool {
   last3Digits?: string; // Last 3 digits for "ends with" search
   last4Digits?: string; // Last 4 digits for "ends with" search
   last5Digits?: string; // Last 5 digits for "ends with" search
+  struckThrough?: boolean; // Indicates if number should be displayed with strike-through (active number)
 }
 
 export interface NumberPoolType {
@@ -191,6 +192,7 @@ export interface NumberPoolType {
   last3Digits?: string; // Last 3 digits for "ends with" search
   last4Digits?: string; // Last 4 digits for "ends with" search
   last5Digits?: string; // Last 5 digits for "ends with" search
+  struckThrough?: boolean; // Indicates if number should be displayed with strike-through (active number)
 }
 
 /**
@@ -524,6 +526,7 @@ export interface AgentLink {
   allowedGroups: string[]; // Groups of numbers to show (e.g., ['G1', 'G2'])
   isActive: boolean;
   otp?: string; // OTP required to access the customer portal
+  otpExpiresAt?: Date; // OTP expiration time (30 minutes from generation)
   createdAt: Date;
   updatedAt: Date;
   expiresAt?: Date; // Optional expiration date

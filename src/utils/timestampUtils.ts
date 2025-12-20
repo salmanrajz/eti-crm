@@ -68,13 +68,14 @@ export function normalizeTimestamp(value: any): Date | null {
  * 
  * @param date - Date object or null (should be in UTC)
  * @param formatStr - Optional format string (default: 'MMM d, yyyy HH:mm')
+ * @param showUTC - Whether to append "UTC" label (default: true)
  * @returns Formatted string or empty string if date is null
  * 
  * IMPORTANT: Shows API time directly without timezone conversion
  * The date should already be in UTC from the API
  * Formats using UTC components directly to avoid timezone conversion
  */
-export function formatTimestamp(date: Date | null, formatStr: string = 'MMM d, yyyy HH:mm'): string {
+export function formatTimestamp(date: Date | null, formatStr: string = 'MMM d, yyyy HH:mm', showUTC: boolean = true): string {
   if (!date) return '';
   
   // Format the UTC time directly without any timezone conversion
@@ -117,11 +118,28 @@ export function formatTimestamp(date: Date | null, formatStr: string = 'MMM d, y
     result = result.replace(/ss/g, String(second).padStart(2, '0'));
     result = result.replace(/\bs\b/g, String(second));
     
+    // Append UTC label if requested
+    if (showUTC) {
+      result += ' UTC';
+    }
+    
     return result;
   } catch (e) {
-    // Fallback: use date-fns but this will have timezone conversion
-    console.warn('Error formatting timestamp manually, using date-fns fallback:', e, date);
-    return format(date, formatStr);
+    // Fallback: format using UTC methods manually (no date-fns to avoid timezone conversion)
+    console.warn('Error formatting timestamp manually, using UTC fallback:', e, date);
+    try {
+      const year = date.getUTCFullYear();
+      const month = date.getUTCMonth();
+      const day = date.getUTCDate();
+      const hour = date.getUTCHours();
+      const minute = date.getUTCMinutes();
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const fallback = `${monthNames[month]} ${day}, ${year} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} UTC`;
+      return fallback;
+    } catch (fallbackError) {
+      // Last resort: return ISO string with UTC indicator
+      return date.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    }
   }
 }
 

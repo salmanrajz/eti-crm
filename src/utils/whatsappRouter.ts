@@ -1,4 +1,4 @@
-import { getWhatsAppVerificationGroups } from './configService';
+import { getWhatsAppFlowGroups } from './configService';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 
 type GroupKey = 'G1' | 'G2' | 'G3' | 'OTHER';
@@ -43,48 +43,48 @@ async function getRoutesFromFirebase(): Promise<Record<GroupKey, RoutingConfig>>
   }
   
   try {
-    const groups = await getWhatsAppVerificationGroups();
+    const flowGroups = await getWhatsAppFlowGroups();
     
-    // Convert to RoutingConfig format
+    // Convert to RoutingConfig format from Flow Configuration
     const routes: Record<GroupKey, RoutingConfig> = {
       G1: {
         meta: {
-          businessPhoneId: groups.G1.businessPhoneId,
-          accessToken: groups.G1.accessToken
+          businessPhoneId: flowGroups.G1.businessPhoneId || '',
+          accessToken: flowGroups.G1.accessToken || ''
         },
         template: {
-          templateName: groups.G1.templateName,
-          languageCode: groups.G1.languageCode
+          templateName: flowGroups.G1.templateName || '',
+          languageCode: flowGroups.G1.languageCode || 'en'
         }
       },
       G2: {
         meta: {
-          businessPhoneId: groups.G2.businessPhoneId,
-          accessToken: groups.G2.accessToken
+          businessPhoneId: flowGroups.G2.businessPhoneId || '',
+          accessToken: flowGroups.G2.accessToken || ''
         },
         template: {
-          templateName: groups.G2.templateName,
-          languageCode: groups.G2.languageCode
+          templateName: flowGroups.G2.templateName || '',
+          languageCode: flowGroups.G2.languageCode || 'en'
         }
       },
       G3: {
         meta: {
-          businessPhoneId: groups.G3.businessPhoneId,
-          accessToken: groups.G3.accessToken
+          businessPhoneId: flowGroups.G3.businessPhoneId || '',
+          accessToken: flowGroups.G3.accessToken || ''
         },
         template: {
-          templateName: groups.G3.templateName,
-          languageCode: groups.G3.languageCode
+          templateName: flowGroups.G3.templateName || '',
+          languageCode: flowGroups.G3.languageCode || 'en'
         }
       },
       OTHER: {
         meta: {
-          businessPhoneId: groups.OTHER.businessPhoneId,
-          accessToken: groups.OTHER.accessToken
+          businessPhoneId: flowGroups.OTHER.businessPhoneId || '',
+          accessToken: flowGroups.OTHER.accessToken || ''
         },
         template: {
-          templateName: groups.OTHER.templateName,
-          languageCode: groups.OTHER.languageCode
+          templateName: flowGroups.OTHER.templateName || '',
+          languageCode: flowGroups.OTHER.languageCode || 'en'
         }
       }
     };
@@ -97,49 +97,49 @@ async function getRoutesFromFirebase(): Promise<Record<GroupKey, RoutingConfig>>
   } catch (error) {
     console.error('Error fetching verification groups from Firebase:', error);
     
-    // Fallback to environment variables if Firebase fails
+    // Fallback to empty routes if Firebase fails
     const fallbackRoutes: Record<GroupKey, RoutingConfig> = {
-  G1: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_G1_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_G1_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_G1_TEMPLATE || 'verification_g1',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  },
-  G2: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_G2_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_G2_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_G2_TEMPLATE || 'verification_g2',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  },
-  G3: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_G3_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_G3_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_G3_TEMPLATE || 'verification_g3',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  },
-  OTHER: {
-    meta: {
-      businessPhoneId: import.meta.env.VITE_WA_DEF_PHONE_ID || '',
-      accessToken: import.meta.env.VITE_WA_DEF_TOKEN || ''
-    },
-    template: {
-      templateName: import.meta.env.VITE_WA_DEF_TEMPLATE || 'verification_default',
-      languageCode: import.meta.env.VITE_WA_LANG || 'en'
-    }
-  }
-};
+      G1: {
+        meta: {
+          businessPhoneId: '',
+          accessToken: ''
+        },
+        template: {
+          templateName: '',
+          languageCode: 'en'
+        }
+      },
+      G2: {
+        meta: {
+          businessPhoneId: '',
+          accessToken: ''
+        },
+        template: {
+          templateName: '',
+          languageCode: 'en'
+        }
+      },
+      G3: {
+        meta: {
+          businessPhoneId: '',
+          accessToken: ''
+        },
+        template: {
+          templateName: '',
+          languageCode: 'en'
+        }
+      },
+      OTHER: {
+        meta: {
+          businessPhoneId: '',
+          accessToken: ''
+        },
+        template: {
+          templateName: '',
+          languageCode: 'en'
+        }
+      }
+    };
 
     return fallbackRoutes;
   }
@@ -176,7 +176,8 @@ export async function sendWhatsAppTemplateByGroup(options: {
   const { meta, template } = await resolveWhatsAppRoute(group);
   const tpl = templateOverride || template;
   if (!meta.businessPhoneId || !meta.accessToken) {
-    throw new Error('WhatsApp meta account is not configured for this route');
+    const groupName = group || 'UNKNOWN';
+    throw new Error(`WhatsApp meta account is not configured for this route (Group: ${groupName}). Please configure Business Phone ID and Access Token in Admin Dashboard > WhatsApp Settings > WhatsApp Flow Configuration > ${groupName} tab > Graph API Credentials section.`);
   }
   const url = `https://graph.facebook.com/v19.0/${meta.businessPhoneId}/messages`;
   const payload: any = {
@@ -219,7 +220,7 @@ export async function sendWhatsAppWithComponentsByGroup(options: {
   const { meta } = await resolveWhatsAppRoute(group);
   
   if (!meta.businessPhoneId || !meta.accessToken) {
-    const errorMsg = `WhatsApp meta account is not configured for this route. Group: ${group}, BusinessPhoneId: ${meta.businessPhoneId ? 'SET' : 'MISSING'}, AccessToken: ${meta.accessToken ? 'SET' : 'MISSING'}`;
+    const errorMsg = `WhatsApp meta account is not configured for this route. Group: ${group || 'UNKNOWN'}, BusinessPhoneId: ${meta.businessPhoneId ? 'SET' : 'MISSING'}, AccessToken: ${meta.accessToken ? 'SET' : 'MISSING'}. Please configure these credentials in Admin Dashboard > WhatsApp Settings > WhatsApp Flow Configuration > ${group || 'Group'} tab > Graph API Credentials section.`;
     throw new Error(errorMsg);
   }
   

@@ -87,6 +87,35 @@ export interface WhatsAppVerificationGroupsConfig {
 }
 
 /**
+ * WhatsApp flow configuration for each group
+ */
+export interface WhatsAppFlowConfig {
+  url: string;                           // Flow API endpoint URL
+  key: string;                           // API key for authentication
+  flowId: string;                        // Flow ID to trigger (default/English)
+  arabicFlowId?: string;                 // Flow ID for Arabic language (optional)
+  channelName: string;                   // Channel name for the flow
+  businessPhoneId?: string;              // WhatsApp Business Phone ID (for Graph API)
+  accessToken?: string;                  // WhatsApp Business API Access Token (for Graph API)
+  templateName?: string;                 // WhatsApp template name (for Graph API)
+  languageCode?: string;                 // Template language code (for Graph API)
+  updatedBy?: string;
+  updatedAt?: Date;
+}
+
+/**
+ * All WhatsApp flow configurations per group
+ */
+export interface WhatsAppFlowGroupsConfig {
+  G1: WhatsAppFlowConfig;
+  G2: WhatsAppFlowConfig;
+  G3: WhatsAppFlowConfig;
+  OTHER: WhatsAppFlowConfig;
+  updatedBy?: string;
+  updatedAt?: Date;
+}
+
+/**
  * Configuration document ID in Firestore
  * Centralized configuration storage key
  */
@@ -141,8 +170,6 @@ export async function updateWhatsAppApiEndpoint(
   updatedBy: string
 ): Promise<void> {
   try {
-    console.log('Updating WhatsApp API endpoint:', { endpoint, updatedBy });
-    
     // Validate the endpoint format
     if (!endpoint.trim()) {
       throw new Error('Endpoint cannot be empty');
@@ -161,9 +188,7 @@ export async function updateWhatsAppApiEndpoint(
       updatedAt: serverTimestamp()
     };
     
-    console.log('API endpoint config data to save:', configData);
     await setDoc(doc(db, 'config', CONFIG_DOC_ID), configData, { merge: true });
-    console.log('WhatsApp API endpoint updated successfully');
   } catch (error) {
     console.error('Error updating WhatsApp API endpoint:', error);
     throw error;
@@ -208,6 +233,50 @@ export async function updateWhatsAppVerificationEnabled(
     await setDoc(doc(db, 'config', CONFIG_DOC_ID), configData, { merge: true });
   } catch (error) {
     console.error('Error updating WhatsApp verification setting:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get number active check enabled status
+ * Returns true if number active check should be performed when creating leads
+ */
+export async function getNumberActiveCheckEnabled(): Promise<boolean> {
+  try {
+    const configDoc = await getDoc(doc(db, 'config', CONFIG_DOC_ID));
+    
+    if (configDoc.exists()) {
+      const data = configDoc.data();
+      // Default to true if not set (check is enabled by default)
+      return data.numberActiveCheckEnabled !== false;
+    }
+    
+    // Return default value if no config exists (enabled by default)
+    return true;
+  } catch (error) {
+    console.error('Error getting number active check setting:', error);
+    // Return default value on error (enabled by default)
+    return true;
+  }
+}
+
+/**
+ * Update number active check enabled status
+ */
+export async function updateNumberActiveCheckEnabled(
+  enabled: boolean, 
+  updatedBy: string
+): Promise<void> {
+  try {
+    const configData: any = {
+      numberActiveCheckEnabled: enabled,
+      updatedBy,
+      updatedAt: serverTimestamp()
+    };
+    
+    await setDoc(doc(db, 'config', CONFIG_DOC_ID), configData, { merge: true });
+  } catch (error) {
+    console.error('Error updating number active check setting:', error);
     throw error;
   }
 }
@@ -294,8 +363,6 @@ export async function updateWhatsAppCredentials(
   updatedBy: string
 ): Promise<void> {
   try {
-    console.log('Updating WhatsApp credentials:', { ...credentials, accessToken: '***REDACTED***' });
-    
     // Validate required fields
     if (credentials.apiUrl !== undefined && !credentials.apiUrl.trim()) {
       throw new Error('API URL cannot be empty');
@@ -325,7 +392,6 @@ export async function updateWhatsAppCredentials(
     };
     
     await setDoc(doc(db, 'config', WHATSAPP_CREDENTIALS_DOC_ID), credentialsData, { merge: true });
-    console.log('WhatsApp credentials updated successfully');
   } catch (error) {
     console.error('Error updating WhatsApp credentials:', error);
     throw error;
@@ -443,14 +509,6 @@ export async function updateWhatsAppVerificationGroups(
   updatedBy: string
 ): Promise<void> {
   try {
-    console.log('Updating WhatsApp verification groups:', { 
-      ...groups, 
-      G1: groups.G1 ? { ...groups.G1, accessToken: '***REDACTED***' } : undefined,
-      G2: groups.G2 ? { ...groups.G2, accessToken: '***REDACTED***' } : undefined,
-      G3: groups.G3 ? { ...groups.G3, accessToken: '***REDACTED***' } : undefined,
-      OTHER: groups.OTHER ? { ...groups.OTHER, accessToken: '***REDACTED***' } : undefined
-    });
-    
     // Validate group credentials if provided
     const validateGroup = (group: Partial<WhatsAppVerificationGroupCredentials> | undefined, groupName: string) => {
       if (!group) return;
@@ -521,9 +579,339 @@ export async function updateWhatsAppVerificationGroups(
     }
     
     await setDoc(doc(db, 'config', WHATSAPP_VERIFICATION_GROUPS_DOC_ID), updateData, { merge: true });
-    console.log('WhatsApp verification groups updated successfully');
   } catch (error) {
     console.error('Error updating WhatsApp verification groups:', error);
+    throw error;
+  }
+}
+
+// ===============================================================================
+// WHATSAPP FLOW CONFIGURATION FUNCTIONS
+// ===============================================================================
+
+/**
+ * Configuration document ID for WhatsApp flow groups
+ */
+const WHATSAPP_FLOW_GROUPS_DOC_ID = 'whatsapp_flow_groups';
+
+/**
+ * Default WhatsApp flow configuration (fallback values)
+ */
+const DEFAULT_FLOW_CONFIG: WhatsAppFlowGroupsConfig = {
+  G1: {
+    url: 'https://api.truvestuae.com/api/webhook/triggerFlowExternal',
+    key: 'connectwithcrm',
+    flowId: 'TestingBot2',
+    arabicFlowId: 'ArabicNewFlow',
+    channelName: 'Express Dial',
+    businessPhoneId: '',
+    accessToken: '',
+    templateName: '',
+    languageCode: 'en'
+  },
+  G2: {
+    url: 'https://api.truvestuae.com/api/webhook/triggerFlowExternal',
+    key: 'connectwithcrm',
+    flowId: 'TestingBot2',
+    arabicFlowId: 'ArabicNewFlow',
+    channelName: 'Express Dial',
+    businessPhoneId: '',
+    accessToken: '',
+    templateName: '',
+    languageCode: 'en'
+  },
+  G3: {
+    url: 'https://api.truvestuae.com/api/webhook/triggerFlowExternal',
+    key: 'connectwithcrm',
+    flowId: 'TestingBot2',
+    arabicFlowId: 'ArabicNewFlow',
+    channelName: 'Express Dial',
+    businessPhoneId: '',
+    accessToken: '',
+    templateName: '',
+    languageCode: 'en'
+  },
+  OTHER: {
+    url: 'https://api.truvestuae.com/api/webhook/triggerFlowExternal',
+    key: 'connectwithcrm',
+    flowId: 'TestingBot2',
+    arabicFlowId: 'ArabicNewFlow',
+    channelName: 'Express Dial',
+    businessPhoneId: '',
+    accessToken: '',
+    templateName: '',
+    languageCode: 'en'
+  }
+};
+
+/**
+ * Get WhatsApp flow configuration from Firebase
+ * @returns Promise<WhatsAppFlowGroupsConfig> - The configured or default flow settings
+ */
+export async function getWhatsAppFlowGroups(): Promise<WhatsAppFlowGroupsConfig> {
+  try {
+    const flowDoc = await getDoc(doc(db, 'config', WHATSAPP_FLOW_GROUPS_DOC_ID));
+    
+    if (flowDoc.exists()) {
+      const data = flowDoc.data();
+      return {
+        G1: {
+          url: data.G1?.url || DEFAULT_FLOW_CONFIG.G1.url,
+          key: data.G1?.key || DEFAULT_FLOW_CONFIG.G1.key,
+          flowId: data.G1?.flowId || DEFAULT_FLOW_CONFIG.G1.flowId,
+          arabicFlowId: data.G1?.arabicFlowId || DEFAULT_FLOW_CONFIG.G1.arabicFlowId,
+          channelName: data.G1?.channelName || DEFAULT_FLOW_CONFIG.G1.channelName,
+          businessPhoneId: data.G1?.businessPhoneId || DEFAULT_FLOW_CONFIG.G1.businessPhoneId,
+          accessToken: data.G1?.accessToken || DEFAULT_FLOW_CONFIG.G1.accessToken,
+          templateName: data.G1?.templateName || DEFAULT_FLOW_CONFIG.G1.templateName,
+          languageCode: data.G1?.languageCode || DEFAULT_FLOW_CONFIG.G1.languageCode,
+          updatedBy: data.G1?.updatedBy || '',
+          updatedAt: data.G1?.updatedAt?.toDate ? data.G1.updatedAt.toDate() : undefined
+        },
+        G2: {
+          url: data.G2?.url || DEFAULT_FLOW_CONFIG.G2.url,
+          key: data.G2?.key || DEFAULT_FLOW_CONFIG.G2.key,
+          flowId: data.G2?.flowId || DEFAULT_FLOW_CONFIG.G2.flowId,
+          arabicFlowId: data.G2?.arabicFlowId || DEFAULT_FLOW_CONFIG.G2.arabicFlowId,
+          channelName: data.G2?.channelName || DEFAULT_FLOW_CONFIG.G2.channelName,
+          businessPhoneId: data.G2?.businessPhoneId || DEFAULT_FLOW_CONFIG.G2.businessPhoneId,
+          accessToken: data.G2?.accessToken || DEFAULT_FLOW_CONFIG.G2.accessToken,
+          templateName: data.G2?.templateName || DEFAULT_FLOW_CONFIG.G2.templateName,
+          languageCode: data.G2?.languageCode || DEFAULT_FLOW_CONFIG.G2.languageCode,
+          updatedBy: data.G2?.updatedBy || '',
+          updatedAt: data.G2?.updatedAt?.toDate ? data.G2.updatedAt.toDate() : undefined
+        },
+        G3: {
+          url: data.G3?.url || DEFAULT_FLOW_CONFIG.G3.url,
+          key: data.G3?.key || DEFAULT_FLOW_CONFIG.G3.key,
+          flowId: data.G3?.flowId || DEFAULT_FLOW_CONFIG.G3.flowId,
+          arabicFlowId: data.G3?.arabicFlowId || DEFAULT_FLOW_CONFIG.G3.arabicFlowId,
+          channelName: data.G3?.channelName || DEFAULT_FLOW_CONFIG.G3.channelName,
+          businessPhoneId: data.G3?.businessPhoneId || DEFAULT_FLOW_CONFIG.G3.businessPhoneId,
+          accessToken: data.G3?.accessToken || DEFAULT_FLOW_CONFIG.G3.accessToken,
+          templateName: data.G3?.templateName || DEFAULT_FLOW_CONFIG.G3.templateName,
+          languageCode: data.G3?.languageCode || DEFAULT_FLOW_CONFIG.G3.languageCode,
+          updatedBy: data.G3?.updatedBy || '',
+          updatedAt: data.G3?.updatedAt?.toDate ? data.G3.updatedAt.toDate() : undefined
+        },
+        OTHER: {
+          url: data.OTHER?.url || DEFAULT_FLOW_CONFIG.OTHER.url,
+          key: data.OTHER?.key || DEFAULT_FLOW_CONFIG.OTHER.key,
+          flowId: data.OTHER?.flowId || DEFAULT_FLOW_CONFIG.OTHER.flowId,
+          arabicFlowId: data.OTHER?.arabicFlowId || DEFAULT_FLOW_CONFIG.OTHER.arabicFlowId,
+          channelName: data.OTHER?.channelName || DEFAULT_FLOW_CONFIG.OTHER.channelName,
+          businessPhoneId: data.OTHER?.businessPhoneId || DEFAULT_FLOW_CONFIG.OTHER.businessPhoneId,
+          accessToken: data.OTHER?.accessToken || DEFAULT_FLOW_CONFIG.OTHER.accessToken,
+          templateName: data.OTHER?.templateName || DEFAULT_FLOW_CONFIG.OTHER.templateName,
+          languageCode: data.OTHER?.languageCode || DEFAULT_FLOW_CONFIG.OTHER.languageCode,
+          updatedBy: data.OTHER?.updatedBy || '',
+          updatedAt: data.OTHER?.updatedAt?.toDate ? data.OTHER.updatedAt.toDate() : undefined
+        },
+        updatedBy: data.updatedBy || '',
+        updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : undefined
+      };
+    }
+    
+    // Return default configuration if no config exists
+    return DEFAULT_FLOW_CONFIG;
+  } catch (error) {
+    console.error('Error getting WhatsApp flow groups:', error);
+    // Return default configuration on error
+    return DEFAULT_FLOW_CONFIG;
+  }
+}
+
+/**
+ * Update WhatsApp flow configuration in Firebase
+ * @param flows - The new flow configuration
+ * @param updatedBy - User ID of the administrator making the update
+ * @throws Error if validation fails or Firestore update fails
+ */
+export async function updateWhatsAppFlowGroups(
+  flows: Partial<WhatsAppFlowGroupsConfig>,
+  updatedBy: string
+): Promise<void> {
+  try {
+    // Validate flow configuration if provided
+    const validateFlow = (flow: Partial<WhatsAppFlowConfig> | undefined, groupName: string) => {
+      if (!flow) return;
+      
+      if (flow.url !== undefined && !flow.url.trim()) {
+        throw new Error(`${groupName} URL cannot be empty`);
+      }
+      
+      if (flow.url !== undefined) {
+        try {
+          new URL(flow.url);
+        } catch {
+          throw new Error(`${groupName} URL must be a valid URL`);
+        }
+      }
+      
+      if (flow.key !== undefined && !flow.key.trim()) {
+        throw new Error(`${groupName} API Key cannot be empty`);
+      }
+      
+      if (flow.flowId !== undefined && !flow.flowId.trim()) {
+        throw new Error(`${groupName} Flow ID cannot be empty`);
+      }
+      
+      if (flow.arabicFlowId !== undefined && !flow.arabicFlowId.trim()) {
+        throw new Error(`${groupName} Arabic Flow ID cannot be empty`);
+      }
+      
+      if (flow.channelName !== undefined && !flow.channelName.trim()) {
+        throw new Error(`${groupName} Channel Name cannot be empty`);
+      }
+    };
+    
+    validateFlow(flows.G1, 'G1');
+    validateFlow(flows.G2, 'G2');
+    validateFlow(flows.G3, 'G3');
+    validateFlow(flows.OTHER, 'OTHER');
+    
+    // Build update data
+    const updateData: any = {
+      updatedBy,
+      updatedAt: serverTimestamp()
+    };
+    
+    // Add group updates with timestamps
+    if (flows.G1) {
+      updateData.G1 = {
+        ...flows.G1,
+        updatedBy,
+        updatedAt: serverTimestamp()
+      };
+    }
+    
+    if (flows.G2) {
+      updateData.G2 = {
+        ...flows.G2,
+        updatedBy,
+        updatedAt: serverTimestamp()
+      };
+    }
+    
+    if (flows.G3) {
+      updateData.G3 = {
+        ...flows.G3,
+        updatedBy,
+        updatedAt: serverTimestamp()
+      };
+    }
+    
+    if (flows.OTHER) {
+      updateData.OTHER = {
+        ...flows.OTHER,
+        updatedBy,
+        updatedAt: serverTimestamp()
+      };
+    }
+    
+    await setDoc(doc(db, 'config', WHATSAPP_FLOW_GROUPS_DOC_ID), updateData, { merge: true });
+  } catch (error) {
+    console.error('Error updating WhatsApp flow groups:', error);
+    throw error;
+  }
+}
+
+// ===============================================================================
+// WHATSAPP CONVERSATION CHECK CONFIGURATION FUNCTIONS
+// ===============================================================================
+
+/**
+ * WhatsApp conversation check API configuration interface
+ */
+export interface WhatsAppConversationCheckConfig {
+  url: string;                           // Conversation check API endpoint URL
+  key: string;                           // API key for authentication
+  channelName: string;                   // Channel name for the conversation check
+  updatedBy?: string;
+  updatedAt?: Date;
+}
+
+/**
+ * Configuration document ID for WhatsApp conversation check
+ */
+const WHATSAPP_CONVERSATION_CHECK_DOC_ID = 'whatsapp_conversation_check';
+
+/**
+ * Get WhatsApp conversation check configuration from Firebase
+ * @returns Promise<WhatsAppConversationCheckConfig> - The configured conversation check settings
+ */
+export async function getWhatsAppConversationCheck(): Promise<WhatsAppConversationCheckConfig> {
+  try {
+    const checkDoc = await getDoc(doc(db, 'config', WHATSAPP_CONVERSATION_CHECK_DOC_ID));
+    
+    if (checkDoc.exists()) {
+      const data = checkDoc.data();
+      return {
+        url: data.url || '',
+        key: data.key || '',
+        channelName: data.channelName || '',
+        updatedBy: data.updatedBy || '',
+        updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : undefined
+      };
+    }
+    
+    // Return empty config if not set (will require admin to configure)
+    return {
+      url: '',
+      key: '',
+      channelName: ''
+    };
+  } catch (error) {
+    console.error('Error getting WhatsApp conversation check config:', error);
+    return {
+      url: '',
+      key: '',
+      channelName: ''
+    };
+  }
+}
+
+/**
+ * Update WhatsApp conversation check configuration in Firebase
+ * @param config - The new conversation check configuration
+ * @param updatedBy - User ID of the administrator making the update
+ * @throws Error if validation fails or Firestore update fails
+ */
+export async function updateWhatsAppConversationCheck(
+  config: Partial<WhatsAppConversationCheckConfig>,
+  updatedBy: string
+): Promise<void> {
+  try {
+    // Validate required fields
+    if (config.url !== undefined && !config.url.trim()) {
+      throw new Error('Conversation check URL cannot be empty');
+    }
+    
+    if (config.url !== undefined) {
+      try {
+        new URL(config.url);
+      } catch {
+        throw new Error('Conversation check URL must be a valid URL');
+      }
+    }
+    
+    if (config.key !== undefined && !config.key.trim()) {
+      throw new Error('Conversation check API Key cannot be empty');
+    }
+    
+    if (config.channelName !== undefined && !config.channelName.trim()) {
+      throw new Error('Conversation check Channel Name cannot be empty');
+    }
+    
+    const updateData: any = {
+      ...config,
+      updatedBy,
+      updatedAt: serverTimestamp()
+    };
+    
+    await setDoc(doc(db, 'config', WHATSAPP_CONVERSATION_CHECK_DOC_ID), updateData, { merge: true });
+  } catch (error) {
+    console.error('Error updating WhatsApp conversation check config:', error);
     throw error;
   }
 }

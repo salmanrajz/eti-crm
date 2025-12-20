@@ -60,6 +60,7 @@ export function CustomerPortal() {
   const [agentLink, setAgentLink] = useState<AgentLink | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingPlans, setLoadingPlans] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [otpVerified, setOtpVerified] = useState(false);
   const [enteredOTP, setEnteredOTP] = useState('');
   const [otpError, setOtpError] = useState('');
@@ -128,6 +129,7 @@ export function CustomerPortal() {
         createdAt: linkDoc.data().createdAt?.toDate() || new Date(),
         updatedAt: linkDoc.data().updatedAt?.toDate() || new Date(),
         expiresAt: linkDoc.data().expiresAt?.toDate() || undefined,
+        otpExpiresAt: linkDoc.data().otpExpiresAt?.toDate() || undefined,
         lastUsedAt: linkDoc.data().lastUsedAt?.toDate() || undefined,
       } as AgentLink;
 
@@ -446,6 +448,7 @@ export function CustomerPortal() {
 
     if (!agentLink) return;
 
+    setIsSubmitting(true);
     try {
       const leadData: Partial<Lead> & { nationality?: string } = {
         customerName: formData.customerName,
@@ -512,6 +515,8 @@ export function CustomerPortal() {
     } catch (error) {
       console.error('Error submitting lead:', error);
       toast.error('Failed to submit request. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -539,6 +544,17 @@ export function CustomerPortal() {
     if (enteredOTP.trim() === '') {
       setOtpError('Please enter the OTP');
       return;
+    }
+
+    // Check if OTP is expired
+    if (agentLink.otpExpiresAt) {
+      const now = new Date();
+      const expiresAt = new Date(agentLink.otpExpiresAt);
+      if (now > expiresAt) {
+        setOtpError('OTP has expired. Please contact the agent for a new OTP.');
+        setEnteredOTP('');
+        return;
+      }
     }
 
     if (enteredOTP.trim() !== agentLink.otp) {
@@ -801,7 +817,7 @@ export function CustomerPortal() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.4 }}
-                className="flex flex-col flex-1 justify-center relative py-4 sm:py-6 md:py-8"
+                className="flex flex-col flex-1 justify-center relative py-2 sm:py-4 md:py-6"
               >
                 {/* Main Content Card - Glass Morphism */}
                 <motion.div
@@ -818,20 +834,20 @@ export function CustomerPortal() {
                         <div className="h-full w-full bg-white/70 backdrop-blur-2xl rounded-2xl sm:rounded-3xl" />
                       </div>
                       
-                      <div className="relative p-5 sm:p-6 md:p-8 lg:p-10">
+                      <div className="relative p-4 sm:p-6 md:p-8 lg:p-10 pb-6 sm:pb-8 md:pb-10">
                         {/* Large Icon Section */}
                         <motion.div
                           initial={{ scale: 0, rotate: -180 }}
                           animate={{ scale: 1, rotate: 0 }}
                           transition={{ delay: 0.3, type: "spring", stiffness: 200 }}
-                          className="flex justify-center mb-6 sm:mb-8"
+                          className="flex justify-center mb-5 sm:mb-6 md:mb-8"
                         >
                           <div className="relative">
                             {/* Glowing background circle */}
                             <div className="absolute inset-0 bg-gradient-to-br from-orange-400 to-amber-500 rounded-full blur-2xl opacity-60 animate-pulse" />
                             {/* Icon container */}
-                            <div className="relative w-24 h-24 sm:w-28 sm:h-28 md:w-32 md:h-32 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-2xl sm:rounded-3xl flex items-center justify-center shadow-xl sm:shadow-2xl shadow-orange-500/50">
-                              <Phone className="w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 text-white" strokeWidth={2.5} />
+                            <div className="relative w-20 h-20 sm:w-24 sm:h-24 md:w-28 md:h-28 lg:w-32 lg:h-32 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-2xl sm:rounded-3xl flex items-center justify-center shadow-xl sm:shadow-2xl shadow-orange-500/50">
+                              <Phone className="w-10 h-10 sm:w-12 sm:h-12 md:w-14 md:h-14 lg:w-16 lg:h-16 text-white" strokeWidth={2.5} />
                               {/* Shine effect */}
                               <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-transparent to-transparent rounded-2xl sm:rounded-3xl" />
                             </div>
@@ -843,12 +859,12 @@ export function CustomerPortal() {
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: 0.4 }}
-                          className="text-center mb-6"
+                          className="text-center mb-5 sm:mb-6 md:mb-7"
                         >
-                          <h2 className="text-3xl sm:text-4xl md:text-5xl font-black text-gray-900 mb-2 bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 bg-clip-text text-transparent">
+                          <h2 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-black text-gray-900 mb-1.5 sm:mb-2 bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 bg-clip-text text-transparent">
                             Enter Your Number
                           </h2>
-                          <p className="text-gray-600 text-sm sm:text-base md:text-lg font-medium max-w-md mx-auto leading-relaxed px-2">
+                          <p className="text-gray-600 text-xs sm:text-sm md:text-base lg:text-lg font-medium max-w-md mx-auto leading-relaxed px-2">
                             We'll find the perfect number matches for you
                           </p>
                         </motion.div>
@@ -858,9 +874,9 @@ export function CustomerPortal() {
                           initial={{ opacity: 0, scale: 0.9 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ delay: 0.5 }}
-                          className="mb-6"
+                          className="mb-5 sm:mb-6 md:mb-7"
                         >
-                          <div className="flex justify-center gap-1 sm:gap-1.5 md:gap-2 lg:gap-2.5 flex-nowrap overflow-x-auto px-4 pb-4 -mx-4">
+                          <div className="flex justify-center items-center gap-1 sm:gap-1.5 md:gap-2 lg:gap-2.5 flex-nowrap w-full px-1 sm:px-2">
                             {Array.from({ length: 10 }).map((_, index) => {
                               const formatLabels = ['0', '5', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X'];
                               const showSeparator = index === 2 || index === 5;
@@ -878,12 +894,12 @@ export function CustomerPortal() {
                                   className="relative flex-shrink-0 overflow-visible"
                                 >
                                   {showSeparator && index === 2 && (
-                                    <div className="absolute -left-2 sm:-left-2.5 md:-left-3 top-1/2 -translate-y-1/2 text-gray-300 text-sm sm:text-base md:text-lg font-bold z-10">-</div>
+                                    <div className="absolute -left-1 sm:-left-1.5 md:-left-2 top-1/2 -translate-y-1/2 text-gray-300 text-xs sm:text-sm md:text-base lg:text-lg font-bold z-10">-</div>
                                   )}
                                   {showSeparator && index === 5 && (
-                                    <div className="absolute -left-2 sm:-left-2.5 md:-left-3 top-1/2 -translate-y-1/2 text-gray-300 text-sm sm:text-base md:text-lg font-bold z-10">-</div>
+                                    <div className="absolute -left-1 sm:-left-1.5 md:-left-2 top-1/2 -translate-y-1/2 text-gray-300 text-xs sm:text-sm md:text-base lg:text-lg font-bold z-10">-</div>
                                   )}
-                                  <div className="relative p-1 sm:p-1.5 md:p-2">
+                                  <div className="relative p-0.5 sm:p-1">
                                     <input
                                       id={`digit-${index}`}
                                       type="tel"
@@ -914,7 +930,7 @@ export function CustomerPortal() {
                                         }
                                       }}
                                       className={clsx(
-                                        "w-8 h-12 sm:w-9 sm:h-14 md:w-12 md:h-16 lg:w-14 lg:h-20 text-center text-lg sm:text-xl md:text-2xl lg:text-3xl font-black rounded-lg sm:rounded-xl md:rounded-2xl outline-none transition-all duration-300 relative border-[3px]",
+                                        "w-6 h-9 sm:w-7 sm:h-11 md:w-9 md:h-14 lg:w-11 lg:h-16 xl:w-13 xl:h-20 text-center text-sm sm:text-base md:text-lg lg:text-xl xl:text-2xl font-black rounded-md sm:rounded-lg md:rounded-xl outline-none transition-all duration-300 relative border-2 sm:border-[3px]",
                                         enteredPhone[index]
                                           ? "bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-lg sm:shadow-xl shadow-orange-500/40 border-orange-400"
                                           : "bg-white border-gray-300 focus:border-orange-500 focus:bg-white focus:shadow-lg text-transparent"
@@ -922,7 +938,7 @@ export function CustomerPortal() {
                                     />
                                     {!enteredPhone[index] && (
                                       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                        <span className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-black text-gray-300 select-none">
+                                        <span className="text-sm sm:text-base md:text-lg lg:text-xl xl:text-2xl font-black text-gray-300 select-none">
                                           {formatLabels[index]}
                                         </span>
                                       </div>
@@ -946,15 +962,14 @@ export function CustomerPortal() {
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: 0.7 }}
-                          className="mb-6 flex justify-center"
+                          className="mb-5 sm:mb-6 md:mb-7 flex justify-center"
                         >
                           <motion.button
                             whileHover={{ scale: 1.02, y: -2 }}
                             whileTap={{ scale: 0.98 }}
                             onClick={handlePhoneSubmit}
                             disabled={enteredPhone.length < 10 || isSearching}
-                            className="relative group overflow-hidden"
-                            style={{ maxWidth: '280px', width: '100%' }}
+                            className="relative group overflow-hidden w-full max-w-[240px] sm:max-w-[260px] md:max-w-[280px]"
                           >
                             {/* Button background with glass morphism */}
                             <div className="absolute inset-0 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-500 rounded-xl sm:rounded-2xl shadow-xl sm:shadow-2xl shadow-orange-500/40" />
@@ -964,7 +979,7 @@ export function CustomerPortal() {
                             <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
                             
                             {/* Button content */}
-                            <div className="relative py-3 sm:py-3.5 md:py-4 rounded-xl sm:rounded-2xl font-black text-sm sm:text-base md:text-lg text-white flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed px-6 sm:px-8">
+                            <div className="relative py-2.5 sm:py-3 md:py-3.5 lg:py-4 rounded-xl sm:rounded-2xl font-black text-xs sm:text-sm md:text-base lg:text-lg text-white flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed px-5 sm:px-6 md:px-8">
                               {isSearching ? (
                                 <>
                                   <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" />
@@ -985,10 +1000,10 @@ export function CustomerPortal() {
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: 0.8 }}
-                          className="grid grid-cols-3 gap-2 sm:gap-3 md:gap-4 mb-4"
+                          className="grid grid-cols-3 gap-1.5 sm:gap-2 md:gap-3 lg:gap-4"
                         >
                           {/* Feature Card 1 */}
-                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-2 sm:p-3 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl"
+                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-3 sm:p-3.5 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center"
                             style={{
                               background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(251, 191, 36, 0.15) 100%)',
                             }}
@@ -998,19 +1013,19 @@ export function CustomerPortal() {
                             <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
                             <div className="absolute inset-0 rounded-lg sm:rounded-xl md:rounded-2xl border border-white/30 pointer-events-none" />
                             
-                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2">
-                              <div className="w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0">
-                                <Zap className="w-3.5 h-3.5 sm:w-4 sm:h-4 md:w-5 md:h-5 text-white" />
+                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2 justify-center h-full">
+                              <div className="w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 mb-0.5">
+                                <Zap className="w-4 h-4 sm:w-4.5 sm:h-4.5 md:w-5 md:h-5 text-white" />
                               </div>
-                              <h3 className="font-bold text-gray-900 text-[10px] sm:text-xs md:text-sm leading-tight">Instant Search</h3>
-                              <p className="text-[9px] sm:text-[10px] md:text-xs text-gray-700 leading-tight">
+                              <h3 className="font-bold text-gray-900 text-xs sm:text-xs md:text-sm leading-tight">Instant Search</h3>
+                              <p className="text-[10px] sm:text-[10px] md:text-xs text-gray-700 leading-tight px-0.5">
                                 Find similar numbers instantly
                               </p>
                             </div>
                           </div>
 
                           {/* Feature Card 2 */}
-                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-2 sm:p-3 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl"
+                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-3 sm:p-3.5 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center"
                             style={{
                               background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(251, 191, 36, 0.15) 100%)',
                             }}
@@ -1020,19 +1035,19 @@ export function CustomerPortal() {
                             <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
                             <div className="absolute inset-0 rounded-lg sm:rounded-xl md:rounded-2xl border border-white/30 pointer-events-none" />
                             
-                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2">
-                              <div className="w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0">
-                                <Shield className="w-3.5 h-3.5 sm:w-4 sm:h-4 md:w-5 md:h-5 text-white" />
+                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2 justify-center h-full">
+                              <div className="w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 mb-0.5">
+                                <Shield className="w-4 h-4 sm:w-4.5 sm:h-4.5 md:w-5 md:h-5 text-white" />
                               </div>
-                              <h3 className="font-bold text-gray-900 text-[10px] sm:text-xs md:text-sm leading-tight">Secure & Safe</h3>
-                              <p className="text-[9px] sm:text-[10px] md:text-xs text-gray-700 leading-tight">
+                              <h3 className="font-bold text-gray-900 text-xs sm:text-xs md:text-sm leading-tight">Secure & Safe</h3>
+                              <p className="text-[10px] sm:text-[10px] md:text-xs text-gray-700 leading-tight px-0.5">
                                 Your data is protected
                               </p>
                             </div>
                           </div>
 
                           {/* Feature Card 3 */}
-                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-2 sm:p-3 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl"
+                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-3 sm:p-3.5 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center"
                             style={{
                               background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(251, 191, 36, 0.15) 100%)',
                             }}
@@ -1042,12 +1057,12 @@ export function CustomerPortal() {
                             <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
                             <div className="absolute inset-0 rounded-lg sm:rounded-xl md:rounded-2xl border border-white/30 pointer-events-none" />
                             
-                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2">
-                              <div className="w-7 h-7 sm:w-8 sm:h-8 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0">
-                                <CheckCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 md:w-5 md:h-5 text-white" />
+                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2 justify-center h-full">
+                              <div className="w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 mb-0.5">
+                                <CheckCircle className="w-4 h-4 sm:w-4.5 sm:h-4.5 md:w-5 md:h-5 text-white" />
                               </div>
-                              <h3 className="font-bold text-gray-900 text-[10px] sm:text-xs md:text-sm leading-tight">Best Matches</h3>
-                              <p className="text-[9px] sm:text-[10px] md:text-xs text-gray-700 leading-tight">
+                              <h3 className="font-bold text-gray-900 text-xs sm:text-xs md:text-sm leading-tight">Best Matches</h3>
+                              <p className="text-[10px] sm:text-[10px] md:text-xs text-gray-700 leading-tight px-0.5">
                                 Curated recommendations
                               </p>
                             </div>
@@ -1075,7 +1090,7 @@ export function CustomerPortal() {
                       type="text"
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
-                      placeholder="Search for numbers..."
+                      placeholder="Search for Any other number of your choice."
                       className="w-full bg-white pl-11 pr-4 py-3.5 rounded-xl text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500/20 font-medium text-base"
                     />
                     {isSearching && (
@@ -1615,13 +1630,27 @@ export function CustomerPortal() {
                     </div>
 
                     <motion.button
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
+                        whileHover={!isSubmitting ? { scale: 1.02 } : {}}
+                        whileTap={!isSubmitting ? { scale: 0.98 } : {}}
                         type="submit"
-                        className="w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-orange-500/20 flex items-center justify-center gap-2"
+                        disabled={isSubmitting}
+                        className={`w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-orange-500/20 flex items-center justify-center gap-2 transition-all ${
+                          isSubmitting 
+                            ? 'opacity-75 cursor-not-allowed' 
+                            : 'hover:shadow-2xl hover:shadow-orange-500/30'
+                        }`}
                     >
-                        <CheckCircle className="w-5 h-5" />
-                        Submit Request
+                        {isSubmitting ? (
+                          <>
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                            <span>Submitting...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle className="w-5 h-5" />
+                            <span>Submit Request</span>
+                          </>
+                        )}
                     </motion.button>
                 </form>
               </motion.div>
