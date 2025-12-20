@@ -10,7 +10,7 @@
  * ===============================================================================
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { collection, addDoc, query, where, getDocs, orderBy, updateDoc, doc, deleteDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { AgentLink } from '../types';
@@ -18,6 +18,7 @@ import { toast } from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Link2, Copy, Trash2, Check, X, Settings, ExternalLink, Key, Eye, EyeOff } from 'lucide-react';
 import { format } from 'date-fns';
+import { useAuthStore } from '../store/authStore';
 
 interface AgentLinkGeneratorProps {
   agentId: string;
@@ -29,10 +30,11 @@ interface LinkItemProps {
   onCopyLink: (linkId: string) => void;
   onToggleActive: (link: AgentLink) => void;
   onDelete: (linkId: string) => void;
+  onGenerateNewOTP: (linkId: string) => void;
   copiedLinkId: string | null;
 }
 
-function LinkItem({ link, onCopyLink, onToggleActive, onDelete, copiedLinkId }: LinkItemProps) {
+function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId }: LinkItemProps) {
   const [showOTP, setShowOTP] = useState(false);
   const url = `${window.location.origin}/customer/${link.linkId}`;
   
@@ -82,7 +84,7 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, copiedLinkId }: 
       </div>
       {link.otp && (
         <div className="pt-2 border-t border-gray-200">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
               <Key className="w-4 h-4 text-emerald-600" />
               <span className="text-xs font-semibold text-gray-700">OTP:</span>
@@ -92,6 +94,11 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, copiedLinkId }: 
                 </span>
               ) : (
                 <span className="text-sm font-mono text-gray-400">••••••</span>
+              )}
+              {link.otpExpiresAt && (
+                <span className="text-xs text-gray-500">
+                  (Expires: {format(new Date(link.otpExpiresAt), 'MMM d, h:mm a')})
+                </span>
               )}
             </div>
             <div className="flex items-center gap-1">
@@ -118,6 +125,14 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, copiedLinkId }: 
               </button>
             </div>
           </div>
+          <button
+            onClick={() => onGenerateNewOTP(link.id)}
+            className="w-full px-3 py-1.5 text-xs font-medium bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5"
+            title="Generate new OTP (valid for 30 minutes)"
+          >
+            <Key className="w-3 h-3" />
+            Generate New OTP
+          </button>
         </div>
       )}
     </div>
@@ -125,15 +140,43 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, copiedLinkId }: 
 }
 
 export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorProps) {
+  const { user } = useAuthStore();
   const [showDialog, setShowDialog] = useState(false);
-  const [selectedGroups, setSelectedGroups] = useState<string[]>(['G1', 'G2']);
   const [links, setLinks] = useState<AgentLink[]>([]);
   const [loading, setLoading] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [generatedOTP, setGeneratedOTP] = useState<string | null>(null);
   const [newLinkId, setNewLinkId] = useState<string | null>(null);
 
-  const availableGroups = ['G1', 'G2', 'G3'];
+  // Get available groups based on agent's allowedGroups
+  const availableGroups = useMemo(() => {
+    const allGroups = ['G1', 'G2', 'G3'];
+    // If agent has allowedGroups, only show those groups
+    if (user?.role === 'agent' && user?.allowedGroups && user.allowedGroups.length > 0) {
+      return allGroups.filter(group => user.allowedGroups!.includes(group));
+    }
+    // If no restrictions, show all groups
+    return allGroups;
+  }, [user?.role, user?.allowedGroups]);
+
+  // Initialize selectedGroups with agent's allowed groups (or first available group)
+  const [selectedGroups, setSelectedGroups] = useState<string[]>(() => {
+    if (user?.role === 'agent' && user?.allowedGroups && user.allowedGroups.length > 0) {
+      return [...user.allowedGroups];
+    }
+    return availableGroups.length > 0 ? [availableGroups[0]] : [];
+  });
+
+  // Update selectedGroups when availableGroups changes
+  useEffect(() => {
+    if (user?.role === 'agent' && user?.allowedGroups && user.allowedGroups.length > 0) {
+      // Filter selectedGroups to only include allowed groups
+      const validGroups = selectedGroups.filter(group => user.allowedGroups!.includes(group));
+      if (validGroups.length !== selectedGroups.length) {
+        setSelectedGroups(validGroups.length > 0 ? validGroups : [...user.allowedGroups]);
+      }
+    }
+  }, [user?.allowedGroups, availableGroups]);
 
   useEffect(() => {
     loadLinks();
@@ -153,6 +196,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         createdAt: doc.data().createdAt?.toDate() || new Date(),
         updatedAt: doc.data().updatedAt?.toDate() || new Date(),
         expiresAt: doc.data().expiresAt?.toDate() || undefined,
+        otpExpiresAt: doc.data().otpExpiresAt?.toDate() || undefined,
         lastUsedAt: doc.data().lastUsedAt?.toDate() || undefined,
       })) as AgentLink[];
       setLinks(linksData);
@@ -187,6 +231,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     try {
       const linkId = generateLinkId();
       const otp = generateOTP();
+      // Set OTP expiration to 30 minutes from now
+      const otpExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
       const linkData = {
         agentId,
         agentName,
@@ -194,6 +240,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         allowedGroups: selectedGroups,
         isActive: true,
         otp,
+        otpExpiresAt,
         createdAt: new Date(),
         updatedAt: new Date(),
         usageCount: 0,
@@ -209,6 +256,24 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       toast.error('Failed to generate link');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGenerateNewOTP = async (linkId: string) => {
+    try {
+      const newOTP = generateOTP();
+      // Set OTP expiration to 30 minutes from now
+      const otpExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      await updateDoc(doc(db, 'agentLinks', linkId), {
+        otp: newOTP,
+        otpExpiresAt,
+        updatedAt: new Date(),
+      });
+      toast.success('New OTP generated successfully!');
+      loadLinks();
+    } catch (error) {
+      console.error('Error generating new OTP:', error);
+      toast.error('Failed to generate new OTP');
     }
   };
 
@@ -248,6 +313,10 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   };
 
   const toggleGroup = (group: string) => {
+    // Only allow toggling groups that are in availableGroups
+    if (!availableGroups.includes(group)) {
+      return;
+    }
     setSelectedGroups(prev =>
       prev.includes(group)
         ? prev.filter(g => g !== group)
@@ -306,29 +375,39 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                   <label className="block text-sm font-semibold text-gray-700 mb-3">
                     Select Number Groups to Show
                   </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {availableGroups.map(group => (
-                      <motion.button
-                        key={group}
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        onClick={() => toggleGroup(group)}
-                        className={`p-4 rounded-xl border-2 transition-all ${
-                          selectedGroups.includes(group)
-                            ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
-                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
-                        }`}
-                      >
-                        <div className="font-bold text-lg">{group}</div>
-                        {selectedGroups.includes(group) && (
-                          <Check className="w-5 h-5 mt-1 mx-auto" />
-                        )}
-                      </motion.button>
-                    ))}
-                  </div>
-                  <p className="text-xs text-gray-500 mt-2">
-                    Only numbers from selected groups will be visible to customers
-                  </p>
+                  {availableGroups.length === 0 ? (
+                    <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                      <p className="text-sm text-yellow-700">
+                        No groups available. Please contact your administrator to assign group access.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        {availableGroups.map(group => (
+                          <motion.button
+                            key={group}
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => toggleGroup(group)}
+                            className={`p-4 rounded-xl border-2 transition-all ${
+                              selectedGroups.includes(group)
+                                ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
+                                : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
+                            }`}
+                          >
+                            <div className="font-bold text-lg">{group}</div>
+                            {selectedGroups.includes(group) && (
+                              <Check className="w-5 h-5 mt-1 mx-auto" />
+                            )}
+                          </motion.button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Only numbers from selected groups will be visible to customers
+                      </p>
+                    </>
+                  )}
                 </div>
 
                 {/* Existing Links */}
@@ -343,6 +422,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           onCopyLink={copyToClipboard}
                           onToggleActive={toggleLinkActive}
                           onDelete={handleDeleteLink}
+                          onGenerateNewOTP={handleGenerateNewOTP}
                           copiedLinkId={copiedLinkId}
                         />
                       ))}

@@ -79,7 +79,7 @@ import { countryList } from '../../utils/countries';
 import { collection as fbCollection, setDoc, doc as fbDoc, serverTimestamp as fbServerTimestamp } from 'firebase/firestore';
 import { logOutboundVerificationMessage } from '../../utils/whatsappVerification';
 import { SuccessPopup } from '../SuccessPopup';
-import { getWhatsAppVerificationEnabled } from '../../utils/configService';
+import { getWhatsAppVerificationEnabled, getNumberActiveCheckEnabled } from '../../utils/configService';
 
 // ===============================================================================
 // WHATSAPP INTEGRATION CONFIGURATION
@@ -359,6 +359,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
   const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
   const [isCheckingNumber, setIsCheckingNumber] = useState(false);
+  const [numberActiveCheckEnabled, setNumberActiveCheckEnabled] = useState(true); // Default to enabled
 
   // Helper functions to convert between 24-hour (HH:mm) and 12-hour (h:mm AM/PM) formats
   const convertTo12Hour = (time24: string): string => {
@@ -590,8 +591,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
   const loadWhatsAppSetting = async () => {
     try {
-      const enabled = await getWhatsAppVerificationEnabled();
-      setWhatsappVerificationEnabled(enabled);
+      const [whatsappEnabled, numberCheckEnabled] = await Promise.all([
+        getWhatsAppVerificationEnabled(),
+        getNumberActiveCheckEnabled()
+      ]);
+      setWhatsappVerificationEnabled(whatsappEnabled);
+      setNumberActiveCheckEnabled(numberCheckEnabled);
     } catch (error) {
       // Keep default value (true) on error
     }
@@ -772,8 +777,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         
       } else {
         // Check number status before adding - verify it's not active
-        // Skip this check for admins - they can add active numbers
-        if (!isAdmin()) {
+        // Only check if the feature is enabled (admin can toggle this)
+        if (numberActiveCheckEnabled) {
           setIsCheckingNumber(true);
           try {
             toast.loading('Checking number status...', { id: 'number-check' });
@@ -1312,27 +1317,25 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             ];
 
             try {
-              // Trigger flow using new API (same as VerifierDashboard's Resend Flow)
+              // Send WhatsApp verification message using Flow API (no Business Phone ID/Access Token needed)
               const sendResponse = await triggerFlowExternal({
                 phoneNumber: formattedNumber,
                 group,
                 language,
                 templateVariables: {
-                  value1: selectedPlans[0]?.number || 'N/A',
-                  value2: monthlyLabel,
-                  value3: planDetails.benefits,
-                  value4: planDetails.duration
+                  value1: templateParameters[0],
+                  value2: templateParameters[1],
+                  value3: templateParameters[2],
+                  value4: templateParameters[3]
                 }
               });
               
               // Log outbound verification message with messageId from response
               try {
-                // Determine flowId for logging
-                const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
                 await logOutboundVerificationMessage(
                   docRef.id,
                   formattedNumber,
-                  flowId,
+                  'verification_flow', // Template name for logging
                   templateParameters,
                   {
                     sendResponse
@@ -1343,7 +1346,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 console.error('Failed to log outbound message:', e);
               }
               
-              // Update whatsappInitiatedAt AFTER successfully sending the flow (same as VerifierDashboard)
+              // Update whatsappInitiatedAt AFTER successfully sending the message
               try {
                 await updateDoc(doc(db, 'leads', docRef.id), {
                   verificationMethod: 'whatsapp',
@@ -1362,26 +1365,65 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
               }, 2000);
             } catch (e: any) {
-              try {
-                // Determine flowId for logging
-                const flowId = language?.toLowerCase() === 'arabic' ? 'ArabicNewFlow' : 'TestingBot2';
-                await logOutboundVerificationMessage(
-                  docRef.id,
-                  formattedNumber,
-                  flowId,
-                  templateParameters,
-                  {
-                    status: 'failed',
-                    error: {
-                      message: e?.message,
-                      details: typeof e?.toString === 'function' ? e.toString() : undefined
+              // Check if it's a duplicate contact error - this is actually okay, contact exists
+              const errorMessage = e?.message || '';
+              const isDuplicateContact = errorMessage.includes('Duplicate entry') && errorMessage.includes('unique_shortcode');
+              
+              if (isDuplicateContact) {
+                // Contact already exists, but flow should still work - treat as success
+                try {
+                  await logOutboundVerificationMessage(
+                    docRef.id,
+                    formattedNumber,
+                    'verification_flow',
+                    templateParameters,
+                    {
+                      success: true,
+                      warning: 'Contact already exists in system'
                     }
-                  }
-                );
-              } catch (logError) {
-                console.error('Failed to log failed outbound message:', logError);
+                  );
+                } catch (logError) {
+                  console.error('Failed to log outbound message:', logError);
+                }
+                
+                // Update whatsappInitiatedAt even for duplicate contact
+                try {
+                  await updateDoc(doc(db, 'leads', docRef.id), {
+                    verificationMethod: 'whatsapp',
+                    whatsappInitiatedAt: new Date()
+                  });
+                } catch (updateError) {
+                  console.error('Failed to update whatsappInitiatedAt:', updateError);
+                }
+                
+                setSuccessMessage('Lead created and verification message sent to customer (contact already exists)');
+                setShowSuccessPopup(true);
+                
+                // Navigate to the lead details page after popup
+                setTimeout(() => {
+                  navigate(`/dashboard/leads/${docRef.id}`, { replace: true });
+                }, 2000);
+              } else {
+                // Real error - log it
+                try {
+                  await logOutboundVerificationMessage(
+                    docRef.id,
+                    formattedNumber,
+                    'verification_flow',
+                    templateParameters,
+                    {
+                      status: 'failed',
+                      error: {
+                        message: e?.message,
+                        details: typeof e?.toString === 'function' ? e.toString() : undefined
+                      }
+                    }
+                  );
+                } catch (logError) {
+                  console.error('Failed to log failed outbound message:', logError);
+                }
+                toast.error('Failed to send verification message to customer');
               }
-              toast.error('Failed to send verification message to customer');
             }
           }
         }

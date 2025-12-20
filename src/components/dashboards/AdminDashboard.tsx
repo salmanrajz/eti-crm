@@ -251,8 +251,16 @@ const setCachedData = (key: string, data: any): void => {
 
 // ✅ PERFORMANCE: Clear all admin cache
 const clearAdminCache = (): void => {
+  // Clear all admin cache keys
   [ADMIN_CACHE_KEY, ADMIN_LEADS_CACHE_KEY, ADMIN_TEAMS_CACHE_KEY, ADMIN_METRICS_CACHE_KEY].forEach(key => {
     localStorage.removeItem(key);
+  });
+  
+  // Clear all month-specific team metrics cache keys
+  Object.keys(localStorage).forEach(key => {
+    if (key.startsWith(ADMIN_TEAM_METRICS_CACHE_KEY)) {
+      localStorage.removeItem(key);
+    }
   });
 };
 
@@ -325,6 +333,11 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [planManagementModalOpen, setPlanManagementModalOpen] = useState(false);
   const [whatsappSettingsModalOpen, setWhatsappSettingsModalOpen] = useState(false);
   const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
+  // Number lookup states
+  const [numberLookupOpen, setNumberLookupOpen] = useState(false);
+  const [numberLookupInput, setNumberLookupInput] = useState('');
+  const [numberLookupResults, setNumberLookupResults] = useState<Lead[]>([]);
+  const [numberLookupLoading, setNumberLookupLoading] = useState(false);
   // Broadcast poster states
   const [posterTitle, setPosterTitle] = useState('');
   const [posterMessage, setPosterMessage] = useState('');
@@ -633,6 +646,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       const currentMonthEnd = endOfMonth(month);
 
       const teamMetricsPromises = teams.map(async team => {
+        // Load team target from Firestore
+        const monthStr = format(month, 'yyyy-MM');
+        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
+        const teamTargetDoc = await getDoc(teamTargetRef);
+        const teamTarget = teamTargetDoc.exists() ? teamTargetDoc.data()?.target || undefined : undefined;
+        
         const teamMetric: TeamMetrics = {
           teamId: team.id,
           teamName: team.name,
@@ -644,7 +663,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           activated: 0,
           pendingAssignment: 0,
           assigned: 0,
-          agents: []
+          agents: [],
+          teamTarget: teamTarget  // Add team target to the metric
         };
 
         const teamMembers = allUsers.filter(user => user.teamId === team.id);
@@ -746,12 +766,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     }
   }, [teamLeads]);
 
-  // ✅ PERFORMANCE: Load team metrics when teamLeads change or component mounts
-  useEffect(() => {
-    if (teamLeads.length > 0) {
-      loadTeamMetricsForMonth(selectedMonth);
-    }
-  }, [teamLeads, selectedMonth, loadTeamMetricsForMonth]);
+  // Note: Team metrics are now loaded by the main data loading function
+  // loadTeamMetricsForMonth is only called when user changes the month via handleMonthChange
 
   // ✅ PERFORMANCE: Compute group activations function
   // Matches the logic from Reports.tsx exactly
@@ -1026,7 +1042,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       const usersMap = new Map(allUsers.map(user => [user.id, user]));
 
       const teamMetricsPromises = teams.map(async team => {
-        // Load team target for the selected month
+        // Load team target for the selected month (ALWAYS fetch fresh from Firestore)
         const monthStr = format(selectedMonth, 'yyyy-MM');
         const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
         const teamTargetDoc = await getDoc(teamTargetRef);
@@ -1181,7 +1197,10 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       if (isMountedRef.current) {
         setCachedData(ADMIN_CACHE_KEY, currentMetrics);
         setCachedData(ADMIN_LEADS_CACHE_KEY, allLeads);
-        setCachedData(ADMIN_TEAM_METRICS_CACHE_KEY, sortedTeamMetrics);
+        // Use month-specific cache key to match loadTeamMetricsForMonth
+        const monthStr = format(selectedMonth, 'yyyy-MM');
+        const teamMetricsCacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
+        setCachedData(teamMetricsCacheKey, sortedTeamMetrics);
         lastLoadTimeRef.current = Date.now();
         
         // Check if teamId is in URL params and select the team
@@ -1298,23 +1317,125 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       }, { merge: true });
       
       // Update local state
-      setTeamMetrics(prev => prev.map(team => 
-        team.teamId === teamId 
-          ? { ...team, teamTarget: teamTargetValue }
-          : team
-      ));
+      setTeamMetrics(prev => 
+        prev.map(team => 
+          team.teamId === teamId 
+            ? { ...team, teamTarget: teamTargetValue }
+            : team
+        )
+      );
+      
+      // Update the cache with new data
+      const teamMetricsCacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
+      const cachedTeamMetrics = getCachedData(teamMetricsCacheKey);
+      if (cachedTeamMetrics) {
+        const updatedCache = cachedTeamMetrics.map((team: TeamMetrics) =>
+          team.teamId === teamId
+            ? { ...team, teamTarget: teamTargetValue }
+            : team
+        );
+        setCachedData(teamMetricsCacheKey, updatedCache);
+      }
       
       setEditingTeamTarget(null);
       toast.success('Team target saved successfully');
     } catch (error) {
-      console.error('Error saving team target:', error);
+      console.error('[AdminDashboard] Error saving team target:', error);
       toast.error('Failed to save team target');
     } finally {
       setSavingTeamTarget(false);
     }
   };
 
+  const searchLeadsByNumbers = async () => {
+    if (!numberLookupInput.trim()) {
+      toast.error('Please enter at least one number');
+      return;
+    }
 
+    setNumberLookupLoading(true);
+    setNumberLookupResults([]);
+
+    try {
+      // Parse numbers from input (split by newline, comma, or space)
+      const numbers = numberLookupInput
+        .split(/[\n,\s]+/)
+        .map(num => num.trim().replace(/\D/g, '')) // Remove non-digits
+        .filter(num => num.length >= 10); // Filter valid numbers (at least 10 digits)
+
+      if (numbers.length === 0) {
+        toast.error('No valid numbers found. Please enter numbers with at least 10 digits.');
+        setNumberLookupLoading(false);
+        return;
+      }
+
+      // Get all leads, users, and teams in parallel
+      const [leadsSnapshot, usersSnapshot, teamsSnapshot] = await Promise.all([
+        getDocs(query(collection(db, 'leads'))),
+        getDocs(query(collection(db, 'users'))),
+        getDocs(query(collection(db, 'teams')))
+      ]);
+
+      const allLeads = leadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Lead[];
+
+      // Create maps for agent and team names
+      const agentMap = new Map<string, string>();
+      usersSnapshot.docs.forEach(doc => {
+        const userData = doc.data() as User;
+        agentMap.set(doc.id, userData.name || 'Unknown Agent');
+      });
+
+      const teamMap = new Map<string, string>();
+      teamsSnapshot.docs.forEach(doc => {
+        const teamData = doc.data() as Team;
+        teamMap.set(doc.id, teamData.name || 'Unknown Team');
+      });
+
+      // Find leads that match any of the provided numbers
+      const matchingLeads = allLeads.filter(lead => {
+        // Check customer phone
+        const customerPhone = lead.customerPhone?.replace(/\D/g, '') || '';
+        
+        // Check selected numbers in plans array
+        const planNumbers = (lead.plans || []).map(plan => plan.number?.replace(/\D/g, '') || '').filter(num => num.length >= 10);
+        
+        // Check if any of the search numbers match customer phone or any plan number
+        return numbers.some(searchNum => {
+          const searchLast10 = searchNum.slice(-10);
+          
+          // Check customer phone
+          if (customerPhone && (customerPhone.includes(searchLast10) || searchLast10 === customerPhone.slice(-10))) {
+            return true;
+          }
+          
+          // Check plan numbers
+          return planNumbers.some(planNum => {
+            return planNum.includes(searchLast10) || searchLast10 === planNum.slice(-10);
+          });
+        });
+      }).map(lead => ({
+        ...lead,
+        agentName: lead.agentId ? (agentMap.get(lead.agentId) || lead.agentName || 'Unknown Agent') : 'N/A',
+        teamName: lead.teamId ? (teamMap.get(lead.teamId) || lead.teamName || 'Unknown Team') : 'N/A'
+      }));
+
+      setNumberLookupResults(matchingLeads);
+      
+      if (matchingLeads.length === 0) {
+        toast(`No leads found for ${numbers.length} number(s)`, { icon: 'ℹ️' });
+      } else {
+        toast.success(`Found ${matchingLeads.length} lead(s) for ${numbers.length} number(s)`);
+      }
+    } catch (error) {
+      console.error('Error searching leads by numbers:', error);
+      toast.error('Failed to search leads');
+    } finally {
+      setNumberLookupLoading(false);
+    }
+  };
 
   const handleAddGroupWithAlias = async () => {
     const key = newGroupName.trim().toUpperCase();
@@ -1514,6 +1635,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
   const stats = useMemo(() => [
     {
+      name: 'Reports',
+      description: 'Daily & Monthly analytics',
+      value: 'View',
+      href: '/dashboard/admin/reports',
+      icon: BarChart3,
+      color: 'bg-gradient-to-br from-pink-500 to-rose-600',
+      textColor: 'text-pink-600',
+    },
+    {
       name: 'Total Leads',
       description: 'All leads in system',
       value: metrics.totalLeads,
@@ -1582,15 +1712,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-red-600',
     },
     {
-      name: 'Open Requests',
-      description: 'Pending coordinator requests',
-      value: openRequestsLoading ? '...' : openRequests.length,
-      href: '#open-requests',
-      icon: Unlock,
-      color: 'bg-gradient-to-br from-orange-500 to-red-600',
-      textColor: 'text-orange-600',
-    },
-    {
       name: 'Number Logs',
       description: 'View all number activity',
       value: 'View',
@@ -1600,13 +1721,13 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-cyan-600',
     },
     {
-      name: 'Reports',
-      description: 'Daily & Monthly analytics',
-      value: 'View',
-      href: '/dashboard/admin/reports',
-      icon: BarChart3,
-      color: 'bg-gradient-to-br from-pink-500 to-rose-600',
-      textColor: 'text-pink-600',
+      name: 'Number Lookup',
+      description: 'Search leads by numbers',
+      value: 'Search',
+      href: '#number-lookup',
+      icon: Search,
+      color: 'bg-gradient-to-br from-teal-500 to-teal-600',
+      textColor: 'text-teal-600',
     },
     {
       name: 'Number Visibility',
@@ -2165,28 +2286,28 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
   return (
     <div>
-      <div className="mb-8">
-        <div className="flex items-center justify-between mb-4">
+      <div className="mb-4 sm:mb-8">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4 mb-3 sm:mb-4">
           <div className="flex-1">
-          <p className="mt-2 text-lg text-gray-600">
+          <p className="mt-1 sm:mt-2 text-xs sm:text-lg text-gray-600">
               <br></br>
             </p>
-            <h1 className="text-3xl font-bold text-gray-900">
+            <h1 className="text-lg sm:text-2xl md:text-3xl font-bold text-gray-900">
               Welcome back, {user?.name}!
             </h1>
-            <p className="mt-2 text-lg text-gray-600">
+            <p className="mt-1 sm:mt-2 text-xs sm:text-base md:text-lg text-gray-600">
               Here's what's happening across all teams today.
             </p>
           </div>
-          <div className="flex items-center space-x-4">
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-4">
             
-            <div className="flex items-center space-x-2 text-sm text-gray-600">
-              <Calendar className="h-5 w-5" />
+            <div className="flex items-center space-x-1 text-[10px] sm:text-sm text-gray-600">
+              <Calendar className="h-2.5 w-2.5 sm:h-4 sm:w-4 md:h-5 md:w-5" />
               <input
                 type="month"
                 value={format(selectedMonth, 'yyyy-MM')}
                 onChange={(e) => handleMonthChange(new Date(e.target.value))}
-                className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                className="border rounded px-1.5 py-0.5 sm:px-3 sm:py-2 text-[10px] sm:text-sm focus:ring-1 sm:focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
               />
             </div>
             <PayrollButton role="admin" user={user} />
@@ -2196,14 +2317,14 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
               onClick={() => setAttendanceOpen(true)}
-              className="group relative inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+              className="group relative inline-flex items-center gap-1.5 sm:gap-3 px-2 py-1 sm:px-6 sm:py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded sm:rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
             >
               <div className="absolute inset-0 bg-gradient-to-r from-green-600 to-emerald-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-              <div className="relative flex items-center gap-3">
-                <div className="p-1.5 bg-white/20 rounded-lg backdrop-blur-sm">
-                  <UserCheck className="h-5 w-5" />
+              <div className="relative flex items-center gap-1.5 sm:gap-3">
+                <div className="p-0.5 sm:p-1.5 bg-white/20 rounded backdrop-blur-sm">
+                  <UserCheck className="h-2.5 w-2.5 sm:h-4 sm:w-4 md:h-5 md:w-5" />
                 </div>
-                <span className="text-sm font-semibold">Attendance</span>
+                <span className="text-[10px] sm:text-sm font-semibold">Attendance</span>
               </div>
             </motion.button>
 
@@ -2213,60 +2334,64 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-12">
+      <div className="grid grid-cols-3 gap-2 sm:gap-4 md:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-6 sm:mb-12">
         {stats.map((stat) => (
-          stat.name === 'Open Requests' ? (
-            <button
-              key={stat.name}
-              onClick={() => setOpenRequestsModal(true)}
-              className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left"
-              type="button"
-            >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
-                  </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.name}
-                  </h3>
-                  <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
-                  </div>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Number Visibility' ? (
+          stat.name === 'Number Visibility' ? (
             <button
               key={stat.name}
               onClick={() => {
                 setNumberVisibilityOpen(true);
                 loadHiddenNumbers();
               }}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Number Lookup' ? (
+            <button
+              key={stat.name}
+              onClick={() => {
+                setNumberLookupOpen(true);
+                setNumberLookupInput('');
+                setNumberLookupResults([]);
+              }}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2276,24 +2401,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setManagerPhoneModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2303,24 +2428,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setPlanManagementModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2330,24 +2455,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setDncManagementOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2357,24 +2482,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setBulkImportOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2384,24 +2509,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setTrustedDevicesModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2411,24 +2536,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setWhatsappSettingsModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2438,24 +2563,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setPosterModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2465,25 +2590,22 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setBulkDeleteModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
-                  <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
-                  </div>
                 </div>
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
@@ -2492,23 +2614,23 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <Link
               to={stat.href}
               key={stat.name}
-              className={`overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group ${getGlassmorphismClass(stat.name) || 'bg-white'}`}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group ${getGlassmorphismClass(stat.name) || 'bg-white'}`}
             >
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className={`p-3 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                   </div>
-                  <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                     {stat.description}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
                   <div className="flex items-baseline justify-between">
-                    <p className={`text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
                   </div>
                 </div>
               </div>
@@ -2521,27 +2643,22 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         <button
           onClick={handleInitializeStats}
           disabled={initializingStats}
-          className="bg-white overflow-hidden shadow-lg rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-blue-200"
+          className="bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-blue-200"
           type="button"
         >
-          <div className="p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="p-3 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 group-hover:scale-110 transition-transform duration-300">
-                <Database className="h-6 w-6 text-white" />
+          <div className="p-2 sm:p-4 md:p-6">
+            <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+              <div className="p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 group-hover:scale-110 transition-transform duration-300">
+                <Database className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
               </div>
-              <div className="text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+              <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
                 {initializingStats ? 'Initializing...' : 'Regenerate stats'}
               </div>
             </div>
-            <div className="space-y-2">
-              <h3 className="text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300">
-                Initialize Number Pool Stats
+            <div className="space-y-1 sm:space-y-2">
+              <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                {initializingStats ? 'Initializing...' : 'Regenerate Stats'}
               </h3>
-              <div className="flex items-baseline justify-between">
-                <p className="text-sm text-gray-600">
-                  {initStatsResult || 'Regenerate pagination stats for groups and initials'}
-                </p>
-              </div>
             </div>
           </div>
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
@@ -2990,6 +3107,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 // Use team target if set by admin, otherwise fall back to sum of agent targets
                 const agentTargetSum = (team.agents || []).reduce((sum, agent) => sum + (agent.target || 0), 0);
                 const totalTarget = team.teamTarget !== undefined ? team.teamTarget : agentTargetSum;
+                
                 const averageActivationPerAgent = (team.agents || []).length > 0 
                   ? (totalAchieved / (team.agents || []).length).toFixed(1) 
                   : '0';
@@ -3062,12 +3180,13 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                         <div className="grid grid-cols-2 gap-3">
                           <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-xl">
                             <div className="flex items-center justify-between mb-2">
-                              <p className="text-sm font-medium text-blue-700">Total Target</p>
+                              <p className="text-sm font-medium text-blue-700">Team Target</p>
                               {user?.role === 'admin' && (
                                 <button
                                   onClick={() => {
+                                    const initialValue = team.teamTarget !== undefined ? team.teamTarget : 0;
                                     setEditingTeamTarget(team.teamId);
-                                    setTeamTargetValue(team.teamTarget !== undefined ? team.teamTarget : agentTargetSum);
+                                    setTeamTargetValue(initialValue);
                                   }}
                                   className="text-xs text-blue-600 hover:text-blue-800 font-medium"
                                 >
@@ -3110,7 +3229,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-2xl font-bold text-blue-900">{totalTarget}</p>
+                              <p className="text-2xl font-bold text-blue-900">
+                                {team.teamTarget !== undefined ? team.teamTarget : 0}
+                              </p>
                             )}
                           </div>
                           <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
@@ -3648,6 +3769,215 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               
               <WhatsAppSettings />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Number Lookup Modal */}
+      {numberLookupOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col animate-fadeIn">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-teal-500 to-teal-600 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <Search className="h-6 w-6 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Number Lookup</h2>
+                  <p className="text-sm text-teal-100 mt-1">Search leads by phone numbers</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setNumberLookupOpen(false);
+                  setNumberLookupInput('');
+                  setNumberLookupResults([]);
+                }}
+                className="text-white hover:bg-white/20 rounded-lg p-2 transition-colors"
+                aria-label="Close"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              {/* Input Section */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Paste Numbers (one per line, comma-separated, or space-separated)
+                </label>
+                <textarea
+                  value={numberLookupInput}
+                  onChange={(e) => setNumberLookupInput(e.target.value)}
+                  placeholder="Enter numbers here...&#10;Example:&#10;0501234567&#10;0502345678&#10;0503456789"
+                  className="w-full h-32 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 resize-none font-mono text-sm"
+                  disabled={numberLookupLoading}
+                />
+                <div className="mt-3 flex items-center justify-between">
+                  <p className="text-xs text-gray-500">
+                    {numberLookupInput.split(/[\n,\s]+/).filter(n => n.trim().replace(/\D/g, '').length >= 10).length} valid number(s) detected
+                  </p>
+                  <button
+                    onClick={searchLeadsByNumbers}
+                    disabled={numberLookupLoading || !numberLookupInput.trim()}
+                    className="px-6 py-2 bg-gradient-to-r from-teal-500 to-teal-600 text-white rounded-lg font-medium hover:from-teal-600 hover:to-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2"
+                  >
+                    {numberLookupLoading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Searching...
+                      </>
+                    ) : (
+                      <>
+                        <Search className="w-4 h-4" />
+                        Search Leads
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Results Section */}
+              {numberLookupResults.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      Found {numberLookupResults.length} Lead(s)
+                    </h3>
+                    <button
+                      onClick={() => {
+                        setNumberLookupResults([]);
+                        setNumberLookupInput('');
+                      }}
+                      className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
+                    >
+                      <X className="w-4 h-4" />
+                      Clear Results
+                    </button>
+                  </div>
+                  
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 border border-gray-200 rounded-lg">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead Number</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone & Customer Numbers</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Selected Number(s)</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Team</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {numberLookupResults.map((lead) => (
+                          <tr key={lead.id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-indigo-600">
+                              {lead.leadNumber || 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                              {lead.customerName || 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              <div className="flex flex-col gap-1">
+                                <div className="font-mono">
+                                  <span className="text-gray-500 text-xs">Phone: </span>
+                                  <span>{lead.customerPhone || 'N/A'}</span>
+                                </div>
+                                {lead.customerNumbers && lead.customerNumbers.length > 0 && (
+                                  <div className="flex flex-col gap-0.5 mt-1">
+                                    {lead.customerNumbers.map((custNum, idx) => (
+                                      <div key={idx} className="text-xs">
+                                        <span className="text-gray-500">Customer #{idx + 1}: </span>
+                                        <span className="font-mono text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                                          {custNum.number}
+                                        </span>
+                                        {custNum.alternativeNumber && (
+                                          <>
+                                            <span className="text-gray-400 mx-1">|</span>
+                                            <span className="font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">
+                                              Alt: {custNum.alternativeNumber}
+                                            </span>
+                                          </>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              {lead.plans && lead.plans.length > 0 ? (
+                                <div className="flex flex-col gap-1">
+                                  {lead.plans.map((plan, idx) => (
+                                    <span key={idx} className="font-mono text-teal-700 bg-teal-50 px-2 py-1 rounded">
+                                      {plan.number || 'N/A'}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="text-gray-400">No numbers</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                                lead.status === 'activated' ? 'bg-green-100 text-green-800' :
+                                lead.status === 'verified' ? 'bg-blue-100 text-blue-800' :
+                                lead.status === 'pending_verification' ? 'bg-yellow-100 text-yellow-800' :
+                                lead.status === 'non_verified' ? 'bg-orange-100 text-orange-800' :
+                                lead.status === 'rejected' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {lead.status === 'activated' ? 'Activated' :
+                                 lead.status === 'verified' ? 'Verified' :
+                                 lead.status === 'pending_verification' ? 'Pending Verification' :
+                                 lead.status === 'non_verified' ? 'Non Verified' :
+                                 lead.status === 'rejected' ? 'Rejected' :
+                                 lead.status || 'N/A'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {(lead as any).agentName || (lead.agentName || 'N/A')}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {(lead as any).teamName || (lead.teamName || 'N/A')}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {lead.createdAt ? format(
+                                (lead.createdAt && typeof (lead.createdAt as any).toDate === 'function') 
+                                  ? (lead.createdAt as any).toDate() 
+                                  : (lead.createdAt instanceof Date ? lead.createdAt : new Date(lead.createdAt)),
+                                'MMM d, yyyy'
+                              ) : 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm">
+                              <Link
+                                to={`/dashboard/leads/${lead.id}`}
+                                className="text-teal-600 hover:text-teal-800 font-medium flex items-center gap-1"
+                              >
+                                View
+                                <ArrowRight className="w-4 h-4" />
+                              </Link>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {numberLookupResults.length === 0 && !numberLookupLoading && numberLookupInput.trim() && (
+                <div className="mt-6 text-center py-12 bg-gray-50 rounded-lg">
+                  <Search className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                  <p className="text-gray-600">No leads found. Try searching with different numbers.</p>
+                </div>
+              )}
             </div>
           </div>
         </div>

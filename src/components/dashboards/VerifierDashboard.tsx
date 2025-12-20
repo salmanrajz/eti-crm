@@ -253,6 +253,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const [replyText, setReplyText] = useState('');
   const [resendingLogId, setResendingLogId] = useState<string | null>(null);
+  const [resendingFlow, setResendingFlow] = useState(false);
   // Flow state tracking
   const [flowState, setFlowState] = useState<'welcome' | 'terms' | 'delivery' | 'address' | 'nationality' | 'complete'>('welcome');
   const [deliveryData, setDeliveryData] = useState({ name: '', address: '', nationality: '' });
@@ -321,12 +322,15 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
   // Handle resending the flow message (can be called without an existing log)
   const handleResendFlow = async () => {
-    if (!selectedLead) {
-      toast.error('Select a lead before resending');
+    if (!selectedLead || resendingFlow) {
+      if (!selectedLead) {
+        toast.error('Select a lead before resending');
+      }
       return;
     }
 
     try {
+      setResendingFlow(true);
       const firstPlan = selectedLead?.plans?.[0];
       if (!firstPlan || !planDetails) {
         toast.error('Plan information missing');
@@ -417,8 +421,33 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
       toast.success('Flow message resent successfully');
     } catch (error: any) {
-      toast.error('Failed to resend flow message');
-      console.error('Resend flow error:', error);
+      // Check if it's a duplicate contact error - this is actually okay, contact exists
+      const errorMessage = error?.message || '';
+      const isDuplicateContact = errorMessage.includes('Duplicate entry') && errorMessage.includes('unique_shortcode');
+      
+      if (isDuplicateContact) {
+        // Contact already exists, but flow should still work - treat as success
+        toast.success('Flow message resent successfully (contact already exists in system)');
+        
+        // Still update whatsappInitiatedAt
+        try {
+          await updateDoc(doc(db, 'leads', selectedLead.id), {
+            whatsappInitiatedAt: new Date()
+          });
+        } catch (updateError) {
+          console.error('Failed to update whatsappInitiatedAt:', updateError);
+        }
+        
+        // Trigger immediate fetch
+        setTimeout(() => {
+          fetchWhatsAppMessagesFromAPI();
+        }, 1000);
+      } else {
+        toast.error(error?.message || 'Failed to resend flow message');
+        console.error('Resend flow error:', error);
+      }
+    } finally {
+      setResendingFlow(false);
     }
   };
 
@@ -2871,11 +2900,29 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleResendFlow}
-                    className="inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 shadow-sm"
+                    disabled={resendingFlow}
+                    className={clsx(
+                      "inline-flex items-center px-3 py-1.5 rounded-md text-xs font-medium focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 shadow-sm transition-colors",
+                      resendingFlow
+                        ? "bg-indigo-400 text-white cursor-not-allowed"
+                        : "bg-indigo-600 text-white hover:bg-indigo-700"
+                    )}
                     title="Resend verification flow message"
                   >
-                    <ArrowRight className="w-3.5 h-3.5 mr-1.5" />
-                    Resend Flow
+                    {resendingFlow ? (
+                      <>
+                        <svg className="animate-spin -ml-1 mr-1.5 h-3.5 w-3.5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                        </svg>
+                        Resending...
+                      </>
+                    ) : (
+                      <>
+                        <ArrowRight className="w-3.5 h-3.5 mr-1.5" />
+                        Resend Flow
+                      </>
+                    )}
                   </button>
                 <button
                   onClick={() => {

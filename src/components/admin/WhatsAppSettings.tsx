@@ -5,10 +5,15 @@ import {
   updateWhatsAppVerificationEnabled,
   getWhatsAppCredentials,
   updateWhatsAppCredentials,
-  getWhatsAppVerificationGroups,
-  updateWhatsAppVerificationGroups,
+  getNumberActiveCheckEnabled,
+  updateNumberActiveCheckEnabled,
+  getWhatsAppFlowGroups,
+  updateWhatsAppFlowGroups,
+  getWhatsAppConversationCheck,
+  updateWhatsAppConversationCheck,
   type WhatsAppCredentials,
-  type WhatsAppVerificationGroupsConfig
+  type WhatsAppFlowGroupsConfig,
+  type WhatsAppConversationCheckConfig
 } from '../../utils/configService';
 import { clearRoutesCache } from '../../utils/whatsappRouter';
 import { toast } from 'react-hot-toast';
@@ -19,8 +24,6 @@ import {
   Loader2, 
   Eye, 
   EyeOff, 
-  Lock, 
-  Users, 
   XCircle,
   Bell,
   Sparkles,
@@ -31,6 +34,7 @@ import {
 export function WhatsAppSettings() {
   const { user } = useAuthStore();
   const [whatsappEnabled, setWhatsappEnabled] = useState<boolean>(true);
+  const [numberActiveCheckEnabled, setNumberActiveCheckEnabled] = useState<boolean>(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -41,23 +45,29 @@ export function WhatsAppSettings() {
     accessToken: '',
     phoneNumberId: ''
   });
-  const [showAccessToken, setShowAccessToken] = useState(false);
   
-  // WhatsApp verification groups state
-  const [verificationGroups, setVerificationGroups] = useState<WhatsAppVerificationGroupsConfig>({
-    G1: { businessPhoneId: '', accessToken: '', templateName: '', languageCode: 'en' },
-    G2: { businessPhoneId: '', accessToken: '', templateName: '', languageCode: 'en' },
-    G3: { businessPhoneId: '', accessToken: '', templateName: '', languageCode: 'en' },
-    OTHER: { businessPhoneId: '', accessToken: '', templateName: '', languageCode: 'en' },
-    languageCode: 'en'
+  // WhatsApp flow configuration state
+  const [flowGroups, setFlowGroups] = useState<WhatsAppFlowGroupsConfig>({
+    G1: { url: '', key: '', flowId: '', arabicFlowId: '', channelName: '' },
+    G2: { url: '', key: '', flowId: '', arabicFlowId: '', channelName: '' },
+    G3: { url: '', key: '', flowId: '', arabicFlowId: '', channelName: '' },
+    OTHER: { url: '', key: '', flowId: '', arabicFlowId: '', channelName: '' }
   });
-  const [showGroupTokens, setShowGroupTokens] = useState<Record<string, boolean>>({
+  const [showFlowKeys, setShowFlowKeys] = useState<Record<string, boolean>>({
     G1: false,
     G2: false,
     G3: false,
     OTHER: false
   });
-  const [activeGroupTab, setActiveGroupTab] = useState<'G1' | 'G2' | 'G3' | 'OTHER' | 'MANAGER'>('G1');
+  const [activeFlowTab, setActiveFlowTab] = useState<'G1' | 'G2' | 'G3' | 'OTHER'>('G1');
+  
+  // WhatsApp conversation check configuration state
+  const [conversationCheck, setConversationCheck] = useState<WhatsAppConversationCheckConfig>({
+    url: '',
+    key: '',
+    channelName: ''
+  });
+  const [showConversationKey, setShowConversationKey] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -66,14 +76,18 @@ export function WhatsAppSettings() {
   const loadSettings = async () => {
     try {
       setLoading(true);
-      const [enabled, creds, groups] = await Promise.all([
+      const [enabled, numberCheckEnabled, creds, flows, conversationCheckConfig] = await Promise.all([
         getWhatsAppVerificationEnabled(),
+        getNumberActiveCheckEnabled(),
         getWhatsAppCredentials(),
-        getWhatsAppVerificationGroups()
+        getWhatsAppFlowGroups(),
+        getWhatsAppConversationCheck()
       ]);
       setWhatsappEnabled(enabled);
+      setNumberActiveCheckEnabled(numberCheckEnabled);
       setCredentials(creds);
-      setVerificationGroups(groups);
+      setFlowGroups(flows);
+      setConversationCheck(conversationCheckConfig);
     } catch (error) {
       console.error('Error loading settings:', error);
       toast.error('Failed to load settings');
@@ -96,11 +110,13 @@ export function WhatsAppSettings() {
     try {
       setSaving(true);
       
-      // Update WhatsApp verification setting, credentials, and verification groups
+      // Update WhatsApp verification setting, number active check, credentials, flow groups, and conversation check
       await Promise.all([
         updateWhatsAppVerificationEnabled(whatsappEnabled, user.id),
+        updateNumberActiveCheckEnabled(numberActiveCheckEnabled, user.id),
         updateWhatsAppCredentials(credentials, user.id),
-        updateWhatsAppVerificationGroups(verificationGroups, user.id)
+        updateWhatsAppFlowGroups(flowGroups, user.id),
+        updateWhatsAppConversationCheck(conversationCheck, user.id)
       ]);
       
       // Clear the routes cache so new settings are immediately used
@@ -244,268 +260,242 @@ export function WhatsAppSettings() {
           </div>
         </motion.div>
 
-        {/* WhatsApp Verification Groups Section */}
+        {/* Number Active Check Section */}
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-xl p-6 border border-purple-100 shadow-sm"
+          transition={{ delay: 0.15 }}
+          className="bg-gradient-to-br from-orange-50 to-red-50 rounded-xl p-6 border border-orange-100 shadow-sm"
+        >
+          <div className="flex items-start justify-between mb-4">
+            <div className="flex-1">
+              <div className="flex items-center space-x-2 mb-2">
+                <Bell className="h-5 w-5 text-orange-600" />
+                <h4 className="text-lg font-semibold text-gray-900">Number Active Check</h4>
+              </div>
+              <p className="text-sm text-gray-600">
+                Enable or disable the number active status check when creating leads. When enabled, users cannot add active numbers to leads.
+              </p>
+            </div>
+            
+            <div className="ml-4">
+              <label className="relative inline-flex items-center cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={numberActiveCheckEnabled}
+                  onChange={(e) => setNumberActiveCheckEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <motion.div 
+                  className="w-14 h-7 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-orange-600 peer-checked:to-red-600 shadow-lg"
+                  whileTap={{ scale: 0.95 }}
+                />
+              </label>
+            </div>
+          </div>
+        </motion.div>
+
+        {/* WhatsApp Flow Configuration Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25 }}
+          className="bg-gradient-to-br from-teal-50 to-cyan-50 rounded-xl p-6 border border-teal-100 shadow-sm"
         >
           <div className="flex items-center mb-4">
-            <div className="p-2 bg-purple-100 rounded-lg mr-3">
-              <Users className="h-5 w-5 text-purple-600" />
+            <div className="p-2 bg-teal-100 rounded-lg mr-3">
+              <Zap className="h-5 w-5 text-teal-600" />
             </div>
             <div>
-              <h4 className="text-lg font-semibold text-gray-900">WhatsApp Verification Groups</h4>
+              <h4 className="text-lg font-semibold text-gray-900">WhatsApp Flow Configuration</h4>
               <p className="text-sm text-gray-600 mt-0.5">
-                Configure credentials for each group (G1, G2, G3, OTHER) used for lead verification
+                Configure flow settings (URL, Key, FlowID, ChannelName) for each group
               </p>
             </div>
           </div>
 
-          {/* Modern Group Tabs */}
-          <div className="bg-white/60 rounded-lg p-1 mb-6 border border-purple-200">
-            <nav className="flex space-x-1" aria-label="Tabs">
-              {(['G1', 'G2', 'G3', 'OTHER', 'MANAGER'] as const).map((group) => (
-                <motion.button
-                  key={group}
-                  onClick={() => setActiveGroupTab(group)}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className={`
-                    flex-1 py-2.5 px-4 rounded-md text-sm font-medium transition-all duration-200 relative
-                    ${activeGroupTab === group
-                      ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg'
-                      : 'text-gray-600 hover:text-gray-900 hover:bg-white/80'
-                    }
-                  `}
-                >
-                  {activeGroupTab === group && (
-                    <motion.div
-                      layoutId="activeTab"
-                      className="absolute inset-0 bg-gradient-to-r from-purple-600 to-pink-600 rounded-md"
-                      transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
-                    />
-                  )}
-                  <span className="relative z-10 flex items-center justify-center space-x-1">
-                    {group === 'OTHER' ? 'Default' : group === 'MANAGER' ? (
-                      <>
-                        <Bell className="h-3.5 w-3.5" />
-                        <span>Manager</span>
-                      </>
-                    ) : group}
-                  </span>
-                </motion.button>
-              ))}
-            </nav>
+          {/* Group Tabs */}
+          <div className="flex space-x-2 mb-4 border-b border-teal-200">
+            {(['G1', 'G2', 'G3', 'OTHER'] as const).map((group) => (
+              <button
+                key={group}
+                onClick={() => setActiveFlowTab(group)}
+                className={`px-4 py-2 text-sm font-medium transition-colors ${
+                  activeFlowTab === group
+                    ? 'text-teal-600 border-b-2 border-teal-600'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {group}
+              </button>
+            ))}
           </div>
 
-          {/* Group Configuration Form */}
-          <AnimatePresence mode="wait">
-            {/* Manager Notifications Tab */}
-            {activeGroupTab === 'MANAGER' && (
-              <motion.div
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                transition={{ duration: 0.2 }}
-                className="bg-white rounded-lg p-5 border border-purple-200 shadow-sm"
-              >
-                <div className="mb-5 pb-4 border-b border-gray-200">
-                  <div className="flex items-center space-x-2 mb-2">
-                    <Bell className="h-5 w-5 text-purple-600" />
-                    <h5 className="text-base font-bold text-gray-900">Manager Notifications</h5>
-                  </div>
-                  <p className="text-xs text-gray-500">
-                    Configure WhatsApp credentials for sending notifications to managers
-                  </p>
-                </div>
+          {/* Flow Configuration Form */}
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Flow API URL
+              </label>
+              <input
+                type="url"
+                value={flowGroups[activeFlowTab].url}
+                onChange={(e) => setFlowGroups(prev => ({
+                  ...prev,
+                  [activeFlowTab]: { ...prev[activeFlowTab], url: e.target.value }
+                }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                placeholder="https://api.truvestuae.com/api/webhook/triggerFlowExternal"
+              />
+            </div>
 
-                <div className="space-y-4">
-                  {/* API URL */}
-                  <div>
-                    <label htmlFor="manager-apiUrl" className="block text-sm font-medium text-gray-700 mb-2">
-                      API URL
-                    </label>
-                    <input
-                      type="url"
-                      id="manager-apiUrl"
-                      value={credentials.apiUrl}
-                      onChange={(e) => setCredentials(prev => ({ ...prev, apiUrl: e.target.value }))}
-                      placeholder="https://graph.facebook.com/v17.0/542227575631617/messages"
-                      className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 border transition-all"
-                    />
-                  </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                API Key
+              </label>
+              <div className="relative">
+                <input
+                  type={showFlowKeys[activeFlowTab] ? 'text' : 'password'}
+                  value={flowGroups[activeFlowTab].key}
+                  onChange={(e) => setFlowGroups(prev => ({
+                    ...prev,
+                    [activeFlowTab]: { ...prev[activeFlowTab], key: e.target.value }
+                  }))}
+                  className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  placeholder="connectwithcrm"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowFlowKeys(prev => ({ ...prev, [activeFlowTab]: !prev[activeFlowTab] }))}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                >
+                  {showFlowKeys[activeFlowTab] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
 
-                  {/* Phone Number ID */}
-                  <div>
-                    <label htmlFor="manager-phoneNumberId" className="block text-sm font-medium text-gray-700 mb-2">
-                      Phone Number ID
-                    </label>
-                    <input
-                      type="text"
-                      id="manager-phoneNumberId"
-                      value={credentials.phoneNumberId}
-                      onChange={(e) => setCredentials(prev => ({ ...prev, phoneNumberId: e.target.value }))}
-                      placeholder="542227575631617"
-                      className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 border transition-all"
-                    />
-                  </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Flow ID (Default/English)
+              </label>
+              <input
+                type="text"
+                value={flowGroups[activeFlowTab].flowId}
+                onChange={(e) => setFlowGroups(prev => ({
+                  ...prev,
+                  [activeFlowTab]: { ...prev[activeFlowTab], flowId: e.target.value }
+                }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                placeholder="TestingBot2"
+              />
+            </div>
 
-                  {/* Access Token */}
-                  <div>
-                    <label htmlFor="manager-accessToken" className="block text-sm font-medium text-gray-700 mb-2">
-                      Access Token
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showAccessToken ? "text" : "password"}
-                        id="manager-accessToken"
-                        value={credentials.accessToken}
-                        onChange={(e) => setCredentials(prev => ({ ...prev, accessToken: e.target.value }))}
-                        placeholder="Enter WhatsApp Business API Access Token"
-                        className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 pr-10 border transition-all"
-                      />
-                      <div className="absolute inset-y-0 right-0 flex items-center pr-2">
-                        <motion.button
-                          type="button"
-                          onClick={() => setShowAccessToken(!showAccessToken)}
-                          whileHover={{ scale: 1.1 }}
-                          whileTap={{ scale: 0.9 }}
-                          className="p-1.5 text-gray-400 hover:text-gray-600 rounded-md hover:bg-gray-100 transition-colors"
-                        >
-                          {showAccessToken ? (
-                            <EyeOff className="h-4 w-4" />
-                          ) : (
-                            <Eye className="h-4 w-4" />
-                          )}
-                        </motion.button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            )}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Arabic Flow ID
+              </label>
+              <input
+                type="text"
+                value={flowGroups[activeFlowTab].arabicFlowId || ''}
+                onChange={(e) => setFlowGroups(prev => ({
+                  ...prev,
+                  [activeFlowTab]: { ...prev[activeFlowTab], arabicFlowId: e.target.value }
+                }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                placeholder="ArabicNewFlow"
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                Flow ID to use when language is Arabic. If not set, will use default Flow ID.
+              </p>
+            </div>
 
-            {/* Group Configuration Forms */}
-            {(['G1', 'G2', 'G3', 'OTHER'] as const).map((group) => (
-              <motion.div
-                key={group}
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: activeGroupTab === group ? 1 : 0, x: activeGroupTab === group ? 0 : 20 }}
-                exit={{ opacity: 0, x: -20 }}
-                transition={{ duration: 0.2 }}
-                className={activeGroupTab === group ? 'block' : 'hidden'}
-              >
-                <div className="bg-white rounded-lg p-5 border border-purple-200 shadow-sm">
-                  <div className="mb-5 pb-4 border-b border-gray-200">
-                    <div>
-                      <h5 className="text-base font-bold text-gray-900 mb-1">
-                        {group === 'G1' && 'Connect Authorised Channel Partner of Etisalat'}
-                        {group === 'G2' && 'Express Dial Authorised Channel Partner of Etisalat'}
-                        {group === 'G3' && 'Telecon Authorised Channel Partner of Etisalat'}
-                        {group === 'OTHER' && 'Default Group'}
-                      </h5>
-                      <p className="text-xs text-gray-500">
-                        Configure credentials for {group === 'OTHER' ? 'default' : group.toLowerCase()} group verification
-                      </p>
-                    </div>
-                  </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Channel Name
+              </label>
+              <input
+                type="text"
+                value={flowGroups[activeFlowTab].channelName}
+                onChange={(e) => setFlowGroups(prev => ({
+                  ...prev,
+                  [activeFlowTab]: { ...prev[activeFlowTab], channelName: e.target.value }
+                }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                placeholder="Express Dial"
+              />
+            </div>
+          </div>
+        </motion.div>
 
-                  <div className="space-y-4">
-                    {/* Business Phone ID */}
-                    <div>
-                      <label htmlFor={`${group}-phoneId`} className="block text-sm font-medium text-gray-700 mb-2">
-                        Business Phone ID
-                      </label>
-                      <input
-                        type="text"
-                        id={`${group}-phoneId`}
-                        value={verificationGroups[group].businessPhoneId}
-                        onChange={(e) => setVerificationGroups(prev => ({
-                          ...prev,
-                          [group]: { ...prev[group], businessPhoneId: e.target.value }
-                        }))}
-                        placeholder="176399048891733"
-                        className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 border transition-all"
-                      />
-                    </div>
+        {/* WhatsApp Conversation Check Configuration Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="bg-gradient-to-br from-violet-50 to-purple-50 rounded-xl p-6 border border-violet-100 shadow-sm"
+        >
+          <div className="flex items-center mb-4">
+            <div className="p-2 bg-violet-100 rounded-lg mr-3">
+              <MessageSquare className="h-5 w-5 text-violet-600" />
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold text-gray-900">Conversation Check API</h4>
+              <p className="text-sm text-gray-600 mt-0.5">
+                Configure API settings for checking WhatsApp conversations (common to all groups)
+              </p>
+            </div>
+          </div>
 
-                    {/* Access Token */}
-                    <div>
-                      <label htmlFor={`${group}-token`} className="block text-sm font-medium text-gray-700 mb-2">
-                        Access Token
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showGroupTokens[group] ? "text" : "password"}
-                          id={`${group}-token`}
-                          value={verificationGroups[group].accessToken}
-                          onChange={(e) => setVerificationGroups(prev => ({
-                            ...prev,
-                            [group]: { ...prev[group], accessToken: e.target.value }
-                          }))}
-                          placeholder="Enter WhatsApp Business API Access Token"
-                          className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 pr-10 border transition-all"
-                        />
-                        <div className="absolute inset-y-0 right-0 flex items-center pr-2">
-                          <motion.button
-                            type="button"
-                            onClick={() => setShowGroupTokens(prev => ({ ...prev, [group]: !prev[group] }))}
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                            className="p-1.5 text-gray-400 hover:text-gray-600 rounded-md hover:bg-gray-100 transition-colors"
-                          >
-                            {showGroupTokens[group] ? (
-                              <EyeOff className="h-4 w-4" />
-                            ) : (
-                              <Eye className="h-4 w-4" />
-                            )}
-                          </motion.button>
-                        </div>
-                      </div>
-                    </div>
+          {/* Conversation Check Configuration Form */}
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                API URL
+              </label>
+              <input
+                type="url"
+                value={conversationCheck.url}
+                onChange={(e) => setConversationCheck(prev => ({ ...prev, url: e.target.value }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                placeholder="https://api.truvestuae.com/api/conversation/check"
+              />
+            </div>
 
-                    {/* Template Name */}
-                    <div>
-                      <label htmlFor={`${group}-template`} className="block text-sm font-medium text-gray-700 mb-2">
-                        Template Name
-                      </label>
-                      <input
-                        type="text"
-                        id={`${group}-template`}
-                        value={verificationGroups[group].templateName}
-                        onChange={(e) => setVerificationGroups(prev => ({
-                          ...prev,
-                          [group]: { ...prev[group], templateName: e.target.value }
-                        }))}
-                        placeholder={group === 'OTHER' ? 'verification_default' : `verification_${group.toLowerCase()}`}
-                        className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 border transition-all"
-                      />
-        </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                API Key
+              </label>
+              <div className="relative">
+                <input
+                  type={showConversationKey ? 'text' : 'password'}
+                  value={conversationCheck.key}
+                  onChange={(e) => setConversationCheck(prev => ({ ...prev, key: e.target.value }))}
+                  className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                  placeholder="connectwithcrm"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConversationKey(!showConversationKey)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                >
+                  {showConversationKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
 
-                    {/* Language Code */}
-                    <div>
-                      <label htmlFor={`${group}-lang`} className="block text-sm font-medium text-gray-700 mb-2">
-                        Language Code
-                      </label>
-                      <input
-                        type="text"
-                        id={`${group}-lang`}
-                        value={verificationGroups[group].languageCode}
-                        onChange={(e) => setVerificationGroups(prev => ({
-                          ...prev,
-                          [group]: { ...prev[group], languageCode: e.target.value }
-                        }))}
-                        placeholder="en"
-                        className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 sm:text-sm px-3 py-2.5 border transition-all"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Channel Name
+              </label>
+              <input
+                type="text"
+                value={conversationCheck.channelName}
+                onChange={(e) => setConversationCheck(prev => ({ ...prev, channelName: e.target.value }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
+                placeholder="Express Dial"
+              />
+            </div>
+          </div>
         </motion.div>
 
         {/* Modern Save Button */}

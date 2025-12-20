@@ -41,7 +41,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, orderBy, limit, doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit, doc, getDoc, onSnapshot, updateDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { User, Lead } from '../../types';
 import { Link, useNavigate } from 'react-router-dom';
@@ -69,7 +69,9 @@ import {
   MessageCircle,
   AlertCircle,
   MapPin,
-  ShoppingCart
+  ShoppingCart,
+  Trash2,
+  CheckSquare
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { clsx } from 'clsx';
@@ -497,6 +499,35 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       console.error('Error loading customer submissions:', error);
     }
   }, [user.id]);
+
+  // Mark submission as lead submitted
+  const markAsLeadSubmitted = async (submissionId: string) => {
+    try {
+      await updateDoc(doc(db, 'customerPortalSubmissions', submissionId), {
+        status: 'lead_submitted',
+        updatedAt: new Date(),
+      });
+      toast.success('Marked as Lead Submitted');
+    } catch (error) {
+      console.error('Error marking as lead submitted:', error);
+      toast.error('Failed to update submission');
+    }
+  };
+
+  // Delete submission
+  const handleDeleteSubmission = async (submissionId: string) => {
+    if (!confirm('Are you sure you want to delete this submission? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'customerPortalSubmissions', submissionId));
+      toast.success('Submission deleted successfully');
+    } catch (error) {
+      console.error('Error deleting submission:', error);
+      toast.error('Failed to delete submission');
+    }
+  };
 
   // ✅ OPTIMIZED: Enhanced data loading with parallel execution and better error handling
   useEffect(() => {
@@ -1468,20 +1499,43 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                           </div>
                         </div>
 
-                        <div className="flex flex-col items-end gap-2">
-                          <div className="text-xs text-gray-500">
+                        <div className="flex flex-col items-end sm:items-end gap-3">
+                          <div className="text-xs text-gray-500 text-right">
                             {submission.submittedAt && format(submission.submittedAt, 'MMM d, yyyy h:mm a')}
                           </div>
                           <span className={clsx(
                             "px-3 py-1 rounded-full text-xs font-semibold",
                             submission.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
                             submission.status === 'reviewed' ? 'bg-blue-100 text-blue-800' :
+                            submission.status === 'lead_submitted' ? 'bg-green-100 text-green-800' :
                             'bg-green-100 text-green-800'
                           )}>
                             {submission.status === 'pending' ? 'Pending Review' :
                              submission.status === 'reviewed' ? 'Reviewed' :
+                             submission.status === 'lead_submitted' ? 'Lead Submitted' :
                              'Converted'}
                           </span>
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+                            {submission.status !== 'lead_submitted' && (
+                              <button
+                                onClick={() => markAsLeadSubmitted(submission.id)}
+                                className="flex items-center justify-center gap-1.5 px-3 py-2 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm"
+                                title="Mark as Lead Submitted"
+                              >
+                                <CheckSquare className="h-3.5 w-3.5" />
+                                <span className="hidden sm:inline">Mark as Submitted</span>
+                                <span className="sm:hidden">Mark Submitted</span>
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleDeleteSubmission(submission.id)}
+                              className="flex items-center justify-center gap-1.5 px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm"
+                              title="Delete Submission"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Delete
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
