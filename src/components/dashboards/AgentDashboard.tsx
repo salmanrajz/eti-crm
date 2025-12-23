@@ -239,7 +239,7 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       }
 
       // Count activated plans for current month using activatedAt (fallback updatedAt)
-      if (lead.status === 'activated' && lead.plans) {
+      if ((lead.status === 'activated' || lead.status === 'activated_non_verified') && lead.plans) {
         const activatedAt = getActivatedAt(lead);
         if (activatedAt && activatedAt >= startOfCurrentMonth && activatedAt <= endOfCurrentMonth) {
         acc.activated += lead.plans.length;

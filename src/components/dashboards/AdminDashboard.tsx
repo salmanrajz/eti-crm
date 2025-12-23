@@ -53,6 +53,7 @@ import { TrustedDevicesAdmin } from '../admin/TrustedDevicesAdmin';
 import { WhatsAppSettings } from '../admin/WhatsAppSettings';
 import { BulkDNCImport } from '../admin/BulkDNCImport';
 import { BulkDeleteNumbers } from '../admin/BulkDeleteNumbers';
+import { AddToDeletedNumbers } from '../admin/AddToDeletedNumbers';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
 import { 
@@ -98,6 +99,7 @@ import {
   X,
   Database,
   Trash2,
+  Archive,
   Sparkles,
   RefreshCw as RefreshCwIcon
 } from 'lucide-react';
@@ -333,6 +335,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [planManagementModalOpen, setPlanManagementModalOpen] = useState(false);
   const [whatsappSettingsModalOpen, setWhatsappSettingsModalOpen] = useState(false);
   const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
+  const [addToDeletedModalOpen, setAddToDeletedModalOpen] = useState(false);
   // Number lookup states
   const [numberLookupOpen, setNumberLookupOpen] = useState(false);
   const [numberLookupInput, setNumberLookupInput] = useState('');
@@ -680,7 +683,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         teamMetric.totalLeads = teamLeadsForTeam.length;
         
         const teamActivatedLeads = teamLeadsForTeam.filter(lead => 
-          lead.status === 'activated' && 
+          (lead.status === 'activated' || lead.status === 'activated_non_verified') && 
           lead.updatedAt && 
           lead.updatedAt >= currentMonthStart && 
           lead.updatedAt <= currentMonthEnd
@@ -710,7 +713,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           const verified = agentLeads.filter(lead => lead.status === 'verified').length;
           
           const agentActivatedLeads = agentLeads.filter(lead => 
-            lead.status === 'activated' && 
+            (lead.status === 'activated' || lead.status === 'activated_non_verified') && 
             lead.updatedAt && 
             lead.updatedAt >= currentMonthStart && 
             lead.updatedAt <= currentMonthEnd
@@ -783,7 +786,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     };
     
     const monthActivated = allLeads.filter(lead => {
-      if (lead.status !== 'activated') return false;
+      if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
       const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
       return updated >= start && updated <= end;
     });
@@ -984,11 +987,13 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       
       // Calculate activated leads for current month
       // Properly handle Firestore timestamps by converting them to Date objects
-      const currentMonthActivatedLeads = currentMonthLeads.filter(lead => lead.status === 'activated');
+      const currentMonthActivatedLeads = currentMonthLeads.filter(lead => 
+        lead.status === 'activated' || lead.status === 'activated_non_verified'
+      );
       
       // Calculate all-time activated leads
       const allTimeActivatedLeads = allLeads.filter(lead => 
-        lead.status === 'activated'
+        lead.status === 'activated' || lead.status === 'activated_non_verified'
       );
       
       // Count total activations by summing up plans in each activated lead
@@ -1081,7 +1086,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         // Calculate activated leads for the team in current month
         // Properly handle Firestore timestamps by converting them to Date objects
         const teamActivatedLeads = teamLeads.filter(lead => {
-          if (lead.status !== 'activated' || !lead.updatedAt) return false;
+          if ((lead.status !== 'activated' && lead.status !== 'activated_non_verified') || !lead.updatedAt) return false;
           
           // Convert Firestore timestamp to Date if needed
           let updatedAtDate: Date;
@@ -1133,7 +1138,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           // Calculate activated leads for the agent in current month
           // Properly handle Firestore timestamps by converting them to Date objects
           const agentActivatedLeads = agentLeads.filter(lead => {
-            if (lead.status !== 'activated' || !lead.updatedAt) return false;
+            if ((lead.status !== 'activated' && lead.status !== 'activated_non_verified') || !lead.updatedAt) return false;
             
             // Convert Firestore timestamp to Date if needed
             let updatedAtDate: Date;
@@ -1589,7 +1594,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         // Get agent's leads for the month
         const agentLeads = teamLeads.filter(lead => 
           lead.agentId === agent.id && 
-          lead.status === 'activated' &&
+          (lead.status === 'activated' || lead.status === 'activated_non_verified') &&
           lead.updatedAt && 
           lead.updatedAt >= startDate && 
           lead.updatedAt <= endDate
@@ -1810,6 +1815,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       icon: Trash2,
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
+    },
+    {
+      name: 'Add to Deleted Numbers',
+      description: 'Add numbers directly to deletedNumbers',
+      value: 'Add',
+      href: '#add-to-deleted',
+      icon: Archive,
+      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
+      textColor: 'text-orange-600',
     },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
@@ -2610,6 +2624,30 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
             </button>
+          ) : stat.name === 'Add to Deleted Numbers' ? (
+            <button
+              key={stat.name}
+              onClick={() => setAddToDeletedModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
           ) : (
             <Link
               to={stat.href}
@@ -2707,7 +2745,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 <p className="text-2xl font-bold">
                   {teamLeads.filter(lead => 
                     lead.teamId === selectedTeam.teamId && 
-                    lead.status === 'activated' &&
+                    (lead.status === 'activated' || lead.status === 'activated_non_verified') &&
                     lead.updatedAt && 
                     lead.updatedAt >= startOfMonth(selectedMonth) && 
                     lead.updatedAt <= endOfMonth(selectedMonth)
@@ -2780,7 +2818,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                       const sixMonthActivations = teamLeads
                         .filter(lead => 
                           lead.agentId === agent.id && 
-                          lead.status === 'activated' &&
+                          (lead.status === 'activated' || lead.status === 'activated_non_verified') &&
                           lead.updatedAt && 
                           lead.updatedAt >= startOfMonth(sixMonthsAgo) && 
                           lead.updatedAt <= endOfMonth(selectedMonth)
@@ -3724,6 +3762,25 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             
             <div className="p-8">
               <BulkDeleteNumbers />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add to Deleted Numbers Modal */}
+      {addToDeletedModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setAddToDeletedModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <AddToDeletedNumbers />
             </div>
           </div>
         </div>

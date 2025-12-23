@@ -79,7 +79,7 @@ import { countryList } from '../../utils/countries';
 import { collection as fbCollection, setDoc, doc as fbDoc, serverTimestamp as fbServerTimestamp } from 'firebase/firestore';
 import { logOutboundVerificationMessage } from '../../utils/whatsappVerification';
 import { SuccessPopup } from '../SuccessPopup';
-import { getWhatsAppVerificationEnabled, getNumberActiveCheckEnabled } from '../../utils/configService';
+import { getWhatsAppVerificationEnabled, getNumberActiveCheckEnabled, getForcedGroupEnabled, getForcedGroup } from '../../utils/configService';
 
 // ===============================================================================
 // WHATSAPP INTEGRATION CONFIGURATION
@@ -1010,10 +1010,15 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     setLoading(true);
     
     try {
+      // Check if forced group is enabled
+      const forcedGroupEnabled = await getForcedGroupEnabled();
+      const forcedGroup = forcedGroupEnabled ? await getForcedGroup() : null;
+
       // Check if numbers are from different groups
-      
-      // Get all unique groups from selected plans
-      const groups = [...new Set(selectedPlans.map(plan => plan.group))];
+      // If forced group is enabled, all plans will use the forced group
+      const groups = forcedGroup 
+        ? [forcedGroup] 
+        : [...new Set(selectedPlans.map(plan => plan.group))];
       
       // If there are multiple groups, route to coordinator
       const hasDifferentGroups = groups.length > 1;
@@ -1022,7 +1027,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       let assignedVerifierId: string | null = null;
       if (!hasDifferentGroups && groups.length === 1) {
         // Find verifier for this specific group
-        const targetGroup = groups[0]?.toLowerCase(); // Normalize to lowercase
+        const targetGroup = (forcedGroup || groups[0])?.toLowerCase(); // Normalize to lowercase
         try {
           const verifiersQuery = query(
             collection(db, 'users'),
@@ -1071,7 +1076,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       : 'pending_verification';
 
       // Get the first plan's group - all plans in the lead will use this group
-      const firstPlanGroup = selectedPlans[0]?.group || (
+      // If forced group is enabled, use the forced group instead
+      const firstPlanGroup = forcedGroup || selectedPlans[0]?.group || (
         (formData.productType === 'MNP' ||
          formData.productType === 'Prepaid to postpaid' ||
          formData.productType === 'Home Wifi')
@@ -1093,10 +1099,10 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             ? 'G2' 
             : 'Standard';
           
-          // Use first plan's group for all plans in the lead (only in lead document, not numberPool)
-          const groupToUse = index === 0 
+          // Use forced group if enabled, otherwise use first plan's group for all plans in the lead (only in lead document, not numberPool)
+          const groupToUse = forcedGroup || (index === 0 
             ? (plan.group || defaultGroup)
-            : firstPlanGroup; // All subsequent plans use the first plan's group
+            : firstPlanGroup); // All subsequent plans use the first plan's group
           
           const p: any = {
             numberId: plan.numberId,
@@ -1372,9 +1378,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               if (isDuplicateContact) {
                 // Contact already exists, but flow should still work - treat as success
                 try {
-                  await logOutboundVerificationMessage(
-                    docRef.id,
-                    formattedNumber,
+                await logOutboundVerificationMessage(
+                  docRef.id,
+                  formattedNumber,
                     'verification_flow',
                     templateParameters,
                     {
@@ -1410,19 +1416,19 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     docRef.id,
                     formattedNumber,
                     'verification_flow',
-                    templateParameters,
-                    {
-                      status: 'failed',
-                      error: {
-                        message: e?.message,
-                        details: typeof e?.toString === 'function' ? e.toString() : undefined
-                      }
+                  templateParameters,
+                  {
+                    status: 'failed',
+                    error: {
+                      message: e?.message,
+                      details: typeof e?.toString === 'function' ? e.toString() : undefined
                     }
-                  );
-                } catch (logError) {
-                  console.error('Failed to log failed outbound message:', logError);
-                }
-                toast.error('Failed to send verification message to customer');
+                  }
+                );
+              } catch (logError) {
+                console.error('Failed to log failed outbound message:', logError);
+              }
+              toast.error('Failed to send verification message to customer');
               }
             }
           }

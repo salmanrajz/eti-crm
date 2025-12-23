@@ -11,6 +11,9 @@ import {
   updateWhatsAppFlowGroups,
   getWhatsAppConversationCheck,
   updateWhatsAppConversationCheck,
+  getForcedGroupEnabled,
+  getForcedGroup,
+  updateForcedGroupSettings,
   type WhatsAppCredentials,
   type WhatsAppFlowGroupsConfig,
   type WhatsAppConversationCheckConfig
@@ -35,6 +38,8 @@ export function WhatsAppSettings() {
   const { user } = useAuthStore();
   const [whatsappEnabled, setWhatsappEnabled] = useState<boolean>(true);
   const [numberActiveCheckEnabled, setNumberActiveCheckEnabled] = useState<boolean>(true);
+  const [forcedGroupEnabled, setForcedGroupEnabled] = useState<boolean>(false);
+  const [forcedGroup, setForcedGroup] = useState<string>('G1');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -76,18 +81,22 @@ export function WhatsAppSettings() {
   const loadSettings = async () => {
     try {
       setLoading(true);
-      const [enabled, numberCheckEnabled, creds, flows, conversationCheckConfig] = await Promise.all([
+      const [enabled, numberCheckEnabled, creds, flows, conversationCheckConfig, forcedGroupEnabledValue, forcedGroupValue] = await Promise.all([
         getWhatsAppVerificationEnabled(),
         getNumberActiveCheckEnabled(),
         getWhatsAppCredentials(),
         getWhatsAppFlowGroups(),
-        getWhatsAppConversationCheck()
+        getWhatsAppConversationCheck(),
+        getForcedGroupEnabled(),
+        getForcedGroup()
       ]);
       setWhatsappEnabled(enabled);
       setNumberActiveCheckEnabled(numberCheckEnabled);
       setCredentials(creds);
       setFlowGroups(flows);
       setConversationCheck(conversationCheckConfig);
+      setForcedGroupEnabled(forcedGroupEnabledValue);
+      setForcedGroup(forcedGroupValue || 'G1');
     } catch (error) {
       console.error('Error loading settings:', error);
       toast.error('Failed to load settings');
@@ -110,13 +119,14 @@ export function WhatsAppSettings() {
     try {
       setSaving(true);
       
-      // Update WhatsApp verification setting, number active check, credentials, flow groups, and conversation check
+      // Update WhatsApp verification setting, number active check, credentials, flow groups, conversation check, and forced group settings
       await Promise.all([
         updateWhatsAppVerificationEnabled(whatsappEnabled, user.id),
         updateNumberActiveCheckEnabled(numberActiveCheckEnabled, user.id),
         updateWhatsAppCredentials(credentials, user.id),
         updateWhatsAppFlowGroups(flowGroups, user.id),
-        updateWhatsAppConversationCheck(conversationCheck, user.id)
+        updateWhatsAppConversationCheck(conversationCheck, user.id),
+        updateForcedGroupSettings(forcedGroupEnabled, forcedGroupEnabled ? forcedGroup : null, user.id)
       ]);
       
       // Clear the routes cache so new settings are immediately used
@@ -295,6 +305,62 @@ export function WhatsAppSettings() {
           </div>
         </motion.div>
 
+        {/* Forced Group Assignment Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-xl p-6 border border-purple-100 shadow-sm"
+        >
+          <div className="flex items-start justify-between mb-4">
+            <div className="flex-1">
+              <div className="flex items-center space-x-2 mb-2">
+                <Zap className="h-5 w-5 text-purple-600" />
+                <h4 className="text-lg font-semibold text-gray-900">Force Group Assignment</h4>
+              </div>
+              <p className="text-sm text-gray-600">
+                When enabled, all new leads will be assigned to the selected group, regardless of the number's actual group. When disabled, leads use the number's actual group.
+              </p>
+            </div>
+            
+            <div className="ml-4">
+              <label className="relative inline-flex items-center cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={forcedGroupEnabled}
+                  onChange={(e) => setForcedGroupEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <motion.div 
+                  className="w-14 h-7 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-purple-600 peer-checked:to-indigo-600 shadow-lg"
+                  whileTap={{ scale: 0.95 }}
+                />
+              </label>
+            </div>
+          </div>
+
+          {forcedGroupEnabled && (
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Group to Force
+              </label>
+              <select
+                value={forcedGroup}
+                onChange={(e) => setForcedGroup(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 bg-white"
+              >
+                <option value="G1">G1</option>
+                <option value="G2">G2</option>
+                <option value="G3">G3</option>
+                <option value="OTHER">OTHER</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-2">
+                All new leads will be assigned to this group when created.
+              </p>
+            </div>
+          )}
+        </motion.div>
+
         {/* WhatsApp Flow Configuration Section */}
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
@@ -318,27 +384,27 @@ export function WhatsAppSettings() {
           <div className="flex space-x-2 mb-4 border-b border-teal-200">
             {(['G1', 'G2', 'G3', 'OTHER'] as const).map((group) => (
               <button
-                key={group}
+                  key={group}
                 onClick={() => setActiveFlowTab(group)}
                 className={`px-4 py-2 text-sm font-medium transition-colors ${
                   activeFlowTab === group
                     ? 'text-teal-600 border-b-2 border-teal-600'
                     : 'text-gray-500 hover:text-gray-700'
                 }`}
-              >
+                >
                 {group}
               </button>
-            ))}
+              ))}
           </div>
 
           {/* Flow Configuration Form */}
-          <div className="space-y-4">
-            <div>
+                <div className="space-y-4">
+                  <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Flow API URL
-              </label>
-              <input
-                type="url"
+                    </label>
+                    <input
+                      type="url"
                 value={flowGroups[activeFlowTab].url}
                 onChange={(e) => setFlowGroups(prev => ({
                   ...prev,
@@ -346,8 +412,8 @@ export function WhatsAppSettings() {
                 }))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
                 placeholder="https://api.truvestuae.com/api/webhook/triggerFlowExternal"
-              />
-            </div>
+                    />
+                  </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -374,12 +440,12 @@ export function WhatsAppSettings() {
               </div>
             </div>
 
-            <div>
+                  <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Flow ID (Default/English)
-              </label>
-              <input
-                type="text"
+                    </label>
+                    <input
+                      type="text"
                 value={flowGroups[activeFlowTab].flowId}
                 onChange={(e) => setFlowGroups(prev => ({
                   ...prev,
@@ -387,14 +453,14 @@ export function WhatsAppSettings() {
                 }))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
                 placeholder="TestingBot2"
-              />
-            </div>
+                    />
+                  </div>
 
-            <div>
+                  <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Arabic Flow ID
-              </label>
-              <input
+                    </label>
+                      <input
                 type="text"
                 value={flowGroups[activeFlowTab].arabicFlowId || ''}
                 onChange={(e) => setFlowGroups(prev => ({
@@ -407,7 +473,7 @@ export function WhatsAppSettings() {
               <p className="mt-1 text-xs text-gray-500">
                 Flow ID to use when language is Arabic. If not set, will use default Flow ID.
               </p>
-            </div>
+                      </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -423,12 +489,12 @@ export function WhatsAppSettings() {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
                 placeholder="Express Dial"
               />
-            </div>
-          </div>
-        </motion.div>
+                  </div>
+                </div>
+              </motion.div>
 
         {/* WhatsApp Conversation Check Configuration Section */}
-        <motion.div 
+              <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
@@ -438,35 +504,35 @@ export function WhatsAppSettings() {
             <div className="p-2 bg-violet-100 rounded-lg mr-3">
               <MessageSquare className="h-5 w-5 text-violet-600" />
             </div>
-            <div>
+                    <div>
               <h4 className="text-lg font-semibold text-gray-900">Conversation Check API</h4>
               <p className="text-sm text-gray-600 mt-0.5">
                 Configure API settings for checking WhatsApp conversations (common to all groups)
-              </p>
-            </div>
-          </div>
+                      </p>
+                    </div>
+                  </div>
 
           {/* Conversation Check Configuration Form */}
-          <div className="space-y-4">
-            <div>
+                  <div className="space-y-4">
+                    <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 API URL
-              </label>
-              <input
+                      </label>
+                      <input
                 type="url"
                 value={conversationCheck.url}
                 onChange={(e) => setConversationCheck(prev => ({ ...prev, url: e.target.value }))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
                 placeholder="https://api.truvestuae.com/api/conversation/check"
-              />
-            </div>
+                      />
+                    </div>
 
-            <div>
+                    <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 API Key
-              </label>
-              <div className="relative">
-                <input
+                      </label>
+                      <div className="relative">
+                        <input
                   type={showConversationKey ? 'text' : 'password'}
                   value={conversationCheck.key}
                   onChange={(e) => setConversationCheck(prev => ({ ...prev, key: e.target.value }))}
@@ -474,28 +540,28 @@ export function WhatsAppSettings() {
                   placeholder="connectwithcrm"
                 />
                 <button
-                  type="button"
+                            type="button"
                   onClick={() => setShowConversationKey(!showConversationKey)}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
-                >
+                          >
                   {showConversationKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
-              </div>
-            </div>
+                      </div>
+                    </div>
 
-            <div>
+                    <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Channel Name
-              </label>
-              <input
-                type="text"
+                      </label>
+                      <input
+                        type="text"
                 value={conversationCheck.channelName}
                 onChange={(e) => setConversationCheck(prev => ({ ...prev, channelName: e.target.value }))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
                 placeholder="Express Dial"
-              />
-            </div>
-          </div>
+                      />
+                    </div>
+                  </div>
         </motion.div>
 
         {/* Modern Save Button */}

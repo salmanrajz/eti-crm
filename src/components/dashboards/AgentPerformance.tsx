@@ -228,11 +228,11 @@ export const AgentPerformance = memo(function AgentPerformance({ user }: AgentPe
         const dayLeads = leadsByDate.get(format(date, 'yyyy-MM-dd')) || [];
 
         const verifiedCount = dayLeads.filter(lead => 
-          lead.status === 'verified' || lead.status === 'activated'
+          lead.status === 'verified' || lead.status === 'activated' || lead.status === 'activated_non_verified'
         ).length;
 
         const activatedCount = dayLeads.filter(lead => 
-          lead.status === 'activated'
+          lead.status === 'activated' || lead.status === 'activated_non_verified'
         ).length;
 
         return {

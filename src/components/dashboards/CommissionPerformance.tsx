@@ -225,7 +225,7 @@ export const CommissionPerformance = memo(function CommissionPerformance({ user 
       };
 
       leads.forEach(lead => {
-        if (lead.status === 'activated' && lead.plans) {
+        if ((lead.status === 'activated' || lead.status === 'activated_non_verified') && lead.plans) {
           lead.plans.forEach(plan => {
             const category = plan.category.toLowerCase();
             if (category.includes('standard')) stats.standard++;
@@ -283,7 +283,7 @@ export const CommissionPerformance = memo(function CommissionPerformance({ user 
         
         if (lead.status === 'verified') {
           dailyData[dateKey].verified++;
-        } else if (lead.status === 'activated') {
+        } else if (lead.status === 'activated' || lead.status === 'activated_non_verified') {
           dailyData[dateKey].activated += lead.plans?.length || 0;
         }
       });

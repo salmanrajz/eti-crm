@@ -46,7 +46,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot, documentId } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot, documentId, getDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, CoordinatorType, VerifierGroups } from '../../types';
@@ -278,6 +278,7 @@ export function LeadList() {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [selectedLeadForTransfer, setSelectedLeadForTransfer] = useState<Lead | null>(null);
   const [statusTimers, setStatusTimers] = useState<Record<string, number>>({});
+  const [leadStrikes, setLeadStrikes] = useState<Record<string, number>>({});
 
 
   // Load plan details from Firebase when selectedLeadForChat changes
@@ -408,6 +409,67 @@ export function LeadList() {
     }, DEBOUNCE_DELAY);
   }, []);
 
+  // Fetch strikes count for leads
+  const fetchLeadStrikes = useCallback(async (leadsToCheck: Lead[]) => {
+    try {
+      const strikesMap: Record<string, number> = {};
+      
+      // Collect all unique numberIds from all leads with lead mapping
+      const numberToLeadsMap = new Map<string, string[]>(); // numberId -> leadIds[]
+      leadsToCheck.forEach(lead => {
+        if (lead.plans && Array.isArray(lead.plans)) {
+          lead.plans.forEach(plan => {
+            if (plan.numberId) {
+              if (!numberToLeadsMap.has(plan.numberId)) {
+                numberToLeadsMap.set(plan.numberId, []);
+              }
+              numberToLeadsMap.get(plan.numberId)!.push(lead.id);
+            }
+          });
+        }
+      });
+
+      if (numberToLeadsMap.size === 0) {
+        setLeadStrikes({});
+        return;
+      }
+
+      // Fetch numbers in batches (Firestore 'in' limit is 10)
+      const numberIdArray = Array.from(numberToLeadsMap.keys());
+      const BATCH_SIZE = 10;
+      
+      for (let i = 0; i < numberIdArray.length; i += BATCH_SIZE) {
+        const batch = numberIdArray.slice(i, i + BATCH_SIZE);
+        try {
+          const numbersQuery = query(
+            collection(db, 'numberPool'),
+            where('__name__', 'in', batch)
+          );
+          const numbersSnapshot = await getDocs(numbersQuery);
+          
+          numbersSnapshot.forEach(numberDoc => {
+            const numberData = numberDoc.data();
+            const claims = numberData.claims || [];
+            const pendingClaims = claims.filter((claim: any) => claim.status === 'pending');
+            const strikesCount = pendingClaims.length;
+            
+            // Map strikes to all leads that use this number
+            const leadIds = numberToLeadsMap.get(numberDoc.id) || [];
+            leadIds.forEach(leadId => {
+              strikesMap[leadId] = (strikesMap[leadId] || 0) + strikesCount;
+            });
+          });
+        } catch (error) {
+          console.error('Error fetching strikes for batch:', error);
+        }
+      }
+
+      setLeadStrikes(strikesMap);
+    } catch (error) {
+      console.error('Error fetching lead strikes:', error);
+    }
+  }, []);
+
   // Memoize cache key
   const cacheKey = useMemo(() => {
     const coordinatorType = user?.role === 'coordinator' ? user.coordinatorType || 'all' : 'not-coordinator';
@@ -454,6 +516,13 @@ export function LeadList() {
     loadLeads(true); // true = initial load
   }, [user, cacheKey]);
 
+
+  // Fetch strikes count for leads when leads change
+  useEffect(() => {
+    if (leads.length > 0) {
+      fetchLeadStrikes(leads);
+    }
+  }, [leads, fetchLeadStrikes]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -2302,6 +2371,17 @@ export function LeadList() {
                         {getStatusIcon(lead.status)}
                         {getStatusDisplayText(lead.status)}
                       </motion.span>
+                      {/* Strikes Count */}
+                      {leadStrikes[lead.id] > 0 && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1"
+                        >
+                          <AlertCircle className="h-3 w-3 mr-1" />
+                          {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
+                        </motion.div>
+                      )}
                         {lead.status === 'assigned' && (() => {
                           const duration = getAssignmentDuration(lead);
                           if (duration) {
@@ -2454,6 +2534,17 @@ export function LeadList() {
                               {getStatusIcon(lead.status)}
                                 {getStatusDisplayText(lead.status)}
                             </motion.span>
+                              {/* Strikes Count */}
+                              {leadStrikes[lead.id] > 0 && (
+                                <motion.div
+                                  initial={{ opacity: 0, scale: 0.9 }}
+                                  animate={{ opacity: 1, scale: 1 }}
+                                  className="inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1"
+                                >
+                                  <AlertCircle className="h-3 w-3 mr-1" />
+                                  {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
+                                </motion.div>
+                              )}
                               {/* Countdown Timer / At Risk Indicator */}
                               {(lead.status === 'verified' || lead.status === 'follow_up') && (() => {
                                 const elapsed = statusTimers[lead.id] ?? getStatusTimeElapsed(lead);

@@ -323,8 +323,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   // Handle resending the flow message (can be called without an existing log)
   const handleResendFlow = async () => {
     if (!selectedLead || resendingFlow) {
-      if (!selectedLead) {
-        toast.error('Select a lead before resending');
+    if (!selectedLead) {
+      toast.error('Select a lead before resending');
       }
       return;
     }
@@ -444,7 +444,7 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         }, 1000);
       } else {
         toast.error(error?.message || 'Failed to resend flow message');
-        console.error('Resend flow error:', error);
+      console.error('Resend flow error:', error);
       }
     } finally {
       setResendingFlow(false);
@@ -2919,8 +2919,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
                       </>
                     ) : (
                       <>
-                        <ArrowRight className="w-3.5 h-3.5 mr-1.5" />
-                        Resend Flow
+                    <ArrowRight className="w-3.5 h-3.5 mr-1.5" />
+                    Resend Flow
                       </>
                     )}
                   </button>

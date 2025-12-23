@@ -602,7 +602,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           // EXCLUDE: follow_up, activated, rejected leads
           [...managerAssignedVerifiedLeads, ...assignedToCordLeads, ...scheduledForTodayLeads].forEach(lead => {
             // Double-check: exclude follow_up, activated, rejected, and later leads with future dates
-            if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'rejected') {
+            if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'activated_non_verified' || lead.status === 'rejected') {
               return; // Skip these leads
             }
             
@@ -665,7 +665,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
 
           // Filter activated leads for selected month using activatedAt (fallback updatedAt)
           const currentMonthActivatedLeads = leadsForMetrics.filter(lead => {
-            if (lead.status !== 'activated') return false;
+            if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
             const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
             if (!activatedAtRaw) return false;
             const activatedAt =
@@ -686,18 +686,29 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           const groupCounts: Record<string, number> = {};
           const breakdownCounts: Record<string, { newCount: number; mnp: number; p2p: number }> = {};
           currentMonthActivatedLeads.forEach(lead => {
+            // Get productType from lead, not from plan
+            const productType = (lead as any).productType || '';
+            
             (lead.plans || []).forEach((plan: any) => {
               const grp = (plan.group || '').toUpperCase().trim();
               if (!grp) return;
-              groupCounts[grp] = (groupCounts[grp] || 0) + 1;
+              
+              // For Express Dial (G2), only count "New" productType towards the group target/achieved
+              const shouldCountForGroup =
+                grp === 'G2'
+                  ? productType === 'New'
+                  : true;
+
+              if (shouldCountForGroup) {
+                groupCounts[grp] = (groupCounts[grp] || 0) + 1;
+              }
 
               // Only track breakdown for G2
               if (grp === 'G2') {
-                const productTypeRaw = (plan.productType || plan.type || plan.planType || '').toString().toLowerCase();
                 const breakdown = breakdownCounts[grp] || { newCount: 0, mnp: 0, p2p: 0 };
-                if (productTypeRaw.includes('mnp')) {
+                if (productType === 'MNP') {
                   breakdown.mnp += 1;
-                } else if (productTypeRaw.includes('p2p') || productTypeRaw.includes('prepaid to postpaid')) {
+                } else if (productType === 'Prepaid to postpaid') {
                   breakdown.p2p += 1;
                 } else {
                   breakdown.newCount += 1;
@@ -794,7 +805,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               todayDateForFilter.setHours(0, 0, 0, 0);
               nextLeads = filteredCoordinatorLeads.filter(lead => {
                 // Exclude follow_up, activated, rejected, and assigned leads
-                if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'rejected' || lead.status === 'assigned') {
+                if (lead.status === 'follow_up' || lead.status === 'activated' || lead.status === 'activated_non_verified' || lead.status === 'rejected' || lead.status === 'assigned') {
                   return false;
                 }
                 

@@ -296,7 +296,7 @@ export function TeamPerformance({ user }: TeamPerformanceProps) {
           // Count activated leads based on when they were actually activated (updatedAt)
           allLeadsSnapshot.docs.forEach(doc => {
             const data = doc.data();
-            if (data.status === 'activated' && data.updatedAt && data.plans && data.plans.length > 0) {
+            if ((data.status === 'activated' || data.status === 'activated_non_verified') && data.updatedAt && data.plans && data.plans.length > 0) {
               // Convert Firestore timestamp to Date for comparison
               const updatedAt = data.updatedAt.toDate ? data.updatedAt.toDate() : data.updatedAt;
               

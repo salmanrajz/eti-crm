@@ -958,18 +958,19 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const canVerify = (isVerifier() || isAdmin()) && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified' || lead.status === 'reverification');
   const isUserManager = isManager();
   const isActivationDialog = coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified';
-  // Manager can assign any of their verified or follow_up leads to coordinator
+  // Manager can assign any of their verified, follow_up, or later leads to coordinator
   // (even if previously managerAssigned) – UI should always show the option
   const canManagerAssign = (isUserManager &&
     user?.id === lead.managerId &&
-    (lead.status === 'verified' || lead.status === 'follow_up')) ||
-    (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up'));
-  // Agent can also request assignment to coordinator for their own verified/follow_up leads
+    (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later')) ||
+    (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later'));
+  // Agent can also request assignment to coordinator for their own verified/follow_up/later leads
   const canAgentAssignToCoordinator =
     user?.role === 'agent' &&
     user.id === lead.agentId &&
     ((lead.status === 'verified' && !lead.managerAssigned) ||
-     (lead.status === 'follow_up' && !lead.managerAssigned));
+     (lead.status === 'follow_up' && !lead.managerAssigned) ||
+     (lead.status === 'later' && !lead.managerAssigned));
 
   // Helper function to get service provider based on group
   const getServiceProvider = (group: string) => {
@@ -1996,7 +1997,7 @@ Language: ${lead.language || 'N/A'}`;
           console.error('Failed to update lead:', e);
         }
       } else {
-        toast.error(error?.message || 'Failed to send verification message');
+      toast.error(error?.message || 'Failed to send verification message');
       }
     } finally {
       setSendingVerification(false);

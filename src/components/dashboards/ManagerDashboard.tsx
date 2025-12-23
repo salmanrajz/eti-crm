@@ -70,7 +70,8 @@ import {
   X,
   DollarSign,
   Phone,
-  AlertCircle
+  AlertCircle,
+  Download
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Dialog, Transition } from '@headlessui/react';
@@ -97,6 +98,7 @@ import AttendanceTable from '../AttendanceTable';
 import LeaveApplicationModal from '../LeaveApplicationModal';
 import { CommissionConfig } from '../CommissionConfig';
 import { TeamReservedNumbers } from './TeamReservedNumbers';
+import jsPDF from 'jspdf';
 
 ChartJS.register(
   CategoryScale,
@@ -273,12 +275,16 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
 
       // Load team data
       const teamDoc = await getDoc(doc(db, 'teams', user.teamId));
+      let teamName = 'Unknown Team';
       if (teamDoc.exists()) {
         const team = teamDoc.data();
+        teamName = team.name || 'Unknown Team';
         setTeamData({
           commissionBased: team.commissionBased || false
         });
       }
+      // Store team name for exports
+      (window as any).__teamName__ = teamName;
 
       // Load team members
       const teamMembersQuery = query(
@@ -344,7 +350,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         if (lead.status === 'pending_verification') teamMetrics.pendingVerification++;
         if (lead.status === 'verified') teamMetrics.verified++;
         if (lead.status === 'rejected') teamMetrics.rejected++;
-        if (lead.status === 'activated') teamMetrics.activated++;
+        if (lead.status === 'activated' || lead.status === 'activated_non_verified') teamMetrics.activated++;
         if (lead.status === 'pending_assignment') teamMetrics.pendingAssignment++;
         // Include follow_up leads with managerAssigned === false in pendingAssignment
         if (lead.status === 'follow_up' && !lead.managerAssigned) {
@@ -411,6 +417,28 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
             lead.createdAt <= endDate
           );
 
+          // Calculate verified leads for the agent in selected month based on verifiedAt date
+          const agentVerifiedLeads = teamLeads.filter(lead => {
+            if (lead.agentId !== agent.id) return false;
+            const verifiedAtRaw = (lead as any).verifiedAt;
+            if (!verifiedAtRaw) return false;
+            
+            // Convert Firestore timestamp to Date if needed
+            let verifiedAtDate: Date;
+            if (verifiedAtRaw instanceof Date) {
+              verifiedAtDate = verifiedAtRaw;
+            } else if (verifiedAtRaw && typeof verifiedAtRaw.toDate === 'function') {
+              verifiedAtDate = verifiedAtRaw.toDate();
+            } else {
+              verifiedAtDate = new Date(verifiedAtRaw);
+            }
+            
+            return verifiedAtDate >= startDate && verifiedAtDate <= endDate;
+          });
+          
+          // Count verified leads from daily activity
+          const verified = agentVerifiedLeads.length;
+
           // Calculate activated leads for the agent in selected month based on when they were activated
           const agentActivatedLeads = teamLeads.filter(lead => {
             if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
@@ -429,7 +457,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
             agentEmail: agent.email,
             totalLeads: agentLeads.length,
             pendingVerification: agentLeads.filter(l => l.status === 'pending_verification').length,
-            verified: agentLeads.filter(l => l.status === 'verified').length,
+            verified: verified,
             rejected: agentLeads.filter(l => l.status === 'rejected').length,
             activated: activated,
             pendingAssignment: agentLeads.filter(l => l.status === 'pending_assignment').length,
@@ -546,6 +574,482 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
       toast.error('Failed to load bonus amounts');
     }
   }
+
+  // Export Team Performance to Excel with modern colorful styling
+  const handleExportToExcel = async () => {
+    try {
+      // Try ExcelJS first for full styling support
+      let ExcelJS;
+      try {
+        const exceljsModule = await import('exceljs');
+        ExcelJS = exceljsModule.default || exceljsModule;
+      } catch {
+        // ExcelJS not available, use xlsx fallback
+        ExcelJS = null;
+      }
+
+      if (ExcelJS) {
+        // Use ExcelJS for styled export
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Team Performance');
+
+        // Prepare data (with verified column)
+        const exportData = agentMetrics.map((agent) => {
+          const target = agentTargets[agent.agentId]?.target || 0;
+          const mar = agentTargets[agent.agentId]?.mar || 0;
+          const achievement = target > 0 ? parseFloat(((agent.activated / target) * 100).toFixed(1)) : 0;
+          
+          return {
+            agent: agent.agentName || agent.agentEmail || 'Unknown',
+            totalLeads: agent.totalLeads,
+            verified: agent.verified,
+            activated: agent.activated,
+            target: target,
+            mar: mar,
+            achievement: achievement
+          };
+        });
+
+        // Get team name
+        const teamName = (window as any).__teamName__ || 'Unknown Team';
+        
+        // Title row with date
+        const currentDate = format(new Date(), 'dd MMMM yyyy');
+        const titleText = `${teamName} - Team Performance Report - ${format(selectedMonth, 'MMMM yyyy')} - ${currentDate}`;
+        const titleRow = worksheet.addRow([titleText]);
+        worksheet.mergeCells(1, 1, 1, 7);
+        // Style only the first cell (merged area)
+        const titleCell = titleRow.getCell(1);
+        titleCell.font = { bold: true, size: 16, color: { argb: 'FF1E293B' } };
+        titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+        titleRow.height = 30;
+        worksheet.addRow([]);
+
+        // Headers (with Verified column)
+        const headers = ['Agent', 'Total Leads', 'Verified', 'Activated', 'Target', 'MAR', 'Achievement %'];
+        const headerRow = worksheet.addRow(headers);
+        headerRow.height = 25;
+        // Style only the header cells (columns 1-7)
+        for (let col = 1; col <= 7; col++) {
+          const cell = headerRow.getCell(col);
+          cell.font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin' }, bottom: { style: 'thin' },
+            left: { style: 'thin' }, right: { style: 'thin' }
+          };
+        }
+
+        // Data rows with color coding
+        exportData.forEach((agent) => {
+          const row = worksheet.addRow([
+            agent.agent, agent.totalLeads, agent.verified, agent.activated,
+            agent.target, agent.mar, `${agent.achievement}%`
+          ]);
+
+          let bgColor = 'FFF3F4F6';
+          let achievementColor = 'FF6B7280';
+          if (agent.achievement >= 100) {
+            bgColor = 'FFD1FAE5';
+            achievementColor = 'FF059669';
+          } else if (agent.achievement >= 80) {
+            bgColor = 'FFDBEAFE';
+            achievementColor = 'FF2563EB';
+          } else if (agent.achievement >= 50) {
+            bgColor = 'FFFEF3C7';
+            achievementColor = 'FFD97706';
+          } else {
+            bgColor = 'FFFEE2E2';
+            achievementColor = 'FFDC2626';
+          }
+
+          // Style only the data cells (columns 1-7) - Agent name centered
+          for (let col = 1; col <= 7; col++) {
+            const cell = row.getCell(col);
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgColor } };
+            cell.font = { size: 11 };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+          }
+
+          const achievementCell = row.getCell(7);
+          achievementCell.font = { bold: true, size: 12, color: { argb: achievementColor } };
+        });
+
+        // Summary row
+        const totals = {
+          agent: 'TOTAL',
+          totalLeads: exportData.reduce((sum, a) => sum + a.totalLeads, 0),
+          verified: exportData.reduce((sum, a) => sum + a.verified, 0),
+          activated: exportData.reduce((sum, a) => sum + a.activated, 0),
+          target: exportData.reduce((sum, a) => sum + a.target, 0),
+          mar: exportData.reduce((sum, a) => sum + a.mar, 0),
+          achievement: exportData.length > 0 && exportData.reduce((sum, a) => sum + a.target, 0) > 0
+            ? parseFloat(((exportData.reduce((sum, a) => sum + a.activated, 0) / exportData.reduce((sum, a) => sum + a.target, 0)) * 100).toFixed(1))
+            : 0
+        };
+
+        const summaryRow = worksheet.addRow([
+          totals.agent, totals.totalLeads, totals.verified, totals.activated,
+          totals.target, totals.mar, `${totals.achievement}%`
+        ]);
+
+        summaryRow.height = 25;
+        // Style only the summary cells (columns 1-7)
+        for (let col = 1; col <= 7; col++) {
+          const cell = summaryRow.getCell(col);
+          cell.font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'medium' }, bottom: { style: 'medium' },
+            left: { style: 'thin' }, right: { style: 'thin' }
+          };
+        }
+
+        worksheet.columns = [
+          { width: 25 }, { width: 12 }, { width: 12 }, { width: 12 },
+          { width: 12 }, { width: 12 }, { width: 15 }
+        ];
+
+        const timestamp = format(new Date(), 'yyyy-MM-dd_HH-mm-ss');
+        const monthStr = format(selectedMonth, 'MMMM-yyyy');
+        const teamNameForFile = (teamName || 'Team').replace(/[^a-zA-Z0-9]/g, '_');
+        const filename = `${teamNameForFile}_Team_Performance_${monthStr}_${timestamp}.xlsx`;
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+        window.URL.revokeObjectURL(url);
+        
+        toast.success('Team Performance report exported successfully!', { duration: 3000, icon: '✅' });
+        return;
+      }
+
+      // Fallback to xlsx (basic formatting, no colors)
+      const XLSX = await import('xlsx');
+      
+      // Get team name
+      const teamName = (window as any).__teamName__ || 'Unknown Team';
+      
+      const exportData = agentMetrics.map((agent) => {
+        const target = agentTargets[agent.agentId]?.target || 0;
+        const mar = agentTargets[agent.agentId]?.mar || 0;
+        const achievement = target > 0 ? ((agent.activated / target) * 100).toFixed(1) : '0.0';
+        
+        return {
+          'Agent': agent.agentName || agent.agentEmail || 'Unknown',
+          'Total Leads': agent.totalLeads,
+          'Verified': agent.verified,
+          'Activated': agent.activated,
+          'Target': target,
+          'MAR': mar,
+          'Achievement %': `${achievement}%`
+        };
+      });
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      ws['!cols'] = [
+        { wch: 25 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+        { wch: 12 }, { wch: 12 }, { wch: 15 }
+      ];
+      XLSX.utils.book_append_sheet(wb, ws, 'Team Performance');
+
+      const timestamp = format(new Date(), 'yyyy-MM-dd_HH-mm-ss');
+      const monthStr = format(selectedMonth, 'MMMM-yyyy');
+      const teamNameForFile = ((window as any).__teamName__ || 'Team').replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `${teamNameForFile}_Team_Performance_${monthStr}_${timestamp}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      
+      toast.success('Team Performance report exported successfully!', { duration: 3000, icon: '✅' });
+    } catch (error) {
+      console.error('Error exporting to Excel:', error);
+      toast.error('Failed to export to Excel');
+    }
+  };
+
+  // Export Team Performance to PDF with beautiful styling
+  const handleExportToPDF = async () => {
+    try {
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 15;
+      const contentWidth = pageWidth - (margin * 2);
+      let yPosition = margin;
+
+      // Prepare data (with verified column)
+      const exportData = agentMetrics.map((agent) => {
+        const target = agentTargets[agent.agentId]?.target || 0;
+        const mar = agentTargets[agent.agentId]?.mar || 0;
+        const achievement = target > 0 ? parseFloat(((agent.activated / target) * 100).toFixed(1)) : 0;
+        
+        return {
+          agent: agent.agentName || agent.agentEmail || 'Unknown',
+          totalLeads: agent.totalLeads,
+          verified: agent.verified,
+          activated: agent.activated,
+          target: target,
+          mar: mar,
+          achievement: achievement
+        };
+      });
+
+
+      // Get team name
+      const teamName = (window as any).__teamName__ || 'Unknown Team';
+      
+      // Header with gradient effect (dark indigo to lighter)
+      pdf.setFillColor(79, 70, 229); // Indigo
+      pdf.rect(margin, yPosition, contentWidth, 30, 'F');
+      
+      // Add subtle border
+      pdf.setDrawColor(99, 102, 241);
+      pdf.setLineWidth(0.5);
+      pdf.rect(margin, yPosition, contentWidth, 30);
+      
+      // Title with team name
+      pdf.setTextColor(255, 255, 255);
+      pdf.setFontSize(22);
+      pdf.setFont('helvetica', 'bold');
+      pdf.text(`${teamName} - Team Performance Report`, pageWidth / 2, yPosition + 12, { align: 'center' });
+      
+      // Subtitle with date
+      pdf.setFontSize(10);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setTextColor(255, 255, 255, 0.9);
+      const currentDate = format(new Date(), 'dd MMMM yyyy');
+      const monthStr = format(selectedMonth, 'MMMM yyyy');
+      pdf.text(`${monthStr} - Generated on ${currentDate}`, pageWidth / 2, yPosition + 22, { align: 'center' });
+      
+      yPosition += 38;
+
+      // Table setup
+      const tableTop = yPosition;
+      const rowHeight = 8;
+      const headerHeight = 10;
+      const colWidths = [
+        contentWidth * 0.18, // Agent
+        contentWidth * 0.12, // Total Leads
+        contentWidth * 0.12, // Verified
+        contentWidth * 0.12, // Activated
+        contentWidth * 0.12, // Target
+        contentWidth * 0.10, // MAR
+        contentWidth * 0.24  // Achievement %
+      ];
+      let xPosition = margin;
+
+      // Table headers with enhanced styling
+      pdf.setFillColor(79, 70, 229); // Indigo
+      pdf.rect(xPosition, yPosition, contentWidth, headerHeight, 'F');
+      
+      pdf.setTextColor(255, 255, 255);
+      pdf.setFontSize(11);
+      pdf.setFont('helvetica', 'bold');
+      
+      const headers = ['Agent', 'Total Leads', 'Verified', 'Activated', 'Target', 'MAR', 'Achievement %'];
+      headers.forEach((header, index) => {
+        pdf.text(header, xPosition + colWidths[index] / 2, yPosition + 7.5, { align: 'center' });
+        if (index < headers.length - 1) {
+          xPosition += colWidths[index];
+        }
+      });
+      
+      // Header borders - draw all lines (after headers is declared)
+      pdf.setDrawColor(99, 102, 241);
+      pdf.setLineWidth(0.3);
+      // Draw all column lines in header
+      let headerCellX = margin;
+      headers.forEach((_, colIndex) => {
+        pdf.line(headerCellX, yPosition, headerCellX, yPosition + headerHeight);
+        headerCellX += colWidths[colIndex];
+      });
+      // Draw rightmost line
+      pdf.line(margin + contentWidth, yPosition, margin + contentWidth, yPosition + headerHeight);
+      // Draw top and bottom lines
+      pdf.line(margin, yPosition, margin + contentWidth, yPosition);
+      pdf.line(margin, yPosition + headerHeight, margin + contentWidth, yPosition + headerHeight);
+      
+      yPosition += headerHeight;
+      xPosition = margin;
+
+      // Data rows
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(9);
+      
+      exportData.forEach((agent, index) => {
+        // Check if we need a new page
+        if (yPosition + rowHeight > pageHeight - margin - 30) {
+          pdf.addPage();
+          yPosition = margin;
+        }
+
+        // Determine row color based on achievement
+        let bgColor = { r: 243, g: 244, b: 246 }; // Gray
+        let textColor = { r: 31, g: 41, b: 55 }; // Dark gray
+        let achievementColor = { r: 107, g: 114, b: 128 }; // Gray
+        
+        if (agent.achievement >= 100) {
+          bgColor = { r: 209, g: 250, b: 229 }; // Green
+          achievementColor = { r: 5, g: 150, b: 105 }; // Dark green
+        } else if (agent.achievement >= 80) {
+          bgColor = { r: 219, g: 234, b: 254 }; // Blue
+          achievementColor = { r: 37, g: 99, b: 235 }; // Dark blue
+        } else if (agent.achievement >= 50) {
+          bgColor = { r: 254, g: 243, b: 199 }; // Yellow
+          achievementColor = { r: 217, g: 119, b: 6 }; // Dark yellow
+        } else {
+          bgColor = { r: 254, g: 226, b: 226 }; // Red
+          achievementColor = { r: 220, g: 38, b: 38 }; // Dark red
+        }
+
+        // Draw row background
+        pdf.setFillColor(bgColor.r, bgColor.g, bgColor.b);
+        pdf.rect(margin, yPosition, contentWidth, rowHeight, 'F');
+
+        // Draw cell borders with visible lines
+        pdf.setDrawColor(200, 200, 200); // Medium gray for better visibility
+        pdf.setLineWidth(0.2);
+        let cellX = margin;
+        headers.forEach((_, colIndex) => {
+          // Draw vertical lines (column separators)
+          pdf.line(cellX, yPosition, cellX, yPosition + rowHeight);
+          // Draw horizontal lines (row separators)
+          pdf.line(cellX, yPosition, cellX + colWidths[colIndex], yPosition);
+          pdf.line(cellX, yPosition + rowHeight, cellX + colWidths[colIndex], yPosition + rowHeight);
+          cellX += colWidths[colIndex];
+        });
+        // Draw rightmost vertical line
+        pdf.line(margin + contentWidth, yPosition, margin + contentWidth, yPosition + rowHeight);
+
+        // Add cell content
+        pdf.setTextColor(textColor.r, textColor.g, textColor.b);
+        xPosition = margin;
+        
+        // Agent name (centered)
+        pdf.text(agent.agent, xPosition + colWidths[0] / 2, yPosition + 5.5, { align: 'center', maxWidth: colWidths[0] - 2 });
+        xPosition += colWidths[0];
+        
+        // Total Leads
+        pdf.text(agent.totalLeads.toString(), xPosition + colWidths[1] / 2, yPosition + 5.5, { align: 'center' });
+        xPosition += colWidths[1];
+        
+        // Verified
+        pdf.text(agent.verified.toString(), xPosition + colWidths[2] / 2, yPosition + 5.5, { align: 'center' });
+        xPosition += colWidths[2];
+        
+        // Activated
+        pdf.text(agent.activated.toString(), xPosition + colWidths[3] / 2, yPosition + 5.5, { align: 'center' });
+        xPosition += colWidths[3];
+        
+        // Target
+        pdf.text(agent.target.toString(), xPosition + colWidths[4] / 2, yPosition + 5.5, { align: 'center' });
+        xPosition += colWidths[4];
+        
+        // MAR
+        pdf.text(agent.mar.toString(), xPosition + colWidths[5] / 2, yPosition + 5.5, { align: 'center' });
+        xPosition += colWidths[5];
+        
+        // Achievement % (bold and colored)
+        pdf.setFont('helvetica', 'bold');
+        pdf.setTextColor(achievementColor.r, achievementColor.g, achievementColor.b);
+        pdf.text(`${agent.achievement}%`, xPosition + colWidths[6] / 2, yPosition + 5.5, { align: 'center' });
+        pdf.setFont('helvetica', 'normal');
+        
+        yPosition += rowHeight;
+      });
+
+      // Summary row
+      const totals = {
+        agent: 'TOTAL',
+        totalLeads: exportData.reduce((sum, a) => sum + a.totalLeads, 0),
+        verified: exportData.reduce((sum, a) => sum + a.verified, 0),
+        activated: exportData.reduce((sum, a) => sum + a.activated, 0),
+        target: exportData.reduce((sum, a) => sum + a.target, 0),
+        mar: exportData.reduce((sum, a) => sum + a.mar, 0),
+        achievement: exportData.length > 0 && exportData.reduce((sum, a) => sum + a.target, 0) > 0
+          ? parseFloat(((exportData.reduce((sum, a) => sum + a.activated, 0) / exportData.reduce((sum, a) => sum + a.target, 0)) * 100).toFixed(1))
+          : 0
+      };
+
+      // Add spacing before summary
+      yPosition += 5;
+      
+      // Draw separator line before summary
+      pdf.setDrawColor(200, 200, 200);
+      pdf.setLineWidth(0.5);
+      pdf.line(margin, yPosition, margin + contentWidth, yPosition);
+      yPosition += 2;
+
+      // Summary row background
+      pdf.setFillColor(30, 41, 59); // Dark gray
+      pdf.rect(margin, yPosition, contentWidth, headerHeight + 2, 'F');
+
+      // Summary borders - draw all lines
+      pdf.setDrawColor(255, 255, 255);
+      pdf.setLineWidth(0.4);
+      let summaryX = margin;
+      headers.forEach((_, colIndex) => {
+        // Draw vertical lines (column separators)
+        pdf.line(summaryX, yPosition, summaryX, yPosition + headerHeight + 2);
+        summaryX += colWidths[colIndex];
+      });
+      // Draw rightmost vertical line
+      pdf.line(margin + contentWidth, yPosition, margin + contentWidth, yPosition + headerHeight + 2);
+      // Draw top and bottom lines
+      pdf.line(margin, yPosition, margin + contentWidth, yPosition);
+      pdf.line(margin, yPosition + headerHeight + 2, margin + contentWidth, yPosition + headerHeight + 2);
+
+      // Summary text
+      pdf.setTextColor(255, 255, 255);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(11);
+      
+      xPosition = margin;
+      pdf.text(totals.agent, xPosition + colWidths[0] / 2, yPosition + 8, { align: 'center' });
+      xPosition += colWidths[0];
+      pdf.text(totals.totalLeads.toString(), xPosition + colWidths[1] / 2, yPosition + 8, { align: 'center' });
+      xPosition += colWidths[1];
+      pdf.text(totals.verified.toString(), xPosition + colWidths[2] / 2, yPosition + 8, { align: 'center' });
+      xPosition += colWidths[2];
+      pdf.text(totals.activated.toString(), xPosition + colWidths[3] / 2, yPosition + 8, { align: 'center' });
+      xPosition += colWidths[3];
+      pdf.text(totals.target.toString(), xPosition + colWidths[4] / 2, yPosition + 8, { align: 'center' });
+      xPosition += colWidths[4];
+      pdf.text(totals.mar.toString(), xPosition + colWidths[5] / 2, yPosition + 8, { align: 'center' });
+      xPosition += colWidths[5];
+      pdf.text(`${totals.achievement}%`, xPosition + colWidths[6] / 2, yPosition + 8, { align: 'center' });
+
+      // Footer
+      yPosition = pageHeight - margin - 10;
+      pdf.setFontSize(8);
+      pdf.setTextColor(107, 114, 128);
+      pdf.setFont('helvetica', 'italic');
+      pdf.text(`Generated on ${format(new Date(), 'dd MMMM yyyy, hh:mm a')}`, pageWidth / 2, yPosition, { align: 'center' });
+
+      // Generate filename and download
+      const timestamp = format(new Date(), 'yyyy-MM-dd_HH-mm-ss');
+      const monthStrForFile = format(selectedMonth, 'MMMM-yyyy');
+      const teamNameForFile = (teamName || 'Team').replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `${teamNameForFile}_Team_Performance_${monthStrForFile}_${timestamp}.pdf`;
+      
+      pdf.save(filename);
+      
+      toast.success('Team Performance PDF report generated successfully!', {
+        duration: 3000,
+        icon: '✅'
+      });
+    } catch (error) {
+      console.error('Error exporting to PDF:', error);
+      toast.error('Failed to export to PDF');
+    }
+  };
 
   const handleSetTarget = async (agent: User) => {
     setSelectedAgent(agent);
@@ -1547,6 +2051,22 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                     </button>
                   </div>
                   <div className="flex items-center space-x-2">
+                    <button
+                      onClick={handleExportToExcel}
+                      className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg hover:from-green-600 hover:to-emerald-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      title="Export to Excel"
+                    >
+                      <FileText className="h-4 w-4 mr-2" />
+                      <span className="text-sm font-medium">Export Excel</span>
+                    </button>
+                    <button
+                      onClick={handleExportToPDF}
+                      className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-red-500 to-rose-600 text-white rounded-lg hover:from-red-600 hover:to-rose-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      title="Export to PDF"
+                    >
+                      <Download className="h-4 w-4 mr-2" />
+                      <span className="text-sm font-medium">Export PDF</span>
+                    </button>
                     <button
                       onClick={() => setViewMode('table')}
                       className={clsx(

@@ -91,7 +91,7 @@ export default function DailyPerformance({ teamId, forceOpen }: DailyPerformance
         if (lead.createdAt && isSameDay(lead.createdAt, selectedDate)) totalLeads++;
         const verifiedAtDate = toDateSafe(lead.verifiedAt);
         if (verifiedAtDate && isSameDay(verifiedAtDate, selectedDate)) verified++;
-        if (lead.status === 'activated' && lead.updatedAt && isSameDay(lead.updatedAt, selectedDate)) activated++;
+        if ((lead.status === 'activated' || lead.status === 'activated_non_verified') && lead.updatedAt && isSameDay(lead.updatedAt, selectedDate)) activated++;
       });
       setStats({ verified, activated, totalLeads });
       setLoading(false);

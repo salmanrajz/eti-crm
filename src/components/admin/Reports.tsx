@@ -46,7 +46,8 @@ import {
   Table,
   X,
   ArrowLeft,
-  User2
+  User2,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
@@ -218,6 +219,8 @@ export function Reports() {
   const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
   const [teamAgentCounts, setTeamAgentCounts] = useState<Record<string, number>>({});
   const [teamTargets, setTeamTargets] = useState<Record<string, number>>({});
+  const [groupMnpActivations, setGroupMnpActivations] = useState<Record<string, number>>({});
+  const [groupP2pActivations, setGroupP2pActivations] = useState<Record<string, number>>({});
 
   useEffect(() => {
     loadTeams();
@@ -456,8 +459,8 @@ export function Reports() {
 
         // Count leads (not plans) for most statuses, but count plans for activated
         // Group-wise: distribute across groups based on plans
-        if (status === 'activated') {
-          // For activated: count plans (like AdminDashboard)
+        if (status === 'activated' || status === 'activated_non_verified') {
+          // For activated and activated_non_verified: count plans (like AdminDashboard)
           const planCount = plans.length || 0;
           metrics.activated += planCount;
           metrics.teamWise[teamId].total += planCount;
@@ -516,8 +519,6 @@ export function Reports() {
             metrics.followup++;
           } else if (status === 'assigned') {
             metrics.assignedForActivation++;
-          } else if (status === 'activated_non_verified') {
-            metrics.nonVerified++;
           } else if (status === 'pending_verification') {
             metrics.pendingVerification++;
           }
@@ -555,8 +556,6 @@ export function Reports() {
                 metrics.teamWise[teamId].groupStatus[group].followup++;
               } else if (status === 'assigned') {
                 metrics.teamWise[teamId].groupStatus[group].assignedForActivation++;
-              } else if (status === 'activated_non_verified') {
-                metrics.teamWise[teamId].groupStatus[group].nonVerified++;
               } else if (status === 'pending_verification') {
                 metrics.teamWise[teamId].groupStatus[group].pendingVerification++;
               }
@@ -680,9 +679,11 @@ export function Reports() {
     const end = endOfMonth(month);
     const gCounts: Record<string, number> = {};
     const cCounts: Record<string, number> = {};
+    const mnpCounts: Record<string, number> = {};
+    const p2pCounts: Record<string, number> = {};
     
     const monthActivated = allLeads.filter(lead => {
-      if (lead.status !== 'activated') return false;
+      if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
       const activatedAt = getActivatedAt(lead);
       return activatedAt !== null && activatedAt >= start && activatedAt <= end;
     });
@@ -704,6 +705,15 @@ export function Reports() {
         gCounts[grp] = (gCounts[grp] || 0) + 1;
         }
         
+        // Track MNP and P2P activations for G2
+        if (grp === 'G2') {
+          if (productType === 'MNP') {
+            mnpCounts[grp] = (mnpCounts[grp] || 0) + 1;
+          } else if (productType === 'Prepaid to postpaid') {
+            p2pCounts[grp] = (p2pCounts[grp] || 0) + 1;
+          }
+        }
+        
         // Category targets remain based on all activations
         cCounts[cat] = (cCounts[cat] || 0) + 1;
       });
@@ -711,6 +721,8 @@ export function Reports() {
     
     setGroupActivations(gCounts);
     setCategoryActivations(cCounts);
+    setGroupMnpActivations(mnpCounts);
+    setGroupP2pActivations(p2pCounts);
   };
 
   const loadMonthlyCategoryActivations = async (date: Date) => {
@@ -737,7 +749,7 @@ export function Reports() {
 
       // Filter activated leads for the current month
       const monthActivated = allLeads.filter(lead => {
-        if (lead.status !== 'activated') return false;
+        if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
         const activatedAt = getActivatedAt(lead);
         return activatedAt !== null && activatedAt >= start && activatedAt <= end;
       });
@@ -771,7 +783,7 @@ export function Reports() {
       })) as Lead[];
 
       const filteredLeads = allLeads.filter(lead => {
-        if (lead.status !== 'activated') return false;
+        if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
         const activatedAt = getActivatedAt(lead);
         return activatedAt !== null && activatedAt >= start && activatedAt <= end;
       });
@@ -921,7 +933,7 @@ export function Reports() {
       // Calculate team metrics
       const totalLeads = teamLeads.length;
       const activatedLeads = teamLeads.filter(lead => {
-        if (lead.status !== 'activated') return false;
+        if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
         const activatedAt = getActivatedAt(lead);
         return activatedAt !== null && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
       });
@@ -943,7 +955,7 @@ export function Reports() {
 
         // Calculate activated for current month
         const agentActivatedLeads = agentLeads.filter(lead => {
-          if (lead.status !== 'activated') return false;
+          if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
           const activatedAt = getActivatedAt(lead);
           return activatedAt !== null && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
         });
@@ -952,7 +964,7 @@ export function Reports() {
         // Calculate 6-month average
         const sixMonthActivations = teamLeads
           .filter(lead => {
-            if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
+            if (lead.agentId !== agent.id || (lead.status !== 'activated' && lead.status !== 'activated_non_verified')) return false;
             const activatedAt = getActivatedAt(lead);
             return activatedAt !== null && activatedAt >= startOfMonth(sixMonthsAgo) && activatedAt <= currentMonthEnd;
           })
@@ -1014,7 +1026,7 @@ export function Reports() {
 
         // Get agent's leads for the month
         const agentLeads = teamLeadsForPerformance.filter(lead => {
-          if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
+          if (lead.agentId !== agent.id || (lead.status !== 'activated' && lead.status !== 'activated_non_verified')) return false;
           const activatedAt = getActivatedAt(lead);
           return activatedAt !== null && activatedAt >= startDate && activatedAt <= endDate;
         });
@@ -1880,8 +1892,14 @@ export function Reports() {
                       <th className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 text-center text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
                         Needed/Day
                       </th>
-                      <th className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 text-center text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider">
+                      <th className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 text-center text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
                         Projected
+                      </th>
+                      <th className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 text-center text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400">
+                        MNP
+                      </th>
+                      <th className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 text-center text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider">
+                        P2P
                       </th>
                     </tr>
                   </thead>
@@ -1904,6 +1922,8 @@ export function Reports() {
                       const groupName = groupAliases[group] || group;
                       const target = groupTargets[group] || 0;
                       const achieved = groupActivations[group] || 0;
+                      const mnp = group === 'G2' ? (groupMnpActivations[group] || 0) : 0;
+                      const p2p = group === 'G2' ? (groupP2pActivations[group] || 0) : 0;
                       const percentage = target > 0 ? Math.min((achieved / target) * 100, 100) : 0;
                       const pending = Math.max(target - achieved, 0);
                         
@@ -2022,7 +2042,7 @@ export function Reports() {
                                 <span className="text-xs sm:text-sm text-gray-400">-</span>
                               )}
                             </td>
-                            <td className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center">
+                            <td className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center border-r border-gray-200">
                               {isCurrentMonth ? (
                                 <span className={`text-xs sm:text-sm font-bold ${
                                   projected >= target ? 'text-green-600' :
@@ -2034,6 +2054,16 @@ export function Reports() {
                               ) : (
                                 <span className="text-xs sm:text-sm font-semibold text-gray-900">{achieved}</span>
                               )}
+                          </td>
+                            <td className={`px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center border-r border-gray-200 ${group === 'G2' ? 'bg-emerald-50' : 'bg-gray-50'}`}>
+                              <span className={`text-xs sm:text-sm font-semibold ${group === 'G2' ? 'text-emerald-700' : 'text-gray-400'}`}>
+                                {group === 'G2' ? mnp : '-'}
+                              </span>
+                            </td>
+                            <td className={`px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center ${group === 'G2' ? 'bg-sky-50' : 'bg-gray-50'}`}>
+                              <span className={`text-xs sm:text-sm font-semibold ${group === 'G2' ? 'text-sky-700' : 'text-gray-400'}`}>
+                                {group === 'G2' ? p2p : '-'}
+                              </span>
                           </td>
                         </motion.tr>
                       );
@@ -2212,6 +2242,8 @@ export function Reports() {
                       const totalAchieved = allAvailableGroups.reduce((sum, group) => sum + (groupActivations[group] || 0), 0);
                       const totalPending = Math.max(totalTarget - totalAchieved, 0);
                       const totalPercentage = totalTarget > 0 ? Math.min((totalAchieved / totalTarget) * 100, 100) : 0;
+                      const totalMnp = groupMnpActivations['G2'] || 0;
+                      const totalP2p = groupP2pActivations['G2'] || 0;
                       
                       // Sum individual "needed per day" values from groups
                       const totalNeededPerDay = allAvailableGroups.reduce((sum, group) => {
@@ -2282,7 +2314,7 @@ export function Reports() {
                               <span className="text-xs sm:text-sm text-gray-400">-</span>
                             )}
                           </td>
-                          <td className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center">
+                          <td className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center border-r border-gray-200">
                             {isCurrentMonth ? (
                               <span className={`text-xs sm:text-sm font-bold ${
                                 totalProjected >= totalTarget ? 'text-green-600' :
@@ -2295,11 +2327,27 @@ export function Reports() {
                               <span className="text-xs sm:text-sm font-bold text-gray-900">{totalAchieved}</span>
                             )}
                           </td>
+                          <td className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center border-r border-gray-200 bg-emerald-50">
+                            <span className="text-xs sm:text-sm font-bold text-emerald-700">{totalMnp}</span>
+                          </td>
+                          <td className="px-1 sm:px-2 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap text-center bg-sky-50">
+                            <span className="text-xs sm:text-sm font-bold text-sky-700">{totalP2p}</span>
+                          </td>
                         </motion.tr>
                       );
                     })()}
                   </tbody>
                 </table>
+                </div>
+              
+              {/* Note about MNP and P2P */}
+              <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 sm:h-5 sm:w-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                  <p className="text-xs sm:text-sm text-blue-800">
+                    <span className="font-semibold">Note:</span> MNP and P2P activations are displayed for reference only and are <span className="font-semibold">not deducted from the targets</span>. Only "New" product type activations count towards the Express Dial (G2) group targets.
+                  </p>
+                </div>
                 </div>
               </div>
 
