@@ -179,7 +179,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['lucide-react'],
-    include: ['react', 'react-dom', 'react-router-dom']
+    include: ['react', 'react-dom', 'react-router-dom', 'exceljs']
   },
   // Add resolve configuration for better module resolution
   resolve: {
