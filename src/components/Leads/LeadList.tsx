@@ -1286,12 +1286,36 @@ export function LeadList() {
 
       // Search in multiple fields - we'll fetch and filter in memory for complex searches
       constraints.push(orderBy('createdAt', 'desc'));
-      constraints.push(limit(500)); // Get more results for search
 
-      const q = query(baseQuery, ...constraints);
-      const snapshot = await getDocs(q);
+      // Fetch all leads with pagination to ensure we get ALL matching leads
+      let allDocs: QueryDocumentSnapshot<DocumentData>[] = [];
+      let lastDocSnapshot: QueryDocumentSnapshot<DocumentData> | null = null;
+      const BATCH_SIZE = 1000; // Firestore can handle up to several thousand per query
+      let hasMore = true;
 
-      let searchResults = snapshot.docs
+      while (hasMore) {
+        let batchConstraints = [...constraints];
+        if (lastDocSnapshot) {
+          batchConstraints.push(startAfter(lastDocSnapshot));
+        }
+        batchConstraints.push(limit(BATCH_SIZE));
+
+        const q = query(baseQuery, ...batchConstraints);
+        const snapshot = await getDocs(q);
+
+        if (snapshot.empty) {
+          hasMore = false;
+        } else {
+          allDocs.push(...snapshot.docs);
+          lastDocSnapshot = snapshot.docs[snapshot.docs.length - 1];
+          // If we got fewer than BATCH_SIZE, we've reached the end
+          if (snapshot.docs.length < BATCH_SIZE) {
+            hasMore = false;
+          }
+        }
+      }
+
+      let searchResults = allDocs
         .map(doc => {
           const data = doc.data();
           return {
