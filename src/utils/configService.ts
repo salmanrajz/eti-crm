@@ -282,6 +282,72 @@ export async function updateNumberActiveCheckEnabled(
 }
 
 /**
+ * Get forced group assignment enabled status
+ * Returns true if forced group assignment is enabled
+ */
+export async function getForcedGroupEnabled(): Promise<boolean> {
+  try {
+    const configDoc = await getDoc(doc(db, 'config', CONFIG_DOC_ID));
+    
+    if (configDoc.exists()) {
+      const data = configDoc.data();
+      return data.forcedGroupEnabled === true; // Default to false if not set
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Error getting forced group setting:', error);
+    return false;
+  }
+}
+
+/**
+ * Get forced group value
+ * Returns the group that should be forced for all new leads (G1, G2, G3, or OTHER)
+ */
+export async function getForcedGroup(): Promise<string | null> {
+  try {
+    const configDoc = await getDoc(doc(db, 'config', CONFIG_DOC_ID));
+    
+    if (configDoc.exists()) {
+      const data = configDoc.data();
+      const forcedGroup = data.forcedGroup;
+      if (forcedGroup && ['G1', 'G2', 'G3', 'OTHER'].includes(forcedGroup)) {
+        return forcedGroup;
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting forced group value:', error);
+    return null;
+  }
+}
+
+/**
+ * Update forced group assignment settings
+ */
+export async function updateForcedGroupSettings(
+  enabled: boolean,
+  group: string | null,
+  updatedBy: string
+): Promise<void> {
+  try {
+    const configData: any = {
+      forcedGroupEnabled: enabled,
+      forcedGroup: group,
+      updatedBy,
+      updatedAt: serverTimestamp()
+    };
+    
+    await setDoc(doc(db, 'config', CONFIG_DOC_ID), configData, { merge: true });
+  } catch (error) {
+    console.error('Error updating forced group settings:', error);
+    throw error;
+  }
+}
+
+/**
  * Get full app configuration
  */
 export async function getAppConfig(): Promise<AppConfig | null> {

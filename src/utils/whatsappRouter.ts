@@ -99,47 +99,47 @@ async function getRoutesFromFirebase(): Promise<Record<GroupKey, RoutingConfig>>
     
     // Fallback to empty routes if Firebase fails
     const fallbackRoutes: Record<GroupKey, RoutingConfig> = {
-      G1: {
-        meta: {
+  G1: {
+    meta: {
           businessPhoneId: '',
           accessToken: ''
-        },
-        template: {
+    },
+    template: {
           templateName: '',
           languageCode: 'en'
-        }
-      },
-      G2: {
-        meta: {
+    }
+  },
+  G2: {
+    meta: {
           businessPhoneId: '',
           accessToken: ''
-        },
-        template: {
+    },
+    template: {
           templateName: '',
           languageCode: 'en'
-        }
-      },
-      G3: {
-        meta: {
+    }
+  },
+  G3: {
+    meta: {
           businessPhoneId: '',
           accessToken: ''
-        },
-        template: {
+    },
+    template: {
           templateName: '',
           languageCode: 'en'
-        }
-      },
-      OTHER: {
-        meta: {
+    }
+  },
+  OTHER: {
+    meta: {
           businessPhoneId: '',
           accessToken: ''
-        },
-        template: {
+    },
+    template: {
           templateName: '',
           languageCode: 'en'
-        }
-      }
-    };
+    }
+  }
+};
 
     return fallbackRoutes;
   }
