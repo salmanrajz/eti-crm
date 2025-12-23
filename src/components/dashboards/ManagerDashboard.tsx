@@ -579,12 +579,14 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
   const handleExportToExcel = async () => {
     try {
       // Try ExcelJS first for full styling support
-      let ExcelJS;
+      let ExcelJS: any = null;
       try {
-        const exceljsModule = await import('exceljs');
+        // Dynamic import for code splitting - ExcelJS is optional
+        const exceljsModule = await import(/* @vite-ignore */ 'exceljs');
         ExcelJS = exceljsModule.default || exceljsModule;
-      } catch {
+      } catch (error) {
         // ExcelJS not available, use xlsx fallback
+        console.warn('ExcelJS not available, using xlsx fallback:', error);
         ExcelJS = null;
       }
 
