@@ -231,8 +231,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     try {
       const linkId = generateLinkId();
       const otp = generateOTP();
-      // Set OTP expiration to 30 minutes from now
-      const otpExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      // Set OTP expiration to 2 hours from now
+      const otpExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
       const linkData = {
         agentId,
         agentName,
@@ -262,8 +262,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   const handleGenerateNewOTP = async (linkId: string) => {
     try {
       const newOTP = generateOTP();
-      // Set OTP expiration to 30 minutes from now
-      const otpExpiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      // Set OTP expiration to 2 hours from now
+      const otpExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
       await updateDoc(doc(db, 'agentLinks', linkId), {
         otp: newOTP,
         otpExpiresAt,
