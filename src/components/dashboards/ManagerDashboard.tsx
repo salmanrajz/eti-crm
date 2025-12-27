@@ -389,7 +389,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
 
       // Calculate activated leads for current month based on activatedAt (fallback updatedAt)
       const currentMonthActivatedLeads = teamLeads.filter(lead => {
-        if (lead.status !== 'activated') return false;
+        if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
         const activatedAt = getActivatedAt(lead);
         return activatedAt !== null && activatedAt >= startOfCurrentMonth && activatedAt <= endOfCurrentMonth;
       });
@@ -441,7 +441,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
 
           // Calculate activated leads for the agent in selected month based on when they were activated
           const agentActivatedLeads = teamLeads.filter(lead => {
-            if (lead.agentId !== agent.id || lead.status !== 'activated') return false;
+            if (lead.agentId !== agent.id || (lead.status !== 'activated' && lead.status !== 'activated_non_verified')) return false;
             const activatedAt = getActivatedAt(lead);
             return activatedAt !== null && activatedAt >= startDate && activatedAt <= endDate;
           });
@@ -1427,7 +1427,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
 
         // Calculate activated leads for the month based on when they were activated
           const monthActivatedLeads = leads.filter(lead => {
-            if (lead.status !== 'activated') return false;
+            if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
             const activatedAt = getActivatedAt(lead);
             return activatedAt !== null && activatedAt >= startOfMonth(month) && activatedAt <= endOfMonth(month);
           });
