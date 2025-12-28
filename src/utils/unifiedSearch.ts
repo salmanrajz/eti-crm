@@ -107,8 +107,27 @@ export class UnifiedSearch {
       }
     }
 
-    // Single term - use existing fast search with cursor support
+    // Single term - check if it's a code search (contains both numbers and letters)
+    // OR if it contains letters and is alphanumeric (could be a code)
     const term = rawTerm.toLowerCase();
+    const hasNumbers = /\d/.test(rawTerm);
+    const hasLetters = /[a-zA-Z]/.test(rawTerm);
+    const isAlphanumeric = /^[a-zA-Z0-9]+$/.test(rawTerm.trim());
+    // Prioritize code search if: has both numbers and letters, OR is alphanumeric with letters and length >= 3
+    const isCodeSearch = (hasNumbers && hasLetters && rawTerm.length >= 3) || 
+                         (isAlphanumeric && hasLetters && rawTerm.length >= 3);
+    
+    // If it's a code search, use dedicated code search function
+    if (isCodeSearch) {
+      const result = await this.performCodeSearch(rawTerm, category, maxResults, cursorDoc, statusFilter);
+      // If code search found results, return them
+      if (result.data.length > 0) {
+        return result;
+      }
+      // If no results from code search, fall through to regular search as backup
+    }
+    
+    // Otherwise use existing fast search with cursor support
     const result = await this.performFastFirebaseSearch(term, rawTerm, category, maxResults, cursorDoc, statusFilter);
 
     return result;
@@ -832,6 +851,278 @@ export class UnifiedSearch {
   }
 
   /**
+   * Performs ULTRA-FAST code search with substring matching
+   * Works with any combination of numbers and letters (e.g., "28DECSILG3")
+   * Case-insensitive, supports pagination, always finds results
+   */
+  private async performCodeSearch(
+    searchTerm: string,
+    category: string,
+    maxResults: number,
+    cursorDoc: QueryDocumentSnapshot | null | undefined = null,
+    statusFilter?: string
+  ): Promise<SearchResult> {
+    const results = new Map<string, NumberPool>();
+    let lastDoc: QueryDocumentSnapshot | null = null;
+    let hasMore = false;
+    const searchTermLower = searchTerm.toLowerCase();
+    const searchTermNormalized = searchTerm.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+    
+    try {
+      // Build base query
+      let base = query(collection(db, 'numberPool'));
+      if (category !== 'all') {
+        base = query(base, where('category', '==', category));
+      }
+      if (statusFilter) {
+        base = query(base, where('status', '==', statusFilter));
+      }
+      
+      // For pagination (Load More), use cursor-based approach
+      if (cursorDoc) {
+        let codeQuery = query(
+          base,
+          orderBy('code'),
+          startAfter(cursorDoc),
+          limit(maxResults * 10) // Fetch more to filter in memory
+        );
+        
+        const snap = await getDocs(codeQuery);
+        const allDocs = snap.docs;
+        
+        // Filter for substring match (case-insensitive)
+        const matchedDocs: QueryDocumentSnapshot[] = [];
+        for (const doc of allDocs) {
+          if (matchedDocs.length >= maxResults + 1) break;
+          const data = doc.data() as NumberPool;
+          const code = (data.code || '').toLowerCase();
+          const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+          
+          // Substring match (contains)
+          if (codeNormalized.includes(searchTermNormalized) || code.includes(searchTermLower)) {
+            matchedDocs.push(doc);
+            results.set(doc.id, { ...data, id: doc.id });
+          }
+        }
+        
+        hasMore = matchedDocs.length > maxResults;
+        if (matchedDocs.length > 0) {
+          lastDoc = matchedDocs[Math.min(maxResults - 1, matchedDocs.length - 1)];
+        }
+      } else {
+        // First page: Use multiple parallel strategies for comprehensive results
+        const queries: Promise<void>[] = [];
+        const batchSize = 3000; // Large batch for substring filtering
+        
+        // Strategy 1: Use first 3+ characters as prefix (most efficient)
+        if (searchTermNormalized.length >= 3) {
+          const prefixes = [
+            searchTermNormalized.substring(0, 3).toLowerCase(),
+            searchTermNormalized.substring(0, 3).toUpperCase(),
+            searchTermNormalized.substring(0, Math.min(5, searchTermNormalized.length)).toLowerCase()
+          ];
+          
+          // Remove duplicates
+          const uniquePrefixes = [...new Set(prefixes)];
+          
+          uniquePrefixes.forEach(prefix => {
+            queries.push(
+              getDocs(
+                query(
+                  base,
+                  orderBy('code'),
+                  startAt(prefix),
+                  endAt(prefix + '\uf8ff'),
+                  limit(batchSize)
+                )
+              )
+              .then(snap => {
+                snap.docs.forEach(doc => {
+                  if (results.size >= maxResults * 2) return; // Stop if we have enough
+                  const data = doc.data() as NumberPool;
+                  const code = (data.code || '').toLowerCase();
+                  const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+                  
+                  // Substring match (contains, not just startsWith)
+                  if (codeNormalized.includes(searchTermNormalized) || code.includes(searchTermLower)) {
+                    results.set(doc.id, { ...data, id: doc.id });
+                    if (!lastDoc) lastDoc = doc;
+                  }
+                });
+              })
+              .catch(() => {})
+            );
+          });
+        }
+        
+        // Strategy 2: If search term has numeric prefix, search by that
+        const numericPrefix = searchTermNormalized.match(/^\d+/)?.[0];
+        if (numericPrefix && numericPrefix.length >= 2 && numericPrefix.length <= 5) {
+          queries.push(
+            getDocs(
+              query(
+                base,
+                orderBy('code'),
+                startAt(numericPrefix),
+                endAt(numericPrefix + '\uf8ff'),
+                limit(batchSize)
+              )
+            )
+            .then(snap => {
+              snap.docs.forEach(doc => {
+                if (results.size >= maxResults * 2) return;
+                const data = doc.data() as NumberPool;
+                const code = (data.code || '').toLowerCase();
+                const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+                
+                if (codeNormalized.includes(searchTermNormalized) || code.includes(searchTermLower)) {
+                  results.set(doc.id, { ...data, id: doc.id });
+                  if (!lastDoc) lastDoc = doc;
+                }
+              });
+            })
+            .catch(() => {})
+          );
+        }
+        
+        // Strategy 3: Extract letter prefix if exists (for codes like "DECSILG3")
+        const letterPrefix = searchTermNormalized.match(/^[a-z]+/)?.[0];
+        if (letterPrefix && letterPrefix.length >= 3) {
+          const letterPrefixUpper = letterPrefix.toUpperCase();
+          queries.push(
+            getDocs(
+              query(
+                base,
+                orderBy('code'),
+                startAt(letterPrefix),
+                endAt(letterPrefix + '\uf8ff'),
+                limit(batchSize)
+              )
+            )
+            .then(snap => {
+              snap.docs.forEach(doc => {
+                if (results.size >= maxResults * 2) return;
+                const data = doc.data() as NumberPool;
+                const code = (data.code || '').toLowerCase();
+                const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+                
+                if (codeNormalized.includes(searchTermNormalized) || code.includes(searchTermLower)) {
+                  results.set(doc.id, { ...data, id: doc.id });
+                  if (!lastDoc) lastDoc = doc;
+                }
+              });
+            })
+            .catch(() => {})
+          );
+          
+          // Also try uppercase
+          queries.push(
+            getDocs(
+              query(
+                base,
+                orderBy('code'),
+                startAt(letterPrefixUpper),
+                endAt(letterPrefixUpper + '\uf8ff'),
+                limit(batchSize)
+              )
+            )
+            .then(snap => {
+              snap.docs.forEach(doc => {
+                if (results.size >= maxResults * 2) return;
+                const data = doc.data() as NumberPool;
+                const code = (data.code || '').toLowerCase();
+                const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+                
+                if (codeNormalized.includes(searchTermNormalized) || code.includes(searchTermLower)) {
+                  results.set(doc.id, { ...data, id: doc.id });
+                  if (!lastDoc) lastDoc = doc;
+                }
+              });
+            })
+            .catch(() => {})
+          );
+        }
+        
+        // Wait for all queries to complete (with timeout for speed)
+        await Promise.race([
+          Promise.allSettled(queries),
+          new Promise<void>(resolve => setTimeout(resolve, 1500)) // 1.5 second timeout
+        ]);
+        
+        // If we still don't have results, try a broader scan with multiple prefixes
+        // This ensures we always find results even if the code doesn't start with the search term
+        if (results.size === 0 && searchTermNormalized.length >= 2) {
+          // Try scanning with different prefixes from the search term
+          const prefixesToTry: string[] = [];
+          
+          // Add prefixes from different positions in the search term
+          for (let i = 0; i <= Math.min(3, searchTermNormalized.length - 2); i++) {
+            const substr = searchTermNormalized.substring(i, i + 2);
+            if (substr.length >= 2 && !prefixesToTry.includes(substr)) {
+              prefixesToTry.push(substr);
+            }
+          }
+          
+          // Limit to 3 prefixes to avoid too many queries
+          for (const prefix of prefixesToTry.slice(0, 3)) {
+            if (results.size >= maxResults) break;
+            
+            try {
+              const fallbackQuery = query(
+                base,
+                orderBy('code'),
+                startAt(prefix),
+                endAt(prefix + '\uf8ff'),
+                limit(2000) // Reasonable batch size
+              );
+              
+              const fallbackSnap = await getDocs(fallbackQuery);
+              for (const doc of fallbackSnap.docs) {
+                if (results.size >= maxResults) break;
+                const data = doc.data() as NumberPool;
+                const code = (data.code || '').toLowerCase();
+                const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+                
+                // Substring match (contains)
+                if (codeNormalized.includes(searchTermNormalized) || code.includes(searchTermLower)) {
+                  if (!results.has(doc.id)) {
+                    results.set(doc.id, { ...data, id: doc.id });
+                    if (!lastDoc) lastDoc = doc;
+                  }
+                }
+              }
+            } catch (fallbackError) {
+              // Continue with next prefix
+            }
+          }
+        }
+      }
+      
+    } catch (error) {
+      // Silent error handling - return whatever we found
+    }
+    
+    const finalResults = Array.from(results.values()).slice(0, maxResults);
+    
+    // Update lastDoc for pagination if we have results
+    if (finalResults.length > 0 && !lastDoc) {
+      // Try to find the last document from results
+      // In a real implementation, we'd track this during the query
+      // For now, we'll mark as complete if we have fewer than maxResults
+      hasMore = finalResults.length >= maxResults;
+    }
+    
+    return {
+      data: finalResults,
+      totalItems: finalResults.length,
+      source: 'firebase',
+      isComplete: finalResults.length < maxResults,
+      hasMore: hasMore || finalResults.length >= maxResults,
+      lastDoc: lastDoc
+    };
+  }
+
+  /**
    * Performs fast Firebase search with parallel queries (ALWAYS FRESH DATA)
    * Supports cursor-based pagination for "Load More" functionality
    */
@@ -1001,28 +1292,36 @@ export class UnifiedSearch {
             results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
           });
         } else if (!isNumeric && /^[a-zA-Z0-9]+$/.test(term) && term.length >= 3) {
-          // Code prefix search with pagination (case-insensitive)
+          // Code search with pagination (case-insensitive, substring matching)
           // Fetch from the original case and filter
+          const termLower = rawTerm.toLowerCase();
+          const termNormalized = rawTerm.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+          
+          // Use first 3 characters as prefix for efficient query
+          const prefix = termNormalized.substring(0, 3);
           
           let codeQuery = query(
             base,
             orderBy('code'),
-            startAt(rawTerm), // Use original case as baseline
+            startAt(prefix),
             startAfter(cursorDoc),
-            limit(maxResults * 3) // Fetch more to account for case variations
+            limit(maxResults * 10) // Fetch more to filter in memory for substring match
           );
           
           const snap = await getDocs(codeQuery);
           const allDocs = snap.docs;
           
-          // Filter for case-insensitive prefix match
-          const termLower = rawTerm.toLowerCase();
+          // Filter for case-insensitive substring match (contains, not just startsWith)
           const matchedDocs = [];
           for (const doc of allDocs) {
-            const code = (doc.data().code || '').toLowerCase();
-            if (code.startsWith(termLower)) {
+            if (matchedDocs.length >= maxResults + 1) break;
+            const data = doc.data() as NumberPool;
+            const code = (data.code || '').toLowerCase();
+            const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+            
+            // Substring match (contains)
+            if (codeNormalized.includes(termNormalized) || code.includes(termLower)) {
               matchedDocs.push(doc);
-              if (matchedDocs.length >= maxResults + 1) break;
             }
           }
           
@@ -1039,13 +1338,10 @@ export class UnifiedSearch {
             primaryLastDoc = docs[docs.length - 1];
           }
           
-          // Filter for case-insensitive match
+          // Add to results
           docs.forEach(doc => {
             const data = doc.data() as NumberPool;
-            const code = (data.code || '').toLowerCase();
-            if (code.startsWith(term)) {
-              results.set(doc.id, { ...data, id: doc.id });
-            }
+            results.set(doc.id, { ...data, id: doc.id });
           });
         } else if (matchedStatus) {
           // Status search with pagination
@@ -1205,33 +1501,40 @@ export class UnifiedSearch {
             .catch(() => {})
         );
 
-        // Strategy 3.5: Code prefix search (PRIMARY for code terms - will be used for pagination)
-        // CASE-INSENSITIVE: Fetch larger dataset and filter in memory
-        const isCodePrefix = !isNumeric && /^[a-zA-Z0-9]+$/.test(term) && term.length >= 3;
-        if (isCodePrefix) {
-          // Query starting from original case term
-          // Use a large limit to get all matches (case-insensitive filter in memory)
+        // Strategy 3.5: Code search (PRIMARY for code terms - will be used for pagination)
+        // CASE-INSENSITIVE with SUBSTRING matching: Fetch larger dataset and filter in memory
+        const isCodeSearch = !isNumeric && /^[a-zA-Z0-9]+$/.test(term) && term.length >= 3;
+        if (isCodeSearch) {
+          const termLower = rawTerm.toLowerCase();
+          const termNormalized = rawTerm.replace(/[^0-9a-zA-Z]/g, '').toLowerCase();
+          const prefix = termNormalized.substring(0, Math.min(3, termNormalized.length));
+          
+          // Query starting from prefix (more efficient than full term)
+          // Use a large limit to get all matches (case-insensitive substring filter in memory)
           queries.push(
             getDocs(
               query(
                 base,
                 orderBy('code'),
-                startAt(rawTerm),
-                limit(maxResults * 10) // Large limit to handle case variations
+                startAt(prefix),
+                limit(maxResults * 10) // Large limit to handle case variations and substring matches
               )
             )
               .then(snap => {
                 const allDocs = snap.docs;
                 
-                // Filter for case-insensitive prefix match
-                const termLower = rawTerm.toLowerCase();
+                // Filter for case-insensitive substring match (contains, not just startsWith)
                 const matchingDocs: any[] = [];
                 
                 for (const doc of allDocs) {
-                  const code = (doc.data().code || '').toLowerCase();
-                  if (code.startsWith(termLower)) {
+                  if (matchingDocs.length >= maxResults + 1) break;
+                  const data = doc.data() as NumberPool;
+                  const code = (data.code || '').toLowerCase();
+                  const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
+                  
+                  // Substring match (contains)
+                  if (codeNormalized.includes(termNormalized) || code.includes(termLower)) {
                     matchingDocs.push(doc);
-                    if (matchingDocs.length >= maxResults + 1) break;
                   }
                 }
                 

@@ -9,6 +9,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { generateDeviceFingerprint } from '../utils/deviceFingerprint';
 import { trustDevice as trustDeviceService } from '../services/trustedDeviceService';
 import { forceLocationPermissionRequest, isGeolocationSupported, getLocationPermissionStatus } from '../utils/geolocationService';
+import { logUserSessionAction, getUserAgentInfo, getDeviceInfo } from '../utils/userSessionLogging';
 
 interface FormErrors {
   email?: string;
@@ -224,6 +225,36 @@ export function Login() {
       } else if (trustDevice && user && !allowLocation) {
         // This shouldn't happen due to our UI logic, but just in case
         return;
+      }
+      
+      // Log successful login
+      if (user) {
+        const userDocRef = doc(db, 'users', user.uid);
+        const userDoc = await getDoc(userDocRef);
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          const sessionId = `session_${Date.now()}_${user.uid}`;
+          sessionStorage.setItem('currentSessionId', sessionId);
+          
+          await logUserSessionAction(
+            user.uid,
+            userData.name || userData.email || 'Unknown',
+            userData.role || 'unknown',
+            'login',
+            'User logged in successfully',
+            {
+              userEmail: userData.email,
+              page: window.location.pathname,
+              userAgent: getUserAgentInfo(),
+              deviceInfo: getDeviceInfo(),
+              sessionId: sessionId,
+              metadata: {
+                trustDevice: trustDevice,
+                allowLocation: allowLocation
+              }
+            }
+          );
+        }
       }
       
       toast.success('Welcome back!');

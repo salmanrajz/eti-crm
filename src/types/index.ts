@@ -526,7 +526,7 @@ export interface AgentLink {
   allowedGroups: string[]; // Groups of numbers to show (e.g., ['G1', 'G2'])
   isActive: boolean;
   otp?: string; // OTP required to access the customer portal
-  otpExpiresAt?: Date; // OTP expiration time (30 minutes from generation)
+  otpExpiresAt?: Date; // OTP expiration time (2 hours from generation)
   createdAt: Date;
   updatedAt: Date;
   expiresAt?: Date; // Optional expiration date

@@ -75,6 +75,7 @@ export function CustomerPortal() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [searchLastDoc, setSearchLastDoc] = useState<any>(null);
+  const [showingMostMatching, setShowingMostMatching] = useState(false);
   const [selectedNumbers, setSelectedNumbers] = useState<SelectedNumber[]>([]);
 
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -131,12 +132,30 @@ export function CustomerPortal() {
         expiresAt: linkDoc.data().expiresAt?.toDate() || undefined,
         otpExpiresAt: linkDoc.data().otpExpiresAt?.toDate() || undefined,
         lastUsedAt: linkDoc.data().lastUsedAt?.toDate() || undefined,
+        usageCount: linkDoc.data().usageCount || 0,
       } as AgentLink;
 
       if (!linkData.isActive) {
         toast.error('This link is no longer active');
         navigate('/');
         return;
+      }
+
+      // Increment usage count when link is accessed (track views)
+      // This counts each time someone visits the link, not just submissions
+      try {
+        const newUsageCount = (linkData.usageCount || 0) + 1;
+        await updateDoc(doc(db, 'agentLinks', linkDoc.id), {
+          usageCount: newUsageCount,
+          lastUsedAt: new Date(),
+          updatedAt: new Date(),
+        });
+        // Update local state to reflect the new count
+        linkData.usageCount = newUsageCount;
+        linkData.lastUsedAt = new Date();
+      } catch (error) {
+        console.error('Error updating link usage count:', error);
+        // Don't block the user if this fails
       }
 
       // Check if OTP is required
@@ -235,11 +254,115 @@ export function CustomerPortal() {
     }
   }, [agentLink]);
 
+  const calculateMatchScore = (number: string, searchPattern: string): number => {
+    const numberDigits = number.replace(/\D/g, '');
+    const searchDigits = searchPattern.replace(/\D/g, '');
+    
+    if (!searchDigits || searchDigits.length === 0) return 0;
+    
+    let score = 0;
+    
+    // Check for exact pattern match (anywhere in number)
+    if (numberDigits.includes(searchDigits)) {
+      score += 100;
+    }
+    
+    // Check for partial matches (substrings)
+    for (let len = searchDigits.length - 1; len >= Math.max(2, Math.floor(searchDigits.length / 2)); len--) {
+      for (let i = 0; i <= searchDigits.length - len; i++) {
+        const substring = searchDigits.slice(i, i + len);
+        if (numberDigits.includes(substring)) {
+          score += len * 10; // Longer matches get higher scores
+        }
+    }
+    }
+    
+    // Check suffix matching (from end)
+    for (let i = 1; i <= Math.min(searchDigits.length, numberDigits.length); i++) {
+      const searchSuffix = searchDigits.slice(-i);
+      const numberSuffix = numberDigits.slice(-i);
+      if (searchSuffix === numberSuffix) {
+        score += i * 5; // Suffix matches get bonus points
+      } else {
+        break;
+      }
+    }
+    
+    // Check prefix matching (from start)
+    for (let i = 1; i <= Math.min(searchDigits.length, numberDigits.length); i++) {
+      const searchPrefix = searchDigits.slice(0, i);
+      const numberPrefix = numberDigits.slice(0, i);
+      if (searchPrefix === numberPrefix) {
+        score += i * 3; // Prefix matches get some points
+      } else {
+        break;
+      }
+    }
+    
+    return score;
+  };
+
+  const findMostMatchingNumbers = async (searchPattern: string, limit: number = 20): Promise<NumberPool[]> => {
+    if (!agentLink) return [];
+    
+    try {
+      // Get all available numbers from allowed groups
+      const allNumbers: NumberPool[] = [];
+      
+      // Search with different strategies to get a pool of numbers
+      const searchStrategies = [
+        { term: searchPattern, limit: 100 },
+        { term: searchPattern.slice(-4), limit: 50 }, // Last 4 digits
+        { term: searchPattern.slice(-3), limit: 50 }, // Last 3 digits
+      ];
+      
+      for (const strategy of searchStrategies) {
+        if (strategy.term.length >= 2) {
+          const result = await unifiedSearch.search(strategy.term, {
+            category: 'all',
+            limit: strategy.limit,
+            statusFilter: 'open',
+          });
+          
+          const filtered = result.data.filter(num =>
+            agentLink.allowedGroups.includes(num.group || 'Standard') &&
+            num.status === 'open'
+          );
+          
+          allNumbers.push(...filtered);
+        }
+      }
+      
+      // Remove duplicates
+      const uniqueNumbers = Array.from(
+        new Map(allNumbers.map(num => [num.id, num])).values()
+      );
+      
+      // Calculate match scores for all numbers
+      const scoredNumbers = uniqueNumbers.map(num => ({
+        number: num,
+        score: calculateMatchScore(num.number, searchPattern)
+      }));
+      
+      // Sort by score (highest first) and take top results
+      scoredNumbers.sort((a, b) => b.score - a.score);
+      
+      return scoredNumbers
+        .filter(item => item.score > 0) // Only return numbers with some match
+        .slice(0, limit)
+        .map(item => item.number);
+    } catch (error) {
+      console.error('Error finding most matching numbers:', error);
+      return [];
+    }
+  };
+
   const handleSearch = useCallback(async (loadMore: boolean = false, cursorDoc: any = null) => {
     if (!searchTerm.trim() || !agentLink) {
       setSearchResults([]);
       setSearchHasMore(false);
       setSearchLastDoc(null);
+      setShowingMostMatching(false);
       return;
     }
 
@@ -249,6 +372,7 @@ export function CustomerPortal() {
       setIsSearching(true);
       setSearchResults([]);
       setSearchLastDoc(null);
+      setShowingMostMatching(false);
     }
 
     try {
@@ -267,11 +391,20 @@ export function CustomerPortal() {
       if (loadMore) {
         setSearchResults(prev => [...prev, ...filtered]);
       } else {
-        setSearchResults(filtered);
+        // If no exact results, find most matching numbers
+        if (filtered.length === 0) {
+          const mostMatching = await findMostMatchingNumbers(searchTerm, 20);
+          setSearchResults(mostMatching);
+          setShowingMostMatching(mostMatching.length > 0);
+          setSearchHasMore(false);
+          setSearchLastDoc(null);
+        } else {
+          setSearchResults(filtered);
+          setShowingMostMatching(false);
+          setSearchHasMore(result.hasMore || false);
+          setSearchLastDoc(result.lastDoc || null);
+        }
       }
-
-      setSearchHasMore(result.hasMore || false);
-      setSearchLastDoc(result.lastDoc || null);
     } catch (error) {
       console.error('Search error:', error);
       toast.error('Search failed');
@@ -313,42 +446,59 @@ export function CustomerPortal() {
     setStep('search');
   };
 
-  const getMatchingDigits = (number: string, enteredNumber: string) => {
+  const getMatchingDigitPositions = (number: string, enteredNumber: string): Set<number> => {
     const entered = enteredNumber.replace(/\D/g, '');
     const numberDigits = number.replace(/\D/g, '');
-    const matches = [];
+    const matchingPositions = new Set<number>();
     
-    // Check from the end (last digits match first)
+    if (!entered || entered.length === 0) {
+      return matchingPositions;
+    }
+    
+    // Find all occurrences of the entered pattern in the number (anywhere in the number)
+    // Try to find the pattern starting from different positions
+    for (let startPos = 0; startPos <= numberDigits.length - entered.length; startPos++) {
+      const substring = numberDigits.slice(startPos, startPos + entered.length);
+      if (substring === entered) {
+        // Mark all digits in this matching pattern
+        for (let i = 0; i < entered.length; i++) {
+          matchingPositions.add(startPos + i);
+        }
+      }
+    }
+    
+    // Also check suffix matching (from the end) for better UX
     for (let i = 1; i <= Math.min(entered.length, numberDigits.length); i++) {
       const enteredSuffix = entered.slice(-i);
       const numberSuffix = numberDigits.slice(-i);
       if (enteredSuffix === numberSuffix) {
-        matches.push(i);
+        // Mark the last i digits
+        for (let j = numberDigits.length - i; j < numberDigits.length; j++) {
+          matchingPositions.add(j);
+        }
       } else {
         break;
       }
     }
     
-    return matches.length > 0 ? matches[matches.length - 1] : 0;
+    return matchingPositions;
   };
 
   const renderNumberWithHighlights = (number: string, enteredNumber: string) => {
-    const numberDigits = number.replace(/\D/g, '');
-    const matchingCount = getMatchingDigits(number, enteredNumber);
+    const matchingPositions = getMatchingDigitPositions(number, enteredNumber);
     
-    if (matchingCount === 0) {
+    if (matchingPositions.size === 0) {
       return <span>{number}</span>;
     }
     
-    // Simple approach: highlight the last N matching digits
+    // Highlight all matching digits (anywhere in the number)
     const result = [];
     let digitIndex = 0;
     
     for (let i = 0; i < number.length; i++) {
       const char = number[i];
       if (/\d/.test(char)) {
-        digitIndex++;
-        const isMatching = digitIndex > (numberDigits.length - matchingCount);
+        const isMatching = matchingPositions.has(digitIndex);
         if (isMatching) {
           result.push(
             <span key={i} className="bg-gradient-to-r from-amber-400 to-amber-500 text-white font-black px-0.5 rounded mr-0.5">
@@ -358,6 +508,7 @@ export function CustomerPortal() {
         } else {
           result.push(<span key={i}>{char}</span>);
         }
+        digitIndex++;
       } else {
         result.push(<span key={i}>{char}</span>);
       }
@@ -470,7 +621,6 @@ export function CustomerPortal() {
           plan: selectedPlans[n.numberId],
           category: n.category,
           group: n.group || 'Standard',
-          type: 'standard',
           status: 'pending_verification',
         })),
         agentId: agentLink.agentId,
@@ -483,7 +633,7 @@ export function CustomerPortal() {
         verificationNotes: '',
         coordinatorNotes: '',
         rejectionReason: '',
-        numberType: '',
+        numberType: selectedNumbers[0]?.category || 'Standard',
         remarks: 'Please Verify',
         sharedWith: [],
         latitude: 0,
@@ -502,9 +652,10 @@ export function CustomerPortal() {
         status: 'pending', // pending, reviewed, converted
       });
 
+      // Note: usageCount is already incremented when the link is first accessed
+      // We only update lastUsedAt here to reflect the submission time
       if (agentLink.id) {
         await updateDoc(doc(db, 'agentLinks', agentLink.id), {
-          usageCount: (agentLink.usageCount || 0) + 1,
           lastUsedAt: new Date(),
           updatedAt: new Date(),
         });
@@ -524,12 +675,108 @@ export function CustomerPortal() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 via-orange-50 to-amber-50 flex items-center justify-center">
         <div className="text-center">
+          {/* Cube Pushing Animation - Perfect Diagonal Wave */}
+          <div className="mb-6 flex flex-col items-center justify-center">
+            {Array.from({ length: 5 }, (_, rowIndex) => (
+              <div key={`row-${rowIndex}`} className="grid grid-cols-5 gap-1 sm:gap-1.5 mt-1 sm:mt-1.5 first:mt-0">
+                {Array.from({ length: 5 }, (_, colIndex) => {
+                  // Calculate diagonal distance from top-left corner
+                  // This creates a smooth diagonal wave effect
+                  const diagonalIndex = rowIndex + colIndex;
+                  
+                  // Base delay increases with diagonal distance - smoother timing
+                  const baseDelay = diagonalIndex * 0.06;
+                  
+                  // Add row offset for smoother cascading effect
+                  const rowOffset = rowIndex * 0.08;
+                  
+                  // Final delay with slight variation for natural flow
+                  const delay = baseDelay + rowOffset;
+                  
+                  // Calculate push direction based on position
+                  // Top-left to bottom-right diagonal flow
+                  const pushDistance = 20;
+                  const angle = Math.atan2(rowIndex - 2, colIndex - 2);
+                  const pushX = Math.cos(angle) * pushDistance * 0.25;
+                  const pushY = Math.sin(angle) * pushDistance * 0.25;
+                  
+                  return (
           <motion.div
-            animate={{ rotate: 360 }}
-            transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-            className="w-16 h-16 border-4 border-slate-200 border-t-orange-500 rounded-full mx-auto mb-4"
-          />
-          <p className="text-slate-600 font-medium">Loading your experience...</p>
+                      key={`cube-${rowIndex}-${colIndex}`}
+                      className="w-5 h-5 sm:w-6 sm:h-6 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-sm shadow-md"
+                      style={{
+                        boxShadow: '0 2px 6px rgba(251, 146, 60, 0.3)'
+                      }}
+                      initial={{ 
+                        scale: 0, 
+                        opacity: 0, 
+                        y: pushY,
+                        x: pushX,
+                        rotateZ: -10
+                      }}
+                      animate={{
+                        scale: [0, 1.1, 1],
+                        opacity: [0, 1, 1],
+                        y: [pushY, 0, 0],
+                        x: [pushX, 0, 0],
+                        rotateZ: [-10, 2, 0]
+                      }}
+                      transition={{
+                        duration: 0.5,
+                        delay: delay,
+                        repeat: Infinity,
+                        repeatDelay: 2.2,
+                        ease: [0.16, 1, 0.3, 1] // Smoother cubic bezier
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          
+          {/* Enhanced Loading Text */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3, duration: 0.6 }}
+            className="space-y-2"
+          >
+            <motion.h2
+              className="text-lg sm:text-xl font-semibold bg-gradient-to-r from-orange-600 via-amber-600 to-orange-600 bg-clip-text text-transparent"
+              animate={{
+                backgroundPosition: ['0%', '100%', '0%'],
+              }}
+              transition={{
+                duration: 3,
+                repeat: Infinity,
+                ease: "linear"
+              }}
+              style={{
+                backgroundSize: '200% 100%'
+              }}
+            >
+              Loading your experience
+            </motion.h2>
+            <div className="flex items-center justify-center gap-1.5">
+              {[0, 1, 2].map((i) => (
+                <motion.div
+                  key={i}
+                  className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-gradient-to-br from-orange-500 to-amber-500"
+                  animate={{
+                    scale: [1, 1.3, 1],
+                    opacity: [0.5, 1, 0.5],
+                  }}
+                  transition={{
+                    duration: 1.2,
+                    repeat: Infinity,
+                    delay: i * 0.2,
+                    ease: "easeInOut"
+                  }}
+                />
+              ))}
+            </div>
+          </motion.div>
         </div>
       </div>
     );
@@ -541,8 +788,8 @@ export function CustomerPortal() {
       return;
     }
 
-    if (enteredOTP.trim() === '') {
-      setOtpError('Please enter the OTP');
+    if (enteredOTP.trim() === '' || enteredOTP.length < 6) {
+      setOtpError('Please enter the 6-digit OTP');
       return;
     }
 
@@ -573,56 +820,76 @@ export function CustomerPortal() {
   // Show OTP verification screen if OTP is required and not verified
   if (agentLink.otp && !otpVerified) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-orange-50 to-amber-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-orange-100 flex items-center justify-center p-4 safe-area-inset">
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
+          transition={{ type: "spring", stiffness: 200, damping: 20 }}
           className="w-full max-w-md"
         >
-          <div className="relative bg-white/70 backdrop-blur-2xl rounded-2xl sm:rounded-3xl border border-white/60 shadow-xl sm:shadow-2xl overflow-hidden">
-            {/* Gradient border effect */}
-            <div className="absolute inset-0 bg-gradient-to-br from-orange-500/20 via-amber-500/20 to-orange-500/20 rounded-2xl sm:rounded-3xl p-[1px]">
-              <div className="h-full w-full bg-white/70 backdrop-blur-2xl rounded-2xl sm:rounded-3xl" />
-            </div>
+          {/* Modern iOS Glass Design */}
+          <div className="relative rounded-3xl overflow-hidden" style={{
+            background: 'rgba(255, 255, 255, 0.7)',
+            backdropFilter: 'blur(40px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(40px) saturate(180%)',
+            border: '1px solid rgba(255, 255, 255, 0.3)',
+            boxShadow: '0 8px 32px 0 rgba(249, 115, 22, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+          }}>
+            {/* Inner glow effect */}
+            <div className="absolute inset-0 bg-gradient-to-br from-white/40 via-transparent to-transparent pointer-events-none" />
+            {/* Subtle border highlight */}
+            <div className="absolute inset-0 rounded-3xl border border-white/50 pointer-events-none" />
             
-            <div className="relative p-6 sm:p-8 md:p-10">
-              {/* Icon Section */}
+            <div className="relative p-4 sm:p-6 md:p-8 lg:p-10">
+              {/* Icon Section with enhanced animation */}
               <motion.div
                 initial={{ scale: 0, rotate: -180 }}
                 animate={{ scale: 1, rotate: 0 }}
-                transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
-                className="flex justify-center mb-6"
+                transition={{ delay: 0.2, type: "spring", stiffness: 200, damping: 15 }}
+                className="flex justify-center mb-8"
               >
                 <div className="relative">
-                  <div className="absolute inset-0 bg-gradient-to-br from-orange-400 to-amber-500 rounded-full blur-2xl opacity-60 animate-pulse" />
-                  <div className="relative w-20 h-20 sm:w-24 sm:h-24 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-2xl sm:rounded-3xl flex items-center justify-center shadow-xl shadow-orange-500/50">
-                    <Lock className="w-10 h-10 sm:w-12 sm:h-12 text-white" strokeWidth={2.5} />
-                    <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-transparent to-transparent rounded-2xl sm:rounded-3xl" />
+                  {/* Pulsing glow effect */}
+                  <motion.div
+                    animate={{ scale: [1, 1.2, 1], opacity: [0.6, 0.3, 0.6] }}
+                    transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                    className="absolute inset-0 bg-gradient-to-br from-orange-400 to-amber-500 rounded-full blur-2xl"
+                  />
+                  {/* Main icon container */}
+                  <div className="relative w-24 h-24 sm:w-28 sm:h-28 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-3xl flex items-center justify-center shadow-2xl shadow-orange-500/50">
+                    <Lock className="w-12 h-12 sm:w-14 sm:h-14 text-white" strokeWidth={2.5} />
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/40 via-transparent to-transparent rounded-3xl" />
+                    {/* Shine effect */}
+                    <motion.div
+                      animate={{ x: ['-100%', '200%'] }}
+                      transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                      className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent rounded-3xl"
+                    />
                   </div>
                 </div>
               </motion.div>
 
-              {/* Title and Description */}
+              {/* Title and Description with better typography */}
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3 }}
-                className="text-center mb-6"
+                transition={{ delay: 0.3, type: "spring" }}
+                className="text-center mb-8"
               >
-                <h2 className="text-2xl sm:text-3xl md:text-4xl font-black text-gray-900 mb-2">
+                <h2 className="text-3xl sm:text-4xl md:text-5xl font-black text-gray-900 mb-3 bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 bg-clip-text text-transparent">
                   Enter Access Code
                 </h2>
-                <p className="text-gray-600 text-sm sm:text-base font-medium">
+                <p className="text-gray-600 text-base sm:text-lg font-medium leading-relaxed px-2">
                   Please enter the OTP provided by our sales agent to access the portal
                 </p>
               </motion.div>
 
-              {/* OTP Input Section */}
+              {/* Enhanced OTP Input Section */}
               <motion.div
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: 0.4 }}
-                className="mb-6"
+                transition={{ delay: 0.4, type: "spring" }}
+                className="mb-8"
               >
                 <div className="flex justify-center gap-2 sm:gap-3">
                   {Array.from({ length: 6 }).map((_, index) => (
@@ -631,7 +898,7 @@ export function CustomerPortal() {
                       initial={{ opacity: 0, scale: 0.5, y: 20 }}
                       animate={{ opacity: 1, scale: 1, y: 0 }}
                       transition={{ 
-                        delay: 0.5 + index * 0.05, 
+                        delay: 0.5 + index * 0.08, 
                         type: "spring", 
                         stiffness: 300,
                         damping: 20
@@ -641,6 +908,8 @@ export function CustomerPortal() {
                       <input
                         id={`otp-${index}`}
                         type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
                         maxLength={1}
                         value={enteredOTP[index] || ''}
                         onChange={(e) => {
@@ -654,8 +923,10 @@ export function CustomerPortal() {
                           setOtpError('');
 
                           if (val && index < 5) {
-                            const nextInput = document.getElementById(`otp-${index + 1}`);
-                            nextInput?.focus();
+                            setTimeout(() => {
+                              const nextInput = document.getElementById(`otp-${index + 1}`);
+                              nextInput?.focus();
+                            }, 50);
                           }
                         }}
                         onKeyDown={(e) => {
@@ -668,11 +939,14 @@ export function CustomerPortal() {
                             setEnteredOTP(newOTP.join(''));
                           }
                         }}
+                        onFocus={(e) => {
+                          e.target.select();
+                        }}
                         className={clsx(
-                          "w-12 h-14 sm:w-14 sm:h-16 md:w-16 md:h-20 text-center text-2xl sm:text-3xl font-black rounded-xl sm:rounded-2xl outline-none transition-all duration-300 relative border-[3px]",
+                          "w-11 h-13 sm:w-12 sm:h-16 md:w-14 md:h-18 text-center text-2xl sm:text-3xl font-black rounded-xl sm:rounded-2xl outline-none transition-all duration-300 relative border-2 touch-manipulation",
                           enteredOTP[index]
-                            ? "bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-500/40 border-orange-400"
-                            : "bg-white border-gray-300 focus:border-orange-500 focus:bg-white focus:shadow-lg"
+                            ? "bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-500/40 border-orange-400 scale-105"
+                            : "bg-white border-gray-300 focus:border-orange-500 focus:bg-orange-50 focus:shadow-lg focus:scale-105"
                         )}
                       />
                       {!enteredOTP[index] && (
@@ -687,59 +961,82 @@ export function CustomerPortal() {
                 </div>
                 {otpError && (
                   <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mt-4 text-center"
+                    initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={{ type: "spring" }}
+                    className="mt-5 text-center"
                   >
-                    <p className="text-red-600 text-sm font-semibold flex items-center justify-center gap-2">
-                      <AlertCircle className="w-4 h-4" />
-                      {otpError}
-                    </p>
+                    <div className="inline-flex items-center gap-2 bg-red-50 border-2 border-red-200 rounded-xl px-4 py-3">
+                      <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+                      <p className="text-red-600 text-sm font-bold">
+                        {otpError}
+                      </p>
+                    </div>
                   </motion.div>
                 )}
               </motion.div>
 
-              {/* Submit Button */}
+              {/* Enhanced Submit Button */}
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.6 }}
-                className="flex justify-center"
+                transition={{ delay: 0.6, type: "spring" }}
+                className="flex justify-center mb-6"
               >
                 <motion.button
-                  whileHover={{ scale: 1.02, y: -2 }}
-                  whileTap={{ scale: 0.98 }}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
                   onClick={handleOTPSubmit}
-                  disabled={enteredOTP.length < 6}
-                  className="relative group overflow-hidden"
-                  style={{ maxWidth: '280px', width: '100%' }}
+                  className="relative group overflow-hidden touch-manipulation rounded-xl sm:rounded-2xl"
                 >
-                  <div className="absolute inset-0 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-500 rounded-xl sm:rounded-2xl shadow-xl shadow-orange-500/40" />
-                  <div className="absolute inset-0 bg-gradient-to-r from-orange-600 via-amber-600 to-orange-600 rounded-xl sm:rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                  {/* Gradient background layers - all with matching rounded corners */}
+                  <div className="absolute inset-0 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-500 rounded-xl sm:rounded-2xl shadow-lg shadow-orange-500/30" />
+                  <div className="absolute inset-0 bg-gradient-to-r from-orange-600 via-amber-600 to-orange-600 rounded-xl sm:rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000 rounded-xl sm:rounded-2xl" />
                   
-                  <div className="relative py-3 sm:py-3.5 md:py-4 rounded-xl sm:rounded-2xl font-black text-sm sm:text-base md:text-lg text-white flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed px-6 sm:px-8">
-                    <Key className="w-4 h-4 sm:w-5 sm:h-5" />
-                    <span>Verify & Access</span>
-                    <ArrowRight className="w-4 h-4 sm:w-5 sm:h-5 group-hover:translate-x-1 transition-transform" />
+                  {/* Button content with gradient text */}
+                  <div className="relative py-2.5 sm:py-3 px-6 sm:px-8 flex items-center justify-center gap-2 z-10">
+                    <Key className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
+                    <span className="bg-gradient-to-r from-white via-amber-50 to-white bg-clip-text text-transparent font-bold text-sm sm:text-base">
+                      Verify & Access
+                    </span>
+                    <ArrowRight className="w-4 h-4 sm:w-5 sm:h-5 text-white group-hover:translate-x-1 transition-transform" />
                   </div>
+                  
+                  {/* Ripple effect on click - clipped to button shape */}
+                  <motion.div
+                    className="absolute inset-0 bg-white/20 rounded-xl sm:rounded-2xl opacity-0"
+                    whileTap={{ opacity: 1, scale: 1.1 }}
+                    transition={{ duration: 0.2 }}
+                    style={{ clipPath: 'inset(0 round 0.75rem)' }}
+                  />
                 </motion.button>
               </motion.div>
 
-              {/* Info Card */}
+              {/* Enhanced Info Card - Modern iOS Glass */}
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.7 }}
-                className="mt-6 bg-orange-50/80 rounded-xl border border-orange-200/60 p-4"
+                transition={{ delay: 0.7, type: "spring" }}
+                className="rounded-2xl p-5 relative overflow-hidden" style={{
+                  background: 'rgba(255, 247, 237, 0.6)',
+                  backdropFilter: 'blur(20px) saturate(180%)',
+                  WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                  border: '1px solid rgba(255, 255, 255, 0.4)',
+                  boxShadow: '0 4px 16px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                }}
               >
-                <div className="flex items-start gap-3">
-                  <Shield className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs sm:text-sm font-semibold text-gray-800 mb-1">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/50 via-transparent to-transparent pointer-events-none" />
+                <div className="absolute inset-0 rounded-2xl border border-white/60 pointer-events-none" />
+                <div className="flex items-center gap-4">
+                  <div className="flex-shrink-0 w-12 h-12 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center shadow-lg">
+                    <Shield className="w-6 h-6 text-white" strokeWidth={2.5} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm sm:text-base font-bold text-gray-900 mb-1.5">
                       Secure Access
                     </p>
-                    <p className="text-xs text-gray-600">
+                    <p className="text-xs sm:text-sm text-gray-700 leading-relaxed">
                       This portal is protected. Please contact our sales agent if you don't have the access code.
                     </p>
                   </div>
@@ -765,6 +1062,18 @@ export function CustomerPortal() {
         .pb-safe-bottom {
           padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
         }
+        .touch-manipulation {
+          touch-action: manipulation;
+          -webkit-tap-highlight-color: transparent;
+        }
+        input[type="tel"], input[type="text"], input[type="number"], select, textarea {
+          font-size: 16px !important; /* Prevents zoom on iOS */
+        }
+        @media (max-width: 640px) {
+          input[type="tel"], input[type="text"], input[type="number"], select, textarea {
+            font-size: 16px !important;
+          }
+        }
       `}</style>
       <div className="min-h-screen bg-white relative overflow-hidden">
         {/* Native-like status bar area */}
@@ -789,7 +1098,7 @@ export function CustomerPortal() {
                     if (step === 'plans') setStep('search');
                     if (step === 'details') setStep('plans');
                   }}
-                  className="w-10 h-10 -ml-2 flex items-center justify-center rounded-full active:bg-gray-100"
+                        className="w-12 h-12 -ml-2 flex items-center justify-center rounded-full active:bg-gray-100 touch-manipulation min-w-[48px] min-h-[48px]"
                 >
                   <ChevronLeft className="w-6 h-6 text-gray-700" strokeWidth={2} />
                 </motion.button>
@@ -817,9 +1126,9 @@ export function CustomerPortal() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.4 }}
-                className="flex flex-col flex-1 justify-center relative py-2 sm:py-4 md:py-6"
+                className="flex flex-col flex-1 justify-center relative py-4 sm:py-6 md:py-8"
               >
-                {/* Main Content Card - Glass Morphism */}
+                {/* Main Content Card - Enhanced Design */}
                 <motion.div
                   initial={{ opacity: 0, y: 30, scale: 0.95 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -827,82 +1136,87 @@ export function CustomerPortal() {
                   className="relative z-10"
                 >
                   <div className="relative">
-                    {/* Glass morphism card */}
-                    <div className="relative bg-white/70 backdrop-blur-2xl rounded-2xl sm:rounded-3xl border border-white/60 shadow-xl sm:shadow-2xl overflow-hidden">
-                      {/* Gradient border effect */}
-                      <div className="absolute inset-0 bg-gradient-to-br from-orange-500/20 via-amber-500/20 to-orange-500/20 rounded-2xl sm:rounded-3xl p-[1px]">
-                        <div className="h-full w-full bg-white/70 backdrop-blur-2xl rounded-2xl sm:rounded-3xl" />
+                    {/* Enhanced glass morphism card */}
+                    <div className="relative bg-white/90 backdrop-blur-xl rounded-3xl border-2 border-orange-200/50 shadow-2xl overflow-hidden">
+                      {/* Animated gradient border */}
+                      <div className="absolute inset-0 bg-gradient-to-br from-orange-400/30 via-amber-400/30 to-orange-400/30 rounded-3xl p-[2px]">
+                        <div className="h-full w-full bg-white/90 backdrop-blur-xl rounded-3xl" />
                       </div>
                       
-                      <div className="relative p-4 sm:p-6 md:p-8 lg:p-10 pb-6 sm:pb-8 md:pb-10">
-                        {/* Large Icon Section */}
+                      <div className="relative p-4 sm:p-6 md:p-8 lg:p-10">
+                        {/* Enhanced Icon Section */}
                         <motion.div
                           initial={{ scale: 0, rotate: -180 }}
                           animate={{ scale: 1, rotate: 0 }}
-                          transition={{ delay: 0.3, type: "spring", stiffness: 200 }}
-                          className="flex justify-center mb-5 sm:mb-6 md:mb-8"
+                          transition={{ delay: 0.3, type: "spring", stiffness: 200, damping: 15 }}
+                          className="flex justify-center mb-4 sm:mb-6 lg:mb-8"
                         >
                           <div className="relative">
-                            {/* Glowing background circle */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-orange-400 to-amber-500 rounded-full blur-2xl opacity-60 animate-pulse" />
+                            {/* Pulsing glow effect */}
+                            <motion.div
+                              animate={{ scale: [1, 1.2, 1], opacity: [0.6, 0.3, 0.6] }}
+                              transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                              className="absolute inset-0 bg-gradient-to-br from-orange-400 to-amber-500 rounded-full blur-2xl"
+                            />
                             {/* Icon container */}
-                            <div className="relative w-20 h-20 sm:w-24 sm:h-24 md:w-28 md:h-28 lg:w-32 lg:h-32 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-2xl sm:rounded-3xl flex items-center justify-center shadow-xl sm:shadow-2xl shadow-orange-500/50">
-                              <Phone className="w-10 h-10 sm:w-12 sm:h-12 md:w-14 md:h-14 lg:w-16 lg:h-16 text-white" strokeWidth={2.5} />
+                            <div className="relative w-24 h-24 sm:w-28 sm:h-28 bg-gradient-to-br from-orange-500 via-orange-400 to-amber-500 rounded-3xl flex items-center justify-center shadow-2xl shadow-orange-500/50">
+                              <Phone className="w-12 h-12 sm:w-14 sm:h-14 text-white" strokeWidth={2.5} />
                               {/* Shine effect */}
-                              <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-transparent to-transparent rounded-2xl sm:rounded-3xl" />
+                              <div className="absolute inset-0 bg-gradient-to-br from-white/40 via-transparent to-transparent rounded-3xl" />
+                              {/* Animated shine */}
+                              <motion.div
+                                animate={{ x: ['-100%', '200%'] }}
+                                transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                                className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent rounded-3xl"
+                              />
                             </div>
                           </div>
                         </motion.div>
 
-                        {/* Title and Description */}
+                        {/* Enhanced Title and Description */}
                         <motion.div
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: 0.4 }}
-                          className="text-center mb-5 sm:mb-6 md:mb-7"
+                          transition={{ delay: 0.4, type: "spring" }}
+                          className="text-center mb-4 sm:mb-6 lg:mb-8"
                         >
-                          <h2 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-black text-gray-900 mb-1.5 sm:mb-2 bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 bg-clip-text text-transparent">
+                          <h2 className="text-3xl sm:text-4xl md:text-5xl font-black text-gray-900 mb-3 bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 bg-clip-text text-transparent">
                             Enter Your Number
                           </h2>
-                          <p className="text-gray-600 text-xs sm:text-sm md:text-base lg:text-lg font-medium max-w-md mx-auto leading-relaxed px-2">
+                          <p className="text-gray-600 text-base sm:text-lg font-medium max-w-md mx-auto leading-relaxed px-2">
                             We'll find the perfect number matches for you
                           </p>
                         </motion.div>
 
-                        {/* Phone Input Section */}
+                        {/* Enhanced Phone Input Section */}
                         <motion.div
                           initial={{ opacity: 0, scale: 0.9 }}
                           animate={{ opacity: 1, scale: 1 }}
-                          transition={{ delay: 0.5 }}
-                          className="mb-5 sm:mb-6 md:mb-7"
+                          transition={{ delay: 0.5, type: "spring" }}
+                          className="mb-4 sm:mb-6 lg:mb-8"
                         >
-                          <div className="flex justify-center items-center gap-1 sm:gap-1.5 md:gap-2 lg:gap-2.5 flex-nowrap w-full px-1 sm:px-2">
+                          <div className="flex justify-center items-center gap-1 sm:gap-1.5 flex-nowrap w-full px-2 sm:px-4">
                             {Array.from({ length: 10 }).map((_, index) => {
                               const formatLabels = ['0', '5', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X'];
-                              const showSeparator = index === 2 || index === 5;
                               return (
                                 <motion.div
                                   key={index}
                                   initial={{ opacity: 0, scale: 0.5, y: 20 }}
                                   animate={{ opacity: 1, scale: 1, y: 0 }}
                                   transition={{ 
-                                    delay: 0.6 + index * 0.04, 
+                                    delay: 0.6 + index * 0.05, 
                                     type: "spring", 
                                     stiffness: 300,
                                     damping: 20
                                   }}
-                                  className="relative flex-shrink-0 overflow-visible"
+                                  className="relative flex-shrink-0"
                                 >
-                                  {showSeparator && index === 2 && (
-                                    <div className="absolute -left-1 sm:-left-1.5 md:-left-2 top-1/2 -translate-y-1/2 text-gray-300 text-xs sm:text-sm md:text-base lg:text-lg font-bold z-10">-</div>
-                                  )}
-                                  {showSeparator && index === 5 && (
-                                    <div className="absolute -left-1 sm:-left-1.5 md:-left-2 top-1/2 -translate-y-1/2 text-gray-300 text-xs sm:text-sm md:text-base lg:text-lg font-bold z-10">-</div>
-                                  )}
-                                  <div className="relative p-0.5 sm:p-1">
+                                  <div className="relative">
                                     <input
                                       id={`digit-${index}`}
                                       type="tel"
+                                      inputMode="numeric"
+                                      pattern="[0-9]*"
                                       maxLength={1}
                                       value={enteredPhone[index] || ''}
                                       onChange={(e) => {
@@ -915,8 +1229,10 @@ export function CustomerPortal() {
                                         setEnteredPhone(newPhoneStr);
 
                                         if (val && index < 9) {
-                                          const nextInput = document.getElementById(`digit-${index + 1}`);
-                                          nextInput?.focus();
+                                          setTimeout(() => {
+                                            const nextInput = document.getElementById(`digit-${index + 1}`);
+                                            nextInput?.focus();
+                                          }, 50);
                                         }
                                       }}
                                       onKeyDown={(e) => {
@@ -929,16 +1245,19 @@ export function CustomerPortal() {
                                           setEnteredPhone(newPhone.join(''));
                                         }
                                       }}
+                                      onFocus={(e) => {
+                                        e.target.select();
+                                      }}
                                       className={clsx(
-                                        "w-6 h-9 sm:w-7 sm:h-11 md:w-9 md:h-14 lg:w-11 lg:h-16 xl:w-13 xl:h-20 text-center text-sm sm:text-base md:text-lg lg:text-xl xl:text-2xl font-black rounded-md sm:rounded-lg md:rounded-xl outline-none transition-all duration-300 relative border-2 sm:border-[3px]",
+                                        "w-7 h-11 sm:w-8 sm:h-14 md:w-10 md:h-18 text-center text-base sm:text-lg md:text-xl font-black rounded-xl outline-none transition-all duration-300 relative border-2 touch-manipulation",
                                         enteredPhone[index]
-                                          ? "bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-lg sm:shadow-xl shadow-orange-500/40 border-orange-400"
-                                          : "bg-white border-gray-300 focus:border-orange-500 focus:bg-white focus:shadow-lg text-transparent"
+                                          ? "bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-500/40 border-orange-400"
+                                          : "bg-white border-gray-300 focus:border-orange-500 focus:bg-orange-50 focus:shadow-lg text-transparent"
                                       )}
                                     />
                                     {!enteredPhone[index] && (
                                       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                        <span className="text-sm sm:text-base md:text-lg lg:text-xl xl:text-2xl font-black text-gray-300 select-none">
+                                        <span className="text-base sm:text-lg md:text-xl font-black text-gray-300 select-none">
                                           {formatLabels[index]}
                                         </span>
                                       </div>
@@ -947,7 +1266,7 @@ export function CustomerPortal() {
                                       <motion.div
                                         initial={{ scale: 0 }}
                                         animate={{ scale: 1 }}
-                                        className="absolute inset-0 bg-gradient-to-br from-white/30 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none"
+                                        className="absolute inset-0 bg-gradient-to-br from-white/30 to-transparent rounded-xl pointer-events-none"
                                       />
                                     )}
                                   </div>
@@ -957,112 +1276,120 @@ export function CustomerPortal() {
                           </div>
                         </motion.div>
 
-                        {/* Submit Button */}
+                        {/* Enhanced Submit Button - Mobile Optimized */}
                         <motion.div
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: 0.7 }}
-                          className="mb-5 sm:mb-6 md:mb-7 flex justify-center"
+                          transition={{ delay: 0.7, type: "spring" }}
+                          className="mb-6 sm:mb-8 flex justify-center"
                         >
                           <motion.button
-                            whileHover={{ scale: 1.02, y: -2 }}
-                            whileTap={{ scale: 0.98 }}
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={handlePhoneSubmit}
                             disabled={enteredPhone.length < 10 || isSearching}
-                            className="relative group overflow-hidden w-full max-w-[240px] sm:max-w-[260px] md:max-w-[280px]"
+                            className="relative group touch-manipulation"
                           >
-                            {/* Button background with glass morphism */}
-                            <div className="absolute inset-0 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-500 rounded-xl sm:rounded-2xl shadow-xl sm:shadow-2xl shadow-orange-500/40" />
-                            <div className="absolute inset-0 bg-gradient-to-r from-orange-600 via-amber-600 to-orange-600 rounded-xl sm:rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity" />
-                            
-                            {/* Shine effect */}
-                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-                            
-                            {/* Button content */}
-                            <div className="relative py-2.5 sm:py-3 md:py-3.5 lg:py-4 rounded-xl sm:rounded-2xl font-black text-xs sm:text-sm md:text-base lg:text-lg text-white flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed px-5 sm:px-6 md:px-8">
-                              {isSearching ? (
-                                <>
-                                  <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" />
-                                  <span className="text-xs sm:text-sm">Finding numbers...</span>
-                                </>
-                              ) : (
-                                <>
-                                  <span>Find Perfect Numbers</span>
-                                  <ArrowRight className="w-4 h-4 sm:w-5 sm:h-5 group-hover:translate-x-1 transition-transform" />
-                                </>
-                              )}
+                            {/* Button content with gradient background only on text area */}
+                            <div className="relative inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed overflow-hidden rounded-xl">
+                              {/* Gradient background layers - only covering text area */}
+                              <div className="absolute inset-0 bg-gradient-to-r from-orange-500 via-amber-500 to-orange-500 rounded-xl shadow-lg shadow-orange-500/40" />
+                              <div className="absolute inset-0 bg-gradient-to-r from-orange-600 via-amber-600 to-orange-600 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000 rounded-xl" />
+                              
+                              {/* Button text content */}
+                              <div className="relative py-2.5 sm:py-3 px-5 sm:px-6 rounded-xl font-black text-sm sm:text-base text-white flex items-center justify-center gap-2 min-h-[48px] z-10">
+                                {isSearching ? (
+                                  <>
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                    <span>Finding numbers...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span>Find Perfect Numbers</span>
+                                    <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                                  </>
+                                )}
+                              </div>
+                              
+                              {/* Ripple effect */}
+                              <motion.div
+                                className="absolute inset-0 bg-white/20 rounded-xl opacity-0"
+                                whileTap={{ opacity: 1, scale: 1.1 }}
+                                transition={{ duration: 0.2 }}
+                              />
                             </div>
                           </motion.button>
                         </motion.div>
 
-                        {/* Information Cards - Moved below button */}
+                        {/* Enhanced Information Cards */}
                         <motion.div
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: 0.8 }}
-                          className="grid grid-cols-3 gap-1.5 sm:gap-2 md:gap-3 lg:gap-4"
+                          transition={{ delay: 0.8, type: "spring" }}
+                          className="grid grid-cols-3 gap-2 sm:gap-3 md:gap-4"
                         >
-                          {/* Feature Card 1 */}
-                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-3 sm:p-3.5 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center"
-                            style={{
-                              background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(251, 191, 36, 0.15) 100%)',
-                            }}
-                          >
-                            {/* Glass morphism overlays */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-white/10 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
-                            <div className="absolute inset-0 rounded-lg sm:rounded-xl md:rounded-2xl border border-white/30 pointer-events-none" />
+                          {/* Feature Card 1 - Instant Search - Modern iOS Glass */}
+                          <div className="relative rounded-2xl overflow-hidden min-h-[110px] sm:min-h-[120px] flex flex-col justify-center p-4 sm:p-5" style={{
+                            background: 'rgba(255, 247, 237, 0.6)',
+                            backdropFilter: 'blur(20px) saturate(180%)',
+                            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                            border: '1px solid rgba(255, 255, 255, 0.4)',
+                            boxShadow: '0 4px 16px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                          }}>
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/50 via-transparent to-transparent pointer-events-none" />
+                            <div className="absolute inset-0 rounded-2xl border border-white/60 pointer-events-none" />
                             
-                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2 justify-center h-full">
-                              <div className="w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 mb-0.5">
-                                <Zap className="w-4 h-4 sm:w-4.5 sm:h-4.5 md:w-5 md:h-5 text-white" />
+                            <div className="relative z-10 flex flex-col items-center text-center gap-2 justify-center h-full">
+                              <div className="w-10 h-10 sm:w-12 sm:h-12 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center shadow-lg mb-1">
+                                <Zap className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
                               </div>
-                              <h3 className="font-bold text-gray-900 text-xs sm:text-xs md:text-sm leading-tight">Instant Search</h3>
-                              <p className="text-[10px] sm:text-[10px] md:text-xs text-gray-700 leading-tight px-0.5">
+                              <h3 className="font-bold text-gray-900 text-xs sm:text-sm leading-tight">Instant Search</h3>
+                              <p className="hidden sm:block text-xs text-gray-700 leading-tight px-1">
                                 Find similar numbers instantly
                               </p>
                             </div>
                           </div>
 
-                          {/* Feature Card 2 */}
-                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-3 sm:p-3.5 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center"
-                            style={{
-                              background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(251, 191, 36, 0.15) 100%)',
-                            }}
-                          >
-                            {/* Glass morphism overlays */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-white/10 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
-                            <div className="absolute inset-0 rounded-lg sm:rounded-xl md:rounded-2xl border border-white/30 pointer-events-none" />
+                          {/* Feature Card 2 - Secure & Safe - Modern iOS Glass */}
+                          <div className="relative rounded-2xl overflow-hidden min-h-[110px] sm:min-h-[120px] flex flex-col justify-center p-4 sm:p-5" style={{
+                            background: 'rgba(255, 247, 237, 0.6)',
+                            backdropFilter: 'blur(20px) saturate(180%)',
+                            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                            border: '1px solid rgba(255, 255, 255, 0.4)',
+                            boxShadow: '0 4px 16px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                          }}>
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/50 via-transparent to-transparent pointer-events-none" />
+                            <div className="absolute inset-0 rounded-2xl border border-white/60 pointer-events-none" />
                             
-                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2 justify-center h-full">
-                              <div className="w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 mb-0.5">
-                                <Shield className="w-4 h-4 sm:w-4.5 sm:h-4.5 md:w-5 md:h-5 text-white" />
+                            <div className="relative z-10 flex flex-col items-center text-center gap-2 justify-center h-full">
+                              <div className="w-10 h-10 sm:w-12 sm:h-12 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center shadow-lg mb-1">
+                                <Shield className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
                               </div>
-                              <h3 className="font-bold text-gray-900 text-xs sm:text-xs md:text-sm leading-tight">Secure & Safe</h3>
-                              <p className="text-[10px] sm:text-[10px] md:text-xs text-gray-700 leading-tight px-0.5">
+                              <h3 className="font-bold text-gray-900 text-xs sm:text-sm leading-tight">Secure & Safe</h3>
+                              <p className="hidden sm:block text-xs text-gray-700 leading-tight px-1">
                                 Your data is protected
                               </p>
                             </div>
                           </div>
 
-                          {/* Feature Card 3 */}
-                          <div className="relative rounded-lg sm:rounded-xl md:rounded-2xl border border-orange-400/40 p-3 sm:p-3.5 md:p-4 shadow-lg overflow-hidden backdrop-blur-2xl min-h-[90px] sm:min-h-[100px] md:min-h-[110px] flex flex-col justify-center"
-                            style={{
-                              background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(251, 191, 36, 0.15) 100%)',
-                            }}
-                          >
-                            {/* Glass morphism overlays */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-white/10 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl md:rounded-2xl pointer-events-none" />
-                            <div className="absolute inset-0 rounded-lg sm:rounded-xl md:rounded-2xl border border-white/30 pointer-events-none" />
+                          {/* Feature Card 3 - Best Matches - Modern iOS Glass */}
+                          <div className="relative rounded-2xl overflow-hidden min-h-[110px] sm:min-h-[120px] flex flex-col justify-center p-4 sm:p-5" style={{
+                            background: 'rgba(255, 247, 237, 0.6)',
+                            backdropFilter: 'blur(20px) saturate(180%)',
+                            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                            border: '1px solid rgba(255, 255, 255, 0.4)',
+                            boxShadow: '0 4px 16px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                          }}>
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/50 via-transparent to-transparent pointer-events-none" />
+                            <div className="absolute inset-0 rounded-2xl border border-white/60 pointer-events-none" />
                             
-                            <div className="relative z-10 flex flex-col items-center text-center gap-1.5 sm:gap-2 justify-center h-full">
-                              <div className="w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg sm:rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 mb-0.5">
-                                <CheckCircle className="w-4 h-4 sm:w-4.5 sm:h-4.5 md:w-5 md:h-5 text-white" />
+                            <div className="relative z-10 flex flex-col items-center text-center gap-2 justify-center h-full">
+                              <div className="w-10 h-10 sm:w-12 sm:h-12 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center shadow-lg mb-1">
+                                <CheckCircle className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
                               </div>
-                              <h3 className="font-bold text-gray-900 text-xs sm:text-xs md:text-sm leading-tight">Best Matches</h3>
-                              <p className="text-[10px] sm:text-[10px] md:text-xs text-gray-700 leading-tight px-0.5">
+                              <h3 className="font-bold text-gray-900 text-xs sm:text-sm leading-tight">Best Matches</h3>
+                              <p className="hidden sm:block text-xs text-gray-700 leading-tight px-1">
                                 Curated recommendations
                               </p>
                             </div>
@@ -1081,110 +1408,198 @@ export function CustomerPortal() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="space-y-4 pb-20"
+                className="space-y-3 sm:space-y-4 pb-16 sm:pb-20"
               >
-                <div className="bg-gray-50 rounded-2xl p-3 border border-gray-100">
+                {/* Modern iOS Glass Search Container with Gradient Lines */}
+                <div className="rounded-2xl p-[2px] relative" style={{
+                  background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.5), rgba(251, 191, 36, 0.5), rgba(249, 115, 22, 0.5))',
+                  boxShadow: '0 4px 16px 0 rgba(249, 115, 22, 0.15)'
+                }}>
+                  <div className="rounded-2xl p-2 sm:p-3 relative overflow-hidden" style={{
+                    background: 'rgba(249, 250, 251, 0.6)',
+                    backdropFilter: 'blur(20px) saturate(180%)',
+                    WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                    boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                  }}>
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/50 via-transparent to-transparent pointer-events-none" />
+                    <div className="absolute inset-0 rounded-2xl border border-white/60 pointer-events-none" />
+                  
                   <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                    <Search className="absolute left-2.5 sm:left-3 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 text-orange-500 z-10" />
                     <input
                       type="text"
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
                       placeholder="Search for Any other number of your choice."
-                      className="w-full bg-white pl-11 pr-4 py-3.5 rounded-xl text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500/20 font-medium text-base"
+                      className="w-full pl-10 sm:pl-12 pr-3 sm:pr-4 py-3 sm:py-4 rounded-xl sm:rounded-2xl text-gray-900 placeholder:text-gray-400 focus:outline-none font-medium text-sm sm:text-base touch-manipulation relative z-10" style={{
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        backdropFilter: 'blur(10px) saturate(180%)',
+                        WebkitBackdropFilter: 'blur(10px) saturate(180%)',
+                        border: '2px solid rgba(249, 115, 22, 0.3)',
+                        boxShadow: '0 2px 8px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.9)',
+                        fontSize: '16px' // Prevent iOS zoom
+                      }}
+                      onFocus={(e) => {
+                        e.target.style.border = '2px solid rgba(249, 115, 22, 0.6)';
+                        e.target.style.boxShadow = '0 4px 12px 0 rgba(249, 115, 22, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.9)';
+                      }}
+                      onBlur={(e) => {
+                        e.target.style.border = '2px solid rgba(249, 115, 22, 0.3)';
+                        e.target.style.boxShadow = '0 2px 8px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.9)';
+                      }}
                     />
                     {isSearching && (
                       <motion.div
                         animate={{ rotate: 360 }}
                         transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                        className="absolute right-4 top-1/2 -translate-y-1/2"
+                        className="absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 z-20"
                       >
-                        <Loader2 className="w-5 h-5 text-orange-500" />
+                        <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 text-orange-500" />
                       </motion.div>
                     )}
+                  </div>
                   </div>
                 </div>
 
 
                 {!isSearching && !searchTerm && similarNumbers.length > 0 && (
                   <div>
-                    <h3 className="text-base sm:text-lg font-black text-gray-900 mb-3 sm:mb-4 lg:mb-5 uppercase tracking-wide">Recommended</h3>
+                    <h3 className="text-sm sm:text-base lg:text-lg font-black text-gray-900 mb-2 sm:mb-3 lg:mb-4 uppercase tracking-wide px-1">Recommended</h3>
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 lg:gap-4">
                       {similarNumbers.map((num, i) => {
                         const isSelected = selectedNumbers.some(n => n.numberId === num.id);
                         return (
-                          <motion.button
+                          <motion.div
                             key={num.id}
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: i * 0.05 }}
-                            whileHover={{ scale: 1.02, y: -2 }}
-                            whileTap={{ scale: 0.98 }}
-                            onClick={() => handleSelectNumber(num)}
-                            className={clsx(
-                              "relative p-2.5 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl lg:rounded-2xl border transition-all duration-300 group overflow-hidden backdrop-blur-2xl",
-                              isSelected
-                                ? "bg-gradient-to-br from-orange-500/90 to-amber-500/90 border-orange-400/60 shadow-2xl shadow-orange-500/40"
-                                : "bg-white/60 border-white/40 hover:border-orange-400/60 hover:shadow-2xl shadow-lg"
-                            )}
+                            className="relative rounded-xl sm:rounded-2xl p-[2px]"
                             style={{
-                              boxShadow: isSelected 
-                                ? '0 20px 25px -5px rgba(249, 115, 22, 0.3), 0 10px 10px -5px rgba(249, 115, 22, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.3)'
-                                : '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+                              background: isSelected 
+                                ? 'linear-gradient(135deg, rgba(249, 115, 22, 0.8), rgba(251, 191, 36, 0.8), rgba(249, 115, 22, 0.8))'
+                                : 'linear-gradient(135deg, rgba(249, 115, 22, 0.3), rgba(251, 191, 36, 0.3), rgba(249, 115, 22, 0.3))',
+                              boxShadow: isSelected
+                                ? '0 8px 24px 0 rgba(249, 115, 22, 0.3)'
+                                : '0 4px 12px 0 rgba(249, 115, 22, 0.15)'
                             }}
                           >
-                            {/* Glass morphism overlay - top shine */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-white/10 to-transparent rounded-lg sm:rounded-xl lg:rounded-2xl pointer-events-none" />
+                            <motion.button
+                              whileHover={{ scale: 1.02, y: -2 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => handleSelectNumber(num)}
+                              className={clsx(
+                                "relative w-full rounded-xl sm:rounded-2xl transition-all duration-300 group overflow-hidden touch-manipulation min-h-[110px] sm:min-h-[130px] lg:min-h-[150px] p-3.5 sm:p-4.5 lg:p-5 xl:p-6",
+                                isSelected ? "scale-[1.02] sm:scale-105" : ""
+                              )}
+                              style={isSelected ? {
+                                background: 'rgba(249, 115, 22, 0.9)',
+                                backdropFilter: 'blur(24px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.35)',
+                                boxShadow: '0 20px 25px -5px rgba(249, 115, 22, 0.35), 0 10px 10px -5px rgba(249, 115, 22, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -1px 0 rgba(0, 0, 0, 0.05)'
+                              } : {
+                                background: 'rgba(255, 255, 255, 0.75)',
+                                backdropFilter: 'blur(24px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.5)',
+                                boxShadow: '0 4px 16px 0 rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.7), inset 0 -1px 0 rgba(0, 0, 0, 0.05)'
+                              }}
+                            >
+                            {/* Modern iOS Glass - Inner glow */}
+                            <div className="absolute inset-0 bg-gradient-to-br from-white/60 via-white/20 to-transparent rounded-xl sm:rounded-2xl pointer-events-none" />
                             
-                            {/* Glass morphism overlay - bottom depth */}
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl lg:rounded-2xl pointer-events-none" />
-                            
-                            {/* 3D border effect */}
-                            <div className="absolute inset-0 rounded-lg sm:rounded-xl lg:rounded-2xl border border-white/30 pointer-events-none" />
+                            {/* Modern iOS Glass - Border highlight */}
+                            <div className="absolute inset-0 rounded-xl sm:rounded-2xl border border-white/70 pointer-events-none" />
                             
                             {/* Shine effect on hover */}
                             {!isSelected && (
-                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700 rounded-lg sm:rounded-xl lg:rounded-2xl" />
+                              <motion.div 
+                                className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent rounded-xl sm:rounded-2xl pointer-events-none"
+                                initial={{ x: '-100%' }}
+                                whileHover={{ x: '200%' }}
+                                transition={{ duration: 0.8, ease: "easeInOut" }}
+                              />
+                            )}
+                            
+                            {/* Selected state glow */}
+                            {isSelected && (
+                              <motion.div 
+                                className="absolute inset-0 bg-gradient-to-br from-white/30 via-transparent to-transparent rounded-xl sm:rounded-2xl pointer-events-none"
+                                animate={{ opacity: [0.3, 0.5, 0.3] }}
+                                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                              />
                             )}
                             
                             {/* Content */}
-                            <div className="relative z-10 flex flex-col items-center justify-center min-h-[80px] sm:min-h-[100px] lg:min-h-[120px]">
-                              {/* Number with highlighted matching digits */}
-                              <div className="mb-1.5 sm:mb-2 lg:mb-3">
-                                <span className={clsx(
-                                  "block text-base sm:text-lg md:text-xl lg:text-2xl font-black font-mono tracking-wide text-center",
-                                  isSelected ? "text-white" : "text-gray-900"
-                                )}>
+                            <div className="relative z-10 flex flex-col items-center justify-center h-full min-h-[70px] sm:min-h-[90px] lg:min-h-[110px] gap-2 sm:gap-2.5 lg:gap-3">
+                              {/* Number with highlighted matching digits and zoom effect */}
+                              <div className="flex-1 flex items-center justify-center">
+                                <motion.span 
+                                  className={clsx(
+                                    "block text-base sm:text-lg md:text-xl lg:text-2xl xl:text-3xl font-black font-mono tracking-wider text-center leading-none",
+                                    isSelected ? "text-white drop-shadow-sm" : "text-gray-900"
+                                  )}
+                                  whileHover={{ scale: 1.1 }}
+                                  transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                                >
                                   {renderNumberWithHighlights(num.number, enteredPhone)}
-                                </span>
+                                </motion.span>
                               </div>
                               
-                              {/* Category badge - centered at bottom */}
+                              {/* Category badge - Modern iOS Glass */}
                               {num.category && (() => {
                                 const categoryColors = getCategoryColor(num.category);
                                 return (
-                                  <span className={clsx(
-                                    "text-[10px] sm:text-xs lg:text-sm font-bold uppercase tracking-wide px-1.5 sm:px-2 lg:px-2.5 py-0.5 sm:py-1 rounded-md sm:rounded-lg lg:rounded-xl inline-block backdrop-blur-sm border shadow-sm",
-                                    isSelected
-                                      ? "bg-white/20 text-white border-white/30"
-                                      : `${categoryColors.bg} ${categoryColors.text} ${categoryColors.border}`
-                                  )}>
+                                  <span 
+                                    className={clsx(
+                                      "text-[9px] sm:text-[10px] lg:text-xs font-bold uppercase tracking-wider px-2 sm:px-2.5 lg:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl inline-block",
+                                      isSelected ? "text-white" : categoryColors.text
+                                    )}
+                                    style={isSelected ? {
+                                      background: 'rgba(255, 255, 255, 0.3)',
+                                      backdropFilter: 'blur(12px) saturate(180%)',
+                                      WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                      border: '1px solid rgba(255, 255, 255, 0.4)',
+                                      boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+                                    } : {
+                                      background: categoryColors.bg.includes('bg-') ? undefined : categoryColors.bg,
+                                      backdropFilter: 'blur(12px) saturate(180%)',
+                                      WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                      border: categoryColors.border.includes('border-') ? undefined : categoryColors.border,
+                                      boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+                                    }}
+                                  >
                                     {num.category}
                                   </span>
                                 );
                               })()}
                             </div>
                             
-                            {/* Arrow indicator - bottom right */}
-                            <div className={clsx(
-                              "absolute bottom-1.5 right-1.5 sm:bottom-2 sm:right-2 w-6 h-6 sm:w-7 sm:h-7 lg:w-8 lg:h-8 rounded-full flex items-center justify-center transition-all backdrop-blur-sm border shadow-sm z-20",
-                              isSelected
-                                ? "bg-white/30 text-white border-white/40"
-                                : "bg-gray-100/80 text-gray-600 border-gray-200/50 group-hover:bg-orange-100/80 group-hover:text-orange-600 group-hover:border-orange-200/50"
-                            )}>
-                              <ArrowRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 lg:w-5 lg:h-5" />
+                            {/* Arrow indicator - Modern iOS Glass */}
+                            <div 
+                              className={clsx(
+                                "absolute bottom-2 right-2 sm:bottom-2.5 sm:right-2.5 lg:bottom-3 lg:right-3 w-6 h-6 sm:w-7 sm:h-7 lg:w-8 lg:h-8 rounded-full flex items-center justify-center transition-all z-20 min-w-[24px] min-h-[24px]",
+                                isSelected ? "text-white" : "text-gray-600 group-hover:text-orange-600"
+                              )}
+                              style={isSelected ? {
+                                background: 'rgba(255, 255, 255, 0.35)',
+                                backdropFilter: 'blur(12px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.5)',
+                                boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                              } : {
+                                background: 'rgba(249, 250, 251, 0.8)',
+                                backdropFilter: 'blur(12px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.6)',
+                                boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.7)'
+                              }}
+                            >
+                              <ArrowRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 lg:w-4.5 lg:h-4.5 xl:w-5 xl:h-5" />
                             </div>
-                          </motion.button>
+                            </motion.button>
+                          </motion.div>
                         );
                       })}
                     </div>
@@ -1193,83 +1608,172 @@ export function CustomerPortal() {
 
                 {searchResults.length > 0 && (
                   <div>
-                    <h3 className="text-base sm:text-lg font-black text-gray-900 mb-3 sm:mb-4 lg:mb-5 uppercase tracking-wide">Search Results</h3>
+                    <div className="flex items-center justify-between mb-2 sm:mb-3 lg:mb-4">
+                      <h3 className="text-sm sm:text-base lg:text-lg font-black text-gray-900 uppercase tracking-wide px-1">Search Results</h3>
+                      {showingMostMatching && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl text-xs sm:text-sm font-medium" style={{
+                            background: 'rgba(251, 191, 36, 0.15)',
+                            backdropFilter: 'blur(10px) saturate(180%)',
+                            WebkitBackdropFilter: 'blur(10px) saturate(180%)',
+                            border: '1px solid rgba(251, 191, 36, 0.3)',
+                            boxShadow: '0 2px 8px 0 rgba(251, 191, 36, 0.1)'
+                          }}
+                        >
+                          <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 text-amber-600" />
+                          <span className="text-amber-700 font-semibold">Most Matching Results</span>
+                        </motion.div>
+                      )}
+                    </div>
+                    {showingMostMatching && (
+                      <motion.p
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="text-xs sm:text-sm text-gray-600 mb-3 sm:mb-4 px-1"
+                      >
+                        No exact matches found. Showing numbers with the most similar patterns to your search.
+                      </motion.p>
+                    )}
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 lg:gap-4">
                       {searchResults.map((num, i) => {
                         const isSelected = selectedNumbers.some(n => n.numberId === num.id);
                         return (
-                          <motion.button
+                          <motion.div
                             key={num.id}
                             initial={{ opacity: 0, y: 20 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: i * 0.05 }}
-                            whileHover={{ scale: 1.02, y: -2 }}
-                            whileTap={{ scale: 0.98 }}
-                            onClick={() => handleSelectNumber(num)}
-                            className={clsx(
-                              "relative p-2.5 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl lg:rounded-2xl border transition-all duration-300 group overflow-hidden backdrop-blur-2xl",
-                              isSelected
-                                ? "bg-gradient-to-br from-orange-500/90 to-amber-500/90 border-orange-400/60 shadow-2xl shadow-orange-500/40"
-                                : "bg-white/60 border-white/40 hover:border-orange-400/60 hover:shadow-2xl shadow-lg"
-                            )}
+                            className="relative rounded-xl sm:rounded-2xl p-[2px]"
                             style={{
-                              boxShadow: isSelected 
-                                ? '0 20px 25px -5px rgba(249, 115, 22, 0.3), 0 10px 10px -5px rgba(249, 115, 22, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.3)'
-                                : '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+                              background: isSelected 
+                                ? 'linear-gradient(135deg, rgba(249, 115, 22, 0.8), rgba(251, 191, 36, 0.8), rgba(249, 115, 22, 0.8))'
+                                : 'linear-gradient(135deg, rgba(249, 115, 22, 0.3), rgba(251, 191, 36, 0.3), rgba(249, 115, 22, 0.3))',
+                              boxShadow: isSelected
+                                ? '0 8px 24px 0 rgba(249, 115, 22, 0.3)'
+                                : '0 4px 12px 0 rgba(249, 115, 22, 0.15)'
                             }}
                           >
-                            {/* Glass morphism overlay - top shine */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-white/10 to-transparent rounded-lg sm:rounded-xl lg:rounded-2xl pointer-events-none" />
-                            
-                            {/* Glass morphism overlay - bottom depth */}
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/5 to-transparent rounded-lg sm:rounded-xl lg:rounded-2xl pointer-events-none" />
-                            
-                            {/* 3D border effect */}
-                            <div className="absolute inset-0 rounded-lg sm:rounded-xl lg:rounded-2xl border border-white/30 pointer-events-none" />
-                            
-                            {/* Shine effect on hover */}
-                            {!isSelected && (
-                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700 rounded-lg sm:rounded-xl lg:rounded-2xl" />
-                            )}
-                            
-                            {/* Content */}
-                            <div className="relative z-10 flex flex-col items-center justify-center min-h-[80px] sm:min-h-[100px] lg:min-h-[120px]">
-                              {/* Number */}
-                              <div className="mb-1.5 sm:mb-2 lg:mb-3">
-                                <span className={clsx(
-                                  "block text-base sm:text-lg md:text-xl lg:text-2xl font-black font-mono tracking-wide text-center",
-                                  isSelected ? "text-white" : "text-gray-900"
-                                )}>
-                                  {num.number}
-                                </span>
-                              </div>
+                            <motion.button
+                              whileHover={{ scale: 1.02, y: -2 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => handleSelectNumber(num)}
+                              className={clsx(
+                                "relative w-full rounded-xl sm:rounded-2xl transition-all duration-300 group overflow-hidden touch-manipulation min-h-[110px] sm:min-h-[130px] lg:min-h-[150px] p-3.5 sm:p-4.5 lg:p-5 xl:p-6",
+                                isSelected ? "scale-[1.02] sm:scale-105" : ""
+                              )}
+                              style={isSelected ? {
+                                background: 'rgba(249, 115, 22, 0.9)',
+                                backdropFilter: 'blur(24px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.35)',
+                                boxShadow: '0 20px 25px -5px rgba(249, 115, 22, 0.35), 0 10px 10px -5px rgba(249, 115, 22, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -1px 0 rgba(0, 0, 0, 0.05)'
+                              } : {
+                                background: 'rgba(255, 255, 255, 0.75)',
+                                backdropFilter: 'blur(24px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.5)',
+                                boxShadow: '0 4px 16px 0 rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.7), inset 0 -1px 0 rgba(0, 0, 0, 0.05)'
+                              }}
+                            >
+                              {/* Modern iOS Glass - Inner glow */}
+                              <div className="absolute inset-0 bg-gradient-to-br from-white/60 via-white/20 to-transparent rounded-xl sm:rounded-2xl pointer-events-none" />
                               
-                              {/* Category badge - centered at bottom */}
+                              {/* Modern iOS Glass - Border highlight */}
+                              <div className="absolute inset-0 rounded-xl sm:rounded-2xl border border-white/70 pointer-events-none" />
+                              
+                              {/* Shine effect on hover */}
+                              {!isSelected && (
+                                <motion.div 
+                                  className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent rounded-xl sm:rounded-2xl pointer-events-none"
+                                  initial={{ x: '-100%' }}
+                                  whileHover={{ x: '200%' }}
+                                  transition={{ duration: 0.8, ease: "easeInOut" }}
+                                />
+                              )}
+                              
+                              {/* Selected state glow */}
+                              {isSelected && (
+                                <motion.div 
+                                  className="absolute inset-0 bg-gradient-to-br from-white/30 via-transparent to-transparent rounded-xl sm:rounded-2xl pointer-events-none"
+                                  animate={{ opacity: [0.3, 0.5, 0.3] }}
+                                  transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                                />
+                              )}
+                              
+                              {/* Content */}
+                              <div className="relative z-10 flex flex-col items-center justify-center h-full min-h-[70px] sm:min-h-[90px] lg:min-h-[110px] gap-2 sm:gap-2.5 lg:gap-3">
+                                {/* Number with zoom effect and colorful highlights */}
+                                <div className="flex-1 flex items-center justify-center">
+                                  <motion.span 
+                                    className={clsx(
+                                      "block text-base sm:text-lg md:text-xl lg:text-2xl xl:text-3xl font-black font-mono tracking-wider text-center leading-none",
+                                      isSelected ? "text-white drop-shadow-sm" : "text-gray-900"
+                                    )}
+                                    whileHover={{ scale: 1.1 }}
+                                    transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                                  >
+                                    {searchTerm 
+                                      ? renderNumberWithHighlights(num.number, searchTerm)
+                                      : renderNumberWithHighlights(num.number, enteredPhone)
+                                    }
+                                  </motion.span>
+                                </div>
+                              
+                              {/* Category badge - Modern iOS Glass */}
                               {num.category && (() => {
                                 const categoryColors = getCategoryColor(num.category);
                                 return (
-                                  <span className={clsx(
-                                    "text-[10px] sm:text-xs lg:text-sm font-bold uppercase tracking-wide px-1.5 sm:px-2 lg:px-2.5 py-0.5 sm:py-1 rounded-md sm:rounded-lg lg:rounded-xl inline-block backdrop-blur-sm border shadow-sm",
-                                    isSelected
-                                      ? "bg-white/20 text-white border-white/30"
-                                      : `${categoryColors.bg} ${categoryColors.text} ${categoryColors.border}`
-                                  )}>
+                                  <span 
+                                    className={clsx(
+                                      "text-[9px] sm:text-[10px] lg:text-xs font-bold uppercase tracking-wider px-2 sm:px-2.5 lg:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl inline-block",
+                                      isSelected ? "text-white" : categoryColors.text
+                                    )}
+                                    style={isSelected ? {
+                                      background: 'rgba(255, 255, 255, 0.3)',
+                                      backdropFilter: 'blur(12px) saturate(180%)',
+                                      WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                      border: '1px solid rgba(255, 255, 255, 0.4)',
+                                      boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+                                    } : {
+                                      background: categoryColors.bg.includes('bg-') ? undefined : categoryColors.bg,
+                                      backdropFilter: 'blur(12px) saturate(180%)',
+                                      WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                      border: categoryColors.border.includes('border-') ? undefined : categoryColors.border,
+                                      boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.5)'
+                                    }}
+                                  >
                                     {num.category}
                                   </span>
                                 );
                               })()}
                             </div>
                             
-                            {/* Arrow indicator - bottom right */}
-                            <div className={clsx(
-                              "absolute bottom-1.5 right-1.5 sm:bottom-2 sm:right-2 w-6 h-6 sm:w-7 sm:h-7 lg:w-8 lg:h-8 rounded-full flex items-center justify-center transition-all backdrop-blur-sm border shadow-sm z-20",
-                              isSelected
-                                ? "bg-white/30 text-white border-white/40"
-                                : "bg-gray-100/80 text-gray-600 border-gray-200/50 group-hover:bg-orange-100/80 group-hover:text-orange-600 group-hover:border-orange-200/50"
-                            )}>
-                              <ArrowRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 lg:w-5 lg:h-5" />
+                            {/* Arrow indicator - Modern iOS Glass */}
+                            <div 
+                              className={clsx(
+                                "absolute bottom-2 right-2 sm:bottom-2.5 sm:right-2.5 lg:bottom-3 lg:right-3 w-6 h-6 sm:w-7 sm:h-7 lg:w-8 lg:h-8 rounded-full flex items-center justify-center transition-all z-20 min-w-[24px] min-h-[24px]",
+                                isSelected ? "text-white" : "text-gray-600 group-hover:text-orange-600"
+                              )}
+                              style={isSelected ? {
+                                background: 'rgba(255, 255, 255, 0.35)',
+                                backdropFilter: 'blur(12px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.5)',
+                                boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.6)'
+                              } : {
+                                background: 'rgba(249, 250, 251, 0.8)',
+                                backdropFilter: 'blur(12px) saturate(180%)',
+                                WebkitBackdropFilter: 'blur(12px) saturate(180%)',
+                                border: '1px solid rgba(255, 255, 255, 0.6)',
+                                boxShadow: '0 2px 8px 0 rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.7)'
+                              }}
+                            >
+                              <ArrowRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 lg:w-4.5 lg:h-4.5 xl:w-5 xl:h-5" />
                             </div>
-                          </motion.button>
+                            </motion.button>
+                          </motion.div>
                         );
                       })}
                     </div>
@@ -1461,9 +1965,6 @@ export function CustomerPortal() {
                 className="space-y-5"
               >
                 <div className="text-center mb-6">
-                  <div className="inline-block mb-3 px-4 py-2 bg-white/70 backdrop-blur-sm rounded-full border border-orange-200/60">
-                    <span className="text-orange-600 text-sm font-bold">Step 3 of 4</span>
-                  </div>
                    <h2 className="text-3xl font-black text-slate-800 mb-2">Your Details</h2>
                    <p className="text-slate-600 font-medium">Almost there! Just a few more details</p>
                 </div>
@@ -1522,7 +2023,7 @@ export function CustomerPortal() {
                                 type="text"
                                 value={formData.customerName}
                                 onChange={e => setFormData({...formData, customerName: e.target.value})}
-                                className="w-full bg-transparent text-gray-900 font-medium text-base focus:outline-none"
+                                className="w-full bg-transparent text-gray-900 font-medium text-base focus:outline-none py-2 touch-manipulation"
                                 placeholder="Mohammad"
                             />
                         </div>
@@ -1534,7 +2035,7 @@ export function CustomerPortal() {
                                 type="tel"
                                 value={formData.customerPhone}
                                 onChange={e => setFormData({...formData, customerPhone: e.target.value})}
-                                className="w-full bg-transparent text-gray-900 font-medium text-base focus:outline-none"
+                                className="w-full bg-transparent text-gray-900 font-medium text-base focus:outline-none py-2 touch-manipulation"
                                 placeholder="050 000 0000"
                             />
                         </div>
@@ -1546,7 +2047,7 @@ export function CustomerPortal() {
                                 type="text"
                                 value={formData.customerAddress}
                                 onChange={e => setFormData({...formData, customerAddress: e.target.value})}
-                                className="w-full bg-transparent text-gray-900 font-medium text-base focus:outline-none"
+                                className="w-full bg-transparent text-gray-900 font-medium text-base focus:outline-none py-2 touch-manipulation"
                                 placeholder="Building, Street, Area"
                             />
                         </div>
@@ -1557,7 +2058,7 @@ export function CustomerPortal() {
                                 <select
                                     value={formData.emirate}
                                     onChange={e => setFormData({...formData, emirate: e.target.value})}
-                                    className="w-full bg-transparent text-slate-800 font-medium focus:outline-none appearance-none"
+                                    className="w-full bg-transparent text-slate-800 font-medium focus:outline-none appearance-none py-2 touch-manipulation text-base"
                                 >
                                     <option value="">Select</option>
                                     {uaeEmirates.map(e => <option key={e} value={e}>{e}</option>)}
@@ -1568,7 +2069,7 @@ export function CustomerPortal() {
                                 <select
                                     value={formData.nationality}
                                     onChange={e => setFormData({...formData, nationality: e.target.value})}
-                                    className="w-full bg-transparent text-slate-800 font-medium focus:outline-none appearance-none"
+                                    className="w-full bg-transparent text-slate-800 font-medium focus:outline-none appearance-none py-2 touch-manipulation text-base"
                                 >
                                     <option value="">Select</option>
                                     {countryList.map(c => <option key={c.code} value={c.name}>{c.name}</option>)}
@@ -1582,7 +2083,7 @@ export function CustomerPortal() {
                                 <select
                                     value={formData.gender}
                                     onChange={e => setFormData({...formData, gender: e.target.value})}
-                                    className="w-full bg-transparent text-slate-800 font-medium focus:outline-none appearance-none"
+                                    className="w-full bg-transparent text-slate-800 font-medium focus:outline-none appearance-none py-2 touch-manipulation text-base"
                                 >
                                     <option value="">Select</option>
                                     <option value="Male">Male</option>
@@ -1622,7 +2123,7 @@ export function CustomerPortal() {
                             id="eid"
                             checked={formData.hasEmirateId}
                             onChange={e => setFormData({...formData, hasEmirateId: e.target.checked})}
-                            className="w-5 h-5 rounded border-2 border-slate-300 text-orange-500 focus:ring-orange-500"
+                            className="w-6 h-6 rounded border-2 border-slate-300 text-orange-500 focus:ring-orange-500 touch-manipulation cursor-pointer"
                         />
                         <label htmlFor="eid" className="text-sm font-bold text-slate-700">
                           I have a valid Emirates ID
@@ -1634,10 +2135,10 @@ export function CustomerPortal() {
                         whileTap={!isSubmitting ? { scale: 0.98 } : {}}
                         type="submit"
                         disabled={isSubmitting}
-                        className={`w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-orange-500/20 flex items-center justify-center gap-2 transition-all ${
+                        className={`w-full bg-gradient-to-r from-orange-500 to-amber-500 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-orange-500/20 flex items-center justify-center gap-2 transition-all touch-manipulation min-h-[56px] ${
                           isSubmitting 
                             ? 'opacity-75 cursor-not-allowed' 
-                            : 'hover:shadow-2xl hover:shadow-orange-500/30'
+                            : 'active:scale-95 active:shadow-lg hover:shadow-2xl hover:shadow-orange-500/30'
                         }`}
                     >
                         {isSubmitting ? (

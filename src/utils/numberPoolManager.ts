@@ -54,6 +54,8 @@ class NumberPoolManager {
   private listenerSetupTimeout: NodeJS.Timeout | null = null;
   private enableVisibleListeners = true; // Real-time updates for visible documents
   private preSearchPage = 1; // Remember the page before search started
+  private pendingRetryTimeout: NodeJS.Timeout | null = null; // Track pending retry timeout
+  private isDestroyed = false; // Flag to prevent retries after destroy
 
   static getInstance(): NumberPoolManager {
     if (!NumberPoolManager.instance) {
@@ -154,6 +156,11 @@ class NumberPoolManager {
         oldRole: this.currentUserRole,
         newRole: userRole
       });
+      // Clear any pending retry timeout when user changes
+      if (this.pendingRetryTimeout) {
+        clearTimeout(this.pendingRetryTimeout);
+        this.pendingRetryTimeout = null;
+      }
       // Force reset all state when user changes
       this.currentUserId = userId;
       this.currentUserRole = userRole;
@@ -242,6 +249,17 @@ class NumberPoolManager {
 
   // Initialize or get existing data
   async initialize(category: string | null = null, pageSize: number = 50, userId?: string, userRole?: string, group?: string | null, initials?: string | null): Promise<void> {
+    
+    // Don't initialize if manager has been destroyed and no user is provided (user logged out)
+    if (this.isDestroyed && !userId) {
+      return;
+    }
+    
+    // Reset destroyed flag if we have a valid user (new login after previous logout)
+    if (userId && this.isDestroyed) {
+      // New user login after destroy - reset the flag to allow initialization
+      this.isDestroyed = false;
+    }
     
     // Check user change first - this will force reset if user changed
     const userChanged = this.checkUserChange(userId, userRole);
@@ -357,7 +375,7 @@ class NumberPoolManager {
 
       this.isInitialized = true;
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('[NumberPoolManager] Error initializing NumberPool:', error);
       // Mark as not initialized so next attempt will retry
       this.isInitialized = false;
@@ -372,10 +390,36 @@ class NumberPoolManager {
         selectedCategory: category
       });
       
-      // Auto-retry after a delay if initialization failed
-      setTimeout(() => {
-        // Only retry if still not initialized, user unchanged, and user still present
-        if (!this.isInitialized && userId && this.currentUserId === userId) {
+      // Check if error is a permission error (indicates user logged out)
+      const isPermissionError = error?.code === 'permission-denied' || 
+                                error?.code === 'PERMISSION_DENIED' ||
+                                error?.message?.includes('Missing or insufficient permissions') ||
+                                error?.message?.includes('permission-denied');
+      
+      // Don't retry if:
+      // 1. It's a permission error (user logged out)
+      // 2. Manager has been destroyed
+      // 3. User has changed (logout happened)
+      if (isPermissionError || this.isDestroyed || this.currentUserId !== userId) {
+        console.log('[NumberPoolManager] Skipping retry - permission error or user logged out');
+        return;
+      }
+      
+      // Clear any existing retry timeout
+      if (this.pendingRetryTimeout) {
+        clearTimeout(this.pendingRetryTimeout);
+        this.pendingRetryTimeout = null;
+      }
+      
+      // Auto-retry after a delay if initialization failed (only for non-permission errors)
+      this.pendingRetryTimeout = setTimeout(() => {
+        this.pendingRetryTimeout = null;
+        // Only retry if:
+        // 1. Still not initialized
+        // 2. User unchanged and still present
+        // 3. Manager not destroyed
+        // 4. Not a permission error
+        if (!this.isDestroyed && !this.isInitialized && userId && this.currentUserId === userId) {
           console.log('[NumberPoolManager] Auto-retrying initialization after error');
           this.initialize(category, pageSize, userId, userRole, group, initials).catch(err => {
             console.error('[NumberPoolManager] Retry initialization failed:', err);
@@ -1192,6 +1236,15 @@ class NumberPoolManager {
   // Cleanup
   destroy() {
     try {
+      // Mark as destroyed to prevent any retries
+      this.isDestroyed = true;
+      
+      // Clear any pending retry timeout
+      if (this.pendingRetryTimeout) {
+        clearTimeout(this.pendingRetryTimeout);
+        this.pendingRetryTimeout = null;
+      }
+      
     if (this.pagination) {
         try {
       this.pagination.clearCache();
@@ -1242,6 +1295,7 @@ class NumberPoolManager {
       this.isInitialized = false;
       this.currentUserId = undefined;
       this.currentUserRole = undefined;
+      this.isDestroyed = true;
     }
   }
 }

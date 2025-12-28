@@ -95,6 +95,7 @@ import {
   ChevronDown,
   CheckCircle2,
   CheckCircle,
+  Circle,
   X,
   Copy,
   FileWarning,
@@ -459,10 +460,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   const [currentPage, setCurrentPage] = useState(1);
-  // Mobile-optimized page size
+  // Default page size: 10 for desktop, 20 for mobile
   const [pageSize, setPageSize] = useState(() => {
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    return isMobile ? 20 : paginationUtils.calculateOptimalPageSize();
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    return isMobileDevice ? 20 : 10;
   });
   const [totalPages, setTotalPages] = useState(0);
   const [totalItems, setTotalItems] = useState(0);
@@ -559,6 +560,31 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [selectedDuplicateEntries, setSelectedDuplicateEntries] = useState<Set<string>>(new Set());
   const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false);
   const [showDeleteDuplicatesDialog, setShowDeleteDuplicatesDialog] = useState(false);
+  
+  // Number status checker state
+  const [showNumberStatusChecker, setShowNumberStatusChecker] = useState(false);
+  const [pastedNumbers, setPastedNumbers] = useState('');
+  const [numberStatusResults, setNumberStatusResults] = useState<Array<{
+    number: string;
+    found: boolean;
+    data?: NumberPoolType;
+  }>>([]);
+  const [checkingNumbers, setCheckingNumbers] = useState(false);
+  const [copiedFeedback, setCopiedFeedback] = useState<{
+    type: 'open' | 'reserved' | 'all';
+    timestamp: number;
+  } | null>(null);
+
+  // Parse valid numbers from pasted text in real-time
+  const validPastedNumbers = useMemo(() => {
+    if (!pastedNumbers.trim()) return [];
+    return pastedNumbers
+      .split(/[\n,\s]+/)
+      .map(n => n.trim())
+      .filter(n => n.length > 0)
+      .map(n => n.replace(/\D/g, ''))
+      .filter(n => n.length === 10);
+  }, [pastedNumbers]);
 
   const formatStatusLabel = useCallback((status?: string) => {
     if (!status) return 'Unknown';
@@ -738,6 +764,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   
   // Bulk copy utility - reuse selectedNumbers state for checkboxes
   const [bulkCopyMode, setBulkCopyMode] = useState(false);
+  const [showBulkCopyWarning, setShowBulkCopyWarning] = useState(false);
+  const [bulkCopyWarningMessage, setBulkCopyWarningMessage] = useState('');
 
   // Export numbers (admin)
   const [showExportModal, setShowExportModal] = useState(false);
@@ -770,6 +798,96 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         ? prev.filter(k => k !== key)
         : [...prev, key]
     );
+  };
+
+  // Check numbers status from pasted list
+  const handleCheckNumbers = async () => {
+    if (!pastedNumbers.trim()) {
+      toast.error('Please paste numbers to check');
+      return;
+    }
+
+    setCheckingNumbers(true);
+    try {
+      // Parse numbers from pasted text (support line breaks, comma-separated, and space-separated)
+      const numberStrings = pastedNumbers
+        .split(/[\n,\s]+/) // Split by newlines, commas, or spaces
+        .map(n => n.trim())
+        .filter(n => n.length > 0)
+        .map(n => n.replace(/\D/g, '')) // Remove non-digits
+        .filter(n => n.length === 10); // Only 10-digit numbers
+
+      if (numberStrings.length === 0) {
+        toast.error('No valid 10-digit numbers found. Please ensure numbers are 10 digits.');
+        setCheckingNumbers(false);
+        return;
+      }
+
+      // Remove duplicates
+      const uniqueNumbers = [...new Set(numberStrings)];
+
+      // Query Firestore for these numbers
+      // Firestore 'in' query supports up to 10 items, so we need to batch
+      const results: Array<{ number: string; found: boolean; data?: NumberPoolType }> = [];
+      
+      for (let i = 0; i < uniqueNumbers.length; i += 10) {
+        const batch = uniqueNumbers.slice(i, i + 10);
+        const q = query(
+          collection(db, 'numberPool'),
+          where('number', 'in', batch)
+        );
+        const snapshot = await getDocs(q);
+        
+        const foundNumbers = new Set<string>();
+        snapshot.docs.forEach(doc => {
+          const data = doc.data() as any;
+          foundNumbers.add(data.number);
+          results.push({
+            number: data.number,
+            found: true,
+            data: {
+              id: doc.id,
+              ...data,
+              lastStatusChange: data.lastStatusChange?.toDate ? data.lastStatusChange.toDate() : data.lastStatusChange,
+              createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+              expiresAt: data.expiresAt?.toDate ? data.expiresAt.toDate() : data.expiresAt,
+              reservedAt: data.reservedAt?.toDate ? data.reservedAt.toDate() : data.reservedAt,
+              claimingStartedAt: data.claimingStartedAt?.toDate ? data.claimingStartedAt.toDate() : data.claimingStartedAt,
+              claimingExpiresAt: data.claimingExpiresAt?.toDate ? data.claimingExpiresAt.toDate() : data.claimingExpiresAt,
+            } as NumberPoolType
+          });
+        });
+
+        // Add not found numbers
+        batch.forEach(num => {
+          if (!foundNumbers.has(num)) {
+            results.push({
+              number: num,
+              found: false
+            });
+          }
+        });
+      }
+
+      setNumberStatusResults(results);
+      toast.success(`Checked ${uniqueNumbers.length} number(s)`);
+    } catch (error) {
+      console.error('Error checking numbers:', error);
+      toast.error('Failed to check numbers');
+    } finally {
+      setCheckingNumbers(false);
+    }
+  };
+
+  // Copy number to clipboard
+  const copyNumber = async (number: string) => {
+    try {
+      await navigator.clipboard.writeText(number);
+      toast.success(`Copied ${number}`);
+    } catch (error) {
+      console.error('Failed to copy:', error);
+      toast.error('Failed to copy number');
+    }
   };
 
   const handleExportNumbers = async () => {
@@ -1615,7 +1733,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
    * Toggle number selection for bulk copy
    * Also automatically adds/removes number from notepad (with duplicate check)
    */
-  const toggleNumberSelection = useCallback((numberId: string, phoneNumber: string) => {
+  const toggleNumberSelection = useCallback((numberId: string, phoneNumber: string, numberStatus?: string) => {
     setSelectedNumbers(prev => {
       const isCurrentlySelected = prev.includes(numberId);
       
@@ -1628,6 +1746,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         });
         return prev.filter(id => id !== numberId);
       } else {
+        // Check if number status is not open or reserved, show warning (after state update)
+        if (numberStatus && numberStatus !== 'open' && numberStatus !== 'reserved') {
+          const statusLabel = formatStatusLabel(numberStatus);
+          // Use setTimeout to avoid updating during render
+          setTimeout(() => {
+            setBulkCopyWarningMessage(`Number status is "${statusLabel}". Only open and reserved numbers are recommended for bulk copy.`);
+            setShowBulkCopyWarning(true);
+          }, 0);
+        }
+        
         // Add to selection and notepad (check for duplicates)
         setNotepadContent(currentContent => {
           const trimmedContent = currentContent.trim();
@@ -1647,7 +1775,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         return [...prev, numberId];
       }
     });
-  }, []);
+  }, [formatStatusLabel]);
   
   /**
    * Select all visible numbers on current page
@@ -1657,6 +1785,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const visibleNumbers = debouncedSearchTerm.trim() ? searchResults : numbers;
     const allIds = visibleNumbers.map(n => n.id);
     const allPhoneNumbers = visibleNumbers.map(n => n.number).join('\n');
+    
+    // Check for numbers that are not open or reserved and show warning (before state update)
+    const nonOpenReservedNumbers = visibleNumbers.filter(n => n.status && n.status !== 'open' && n.status !== 'reserved');
+    if (nonOpenReservedNumbers.length > 0) {
+      const statusCounts = new Map<string, number>();
+      nonOpenReservedNumbers.forEach(n => {
+        const status = n.status || 'unknown';
+        statusCounts.set(status, (statusCounts.get(status) || 0) + 1);
+      });
+      
+      const statusMessages = Array.from(statusCounts.entries())
+        .map(([status, count]) => `${formatStatusLabel(status)}: ${count}`)
+        .join(', ');
+      
+      // Use setTimeout to avoid updating during render
+      setTimeout(() => {
+        setBulkCopyWarningMessage(`${nonOpenReservedNumbers.length} number(s) with status "${statusMessages}" selected. Only open and reserved numbers are recommended for bulk copy.`);
+        setShowBulkCopyWarning(true);
+      }, 0);
+    }
     
     setSelectedNumbers(allIds);
     
@@ -1678,7 +1826,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       }
       return trimmedContent;
     });
-  }, [numbers, searchResults, debouncedSearchTerm]);
+  }, [numbers, searchResults, debouncedSearchTerm, formatStatusLabel]);
   
   /**
    * Clear selected numbers (they're already in notepad)
@@ -2416,91 +2564,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   // Use displayNumbers instead of paginatedNumbers for the new pagination system
   const paginatedNumbers = displayNumbers;
-
-  // Check and mark active numbers with strike-through
-  const checkAndMarkActiveNumbers = useCallback(async (numbersToCheck: NumberPoolType[]) => {
-    if (!user?.id || numbersToCheck.length === 0) return;
-
-    // Check each number that doesn't already have struckThrough set
-    for (const number of numbersToCheck) {
-      // First check: If status is 'activated', mark as struck through immediately
-      if (number.status === 'activated') {
-        if (number.struckThrough !== true) {
-          try {
-            const numberRef = doc(db, 'numberPool', number.id);
-            await updateDoc(numberRef, {
-              struckThrough: true
-            });
-            // Update local state
-            setNumbers(prev => prev.map(n => 
-              n.id === number.id ? { ...n, struckThrough: true } : n
-            ));
-          } catch (error) {
-            console.error(`Error updating struckThrough for number ${number.id}:`, error);
-          }
-        }
-        continue; // Skip API check if status is already 'activated'
-      }
-
-      // Skip if already checked
-      if (number.struckThrough === true) {
-        continue;
-      }
-
-      // Check if number is active via API (only for numbers not already marked)
-      try {
-        const { NumberCheckService } = await import('../../services/numberCheckService');
-        const result = await NumberCheckService.checkNumberStatus(number.number);
-        
-        if (result.isActive) {
-          // Number is active, mark as struck through
-          try {
-            const numberRef = doc(db, 'numberPool', number.id);
-            await updateDoc(numberRef, {
-              struckThrough: true
-            });
-            // Update local state
-            setNumbers(prev => prev.map(n => 
-              n.id === number.id ? { ...n, struckThrough: true } : n
-            ));
-          } catch (error) {
-            console.error(`Error updating struckThrough for number ${number.id}:`, error);
-          }
-        } else {
-          // Number is not active, ensure struckThrough is false
-          if (number.struckThrough) {
-            try {
-              const numberRef = doc(db, 'numberPool', number.id);
-              await updateDoc(numberRef, {
-                struckThrough: false
-              });
-              // Update local state
-              setNumbers(prev => prev.map(n => 
-                n.id === number.id ? { ...n, struckThrough: false } : n
-              ));
-            } catch (error) {
-              console.error(`Error updating struckThrough for number ${number.id}:`, error);
-            }
-          }
-        }
-      } catch (error) {
-        console.error(`Error checking number status for ${number.number}:`, error);
-      }
-    }
-  }, [user?.id]);
-
-  // Check numbers when they're displayed (debounced to avoid too many API calls)
-  useEffect(() => {
-    if (!loading && paginatedNumbers.length > 0) {
-      // Only check numbers that are visible on current page
-      // Add a small delay to batch checks
-      const timeoutId = setTimeout(() => {
-        checkAndMarkActiveNumbers(paginatedNumbers);
-      }, 1000); // Wait 1 second after numbers are loaded
-
-      return () => clearTimeout(timeoutId);
-    }
-  }, [paginatedNumbers, loading, checkAndMarkActiveNumbers]);
 
   async function handleReserve(number: NumberPoolType) {
     // Enforce cap using global reservedNumbers (listener-backed, not page-limited)
@@ -3919,129 +3982,135 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
    * Main component render - comprehensive number pool interface with all dialogs and tables
    */
   return showPool ? (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 pb-12 pt-0 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
         {/* Header Section */}
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
-          className="mb-12"
+            className="mb-6 sm:mb-12 pt-2"
         >
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div className="flex-1">
-              <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
+           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 sm:gap-4">
+            <div className="w-full">
+               <h1 className="text-2xl sm:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
                 Number Pool
               </h1>
-              <p className="mt-2 text-lg text-gray-600">
+               <p className="mt-1 sm:mt-2 text-sm sm:text-lg text-gray-600">
                 Manage and reserve phone numbers for your leads
             </p>
             </div>
-            {isAdmin() && (
-              <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              {isAdmin() && (
+                <>
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleCheckDuplicates}
+                    disabled={checkingDuplicates}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed border border-gray-200"
+                  >
+                    <div className="bg-gradient-to-br from-orange-500 to-red-600 p-1 rounded flex-shrink-0">
+                      {checkingDuplicates ? (
+                        <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
+                      ) : (
+                        <FileWarning className="w-3.5 h-3.5 text-white" />
+                      )}
+                    </div>
+                    <span className="text-xs font-medium text-gray-700 whitespace-nowrap">
+                      {checkingDuplicates ? 'Checking...' : 'Check Duplicates'}
+                    </span>
+                  </motion.button>
+                  <button
+                    onClick={() => {
+                      setShowExportModal(true);
+                    }}
+                    type="button"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer border border-gray-200"
+                  >
+                    <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-1 rounded flex-shrink-0">
+                      <Download className="w-3.5 h-3.5 text-white" />
+                    </div>
+                    <div className="flex flex-col items-start leading-tight">
+                      <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Export</span>
+                      <span className="text-[10px] text-gray-500 whitespace-nowrap">Choose columns</span>
+                    </div>
+                  </button>
+                </>
+              )}
+              {user?.role === 'agent' && (
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  onClick={handleCheckDuplicates}
-                  disabled={checkingDuplicates}
-                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <div className="flex items-center">
-                    <div className="bg-gradient-to-br from-orange-500 to-red-600 p-2 rounded-lg mr-3">
-                      {checkingDuplicates ? (
-                        <Loader2 className="w-5 h-5 text-white animate-spin" />
-                      ) : (
-                        <FileWarning className="w-5 h-5 text-white" />
-                      )}
-                    </div>
-                    <div>
-                      <span className="block text-sm font-semibold text-gray-900">
-                        {checkingDuplicates ? 'Checking...' : 'Check Duplicates'}
-                      </span>
-                    </div>
-                  </div>
-                </motion.button>
-                <button
                   onClick={() => {
-                    setShowExportModal(true);
+                    setShowNumberStatusChecker(true);
+                    setPastedNumbers('');
+                    setNumberStatusResults([]);
                   }}
                   type="button"
-                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer border border-gray-200"
                 >
-                  <div className="flex items-center">
-                    <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-2 rounded-lg mr-3">
-                      <Download className="w-5 h-5 text-white" />
-                    </div>
-                    <div>
-                      <span className="block text-sm font-semibold text-gray-900">
-                        Export Numbers
-                      </span>
-                      <span className="block text-xs text-gray-500">Choose columns</span>
-                    </div>
+                  <div className="bg-gradient-to-br from-purple-500 to-pink-600 p-1 rounded flex-shrink-0">
+                    <Clipboard className="w-3.5 h-3.5 text-white" />
                   </div>
-                </button>
-              </div>
-            )}
-            {(isCoordinator || isAdmin()) && (
-              <div className="flex items-center gap-4">
+                  <div className="flex flex-col items-start leading-tight">
+                    <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Check Your List</span>
+                  </div>
+                </motion.button>
+              )}
+              {(isCoordinator || isAdmin()) && (
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   onClick={() => setShowAddDialog(true)}
-                  className="inline-flex items-center px-4 py-2 bg-white rounded-lg shadow-lg hover:shadow-xl transition-all duration-300 border border-gray-200"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 border border-gray-200"
                 >
-                  <div className="flex items-center">
-                    <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-2 rounded-lg mr-3">
-                      <Hash className="w-5 h-5 text-white" />
-                    </div>
-                    <div>
-                      <span className="block text-sm font-semibold text-gray-900">Add Number</span>
-                    </div>
+                  <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1 rounded flex-shrink-0">
+                    <Hash className="w-3.5 h-3.5 text-white" />
                   </div>
+                  <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Add Number</span>
                 </motion.button>
-              </div>
-            )}
+              )}
+            </div>
             {/* Agent Utilities */}
             {user?.role === 'agent' && (
-              <div className="flex items-center gap-3 flex-wrap">
-                {/* My Claim Quota Summary */}
-                <div className="flex flex-col gap-3 bg-white border border-indigo-100 rounded-xl px-4 py-3 shadow-sm min-w-[260px]">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-2">
-                      <div className="p-2 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 text-white shadow-sm">
-                        <Shield className="h-4 w-4" />
+              <div className="flex items-center gap-2 flex-wrap justify-between w-full">
+                {/* My Claim Quota Summary - Compact for Single Row */}
+                <div className="flex items-center gap-1.5 sm:gap-2 bg-white border border-indigo-100 rounded-lg sm:rounded-xl px-2 sm:px-3 py-1.5 sm:py-2 shadow-sm">
+                  <div className="p-1 sm:p-1.5 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 text-white shadow-sm flex-shrink-0">
+                    <Shield className="h-3 w-3 sm:h-4 sm:w-4" />
                       </div>
-                      <div>
-                        <span className="text-sm font-semibold text-gray-900">My Claim Quota</span>
-                        <div className="mt-2 flex gap-2 flex-wrap">
-                          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-blue-100 text-blue-800 text-[11px] font-semibold">
-                            Used: {userClaimCount} / {MAX_CLAIMS_PER_24H}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
+                      <span className="inline-flex items-center gap-0.5 sm:gap-1 px-1 sm:px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[8px] sm:text-[10px] font-semibold whitespace-nowrap">
+                        <CheckCircle className="h-2.5 w-2.5 sm:hidden" />
+                        <span className="hidden sm:inline">Used:</span> {userClaimCount}/{MAX_CLAIMS_PER_24H}
                           </span>
-                          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-semibold">
-                            Available: {Math.max(0, MAX_CLAIMS_PER_24H - userClaimCount)}
+                      <span className="inline-flex items-center gap-0.5 sm:gap-1 px-1 sm:px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[8px] sm:text-[10px] font-semibold whitespace-nowrap">
+                        <Circle className="h-2.5 w-2.5 sm:hidden" />
+                        <span className="hidden sm:inline">Avail:</span> {Math.max(0, MAX_CLAIMS_PER_24H - userClaimCount)}
                           </span>
-                          <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-purple-100 text-purple-800 text-[11px] font-semibold">
-                            Being claimed: {myBeingClaimedAll.length}
+                      <span className="inline-flex items-center gap-0.5 sm:gap-1 px-1 sm:px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-800 text-[8px] sm:text-[10px] font-semibold whitespace-nowrap">
+                        <Clock className="h-2.5 w-2.5 sm:hidden" />
+                        <span className="hidden sm:inline">Claiming:</span> {myBeingClaimedAll.length}
                           </span>
-                        </div>
                       </div>
                     </div>
                     <button
                       onClick={() => setShowMyClaimsDialog(true)}
-                      className="text-[11px] px-3 py-1 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm"
+                    className="text-[8px] sm:text-[10px] px-1.5 sm:px-2 py-0.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm flex-shrink-0 whitespace-nowrap"
                     >
                       View
                     </button>
-                  </div>
                 </div>
 
-                {/* Bulk Copy Button - Left */}
-                <div className="flex items-center gap-2">
+                {/* Bulk Copy and Notes Buttons */}
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 ml-auto">
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={selectedNumbers.length > 0 ? clearSelectedNumbers : toggleBulkCopyMode}
-                    className={`inline-flex items-center h-9 px-3 rounded-lg shadow hover:shadow-md transition-all duration-300 border ${
+                    className={`inline-flex items-center h-8 sm:h-9 px-2 sm:px-2.5 rounded-lg shadow hover:shadow-md transition-all duration-300 border ${
                       bulkCopyMode 
                         ? selectedNumbers.length > 0
                           ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white border-green-600'
@@ -4051,13 +4120,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   >
                     {selectedNumbers.length > 0 ? (
                       <>
-                        <Check className="w-4 h-4 transition-all duration-300" />
-                        <span className="ml-2 text-xs font-semibold">Done ({selectedNumbers.length})</span>
+                        <Check className="w-3.5 h-3.5 sm:w-4 sm:h-4 transition-all duration-300" />
+                        <span className="ml-1 sm:ml-1.5 text-[10px] sm:text-xs font-semibold">Done ({selectedNumbers.length})</span>
                       </>
                     ) : (
                       <>
-                        <Clipboard className="w-4 h-4 transition-all duration-300" />
-                        <span className="ml-2 text-xs font-medium">Bulk Copy</span>
+                        <Clipboard className="w-3.5 h-3.5 sm:w-4 sm:h-4 transition-all duration-300" />
+                        <span className="ml-1 sm:ml-1.5 text-[10px] sm:text-xs font-medium">Bulk Copy</span>
                       </>
                     )}
                   </motion.button>
@@ -4070,10 +4139,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     <motion.button
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
-                      className="inline-flex items-center h-9 px-3 bg-white rounded-lg shadow hover:shadow-md transition-all duration-300 border border-gray-200"
+                      className="inline-flex items-center h-8 sm:h-9 px-2 sm:px-2.5 bg-white rounded-lg shadow hover:shadow-md transition-all duration-300 border border-gray-200"
                     >
-                      <StickyNote className={`w-4 h-4 transition-colors duration-300 ${showNotepad ? 'text-blue-600' : 'text-gray-600'}`} />
-                      <span className="ml-2 text-xs font-medium text-gray-700">Notes</span>
+                      <StickyNote className={`w-3.5 h-3.5 sm:w-4 sm:h-4 transition-colors duration-300 ${showNotepad ? 'text-blue-600' : 'text-gray-600'}`} />
+                      <span className="ml-1 sm:ml-1.5 text-[10px] sm:text-xs font-medium text-gray-700">Notes</span>
                     </motion.button>
                   </motion.div>
                 </div>
@@ -4191,28 +4260,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           transition={{ duration: 0.5, delay: 0.2 }}
           className="mb-10"
         >
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {/* Search Input */}
-            <div className="relative group">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                <Search className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+          {/* Desktop: Search bar in first row, filters in second row */}
+          <div className="flex flex-col gap-3 md:gap-4">
+            {/* Search Input - Full width row on desktop */}
+            <div className="relative group w-full">
+              <div className="absolute inset-y-0 left-0 pl-3 sm:pl-4 flex items-center pointer-events-none">
+                <Search className="h-4 w-4 sm:h-5 sm:w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
               </div>
               <input
                 type="text"
                 placeholder="Search numbers or codes..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-12 pr-32 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200"
+                className="pl-10 sm:pl-12 pr-28 sm:pr-32 py-2.5 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 text-sm sm:text-base"
               />
               {isSearching && (
-                <div className="absolute inset-y-0 right-24 pr-4 flex items-center">
-                  <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+                <div className="absolute inset-y-0 right-20 sm:right-24 pr-3 sm:pr-4 flex items-center">
+                  <Loader2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 animate-spin text-gray-400" />
                 </div>
               )}
               {/* Ends With Toggle (switch) */}
-              <div className="absolute inset-y-0 right-12 flex items-center">
+              <div className="absolute inset-y-0 right-12 sm:right-12 flex items-center">
                 <label
-                  className="flex items-center gap-2 text-xs font-medium select-none cursor-pointer"
+                  className="flex items-center gap-1 sm:gap-2 text-xs font-medium select-none cursor-pointer"
                   title={
                     searchTerm.trim() && !/^\d{2,5}$/.test(searchTerm.trim())
                       ? "Ends with search only works for 2-5 digit numbers"
@@ -4233,15 +4303,15 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   />
                   <span
                     className={clsx(
-                      "relative inline-flex h-5 w-10 items-center rounded-full transition-colors",
+                      "relative inline-flex h-4 w-8 sm:h-5 sm:w-10 items-center rounded-full transition-colors",
                       endsWithToggle ? "bg-indigo-500" : "bg-gray-300",
                       searchTerm.trim() && !/^\d{2,5}$/.test(searchTerm.trim()) && "opacity-40 cursor-not-allowed"
                     )}
                   >
                     <span
                       className={clsx(
-                        "inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform",
-                        endsWithToggle ? "translate-x-5" : "translate-x-1"
+                        "inline-block h-3 w-3 sm:h-4 sm:w-4 rounded-full bg-white shadow transform transition-transform",
+                        endsWithToggle ? "translate-x-4 sm:translate-x-5" : "translate-x-0.5 sm:translate-x-1"
                       )}
                     />
                   </span>
@@ -4272,14 +4342,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     toast.error('Refresh failed or timed out');
                   }
                 }}
-                className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="absolute inset-y-0 right-0 px-2 sm:px-3 flex items-center text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Refresh data (real-time updates active)"
                 disabled={loading && !debouncedSearchTerm.trim()}
               >
-                <RefreshCw className={`h-4 w-4 ${loading && !debouncedSearchTerm.trim() ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${loading && !debouncedSearchTerm.trim() ? 'animate-spin' : ''}`} />
               </button>
               {debouncedSearchTerm.trim() && (
-                <div className="mt-1 text-xs text-gray-500 pl-12">
+                <div className="mt-1 text-xs text-gray-500 pl-10 sm:pl-12">
                   {isSearching ? 'Searching…' : (
                     <>
                       Found {fullSearchResultsRef.current.length} result{fullSearchResultsRef.current.length === 1 ? '' : 's'}
@@ -4297,15 +4367,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               )}
             </div>
 
+            {/* Filters - Second row on desktop, grid on mobile */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 md:gap-2">
             {/* Category Filter */}
             <div className="relative group">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+                <div className="absolute inset-y-0 left-0 pl-2 sm:pl-4 flex items-center pointer-events-none">
+                  <Filter className="h-3.5 w-3.5 sm:h-5 sm:w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
               </div>
               <select
                 value={selectedCategory || ''}
                 onChange={(e) => setSelectedCategory(e.target.value || null)}
-                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+                  className="pl-8 sm:pl-12 pr-2 sm:pr-4 py-2 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none text-xs sm:text-sm"
               >
                 <option value="">All Categories</option>
                 {CATEGORIES.map(category => (
@@ -4316,8 +4388,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
             {/* Group Filter */}
             <div className="relative group">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+                <div className="absolute inset-y-0 left-0 pl-2 sm:pl-4 flex items-center pointer-events-none">
+                  <Filter className="h-3.5 w-3.5 sm:h-5 sm:w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
               </div>
               <select
                 value={selectedGroup || ''}
@@ -4329,7 +4401,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   setSelectedGroup(val);
                 }}
                 disabled={!!(allowedGroups && allowedGroups.length === 1)}
-                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  className="pl-8 sm:pl-12 pr-2 sm:pr-4 py-2 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none disabled:bg-gray-100 disabled:cursor-not-allowed text-xs sm:text-sm"
               >
                 {!allowedGroups && <option value="">All Groups</option>}
                 {(allowedGroups || GROUPS).map(group => (
@@ -4340,13 +4412,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
             {/* Initials Filter */}
             <div className="relative group">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                <Filter className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+                <div className="absolute inset-y-0 left-0 pl-2 sm:pl-4 flex items-center pointer-events-none">
+                  <Filter className="h-3.5 w-3.5 sm:h-5 sm:w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
               </div>
               <select
                 value={selectedInitials || ''}
                 onChange={(e) => setSelectedInitials(e.target.value || null)}
-                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+                  className="pl-8 sm:pl-12 pr-2 sm:pr-4 py-2 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none text-xs sm:text-sm"
               >
                 <option value="">All Initials</option>
                 {INITIALS.map(initials => (
@@ -4357,18 +4429,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
             {/* Page Size Selector */}
             <div className="relative group">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                <Hash className="h-5 w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
+                <div className="absolute inset-y-0 left-0 pl-2 sm:pl-4 flex items-center pointer-events-none">
+                  <Hash className="h-3.5 w-3.5 sm:h-5 sm:w-5 text-gray-400 group-hover:text-indigo-500 transition-colors" />
               </div>
               <select
                 value={pageSize}
                 onChange={(e) => setPageSize(Number(e.target.value) as typeof PAGE_SIZES[number])}
-                className="pl-12 pr-4 py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none"
+                  className="pl-8 sm:pl-12 pr-2 sm:pr-4 py-2 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 appearance-none text-xs sm:text-sm"
               >
                 {PAGE_SIZES.map(size => (
                   <option key={size} value={size}>{size} per page</option>
                 ))}
               </select>
+              </div>
             </div>
           </div>
         </motion.div>
@@ -5367,7 +5440,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             type="checkbox"
             className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 transition-colors"
                           checked={selectedNumbers.includes(number.id)}
-                          onChange={() => toggleNumberSelection(number.id, number.number)}
+                          onChange={() => toggleNumberSelection(number.id, number.number, number.status)}
                           onClick={(e) => e.stopPropagation()}
           />
         </td>
@@ -6703,6 +6776,416 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         </AnimatePresence>
       </div>
 
+      {/* Number Status Checker Modal */}
+      {showNumberStatusChecker && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-black/40 px-0 sm:px-4"
+          onClick={() => {
+            if (!checkingNumbers) setShowNumberStatusChecker(false);
+          }}
+          style={{ zIndex: 9999 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-4xl max-h-[95vh] sm:max-h-[90vh] flex flex-col"
+            style={{ position: 'relative', zIndex: 10000 }}
+          >
+            <div className="flex items-center justify-between p-3 sm:p-4 md:p-6 border-b border-gray-200 bg-gradient-to-r from-indigo-50 to-purple-50">
+              <div className="flex-1 min-w-0">
+                <h3 className="text-base sm:text-lg font-semibold text-gray-900 flex items-center gap-1.5 sm:gap-2">
+                  <Clipboard className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-600 flex-shrink-0" />
+                  <span className="truncate">Check Your List</span>
+                </h3>
+                <p className="text-xs sm:text-sm text-gray-500 mt-0.5 sm:mt-1 hidden sm:block">Paste numbers in any format (newlines, commas, or spaces) to check their status</p>
+              </div>
+              <button
+                onClick={() => setShowNumberStatusChecker(false)}
+                className="text-gray-500 hover:text-gray-700 flex-shrink-0 ml-2"
+                disabled={checkingNumbers}
+              >
+                <X className="h-4 w-4 sm:h-5 sm:w-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 space-y-3 sm:space-y-4">
+              {/* Input Area */}
+              <div>
+                <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1.5 sm:mb-2">
+                  Paste Numbers
+                </label>
+                <textarea
+                  value={pastedNumbers}
+                  onChange={(e) => setPastedNumbers(e.target.value)}
+                  placeholder="Paste numbers (any format)&#10;971501234567&#10;971509876543"
+                  className="w-full h-24 sm:h-32 md:h-36 px-3 sm:px-4 py-2 sm:py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none font-mono text-xs sm:text-sm"
+                  disabled={checkingNumbers}
+                />
+                <div className="mt-1.5 sm:mt-2 flex items-start gap-1.5 sm:gap-2">
+                  <Info className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+                  <p className="text-[10px] sm:text-xs text-gray-500 leading-tight">
+                    Numbers can be separated by newlines, commas, or spaces. Only 10-digit numbers will be processed.
+                  </p>
+                </div>
+                
+                {/* Show valid parsed numbers count below the input */}
+                {validPastedNumbers.length > 0 && (
+                  <div className="mt-2 sm:mt-3 p-2 sm:p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs sm:text-sm font-semibold text-indigo-900">
+                        Valid: {validPastedNumbers.length}
+                      </span>
+                      <button
+                        onClick={() => {
+                          const numbersText = validPastedNumbers.join('\n');
+                          copyNumber(numbersText);
+                          toast.success(`Copied ${validPastedNumbers.length} number(s)`);
+                        }}
+                        className="text-[10px] sm:text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center gap-1 px-1.5 sm:px-2 py-0.5 sm:py-1 bg-white hover:bg-indigo-100 rounded transition-colors"
+                      >
+                        <Copy className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                        <span className="hidden sm:inline">Copy All</span>
+                        <span className="sm:hidden">Copy</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Check Button */}
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleCheckNumbers}
+                  disabled={checkingNumbers || !pastedNumbers.trim()}
+                  className="inline-flex items-center px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg bg-indigo-600 text-white text-xs sm:text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {checkingNumbers ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 mr-1.5 sm:mr-2 animate-spin" />
+                      <span className="hidden sm:inline">Checking...</span>
+                      <span className="sm:hidden">Checking</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="hidden sm:inline">Check Your List</span>
+                      <span className="sm:hidden">Check</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Results */}
+              {numberStatusResults.length > 0 && (
+                <div className="space-y-5">
+                  {/* Summary Stats */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
+                    <div className="bg-green-50 border border-green-200 rounded-lg p-2 sm:p-3 text-center">
+                      <div className="text-lg sm:text-xl md:text-2xl font-bold text-green-700">
+                        {numberStatusResults.filter(r => r.found && r.data?.status === 'open').length}
+                      </div>
+                      <div className="text-[10px] sm:text-xs text-green-600 mt-0.5 sm:mt-1">Open</div>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 sm:p-3 text-center">
+                      <div className="text-lg sm:text-xl md:text-2xl font-bold text-amber-700">
+                        {numberStatusResults.filter(r => r.found && r.data?.status === 'reserved').length}
+                      </div>
+                      <div className="text-[10px] sm:text-xs text-amber-600 mt-0.5 sm:mt-1">Reserved</div>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-2 sm:p-3 text-center">
+                      <div className="text-lg sm:text-xl md:text-2xl font-bold text-blue-700">
+                        {numberStatusResults.filter(r => r.found && r.data?.status !== 'open' && r.data?.status !== 'reserved').length}
+                      </div>
+                      <div className="text-[10px] sm:text-xs text-blue-600 mt-0.5 sm:mt-1">Other</div>
+                    </div>
+                    <div className="bg-red-50 border border-red-200 rounded-lg p-2 sm:p-3 text-center">
+                      <div className="text-lg sm:text-xl md:text-2xl font-bold text-red-700">
+                        {numberStatusResults.filter(r => !r.found).length}
+                      </div>
+                      <div className="text-[10px] sm:text-xs text-red-600 mt-0.5 sm:mt-1">Not Found</div>
+                    </div>
+                  </div>
+
+                  {/* Open & Reserved Numbers Section */}
+                  {(numberStatusResults.filter(r => r.found && (r.data?.status === 'open' || r.data?.status === 'reserved')).length > 0) && (
+                    <div>
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-0 mb-2 sm:mb-3">
+                        <h4 className="text-xs sm:text-sm font-semibold text-gray-900 flex items-center gap-1.5 sm:gap-2">
+                          <CheckCircle2 className="w-4 h-4 sm:w-5 sm:h-5 text-green-600 flex-shrink-0" />
+                          <span className="truncate">Open & Reserved ({numberStatusResults.filter(r => r.found && (r.data?.status === 'open' || r.data?.status === 'reserved')).length})</span>
+                        </h4>
+                        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                          {numberStatusResults.filter(r => r.found && r.data?.status === 'open').length > 0 && (
+                            <motion.button
+                              whileHover={{ scale: copiedFeedback?.type === 'open' ? 1 : 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => {
+                                const openNumbers = numberStatusResults
+                                  .filter(r => r.found && r.data?.status === 'open')
+                                  .map(r => r.number);
+                                const count = openNumbers.length;
+                                const numbersText = openNumbers.join('\n');
+                                copyNumber(numbersText);
+                                setCopiedFeedback({ type: 'open', timestamp: Date.now() });
+                                setTimeout(() => setCopiedFeedback(null), 2000);
+                                toast.success(`Copied ${count} open number${count !== 1 ? 's' : ''}!`, {
+                                  duration: 2000,
+                                  icon: '✅',
+                                });
+                              }}
+                              className="text-[10px] sm:text-xs font-medium flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg transition-all"
+                              style={{
+                                backgroundColor: copiedFeedback?.type === 'open' ? '#10b981' : '#f0fdf4',
+                                color: copiedFeedback?.type === 'open' ? 'white' : '#059669',
+                              }}
+                            >
+                              {copiedFeedback?.type === 'open' ? (
+                                <>
+                                  <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                  <span className="hidden sm:inline">Copied!</span>
+                                  <span className="sm:hidden">Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                  <span className="hidden sm:inline">Copy Open ({numberStatusResults.filter(r => r.found && r.data?.status === 'open').length})</span>
+                                  <span className="sm:hidden">Open ({numberStatusResults.filter(r => r.found && r.data?.status === 'open').length})</span>
+                                </>
+                              )}
+                            </motion.button>
+                          )}
+                          {numberStatusResults.filter(r => r.found && r.data?.status === 'reserved').length > 0 && (
+                            <motion.button
+                              whileHover={{ scale: copiedFeedback?.type === 'reserved' ? 1 : 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => {
+                                const reservedNumbers = numberStatusResults
+                                  .filter(r => r.found && r.data?.status === 'reserved')
+                                  .map(r => r.number);
+                                const count = reservedNumbers.length;
+                                const numbersText = reservedNumbers.join('\n');
+                                copyNumber(numbersText);
+                                setCopiedFeedback({ type: 'reserved', timestamp: Date.now() });
+                                setTimeout(() => setCopiedFeedback(null), 2000);
+                                toast.success(`Copied ${count} reserved number${count !== 1 ? 's' : ''}!`, {
+                                  duration: 2000,
+                                  icon: '✅',
+                                });
+                              }}
+                              className="text-[10px] sm:text-xs font-medium flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg transition-all"
+                              style={{
+                                backgroundColor: copiedFeedback?.type === 'reserved' ? '#f59e0b' : '#fffbeb',
+                                color: copiedFeedback?.type === 'reserved' ? 'white' : '#d97706',
+                              }}
+                            >
+                              {copiedFeedback?.type === 'reserved' ? (
+                                <>
+                                  <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                  <span className="hidden sm:inline">Copied!</span>
+                                  <span className="sm:hidden">Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                  <span className="hidden sm:inline">Copy Reserved ({numberStatusResults.filter(r => r.found && r.data?.status === 'reserved').length})</span>
+                                  <span className="sm:hidden">Reserved ({numberStatusResults.filter(r => r.found && r.data?.status === 'reserved').length})</span>
+                                </>
+                              )}
+                            </motion.button>
+                          )}
+                          <motion.button
+                            whileHover={{ scale: copiedFeedback?.type === 'all' ? 1 : 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => {
+                              const allNumbers = numberStatusResults
+                                .filter(r => r.found && (r.data?.status === 'open' || r.data?.status === 'reserved'))
+                                .map(r => r.number);
+                              const count = allNumbers.length;
+                              const numbersText = allNumbers.join('\n');
+                              copyNumber(numbersText);
+                              setCopiedFeedback({ type: 'all', timestamp: Date.now() });
+                              setTimeout(() => setCopiedFeedback(null), 2000);
+                              toast.success(`Copied ${count} number${count !== 1 ? 's' : ''} (open + reserved)!`, {
+                                duration: 2000,
+                                icon: '✅',
+                              });
+                            }}
+                            className="text-[10px] sm:text-xs font-medium flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg transition-all"
+                            style={{
+                              backgroundColor: copiedFeedback?.type === 'all' ? '#6366f1' : '#eef2ff',
+                              color: copiedFeedback?.type === 'all' ? 'white' : '#4f46e5',
+                            }}
+                          >
+                            {copiedFeedback?.type === 'all' ? (
+                              <>
+                                <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                <span className="hidden sm:inline">Copied!</span>
+                                <span className="sm:hidden">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                                <span className="hidden sm:inline">Copy Open & Reserved ({numberStatusResults.filter(r => r.found && (r.data?.status === 'open' || r.data?.status === 'reserved')).length})</span>
+                                <span className="sm:hidden">Open & Reserved ({numberStatusResults.filter(r => r.found && (r.data?.status === 'open' || r.data?.status === 'reserved')).length})</span>
+                              </>
+                            )}
+                          </motion.button>
+                        </div>
+                      </div>
+                      <div className="bg-green-50 border border-green-200 rounded-lg p-2 sm:p-3 md:p-4 space-y-1.5 sm:space-y-2 max-h-64 sm:max-h-80 overflow-y-auto">
+                        {numberStatusResults
+                          .filter(r => r.found && (r.data?.status === 'open' || r.data?.status === 'reserved'))
+                          .sort((a, b) => {
+                            // Sort: open first, then reserved
+                            if (a.data?.status === 'open' && b.data?.status !== 'open') return -1;
+                            if (a.data?.status !== 'open' && b.data?.status === 'open') return 1;
+                            return 0;
+                          })
+                          .map((result, idx) => (
+                            <motion.div
+                              key={idx}
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ delay: idx * 0.05 }}
+                              onClick={() => {
+                                copyNumber(result.number);
+                                toast.success(`Copied ${result.number}`);
+                              }}
+                              className={`flex items-center justify-between bg-white rounded-lg p-2 sm:p-2.5 md:p-3 border ${
+                                result.data?.status === 'open' 
+                                  ? 'border-green-200 hover:border-green-300' 
+                                  : result.data?.status === 'reserved'
+                                  ? 'border-amber-200 hover:border-amber-300'
+                                  : 'border-gray-200 hover:border-gray-300'
+                              } hover:shadow-md transition-all cursor-pointer group active:scale-[0.98]`}
+                            >
+                              <div className="flex-1 min-w-0 flex items-center gap-3">
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-mono text-xs sm:text-sm font-semibold text-gray-900">{result.number}</div>
+                                  {result.data && (
+                                    <div className="text-[10px] sm:text-xs text-gray-500 mt-0.5 sm:mt-1 flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                                      <span className="bg-green-100 text-green-700 px-1.5 sm:px-2 py-0.5 rounded-full font-medium text-[10px] sm:text-xs">
+                                        {result.data.category}
+                                      </span>
+                                      {result.data.group && (
+                                        <span className="text-gray-600 text-[10px] sm:text-xs">Group: {result.data.group}</span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                                {result.data && (
+                                  <div className="flex-shrink-0">
+                                    <span className={`${
+                                      result.data.status === 'open' 
+                                        ? 'bg-green-500 text-white' 
+                                        : result.data.status === 'reserved'
+                                        ? 'bg-amber-500 text-white'
+                                        : 'bg-gray-500 text-white'
+                                    } px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-0.5 sm:gap-1`}>
+                                      {result.data.status === 'open' ? (
+                                        <CheckCircle2 className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                                      ) : result.data.status === 'reserved' ? (
+                                        <Clock className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                                      ) : null}
+                                      <span className="hidden sm:inline">{formatStatusLabel(result.data.status)}</span>
+                                      <span className="sm:hidden">{result.data.status === 'open' ? 'Open' : result.data.status === 'reserved' ? 'Reserved' : formatStatusLabel(result.data.status)}</span>
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                              <div className={`ml-2 sm:ml-3 flex-shrink-0 p-1.5 sm:p-2 rounded-lg transition-colors ${
+                                result.data?.status === 'open' 
+                                  ? 'bg-green-100 group-hover:bg-green-200' 
+                                  : result.data?.status === 'reserved'
+                                  ? 'bg-amber-100 group-hover:bg-amber-200'
+                                  : 'bg-gray-100 group-hover:bg-gray-200'
+                              }`}>
+                                <Copy className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${
+                                  result.data?.status === 'open' 
+                                    ? 'text-green-700' 
+                                    : result.data?.status === 'reserved'
+                                    ? 'text-amber-700'
+                                    : 'text-gray-700'
+                                }`} />
+                              </div>
+                            </motion.div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Other Numbers Section */}
+                  {numberStatusResults.filter(r => !(r.found && (r.data?.status === 'open' || r.data?.status === 'reserved'))).length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between mb-2 sm:mb-3">
+                        <h4 className="text-xs sm:text-sm font-semibold text-gray-900 flex items-center gap-1.5 sm:gap-2">
+                          <Info className="w-4 h-4 sm:w-5 sm:h-5 text-gray-600 flex-shrink-0" />
+                          <span className="truncate">Other Numbers ({numberStatusResults.filter(r => !(r.found && (r.data?.status === 'open' || r.data?.status === 'reserved'))).length})</span>
+                        </h4>
+                      </div>
+                      <div className="bg-gray-50 border border-gray-200 rounded-lg p-2 sm:p-3 md:p-4 space-y-1.5 sm:space-y-2 max-h-64 sm:max-h-96 overflow-y-auto">
+                        {numberStatusResults
+                          .filter(r => !(r.found && (r.data?.status === 'open' || r.data?.status === 'reserved')))
+                          .map((result, idx) => (
+                            <motion.div
+                              key={idx}
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              transition={{ delay: idx * 0.05 }}
+                              className="flex items-center justify-between bg-white rounded-lg p-2 sm:p-2.5 md:p-3 border border-gray-200 hover:shadow-md transition-all"
+                            >
+                              <div className="flex-1 min-w-0 flex items-center gap-3">
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-mono text-xs sm:text-sm font-semibold text-gray-900">{result.number}</div>
+                                  {result.found && result.data ? (
+                                    <div className="text-[10px] sm:text-xs text-gray-500 mt-0.5 sm:mt-1 flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                                      <span className="bg-blue-100 text-blue-700 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-xs">
+                                        {result.data.category}
+                                      </span>
+                                      {result.data.group && (
+                                        <span className="text-gray-600 text-[10px] sm:text-xs">Group: {result.data.group}</span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div className="text-[10px] sm:text-xs text-red-600 mt-0.5 sm:mt-1 font-medium flex items-center gap-1">
+                                      <XCircle className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
+                                      <span className="hidden sm:inline">Not found in number pool</span>
+                                      <span className="sm:hidden">Not found</span>
+                                    </div>
+                                  )}
+                                </div>
+                                {result.found && result.data && (
+                                  <div className="flex-shrink-0">
+                                    <span className="bg-gray-600 text-white px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-semibold">
+                                      <span className="hidden sm:inline">{formatStatusLabel(result.data.status)}</span>
+                                      <span className="sm:hidden">{result.data.status === 'verified' ? 'Verified' : result.data.status === 'assigned' ? 'Assigned' : formatStatusLabel(result.data.status).substring(0, 6)}</span>
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                              {result.found && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyNumber(result.number);
+                                  }}
+                                  className="ml-2 sm:ml-3 p-1.5 sm:p-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors flex-shrink-0"
+                                  title="Copy number"
+                                >
+                                  <Copy className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-gray-700" />
+                                </button>
+                              )}
+                            </motion.div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Export Modal - Moved to root level */}
       {isAdmin() && showExportModal && (
         <div
@@ -6779,6 +7262,54 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           </div>
         </div>
       )}
+
+      {/* Bulk Copy Warning Modal */}
+      <AnimatePresence>
+        {showBulkCopyWarning && (
+          <div
+            className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/20 p-4"
+            onClick={() => setShowBulkCopyWarning(false)}
+            style={{ zIndex: 10000 }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={{ duration: 0.2 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-xl shadow-2xl max-w-sm w-full p-4 sm:p-5 border border-amber-200"
+            >
+              <div className="flex items-start gap-3 mb-3">
+                <div className="flex-shrink-0 p-2 bg-amber-100 rounded-lg">
+                  <AlertTriangle className="w-5 h-5 sm:w-6 sm:h-6 text-amber-600" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm sm:text-base font-semibold text-gray-900 mb-1">
+                    Status Warning
+                  </h3>
+                  <p className="text-xs sm:text-sm text-gray-600 leading-relaxed">
+                    {bulkCopyWarningMessage}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowBulkCopyWarning(false)}
+                  className="flex-shrink-0 text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <X className="w-4 h-4 sm:w-5 sm:h-5" />
+                </button>
+              </div>
+              <div className="flex justify-end mt-4">
+                <button
+                  onClick={() => setShowBulkCopyWarning(false)}
+                  className="px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors"
+                >
+                  Understood
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   ) : null;
 }

@@ -22,6 +22,8 @@ import { ManagerDashboard } from '../components/dashboards/ManagerDashboard';
 import { ModernLoading } from '../components/ModernLoading';
 import { useMinimumLoading } from '../hooks/useMinimumLoading';
 import { NumberLogsDashboard } from '../components/dashboards/NumberLogsDashboard';
+import { LeadLogsDashboard } from '../components/dashboards/LeadLogsDashboard';
+import { UserSessionLogsDashboard } from '../components/dashboards/UserSessionLogsDashboard';
 import { Reports } from '../components/admin/Reports';
 import { CustomerPortal } from '../pages/CustomerPortal';
 
@@ -131,6 +133,22 @@ export function AppRoutes() {
           element={
             <RoleBasedRoute allowedRoles={['admin']}>
               <NumberLogsDashboard />
+            </RoleBasedRoute>
+          }
+        />
+        <Route
+          path="lead-logs"
+          element={
+            <RoleBasedRoute allowedRoles={['admin']}>
+              <LeadLogsDashboard />
+            </RoleBasedRoute>
+          }
+        />
+        <Route
+          path="user-session-logs"
+          element={
+            <RoleBasedRoute allowedRoles={['admin']}>
+              <UserSessionLogsDashboard />
             </RoleBasedRoute>
           }
         />
