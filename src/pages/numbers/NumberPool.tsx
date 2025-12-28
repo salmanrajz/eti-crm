@@ -1257,11 +1257,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return; // CRITICAL: Return early to prevent performSearch() from being called
     }
 
-    // OPTIMIZATION: If only group or initial filter changed (not search term or category),
+    // OPTIMIZATION: If we have cached results and only filters changed (not search term),
     // filter cached results in memory instead of doing a new Firebase search
-    if (hasCachedResults && !searchTermChanged && !categoryChanged && (groupChanged || initialsChanged)) {
-      // Filter cached results in memory by group and/or initial
-      let filteredResults = [...fullSearchResultsRef.current];
+    // This applies to ALL filters: category, group, and initials
+    if (hasCachedResults && !searchTermChanged && !endsWithToggleChanged && (categoryChanged || groupChanged || initialsChanged)) {
+      // Get the full unfiltered results from cache
+      // We need to check if we have the original unfiltered results stored
+      const originalUnfilteredResults = (fullSearchResultsRef.current as any).originalUnfilteredResults || fullSearchResultsRef.current;
+      
+      // Start with the original unfiltered results
+      let filteredResults = [...originalUnfilteredResults];
+      
+      // Apply category filter in memory
+      if (selectedCategory && selectedCategory !== 'all') {
+        filteredResults = filteredResults.filter(n => n.category === selectedCategory);
+      }
       
       // Apply group filter
       if (selectedGroup) {
@@ -1273,8 +1283,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         filteredResults = filteredResults.filter(n => (n.number || '').startsWith(selectedInitials));
       }
       
-      // Update cached results with filtered data
+      // Update cached results - store both filtered and original unfiltered
       fullSearchResultsRef.current = filteredResults;
+      (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
       (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
       (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
       (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
@@ -1296,15 +1307,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       setSearchHasPreviousPage(false);
       setIsSearching(false);
       setIsLoadingMore(false);
-      return; // Return early - no Firebase query needed
+      return; // Return early - no Firebase query needed, all filtering done in memory
     }
 
-    // Only perform new Firebase search if search term, category, or endsWith toggle changed
-    // (Category needs Firebase query because it's passed to unifiedSearch)
-    // (endsWith toggle changes the search behavior, so we need a new search)
-    if (!hasCachedResults || searchTermChanged || categoryChanged || endsWithToggleChanged) {
-      // Reset to page 1 when search term, category, or toggle changes
-      if (searchTermChanged || categoryChanged || endsWithToggleChanged) {
+    // Only perform new Firebase search if:
+    // 1. No cached results exist, OR
+    // 2. Search term changed, OR
+    // 3. endsWith toggle changed (changes search behavior)
+    // Filters (category, group, initials) are now handled in memory above
+    if (!hasCachedResults || searchTermChanged || endsWithToggleChanged) {
+      // Reset to page 1 when search term or toggle changes
+      if (searchTermChanged || endsWithToggleChanged) {
         setSearchCurrentPage(1);
       }
       performSearch();
@@ -1396,18 +1409,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // Fetch a larger first batch to reduce extra roundtrips while keeping pagination client-side
         const searchLimit = 1000;
         
+        // Always search with 'all' category to get full results for in-memory filtering
+        // This allows us to filter by category in memory later without re-searching
         const result = await unifiedSearch.search(debouncedSearchTerm, {
-          category: selectedCategory || 'all',
+          category: 'all', // Always search all categories for in-memory filtering
           limit: searchLimit,
         startAfter: loadMore ? searchLastDoc : null,
           includeStale: false,
           endsWith: endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         });
         
-        // Also search deletedNumbers collection if admin
+        // Also search deletedNumbers collection if admin (search all categories)
         const deletedResults = await searchDeletedNumbers(
           debouncedSearchTerm, 
-          selectedCategory || 'all',
+          'all', // Always search all categories
           endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         );
         
@@ -1417,6 +1432,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           
           // Add deleted numbers to results (they already have status 'returned')
           filteredResults = [...filteredResults, ...deletedResults];
+          
+          // Store the original unfiltered results for in-memory filtering
+          const originalUnfilteredResults = [...filteredResults];
+          
+          // Apply category filter in memory
+          if (selectedCategory && selectedCategory !== 'all') {
+            filteredResults = filteredResults.filter(n => n.category === selectedCategory);
+          }
           
           // Apply group filter
           if (selectedGroup) {
@@ -1430,8 +1453,24 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           
         if (loadMore) {
           // Append new results to existing ones
-          const combinedResults = [...fullSearchResultsRef.current, ...filteredResults];
-          fullSearchResultsRef.current = combinedResults;
+          const existingOriginal = (fullSearchResultsRef.current as any).originalUnfilteredResults || fullSearchResultsRef.current;
+          const combinedOriginalResults = [...existingOriginal, ...originalUnfilteredResults];
+          
+          // Re-apply all filters to combined results
+          let combinedFiltered = [...combinedOriginalResults];
+          if (selectedCategory && selectedCategory !== 'all') {
+            combinedFiltered = combinedFiltered.filter(n => n.category === selectedCategory);
+          }
+          if (selectedGroup) {
+            combinedFiltered = combinedFiltered.filter(n => n.group === selectedGroup);
+          }
+          if (selectedInitials) {
+            combinedFiltered = combinedFiltered.filter(n => (n.number || '').startsWith(selectedInitials));
+          }
+          
+          fullSearchResultsRef.current = combinedFiltered;
+          // Store original unfiltered results for future in-memory filtering
+          (fullSearchResultsRef.current as any).originalUnfilteredResults = combinedOriginalResults;
           // Preserve search metadata for pagination checks
           (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
@@ -1442,12 +1481,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           // Update pagination
           const startIndex = (searchCurrentPage - 1) * pageSize;
           const endIndex = startIndex + pageSize;
-          const paginatedResults = combinedResults.slice(startIndex, endIndex);
+          const paginatedResults = combinedFiltered.slice(startIndex, endIndex);
           
           setSearchResults(paginatedResults);
-          setSearchTotalPages(Math.ceil(combinedResults.length / pageSize));
-          setSearchTotalItems(combinedResults.length);
-          setSearchHasNextPage(endIndex < combinedResults.length);
+          setSearchTotalPages(Math.ceil(combinedFiltered.length / pageSize));
+          setSearchTotalItems(combinedFiltered.length);
+          setSearchHasNextPage(endIndex < combinedFiltered.length);
           setSearchHasPreviousPage(searchCurrentPage > 1);
           
           // Scroll to top after loading more results
@@ -1457,6 +1496,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         } else {
           // New search - replace results
           fullSearchResultsRef.current = filteredResults;
+          // Store original unfiltered results for future in-memory filtering
+          (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
           (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
