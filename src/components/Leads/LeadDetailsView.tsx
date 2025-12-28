@@ -55,6 +55,7 @@ import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { logNumberAction, resolveUserName } from '../../utils/numberLogging';
+import { logLeadAction } from '../../utils/leadLogging';
 import { getPlans } from '../../utils/planService';
 import { incrementVerifierCounters } from '../../utils/verifierCounters';
 import { 
@@ -242,6 +243,8 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [managerNote, setManagerNote] = useState('');
   const [managerLocationUrl, setManagerLocationUrl] = useState('');
   const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
+  const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
+  const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
   const [etisalatLeadId, setEtisalatLeadId] = useState('');
   const [etisalatLeadIds, setEtisalatLeadIds] = useState<string[]>([]); // Array for multiple numbers
   const [selectedEmirate, setSelectedEmirate] = useState('');
@@ -1184,6 +1187,39 @@ Language: ${lead.language || 'N/A'}`;
     return plan?.description || 'No description available';
   };
 
+  // Validate that all numbers in lead plans exist in numberPool
+  const validateNumbersExist = async (): Promise<{ valid: boolean; missingNumbers: string[] }> => {
+    const plans = lead.plans || [];
+    const realPlans = plans.filter((p: any) => p.numberId && !p.numberId.startsWith('virtual-'));
+    
+    if (realPlans.length === 0) {
+      return { valid: true, missingNumbers: [] };
+    }
+
+    const missingNumbers: string[] = [];
+    
+    // Check each numberId exists in numberPool
+    const checkPromises = realPlans.map(async (plan: any) => {
+      try {
+        const numberRef = doc(db, 'numberPool', plan.numberId);
+        const numberDoc = await getDoc(numberRef);
+        if (!numberDoc.exists()) {
+          missingNumbers.push(plan.number || plan.numberId);
+        }
+      } catch (error) {
+        console.error(`Error checking number ${plan.numberId}:`, error);
+        missingNumbers.push(plan.number || plan.numberId);
+      }
+    });
+
+    await Promise.all(checkPromises);
+
+    return {
+      valid: missingNumbers.length === 0,
+      missingNumbers
+    };
+  };
+
   const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified', noteOverride?: string) => {
     setIsVerifyActionProcessing(true);
     try {
@@ -1192,6 +1228,16 @@ Language: ${lead.language || 'N/A'}`;
         setIsVerifyActionProcessing(false);
         return;
       }
+      
+      // Validate that all numbers exist in numberPool
+      const numberValidation = await validateNumbersExist();
+      if (!numberValidation.valid) {
+        setMissingNumbers(numberValidation.missingNumbers);
+        setShowNumberErrorModal(true);
+        setIsVerifyActionProcessing(false);
+        return;
+      }
+      
       if (actionToUse === 'verify' && !uploadComplete) {
         toast.error('Please upload verification media before verifying');
         setIsVerifyActionProcessing(false);
@@ -1227,6 +1273,25 @@ Language: ${lead.language || 'N/A'}`;
         updatedAt: serverTimestamp(),
         ...(leadStatus === 'verified' || leadStatus === 'activated' ? { verifiedAt: serverTimestamp() } : {})
       });
+      
+      // Log lead verification action
+      try {
+        const action: 'verified' | 'rejected' | 'non_verified' = 
+          leadStatus === 'verified' || leadStatus === 'activated' ? 'verified' :
+          leadStatus === 'rejected' ? 'rejected' :
+          'non_verified';
+        
+        await logLeadAction(
+          lead.id,
+          lead.leadNumber || lead.id,
+          action,
+          { status: lead.status },
+          { status: leadStatus, verifierId: user?.id, verificationNotes: noteToUse },
+          noteToUse || `Lead ${action} by ${user?.name || 'Unknown'}`
+        );
+      } catch (error) {
+        console.error('Error logging lead verification action:', error);
+      }
 
       // Increment verifier counters if lead is verified or activated
       if ((leadStatus === 'verified' || leadStatus === 'activated') && user?.id) {
@@ -1251,7 +1316,7 @@ Language: ${lead.language || 'N/A'}`;
               const nextClaim = numberData.claimQueue[0];
 
               // Update the number with the next claim
-              await updateDoc(numberRef, {
+              const updateData: any = {
                 status: 'reserved',
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: nextClaim.agentId,
@@ -1259,7 +1324,14 @@ Language: ${lead.language || 'N/A'}`;
                 claimingExpiresAt: new Date(Date.now() + 2 * 60 * 1000), // 2 minutes
                 claimQueue: numberData.claimQueue.slice(1),
                 leadId: lead.id
-              });
+              };
+              
+              // Clear struckThrough if it exists
+              if (numberData?.struckThrough === true) {
+                updateData.struckThrough = false;
+              }
+              
+              await updateDoc(numberRef, updateData);
 
               // Log status change for number (rejected -> reserved transfer)
               await logNumberAction(
@@ -1285,7 +1357,7 @@ Language: ${lead.language || 'N/A'}`;
               }
             } else {
               // No claims in queue, just set to open
-              await updateDoc(numberRef, {
+              const updateData: any = {
                 status: 'open',
                 lastStatusChange: serverTimestamp(),
                 claimingAgentId: null,
@@ -1293,7 +1365,14 @@ Language: ${lead.language || 'N/A'}`;
                 claimingExpiresAt: null,
                 claimQueue: [],
                 leadId: lead.id
-              });
+              };
+              
+              // Clear struckThrough if it exists
+              if (numberData?.struckThrough === true) {
+                updateData.struckThrough = false;
+              }
+              
+              await updateDoc(numberRef, updateData);
 
               await logNumberAction(
                 plan.numberId,
@@ -1301,7 +1380,7 @@ Language: ${lead.language || 'N/A'}`;
                 'status_changed',
                 { status: numberData?.status },
                 { status: 'open', leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} rejected lead, set number open`
+                `Verifier ${user?.name || 'Unknown'} rejected lead, set number open, cleared struckThrough`
               );
           }
           } else if (leadStatus === 'non_verified') {
@@ -1404,6 +1483,32 @@ Language: ${lead.language || 'N/A'}`;
                 `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName3}`
               );
             }
+          } else if (leadStatus === 'verified' || leadStatus === 'activated') {
+            // For verified/activated leads, clear ALL claim data
+            const updateData: any = {
+              status: leadStatus,
+              lastStatusChange: serverTimestamp(),
+              leadId: lead.id,
+              // Clear all claim-related fields
+              claimingAgentId: null,
+              claimingStartedAt: null,
+              claimingExpiresAt: null,
+              claimQueue: [],
+              claims: [],
+              claimedAt: null,
+              lastClaimedAt: null
+            };
+            
+            await updateDoc(numberRef, updateData);
+
+            await logNumberAction(
+              plan.numberId,
+              plan.number || '',
+              'status_changed',
+              { status: numberData?.status },
+              { status: leadStatus, leadId: lead.id },
+              `Verifier ${user?.name || 'Unknown'} verified lead, cleared claim data`
+            );
           } else {
             // For other verification actions, update normally
             await updateDoc(numberRef, {
@@ -1426,11 +1531,8 @@ Language: ${lead.language || 'N/A'}`;
         await Promise.all(updatePromises);
       }
 
-      // Fetch the latest lead data from Firestore to ensure we have the correct agentId
-      // This is important because if a verifier edited the lead, the component state might be stale
-      const leadDoc = await getDoc(leadRef);
-      const latestLeadData = leadDoc.exists() ? leadDoc.data() : null;
-      const agentId = latestLeadData?.agentId || lead.agentId;
+      // Use lead.agentId directly - it's always preserved and never modified when verifiers edit leads
+      const agentId = lead.agentId;
 
       // Send notification to the agent
       if (agentId) {
@@ -2121,6 +2223,14 @@ Language: ${lead.language || 'N/A'}`;
   };
 
   const handleCoordinatorAction = async () => {
+    // Validate that all numbers exist in numberPool
+    const numberValidation = await validateNumbersExist();
+    if (!numberValidation.valid) {
+      setMissingNumbers(numberValidation.missingNumbers);
+      setShowNumberErrorModal(true);
+      return;
+    }
+    
     // Validate required fields for assignment / reassignment
     if (coordinatorAction === 'assign' || coordinatorAction === 'reassign') {
       const plansCount = lead.plans?.length || 0;
@@ -2524,6 +2634,26 @@ Language: ${lead.language || 'N/A'}`;
       }
 
       await updateDoc(leadRef, updateData);
+      
+      // Log coordinator action
+      try {
+        let action: 'assigned' | 'activated' | 'reassigned' | 'rejected' | 'status_changed' = 'status_changed';
+        if (coordinatorAction === 'assign') action = 'assigned';
+        else if (coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified') action = 'activated';
+        else if (coordinatorAction === 'reassign') action = 'reassigned';
+        else if (coordinatorAction === 'reject') action = 'rejected';
+        
+        await logLeadAction(
+          lead.id,
+          lead.leadNumber || lead.id,
+          action,
+          { status: lead.status },
+          { status: updateData.status, coordinatorId: user?.id, coordinatorNotes: coordinatorNote },
+          coordinatorNote || `Coordinator ${user?.name || 'Unknown'} performed ${coordinatorAction}`
+        );
+      } catch (error) {
+        console.error('Error logging coordinator action:', error);
+      }
 
       // Handle number pool updates for multiple numbers activation
       const plansCountForUpdate = lead.plans?.length || 0;
@@ -5857,6 +5987,48 @@ Language: ${lead.language || 'N/A'}`;
         )}
       </AnimatePresence>
       </div>
+
+      {/* Number Error Modal */}
+      <Dialog open={showNumberErrorModal} onClose={() => setShowNumberErrorModal(false)} className="relative z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-30" aria-hidden="true" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <Dialog.Panel className="mx-auto max-w-md w-full bg-white rounded-xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-red-100 rounded-lg">
+                <AlertTriangle className="h-6 w-6 text-red-600" />
+              </div>
+              <Dialog.Title className="text-xl font-bold text-gray-900">
+                Number Not Available
+              </Dialog.Title>
+            </div>
+            <div className="mb-6">
+              <p className="text-gray-600 mb-3">
+                The following number(s) are not available in the number pool:
+              </p>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <ul className="list-disc list-inside space-y-1">
+                  {missingNumbers.map((number, idx) => (
+                    <li key={idx} className="text-red-800 font-mono text-sm">
+                      {number}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-sm text-gray-500 mt-3">
+                Please ensure all numbers exist in the number pool before performing this action.
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowNumberErrorModal(false)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </Dialog.Panel>
+        </div>
+      </Dialog>
     </div>
   );
 }

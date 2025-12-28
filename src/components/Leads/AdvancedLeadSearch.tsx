@@ -83,7 +83,7 @@ interface AdvancedSearchFilters {
   productType: string;
   
   // Status and Assignment
-  status: string;
+  status: string[];
   agentId: string;
   coordinatorId: string;
   verifierId: string;
@@ -145,7 +145,7 @@ const NUMBER_GROUPS = [
 ];
 
 const STATUS_OPTIONS = [
-  'verified', 'pending', 'assigned', 'activated', 'rejected', 'follow_up'
+  'verified', 'pending', 'assigned', 'activated', 'activated_non_verified', 'rejected', 'follow_up'
 ];
 
 function getStatusDisplayText(status: string | undefined): string {
@@ -187,7 +187,7 @@ export function AdvancedLeadSearch({
     productType: '',
     
     // Status and Assignment
-    status: '',
+    status: [],
     agentId: '',
     coordinatorId: '',
     verifierId: '',
@@ -273,9 +273,21 @@ export function AdvancedLeadSearch({
       let constraints: any[] = [];
 
       // Build Firestore query constraints based on filters
-      // Status filter
-      if (searchFilters.status) {
-        constraints.push(where('status', '==', searchFilters.status));
+      // Status filter - support multiple statuses
+      if (searchFilters.status && searchFilters.status.length > 0) {
+        if (searchFilters.status.length === 1) {
+          constraints.push(where('status', '==', searchFilters.status[0]));
+        } else {
+          // Firestore 'in' operator supports up to 10 values
+          const statusChunks = [];
+          for (let i = 0; i < searchFilters.status.length; i += 10) {
+            statusChunks.push(searchFilters.status.slice(i, i + 10));
+          }
+          // For now, we'll use the first chunk. For more than 10, we'd need to combine queries
+          if (statusChunks.length > 0) {
+            constraints.push(where('status', 'in', statusChunks[0]));
+          }
+        }
       }
 
       // Date range filters - these can be added to Firestore queries
@@ -532,7 +544,7 @@ export function AdvancedLeadSearch({
       }
 
       // Status Filter
-      if (filters.status && lead.status !== filters.status) {
+      if (filters.status.length > 0 && !filters.status.includes(lead.status)) {
         return false;
       }
 
@@ -623,7 +635,7 @@ export function AdvancedLeadSearch({
   };
 
   // Multi-select helper functions
-  const toggleArrayFilter = (field: 'planName' | 'numberCategory' | 'numberGroup', value: string) => {
+  const toggleArrayFilter = (field: 'planName' | 'numberCategory' | 'numberGroup' | 'status', value: string) => {
     setFilters(prev => ({
       ...prev,
       [field]: prev[field].includes(value) 
@@ -632,7 +644,7 @@ export function AdvancedLeadSearch({
     }));
   };
 
-  const removeFromArrayFilter = (field: 'planName' | 'numberCategory' | 'numberGroup', value: string) => {
+  const removeFromArrayFilter = (field: 'planName' | 'numberCategory' | 'numberGroup' | 'status', value: string) => {
     setFilters(prev => ({
       ...prev,
       [field]: prev[field].filter(item => item !== value)
@@ -906,16 +918,44 @@ export function AdvancedLeadSearch({
                         <CheckCircle className="h-4 w-4 mr-2 text-orange-600" />
                         Status
                       </label>
+                      
+                      {/* Selected Statuses */}
+                      {filters.status.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-3">
+                          {filters.status.map(status => (
+                            <span
+                              key={status}
+                              className="inline-flex items-center px-3 py-1 bg-orange-100 text-orange-800 text-sm rounded-full"
+                            >
+                              {status.replace(/_/g, ' ').toUpperCase()}
+                              <button
+                                onClick={() => removeFromArrayFilter('status', status)}
+                                className="ml-2 hover:bg-orange-200 rounded-full p-0.5"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      
+                      {/* Status Selection Dropdown */}
                       <div className="relative">
                         <select
-                          value={filters.status}
-                          onChange={(e) => handleFilterChange('status', e.target.value)}
+                          onChange={(e) => {
+                            if (e.target.value && !filters.status.includes(e.target.value)) {
+                              toggleArrayFilter('status', e.target.value);
+                            }
+                            e.target.value = ''; // Reset selection
+                          }}
                           className="w-full px-4 py-3 bg-white border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-orange-100 focus:border-orange-500 transition-all duration-200 appearance-none cursor-pointer"
                         >
-                          <option value="">All Statuses</option>
-                          {STATUS_OPTIONS.map(status => (
-                            <option key={status} value={status}>{status.replace('_', ' ').toUpperCase()}</option>
-                          ))}
+                          <option value="">Select Statuses</option>
+                          {STATUS_OPTIONS
+                            .filter(status => !filters.status.includes(status))
+                            .map(status => (
+                              <option key={status} value={status}>{status.replace(/_/g, ' ').toUpperCase()}</option>
+                            ))}
                         </select>
                         <ChevronDownIcon className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
                       </div>

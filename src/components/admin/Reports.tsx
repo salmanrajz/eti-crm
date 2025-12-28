@@ -1594,17 +1594,15 @@ export function Reports() {
       return { group, totals, total: groupTotal };
     });
 
-    // Calculate actual totals (not sum of groups) to avoid double-counting
-    // For activated: sum of plans
-    // For others: count of unique leads
-    const actualTotals = {
-      activated: dailyMetrics.activated, // Already counts plans
-      verified: dailyMetrics.verified, // Already counts leads
-      followup: dailyMetrics.followup,
-      nonVerified: dailyMetrics.nonVerified,
-      assignedForActivation: dailyMetrics.assignedForActivation,
-      pendingVerification: dailyMetrics.pendingVerification,
-    };
+    // Calculate totals by summing group-wise totals
+    // This ensures the totals match what's displayed in the group rows
+    const actualTotals = STATUSES.reduce((acc, status, statusIdx) => {
+      const total = groupWiseTotals.reduce((sum, groupData) => {
+        return sum + (groupData.totals[statusIdx] || 0);
+      }, 0);
+      acc[status.key as keyof typeof acc] = total;
+      return acc;
+    }, {} as Record<string, number>);
 
     return (
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
@@ -1675,7 +1673,7 @@ export function Reports() {
                   <span className="text-xs sm:text-sm">TOTAL</span>
                 </td>
                 {STATUSES.map((status) => {
-                  // Use actual totals to avoid double-counting leads that appear in multiple groups
+                  // Calculate total by summing all group-wise totals
                   const statusTotal = actualTotals[status.key as keyof typeof actualTotals] || 0;
                   return (
                     <td

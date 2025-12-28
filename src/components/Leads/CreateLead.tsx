@@ -50,6 +50,7 @@ import { useAuthStore } from '../../store/authStore';
 import { User, NumberPool, Lead } from '../../types';
 import { toast } from 'react-hot-toast';
 import { logNumberAction } from '../../utils/numberLogging';
+import { logLeadAction } from '../../utils/leadLogging';
 import { format, addMinutes } from 'date-fns';
 import { getPlanCategoriesWithPlans, PlanCategoryGroup, getPlans, Plan } from '../../utils/planService';
 // import { countries } from 'countries-list';
@@ -1085,10 +1086,18 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           : 'Standard'
       );
 
+      // Get the first plan's number, numberId, and category for storing as separate fields
+      const firstPlan = selectedPlans[0];
+      const selectedNumber = firstPlan?.number || '';
+      const selectedNumberId = firstPlan?.numberId || '';
+      const selectedCategory = firstPlan?.category || 'Standard';
+      
       const leadData: Partial<Lead> = {
         ...cleanedFormData,
         customerAddress: formData.customerAddress,
         customerAge: parseInt(formData.customerAge),
+        numberId: selectedNumberId, // Store selected number ID at lead level
+        numberType: selectedCategory, // Store category instead of "Standard"
         plans: selectedPlans.map((plan, index) => {
           // Default to G2 for MNP, Prepaid to postpaid and Home Wifi
           const defaultGroup = (
@@ -1109,7 +1118,6 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             number: plan.number,
             plan: plan.plan,
             group: groupToUse,
-            type: plan.type || 'standard',
             status: 'pending_verification'
           };
           if (plan.category !== undefined && plan.category !== null && plan.category !== '') {
@@ -1128,6 +1136,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         sharedWith: formData.sharedWith ? [formData.sharedWith] : [],
         remarks: formData.remarks || 'Please Verify'
       };
+      
+      // Store selected number as separate field (using a custom field name since Lead interface doesn't have it)
+      (leadData as any).selectedNumber = selectedNumber;
 
       // Remove any remaining undefined values
       let finalLeadData = Object.fromEntries(
@@ -1156,6 +1167,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       } else {
         
         const docRef = await addDoc(collection(db, 'leads'), finalLeadData);
+        
+        // Log lead creation
+        try {
+          await logLeadAction(
+            docRef.id,
+            finalLeadData.leadNumber || docRef.id,
+            'created',
+            undefined,
+            { ...finalLeadData, id: docRef.id },
+            `Lead created with ${finalLeadData.plans?.length || 0} plan(s)`
+          );
+        } catch (error) {
+          console.error('Error logging lead creation:', error);
+        }
         
         // Clear the form draft from localStorage on successful creation
         try {

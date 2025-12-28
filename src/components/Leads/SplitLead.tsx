@@ -100,7 +100,6 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
         plan: plan.plan,
         category: plan.category,
         group: groupOverride || plan.group || 'Standard',
-        type: plan.type || 'standard',
         status: plan.status || 'pending'
       };
       console.log('Validated plan:', validatedPlan);

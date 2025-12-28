@@ -40,6 +40,8 @@ import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { generateDeviceFingerprint } from '../../utils/deviceFingerprint';
 import { isDeviceTrusted } from '../../services/trustedDeviceService';
+import { logUserSessionAction, getUserAgentInfo, getDeviceInfo } from '../../utils/userSessionLogging';
+import { checkAndLogUnclosedSession } from '../../utils/sessionTracker';
 //import { numberPoolPreloader } from '../../services/numberPoolPreloader';
 
 /**
@@ -133,14 +135,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               updatedAt: userData.updatedAt?.toDate() || new Date()
             });
             
-          
+            // Check for and log any unclosed sessions from previous login
+            await checkAndLogUnclosedSession();
             
-            // ✅ OPTIONAL: Check device trust in background (non-blocking, for logging only)
-            // Check if this is a fresh login or session restoration
+            // Log session start
             const isFreshLogin = sessionStorage.getItem('freshLogin') === 'true';
             if (isFreshLogin) {
               sessionStorage.removeItem('freshLogin'); // Clean up
+              
+              // Log login (already logged in Login.tsx, but log session_start here)
+              const sessionId = `session_${Date.now()}_${firebaseUser.uid}`;
+              sessionStorage.setItem('currentSessionId', sessionId);
+              sessionStorage.setItem('sessionStartTime', Date.now().toString());
+              
+              // Store in localStorage for persistence across page reloads
+              localStorage.setItem('previousSessionId', sessionId);
+              localStorage.setItem('previousSessionStartTime', Date.now().toString());
+              
+              await logUserSessionAction(
+                firebaseUser.uid,
+                userData.name || userData.email || 'Unknown',
+                userData.role || 'unknown',
+                'session_start',
+                'User session started',
+                {
+                  userEmail: userData.email,
+                  page: window.location.pathname,
+                  userAgent: getUserAgentInfo(),
+                  deviceInfo: getDeviceInfo(),
+                  sessionId: sessionId
+                }
+              );
+            } else {
+              // Session restoration - check if we need to create a new session
+              const existingSessionId = sessionStorage.getItem('currentSessionId');
+              if (!existingSessionId) {
+                // No active session, create one
+                const sessionId = `session_${Date.now()}_${firebaseUser.uid}`;
+                sessionStorage.setItem('currentSessionId', sessionId);
+                sessionStorage.setItem('sessionStartTime', Date.now().toString());
+                localStorage.setItem('previousSessionId', sessionId);
+                localStorage.setItem('previousSessionStartTime', Date.now().toString());
+              }
             }
+            
+            // ✅ OPTIONAL: Check device trust in background (non-blocking, for logging only)
             
             // Background device trust check (doesn't affect login)
             try {
@@ -169,6 +208,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             toast.error('User account not found. Please contact an administrator.');
           }
         } else {
+          // Log session end on logout (before clearing user state)
+          const currentUser = useAuthStore.getState().user;
+          if (currentUser) {
+            try {
+              const sessionId = sessionStorage.getItem('currentSessionId');
+              const sessionStartTime = sessionStorage.getItem('sessionStartTime');
+              let duration: number | undefined;
+              
+              if (sessionStartTime) {
+                duration = Math.floor((Date.now() - parseInt(sessionStartTime)) / 1000);
+              }
+              
+              await logUserSessionAction(
+                currentUser.id,
+                currentUser.name || currentUser.email || 'Unknown',
+                currentUser.role,
+                'session_end',
+                'User session ended',
+                {
+                  userEmail: currentUser.email,
+                  page: typeof window !== 'undefined' ? window.location.pathname : undefined,
+                  userAgent: getUserAgentInfo(),
+                  deviceInfo: getDeviceInfo(),
+                  sessionId: sessionId || undefined,
+                  duration: duration
+                }
+              );
+            } catch (logError) {
+              // Don't block logout if logging fails
+              console.warn('Failed to log session end:', logError);
+            }
+          }
+          
           setUser(null);
           // Clear preloader on logout
          

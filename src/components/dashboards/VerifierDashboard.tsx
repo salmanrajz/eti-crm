@@ -78,6 +78,7 @@ import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
 import { MediaUpload } from '../Leads/MediaUpload';
+import { Dialog } from '@headlessui/react';
 import { logOutboundVerificationMessage } from '../../utils/whatsappVerification';
 import { resolveWhatsAppRoute } from '../../utils/whatsappRouter';
 import { incrementVerifierCounters } from '../../utils/verifierCounters';
@@ -234,6 +235,8 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
   const [showActionDialog, setShowActionDialog] = useState(false);
   const [actionType, setActionType] = useState<'verify' | 'reject' | 'followup' | null>(null);
   const [actionNote, setActionNote] = useState('');
+  const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
+  const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   // Determine if we need to show the postpaid campaign checklist (check selectedLead)
@@ -1505,6 +1508,35 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
 
     try {
       setLoading(true);
+      
+      // Validate that all numbers in lead plans exist in numberPool
+      const plans = selectedLead.plans || [];
+      const realPlans = plans.filter((p: any) => p.numberId && !p.numberId.startsWith('virtual-'));
+      
+      if (realPlans.length > 0) {
+        const missingNumbers: string[] = [];
+        const checkPromises = realPlans.map(async (plan: any) => {
+          try {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) {
+              missingNumbers.push(plan.number || plan.numberId);
+            }
+          } catch (error) {
+            console.error(`Error checking number ${plan.numberId}:`, error);
+            missingNumbers.push(plan.number || plan.numberId);
+          }
+        });
+        
+        await Promise.all(checkPromises);
+        
+        if (missingNumbers.length > 0) {
+          setMissingNumbers(missingNumbers);
+          setShowNumberErrorModal(true);
+          setLoading(false);
+          return;
+        }
+      }
       
       const leadRef = doc(db, 'leads', selectedLead.id);
       const newStatus = actionType === 'verify' ? 'verified' : 
@@ -3113,6 +3145,48 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Number Error Modal */}
+      <Dialog open={showNumberErrorModal} onClose={() => setShowNumberErrorModal(false)} className="relative z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-30" aria-hidden="true" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <Dialog.Panel className="mx-auto max-w-md w-full bg-white rounded-xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-red-100 rounded-lg">
+                <AlertTriangle className="h-6 w-6 text-red-600" />
+              </div>
+              <Dialog.Title className="text-xl font-bold text-gray-900">
+                Number Not Available
+              </Dialog.Title>
+            </div>
+            <div className="mb-6">
+              <p className="text-gray-600 mb-3">
+                The following number(s) are not available in the number pool:
+              </p>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <ul className="list-disc list-inside space-y-1">
+                  {missingNumbers.map((number, idx) => (
+                    <li key={idx} className="text-red-800 font-mono text-sm">
+                      {number}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-sm text-gray-500 mt-3">
+                Please ensure all numbers exist in the number pool before performing this action.
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowNumberErrorModal(false)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </Dialog.Panel>
+        </div>
+      </Dialog>
     </div>
   );
 }

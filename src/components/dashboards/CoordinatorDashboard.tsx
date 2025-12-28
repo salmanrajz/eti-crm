@@ -82,6 +82,7 @@ import { clsx } from 'clsx';
 import type { Lead, User, CoordinatorType, Team } from '../../types';
 import { motion } from 'framer-motion';
 import { StruckNumbers, useStruckNumbersForCoordinator } from './StruckNumbers';
+import { Dialog } from '@headlessui/react';
 
 function getStatusDisplayText(status: string | undefined): string {
   if (!status) return 'Status';
@@ -231,6 +232,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [actionType, setActionType] = useState<'assign' | 'activate' | 'followup' | 'later' | 'assign_verifier' | null>(null);
   const [actionNote, setActionNote] = useState('');
+  const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
+  const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [pageSize, setPageSize] = useState<typeof PAGE_SIZES[number]>(20);
@@ -700,7 +703,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                   : true;
 
               if (shouldCountForGroup) {
-                groupCounts[grp] = (groupCounts[grp] || 0) + 1;
+              groupCounts[grp] = (groupCounts[grp] || 0) + 1;
               }
 
               // Only track breakdown for G2
@@ -1059,6 +1062,34 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     if (!selectedLead || !actionType) return;
 
     try {
+      // Validate that all numbers in lead plans exist in numberPool
+      const plans = selectedLead.plans || [];
+      const realPlans = plans.filter((p: any) => p.numberId && !p.numberId.startsWith('virtual-'));
+      
+      if (realPlans.length > 0) {
+        const missingNumbers: string[] = [];
+        const checkPromises = realPlans.map(async (plan: any) => {
+          try {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) {
+              missingNumbers.push(plan.number || plan.numberId);
+            }
+          } catch (error) {
+            console.error(`Error checking number ${plan.numberId}:`, error);
+            missingNumbers.push(plan.number || plan.numberId);
+          }
+        });
+        
+        await Promise.all(checkPromises);
+        
+        if (missingNumbers.length > 0) {
+          setMissingNumbers(missingNumbers);
+          setShowNumberErrorModal(true);
+          return;
+        }
+      }
+      
       const leadRef = doc(db, 'leads', selectedLead.id);
 
       let updates: any = {
@@ -2271,6 +2302,48 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           </div>
         </div>
       </div>
+
+      {/* Number Error Modal */}
+      <Dialog open={showNumberErrorModal} onClose={() => setShowNumberErrorModal(false)} className="relative z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-30" aria-hidden="true" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <Dialog.Panel className="mx-auto max-w-md w-full bg-white rounded-xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-red-100 rounded-lg">
+                <AlertTriangle className="h-6 w-6 text-red-600" />
+              </div>
+              <Dialog.Title className="text-xl font-bold text-gray-900">
+                Number Not Available
+              </Dialog.Title>
+            </div>
+            <div className="mb-6">
+              <p className="text-gray-600 mb-3">
+                The following number(s) are not available in the number pool:
+              </p>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <ul className="list-disc list-inside space-y-1">
+                  {missingNumbers.map((number, idx) => (
+                    <li key={idx} className="text-red-800 font-mono text-sm">
+                      {number}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-sm text-gray-500 mt-3">
+                Please ensure all numbers exist in the number pool before performing this action.
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowNumberErrorModal(false)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </Dialog.Panel>
+        </div>
+      </Dialog>
     </div>
   );
 }

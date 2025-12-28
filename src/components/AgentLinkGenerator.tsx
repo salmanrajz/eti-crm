@@ -11,12 +11,13 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { collection, addDoc, query, where, getDocs, orderBy, updateDoc, doc, deleteDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { AgentLink } from '../types';
 import { toast } from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Link2, Copy, Trash2, Check, X, Settings, ExternalLink, Key, Eye, EyeOff } from 'lucide-react';
+import { Link2, Copy, Trash2, Check, X, Settings, ExternalLink, Key, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuthStore } from '../store/authStore';
 
@@ -32,11 +33,21 @@ interface LinkItemProps {
   onDelete: (linkId: string) => void;
   onGenerateNewOTP: (linkId: string) => void;
   copiedLinkId: string | null;
+  generatingOTPFor: string | null;
+  newlyGeneratedOTPFor: string | null;
 }
 
-function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId }: LinkItemProps) {
-  const [showOTP, setShowOTP] = useState(false);
+function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId, generatingOTPFor, newlyGeneratedOTPFor }: LinkItemProps) {
+  // Automatically show OTP if it was just generated for this link
+  const [showOTP, setShowOTP] = useState(newlyGeneratedOTPFor === link.id);
   const url = `${window.location.origin}/customer/${link.linkId}`;
+  
+  // Update showOTP when a new OTP is generated for this link
+  useEffect(() => {
+    if (newlyGeneratedOTPFor === link.id) {
+      setShowOTP(true);
+    }
+  }, [newlyGeneratedOTPFor, link.id]);
   
   return (
     <div className="p-3 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
@@ -125,14 +136,30 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP
               </button>
             </div>
           </div>
-          <button
+          <motion.button
             onClick={() => onGenerateNewOTP(link.id)}
-            className="w-full px-3 py-1.5 text-xs font-medium bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors flex items-center justify-center gap-1.5"
-            title="Generate new OTP (valid for 30 minutes)"
+            disabled={generatingOTPFor === link.id}
+            whileHover={{ scale: generatingOTPFor === link.id ? 1 : 1.02 }}
+            whileTap={{ scale: generatingOTPFor === link.id ? 1 : 0.98 }}
+            className={`w-full px-3 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 ${
+              generatingOTPFor === link.id
+                ? 'bg-emerald-400 text-white cursor-not-allowed'
+                : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm hover:shadow-md'
+            }`}
+            title="Generate new OTP (valid for 2 hours)"
           >
+            {generatingOTPFor === link.id ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>Generating...</span>
+              </>
+            ) : (
+              <>
             <Key className="w-3 h-3" />
-            Generate New OTP
-          </button>
+                <span>Generate New OTP</span>
+              </>
+            )}
+          </motion.button>
         </div>
       )}
     </div>
@@ -147,6 +174,9 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [generatedOTP, setGeneratedOTP] = useState<string | null>(null);
   const [newLinkId, setNewLinkId] = useState<string | null>(null);
+  const [generatingOTPFor, setGeneratingOTPFor] = useState<string | null>(null);
+  const [newlyGeneratedOTPFor, setNewlyGeneratedOTPFor] = useState<string | null>(null);
+  const [isMounted, setIsMounted] = useState(false);
 
   // Get available groups based on agent's allowedGroups
   const availableGroups = useMemo(() => {
@@ -179,6 +209,10 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   }, [user?.allowedGroups, availableGroups]);
 
   useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
     loadLinks();
   }, [agentId]);
 
@@ -200,9 +234,11 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         lastUsedAt: doc.data().lastUsedAt?.toDate() || undefined,
       })) as AgentLink[];
       setLinks(linksData);
+      return linksData;
     } catch (error) {
       console.error('Error loading links:', error);
       toast.error('Failed to load links');
+      return [];
     }
   };
 
@@ -260,6 +296,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   };
 
   const handleGenerateNewOTP = async (linkId: string) => {
+    setGeneratingOTPFor(linkId);
     try {
       const newOTP = generateOTP();
       // Set OTP expiration to 2 hours from now
@@ -270,10 +307,16 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         updatedAt: new Date(),
       });
       toast.success('New OTP generated successfully!');
-      loadLinks();
+      // Mark this link as having a newly generated OTP so it shows automatically
+      setNewlyGeneratedOTPFor(linkId);
+      await loadLinks();
+      // Keep the OTP visible - user can manually hide it if needed
+      // The flag will be cleared when component unmounts or when a new OTP is generated for a different link
     } catch (error) {
       console.error('Error generating new OTP:', error);
       toast.error('Failed to generate new OTP');
+    } finally {
+      setGeneratingOTPFor(null);
     }
   };
 
@@ -344,15 +387,17 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         </div>
       </motion.button>
 
-      {/* Dialog */}
+      {/* Dialog - Rendered via Portal to ensure it's above everything */}
+      {isMounted && typeof document !== 'undefined' && createPortal(
       <AnimatePresence>
         {showDialog && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" style={{ zIndex: 10000 }}>
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+                className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto relative"
+                style={{ zIndex: 10001 }}
             >
               <div className="sticky top-0 bg-gradient-to-r from-emerald-500 to-teal-600 p-6 rounded-t-2xl">
                 <div className="flex items-center justify-between">
@@ -424,6 +469,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           onDelete={handleDeleteLink}
                           onGenerateNewOTP={handleGenerateNewOTP}
                           copiedLinkId={copiedLinkId}
+                          generatingOTPFor={generatingOTPFor}
+                          newlyGeneratedOTPFor={newlyGeneratedOTPFor}
                         />
                       ))}
                     </div>
@@ -529,7 +576,9 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
             </motion.div>
           </div>
         )}
-      </AnimatePresence>
+        </AnimatePresence>,
+        document.body
+      )}
     </>
   );
 }

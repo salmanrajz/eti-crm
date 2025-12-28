@@ -140,33 +140,33 @@ export function MARStrip({ user }: MARStripProps) {
   }
 
   return (
-    <div className="flex items-center gap-3 bg-gradient-to-r from-cyan-50 to-blue-50 border border-cyan-200 rounded-lg px-3 py-2 shadow-sm">
-      <div className="flex items-center gap-2">
-        <Target className="h-4 w-4 text-cyan-600" />
-        <span className="text-sm font-semibold text-cyan-700">MAR:</span>
-        <span className="text-sm font-bold text-cyan-900">{metrics.mar}</span>
+    <div className="flex items-center gap-1 sm:gap-1.5 bg-gradient-to-r from-cyan-50 to-blue-50 border border-cyan-200 rounded-md sm:rounded-lg px-1.5 sm:px-2 py-1 sm:py-1.5 shadow-sm">
+      <div className="flex items-center gap-0.5 sm:gap-1">
+        <Target className="h-3 w-3 text-cyan-600 flex-shrink-0" />
+        <span className="text-[10px] sm:text-xs font-semibold text-cyan-700 whitespace-nowrap">MAR:</span>
+        <span className="text-[10px] sm:text-xs font-bold text-cyan-900">{metrics.mar}</span>
       </div>
-      <div className="flex items-center gap-2">
-        <Zap className="h-4 w-4 text-purple-600" />
-        <span className="text-sm font-semibold text-purple-700">Achieved:</span>
-        <span className="text-sm font-bold text-purple-900">{metrics.activated}</span>
+      <div className="flex items-center gap-0.5 sm:gap-1">
+        <Zap className="h-3 w-3 text-purple-600 flex-shrink-0" />
+        <span className="text-[10px] sm:text-xs font-semibold text-purple-700 whitespace-nowrap">Achieved:</span>
+        <span className="text-[10px] sm:text-xs font-bold text-purple-900">{metrics.activated}</span>
       </div>
-      <div className="ml-2">
+      <div className="ml-0.5 sm:ml-1">
         {metrics.activated < metrics.mar ? (
           <motion.div 
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.3 }}
-            className="flex items-center gap-2 text-xs bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg px-2 py-1 shadow-sm"
+            className="flex items-center gap-1 text-[9px] sm:text-[10px] bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded px-1 sm:px-1.5 py-0.5 shadow-sm"
           >
             <motion.div 
               animate={{ scale: [1, 1.1, 1] }}
               transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-              className="w-4 h-4 bg-red-100 rounded-full flex items-center justify-center"
+              className="w-2.5 h-2.5 sm:w-3 sm:h-3 bg-red-100 rounded-full flex items-center justify-center flex-shrink-0"
             >
-              <XCircle className="h-2 w-2 text-red-500" />
+              <XCircle className="h-1.5 w-1.5 text-red-500" />
             </motion.div>
-            <span className="font-semibold text-red-700">
+            <span className="font-semibold text-red-700 whitespace-nowrap">
               Needs {metrics.mar - metrics.activated} more
             </span>
           </motion.div>
@@ -175,14 +175,14 @@ export function MARStrip({ user }: MARStripProps) {
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.3 }}
-            className="flex items-center gap-2 text-xs bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg px-2 py-1 shadow-sm"
+            className="flex items-center gap-1 text-[9px] sm:text-[10px] bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded px-1 sm:px-1.5 py-0.5 shadow-sm"
           >
             <motion.div 
               animate={{ scale: [1, 1.05, 1] }}
               transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-              className="w-4 h-4 bg-green-100 rounded-full flex items-center justify-center"
+              className="w-2.5 h-2.5 sm:w-3 sm:h-3 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0"
             >
-              <CheckCircle className="h-2 w-2 text-green-500" />
+              <CheckCircle className="h-1.5 w-1.5 text-green-500" />
             </motion.div>
           </motion.div>
         )}

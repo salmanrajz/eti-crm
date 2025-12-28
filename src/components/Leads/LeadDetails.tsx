@@ -52,11 +52,13 @@ import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, ChatMessage } from '../../types';
 import { toast } from 'react-hot-toast';
-import { Send, ArrowLeft, MessageSquare, Paperclip, Mic, Square, Loader2, Trash2, Download, Play, Pause, X, AlertCircle } from 'lucide-react';
+import { Send, ArrowLeft, MessageSquare, Paperclip, Mic, Square, Loader2, Trash2, Download, Play, Pause, X, AlertCircle, AlertTriangle } from 'lucide-react';
+import { Dialog } from '@headlessui/react';
 import { LeadDetailsView } from './LeadDetailsView';
 import { CreateLead } from './CreateLead';
 import { format } from 'date-fns';
 import { logNumberAction } from '../../utils/numberLogging';
+import { logLeadAction } from '../../utils/leadLogging';
 
 const VoiceNotePlayer = ({ src, durationMs, onPlay, currentlyPlaying }: { src: string; durationMs?: number; onPlay: () => void; currentlyPlaying: string | null }) => {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -216,6 +218,8 @@ export function LeadDetails() {
   const [recordingElapsed, setRecordingElapsed] = useState<number>(0);
   const [fileSizeError, setFileSizeError] = useState<string | null>(null);
   const [userDetails, setUserDetails] = useState<Record<string, { name: string }>>({});
+  const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
+  const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
     // Defer to ensure DOM is painted
@@ -681,7 +685,35 @@ export function LeadDetails() {
         throw new Error(errorMessage);
       }
 
-      const leadData = leadDoc.data();
+      const leadData = leadDoc.data() as Lead;
+      
+      // Validate that all numbers in lead plans exist in numberPool
+      const plans = leadData.plans || [];
+      const realPlans = plans.filter((p: any) => p.numberId && !p.numberId.startsWith('virtual-'));
+      
+      if (realPlans.length > 0) {
+        const missingNumbers: string[] = [];
+        const checkPromises = realPlans.map(async (plan: any) => {
+          try {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) {
+              missingNumbers.push(plan.number || plan.numberId);
+            }
+          } catch (error) {
+            console.error(`Error checking number ${plan.numberId}:`, error);
+            missingNumbers.push(plan.number || plan.numberId);
+          }
+        });
+        
+        await Promise.all(checkPromises);
+        
+        if (missingNumbers.length > 0) {
+          setMissingNumbers(missingNumbers);
+          setShowNumberErrorModal(true);
+          throw new Error(`Number not available: ${missingNumbers.join(', ')}`);
+        }
+      }
       
       // If lead is verified, only allow updates from admin, manager, or coordinator
       if (leadData.status === 'verified' && !['admin', 'manager', 'coordinator'].includes(user.role)) {
@@ -765,6 +797,30 @@ export function LeadDetails() {
 
       // Update the lead in Firestore
       await updateDoc(leadRef, updateData);
+      
+      // Log lead update
+      try {
+        const action: 'updated' | 'status_changed' | 'resubmitted' = statusChanged 
+          ? 'status_changed' 
+          : isAgentResubmittingFollowUp 
+            ? 'resubmitted' 
+            : 'updated';
+        
+        await logLeadAction(
+          id,
+          leadData.leadNumber || id,
+          action,
+          leadData,
+          { ...leadData, ...updateData },
+          statusChanged 
+            ? `Status changed from ${leadData.status} to ${nextStatus}` 
+            : isAgentResubmittingFollowUp 
+              ? 'Lead resubmitted by agent' 
+              : 'Lead updated'
+        );
+      } catch (error) {
+        console.error('Error logging lead update:', error);
+      }
 
       // Handle number status changes when plans are modified
       if (updates.plans) {
@@ -2038,6 +2094,48 @@ export function LeadDetails() {
           )}
         </div>
       </div>
+
+      {/* Number Error Modal */}
+      <Dialog open={showNumberErrorModal} onClose={() => setShowNumberErrorModal(false)} className="relative z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-30" aria-hidden="true" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <Dialog.Panel className="mx-auto max-w-md w-full bg-white rounded-xl shadow-2xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-red-100 rounded-lg">
+                <AlertTriangle className="h-6 w-6 text-red-600" />
+              </div>
+              <Dialog.Title className="text-xl font-bold text-gray-900">
+                Number Not Available
+              </Dialog.Title>
+            </div>
+            <div className="mb-6">
+              <p className="text-gray-600 mb-3">
+                The following number(s) are not available in the number pool:
+              </p>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <ul className="list-disc list-inside space-y-1">
+                  {missingNumbers.map((number, idx) => (
+                    <li key={idx} className="text-red-800 font-mono text-sm">
+                      {number}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-sm text-gray-500 mt-3">
+                Please ensure all numbers exist in the number pool before performing this action.
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowNumberErrorModal(false)}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </Dialog.Panel>
+        </div>
+      </Dialog>
     </div>
   );
 }

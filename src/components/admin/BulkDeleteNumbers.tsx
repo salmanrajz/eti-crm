@@ -1,21 +1,21 @@
 /**
  * ===============================================================================
- * BULK DELETE NUMBERS COMPONENT - ADMIN NUMBER MANAGEMENT
+ * RETURN NUMBERS COMPONENT - ADMIN NUMBER MANAGEMENT
  * ===============================================================================
  * 
- * This component provides an interface for admins to bulk delete numbers
+ * This component provides an interface for admins to return numbers
  * from the number pool. It accepts a list of numbers (one per line) and
- * processes them for deletion.
+ * processes them for return.
  * 
  * FEATURES:
  * - Textarea input for pasting multiple numbers
  * - Real-time number count display
  * - Batch processing with progress feedback
  * - Automatic stats recalculation
- * - Detailed results showing deleted, not found, and errors
+ * - Detailed results showing returned, not found, and errors
  * 
  * SAFETY:
- * - Confirmation dialog before deletion
+ * - Confirmation dialog before return
  * - Maximum 500 numbers per batch
  * - Transaction-safe operations
  * - Automatic stats update
@@ -110,8 +110,8 @@ export function BulkDeleteNumbers() {
         }
       }
     } catch (error: any) {
-      console.error('Bulk delete error:', error);
-      toast.error(error.message || 'Failed to delete numbers');
+      console.error('Bulk return error:', error);
+      toast.error(error.message || 'Failed to return numbers');
       setResult({
         success: false,
         deletedCount: 0,
@@ -132,9 +132,9 @@ export function BulkDeleteNumbers() {
           <Trash2 className="h-6 w-6 text-red-600" />
         </div>
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Bulk Delete Numbers</h2>
+          <h2 className="text-2xl font-bold text-gray-900">Return Numbers</h2>
           <p className="text-sm text-gray-500 mt-1">
-            Delete multiple numbers from the pool (one per line, max 500)
+            Return multiple numbers from the pool (one per line, max 500)
           </p>
         </div>
       </div>
@@ -143,11 +143,11 @@ export function BulkDeleteNumbers() {
       <div className="bg-white rounded-xl border-2 border-gray-200 p-6 space-y-4">
         <div className="flex items-center justify-between">
           <label className="block text-sm font-medium text-gray-700">
-            Numbers to Delete
+            Numbers to Return
           </label>
           {numbersCount > 0 && (
             <span className="text-sm font-medium text-gray-600">
-              {numbersCount} number{numbersCount !== 1 ? 's' : ''} to delete
+              {numbersCount} number{numbersCount !== 1 ? 's' : ''} to return
             </span>
           )}
         </div>
@@ -177,12 +177,12 @@ export function BulkDeleteNumbers() {
             {isProcessing ? (
               <>
                 <Loader className="h-5 w-5 animate-spin" />
-                Deleting...
+                Returning...
               </>
             ) : (
               <>
                 <Trash2 className="h-5 w-5" />
-                Delete {numbersCount} Number{numbersCount !== 1 ? 's' : ''}
+                Return {numbersCount} Number{numbersCount !== 1 ? 's' : ''}
               </>
             )}
           </button>
@@ -338,7 +338,7 @@ export function BulkDeleteNumbers() {
               </div>
 
               <p className="text-gray-600 mb-6">
-                Are you sure you want to delete <strong>{numbersCount}</strong> number
+                Are you sure you want to return <strong>{numbersCount}</strong> number
                 {numbersCount !== 1 ? 's' : ''}? 
                 <br /><br />
                 The status of these numbers will be changed to "returned" and they will appear in search results. 
@@ -350,7 +350,7 @@ export function BulkDeleteNumbers() {
                   onClick={handleBulkDelete}
                   className="flex-1 bg-red-600 text-white py-2 px-4 rounded-lg hover:bg-red-700 transition-colors font-medium"
                 >
-                  Yes, Delete
+                  Yes, Return
                 </button>
                 <button
                   onClick={() => setShowConfirmDialog(false)}

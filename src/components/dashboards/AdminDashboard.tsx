@@ -54,6 +54,9 @@ import { WhatsAppSettings } from '../admin/WhatsAppSettings';
 import { BulkDNCImport } from '../admin/BulkDNCImport';
 import { BulkDeleteNumbers } from '../admin/BulkDeleteNumbers';
 import { AddToDeletedNumbers } from '../admin/AddToDeletedNumbers';
+import { BulkNumberSearch } from '../admin/BulkNumberSearch';
+import { BulkDeletedNumberSearch } from '../admin/BulkDeletedNumberSearch';
+import { CustomerLinkTracking } from '../admin/CustomerLinkTracking';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
 import { 
@@ -336,11 +339,20 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [whatsappSettingsModalOpen, setWhatsappSettingsModalOpen] = useState(false);
   const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
   const [addToDeletedModalOpen, setAddToDeletedModalOpen] = useState(false);
+  const [bulkNumberSearchModalOpen, setBulkNumberSearchModalOpen] = useState(false);
+  const [bulkDeletedNumberSearchModalOpen, setBulkDeletedNumberSearchModalOpen] = useState(false);
+  const [customerLinkTrackingModalOpen, setCustomerLinkTrackingModalOpen] = useState(false);
   // Number lookup states
   const [numberLookupOpen, setNumberLookupOpen] = useState(false);
   const [numberLookupInput, setNumberLookupInput] = useState('');
   const [numberLookupResults, setNumberLookupResults] = useState<Lead[]>([]);
   const [numberLookupLoading, setNumberLookupLoading] = useState(false);
+  const [numberLookupFilters, setNumberLookupFilters] = useState<{
+    status: string[];
+  }>({
+    status: []
+  });
+  const [showNumberLookupFilters, setShowNumberLookupFilters] = useState(false);
   // Broadcast poster states
   const [posterTitle, setPosterTitle] = useState('');
   const [posterMessage, setPosterMessage] = useState('');
@@ -1427,7 +1439,56 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         teamName: lead.teamId ? (teamMap.get(lead.teamId) || lead.teamName || 'Unknown Team') : 'N/A'
       }));
 
-      setNumberLookupResults(matchingLeads);
+      // Fetch number pool data for all plan numberIds to get groups
+      const numberPoolMap = new Map<string, { group?: string }>();
+      const numberIdsToFetch = new Set<string>();
+      
+      matchingLeads.forEach(lead => {
+        (lead.plans || []).forEach(plan => {
+          if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+            numberIdsToFetch.add(plan.numberId);
+          }
+        });
+      });
+
+      // Fetch number pool documents in batches
+      if (numberIdsToFetch.size > 0) {
+        const numberPoolPromises = Array.from(numberIdsToFetch).map(async (numberId) => {
+          try {
+            const numberDoc = await getDoc(doc(db, 'numberPool', numberId));
+            if (numberDoc.exists()) {
+              const numberData = numberDoc.data();
+              numberPoolMap.set(numberId, {
+                group: numberData.group || 'N/A'
+              });
+            }
+          } catch (error) {
+            console.error(`Error fetching number pool for ${numberId}:`, error);
+          }
+        });
+        
+        await Promise.all(numberPoolPromises);
+      }
+
+      // Add number pool group data to leads
+      const leadsWithNumberPoolData = matchingLeads.map(lead => ({
+        ...lead,
+        plansWithGroup: (lead.plans || []).map(plan => {
+          if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+            const poolData = numberPoolMap.get(plan.numberId);
+            return {
+              ...plan,
+              poolGroup: poolData?.group || 'N/A'
+            };
+          }
+          return {
+            ...plan,
+            poolGroup: 'N/A'
+          };
+        })
+      }));
+
+      setNumberLookupResults(leadsWithNumberPoolData as any);
       
       if (matchingLeads.length === 0) {
         toast(`No leads found for ${numbers.length} number(s)`, { icon: 'ℹ️' });
@@ -1726,6 +1787,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-cyan-600',
     },
     {
+      name: 'Lead Logs',
+      description: 'View all lead activity',
+      value: 'View',
+      href: '/dashboard/lead-logs',
+      icon: ClipboardList,
+      color: 'bg-gradient-to-br from-violet-500 to-violet-600',
+      textColor: 'text-violet-600',
+    },
+    {
+      name: 'User Session Logs',
+      description: 'Track user activities',
+      value: 'View',
+      href: '/dashboard/user-session-logs',
+      icon: Activity,
+      color: 'bg-gradient-to-br from-blue-500 to-indigo-600',
+      textColor: 'text-blue-600',
+    },
+    {
       name: 'Number Lookup',
       description: 'Search leads by numbers',
       value: 'Search',
@@ -1808,8 +1887,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-amber-600',
     },
     {
-      name: 'Bulk Delete Numbers',
-      description: 'Delete multiple numbers',
+      name: 'Return numbers',
+      description: 'Return multiple numbers',
       value: 'Delete',
       href: '#bulk-delete',
       icon: Trash2,
@@ -1818,12 +1897,39 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     },
     {
       name: 'Add to Deleted Numbers',
-      description: 'Add numbers directly to deletedNumbers',
+      description: 'Add to deleted numbers',
       value: 'Add',
       href: '#add-to-deleted',
       icon: Archive,
       color: 'bg-gradient-to-br from-orange-500 to-orange-600',
       textColor: 'text-orange-600',
+    },
+    {
+      name: 'Bulk Number Search',
+      description: 'Search number pool',
+      value: 'Search',
+      href: '#bulk-number-search',
+      icon: Search,
+      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
+      textColor: 'text-purple-600',
+    },
+    {
+      name: 'Bulk Deleted Number Search',
+      description: 'Search deleted numbers',
+      value: 'Search',
+      href: '#bulk-deleted-number-search',
+      icon: Archive,
+      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
+      textColor: 'text-orange-600',
+    },
+    {
+      name: 'Customer Link Tracking',
+      description: 'Track link activities',
+      value: 'Track',
+      href: '#customer-link-tracking',
+      icon: BarChart3,
+      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
+      textColor: 'text-indigo-600',
     },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
@@ -2600,7 +2706,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
             </button>
-          ) : stat.name === 'Bulk Delete Numbers' ? (
+          ) : stat.name === 'Return numbers' ? (
             <button
               key={stat.name}
               onClick={() => setBulkDeleteModalOpen(true)}
@@ -2644,6 +2750,90 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                   <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
                     {stat.name}
                   </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+                <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+              </div>
+            </button>
+          ) : stat.name === 'Bulk Number Search' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkNumberSearchModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+                <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+              </div>
+            </button>
+          ) : stat.name === 'Bulk Deleted Number Search' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkDeletedNumberSearchModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Customer Link Tracking' ? (
+            <button
+              key={stat.name}
+              onClick={() => setCustomerLinkTrackingModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
                 </div>
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
@@ -2681,7 +2871,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         <button
           onClick={handleInitializeStats}
           disabled={initializingStats}
-          className="bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-blue-200"
+          className="hidden bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-blue-200"
           type="button"
         >
           <div className="p-2 sm:p-4 md:p-6">
@@ -3748,7 +3938,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             onClose={() => setBulkImportOpen(false)} 
           />
 
-      {/* Bulk Delete Numbers Modal */}
+      {/* Return Numbers Modal */}
       {bulkDeleteModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
           <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
@@ -3785,6 +3975,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           </div>
         </div>
       )}
+
+      {/* Bulk Number Search Modal */}
+      <BulkNumberSearch 
+        isOpen={bulkNumberSearchModalOpen} 
+        onClose={() => setBulkNumberSearchModalOpen(false)} 
+      />
+
+      {/* Bulk Deleted Number Search Modal */}
+      <BulkDeletedNumberSearch 
+        isOpen={bulkDeletedNumberSearchModalOpen} 
+        onClose={() => setBulkDeletedNumberSearchModalOpen(false)} 
+      />
+
+      {/* Customer Link Tracking Modal */}
+      <CustomerLinkTracking 
+        isOpen={customerLinkTrackingModalOpen} 
+        onClose={() => setCustomerLinkTrackingModalOpen(false)} 
+      />
 
       {/* Trusted Devices Management Modal */}
       {trustedDevicesModalOpen && (
@@ -3904,17 +4112,192 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                     <h3 className="text-lg font-semibold text-gray-900">
                       Found {numberLookupResults.length} Lead(s)
                     </h3>
-                    <button
-                      onClick={() => {
-                        setNumberLookupResults([]);
-                        setNumberLookupInput('');
-                      }}
-                      className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
-                    >
-                      <X className="w-4 h-4" />
-                      Clear Results
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setShowNumberLookupFilters(!showNumberLookupFilters)}
+                        className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
+                      >
+                        <Filter className="w-4 h-4" />
+                        Filters
+                        {numberLookupFilters.status.length > 0 && (
+                          <span className="ml-1 px-1.5 py-0.5 bg-teal-500 text-white text-xs rounded-full">
+                            {numberLookupFilters.status.length}
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const filteredResults = numberLookupResults.filter(lead => {
+                              if (numberLookupFilters.status.length > 0 && !numberLookupFilters.status.includes(lead.status)) return false;
+                              return true;
+                            });
+                            
+                            const XLSX = await import('xlsx');
+                            
+                            // Prepare export data - one row per plan/number
+                            const exportData: any[] = [];
+                            
+                            filteredResults.forEach((lead) => {
+                              const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
+                              
+                              if (plansWithGroup.length === 0) {
+                                // Lead with no plans - single row
+                                exportData.push({
+                                  'Lead Number': lead.leadNumber || 'N/A',
+                                  'Customer Name': lead.customerName || 'N/A',
+                                  'Customer Number': lead.customerNumber || 'N/A',
+                                  'Selected Number': 'N/A',
+                                  'Group': 'N/A',
+                                  'Status': lead.status || 'N/A',
+                                  'Agent': (lead as any).agentName || lead.agentName || 'N/A',
+                                  'Team': (lead as any).teamName || lead.teamName || 'N/A',
+                                  'Created': lead.createdAt ? format(
+                                    (lead.createdAt && typeof (lead.createdAt as any).toDate === 'function') 
+                                      ? (lead.createdAt as any).toDate() 
+                                      : (lead.createdAt instanceof Date ? lead.createdAt : new Date(lead.createdAt)),
+                                    'MMM d, yyyy'
+                                  ) : 'N/A'
+                                });
+                              } else {
+                                // Lead with plans - one row per plan
+                                plansWithGroup.forEach((plan: any) => {
+                                  exportData.push({
+                                    'Lead Number': lead.leadNumber || 'N/A',
+                                    'Customer Name': lead.customerName || 'N/A',
+                                    'Customer Number': lead.customerNumber || 'N/A',
+                                    'Selected Number': plan.number || 'N/A',
+                                    'Group': plan.poolGroup || 'N/A',
+                                    'Status': lead.status || 'N/A',
+                                    'Agent': (lead as any).agentName || lead.agentName || 'N/A',
+                                    'Team': (lead as any).teamName || lead.teamName || 'N/A',
+                                    'Created': lead.createdAt ? format(
+                                      (lead.createdAt && typeof (lead.createdAt as any).toDate === 'function') 
+                                        ? (lead.createdAt as any).toDate() 
+                                        : (lead.createdAt instanceof Date ? lead.createdAt : new Date(lead.createdAt)),
+                                      'MMM d, yyyy'
+                                    ) : 'N/A'
+                                  });
+                                });
+                              }
+                            });
+                            
+                            const ws = XLSX.utils.json_to_sheet(exportData);
+                            const wb = XLSX.utils.book_new();
+                            XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+                            
+                            const dateStr = format(new Date(), 'yyyy-MM-dd');
+                            const filename = `Numbers in leads ${dateStr}.xlsx`;
+                            XLSX.writeFile(wb, filename);
+                            
+                            toast.success('Excel file downloaded successfully!');
+                          } catch (error) {
+                            console.error('Error exporting to Excel:', error);
+                            toast.error('Failed to export to Excel');
+                          }
+                        }}
+                        className="text-sm text-white bg-teal-600 hover:bg-teal-700 flex items-center gap-1 px-3 py-1.5 rounded-lg transition-colors"
+                      >
+                        <Database className="w-4 h-4" />
+                        Export Excel
+                      </button>
+                      <button
+                        onClick={() => {
+                          setNumberLookupResults([]);
+                          setNumberLookupInput('');
+                          setNumberLookupFilters({ status: [] });
+                        }}
+                        className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
+                      >
+                        <X className="w-4 h-4" />
+                        Clear Results
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Filters Section */}
+                  {showNumberLookupFilters && (
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Status
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {(() => {
+                            // Get all unique statuses from results
+                            const allStatuses = Array.from(new Set(numberLookupResults.map(lead => lead.status).filter(Boolean)));
+                            // Add common statuses that might not be in results
+                            const commonStatuses = [
+                              'pending_verification',
+                              'verified',
+                              'activated',
+                              'non_verified',
+                              'rejected',
+                              'assigned',
+                              'follow_up',
+                              'activated_non_verified',
+                              'assigned_to_cord',
+                              'pending',
+                              'later',
+                              'reverification'
+                            ];
+                            const allUniqueStatuses = Array.from(new Set([...commonStatuses, ...allStatuses])).sort();
+                            
+                            return allUniqueStatuses.map((status) => {
+                              const isSelected = numberLookupFilters.status.includes(status);
+                              return (
+                                <button
+                                  key={status}
+                                  onClick={() => {
+                                    setNumberLookupFilters(prev => ({
+                                      ...prev,
+                                      status: isSelected
+                                        ? prev.status.filter(s => s !== status)
+                                        : [...prev.status, status]
+                                    }));
+                                  }}
+                                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                                    isSelected
+                                      ? 'bg-teal-500 text-white'
+                                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {status === 'pending_verification' ? 'Pending Verification' :
+                                   status === 'non_verified' ? 'Non Verified' :
+                                   status === 'activated_non_verified' ? 'Activated Non Verified' :
+                                   status === 'assigned_to_cord' ? 'Assigned To Coordinator' :
+                                   status === 'follow_up' ? 'Follow Up' :
+                                   status === 'reverification' ? 'Reverification' :
+                                   status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, ' ')}
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </div>
+                      <div className="mt-4 flex justify-end">
+                        <button
+                          onClick={() => setNumberLookupFilters({ status: [] })}
+                          className="text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5"
+                        >
+                          Clear All Filters
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Filtered Results Count */}
+                  {(() => {
+                    const filteredResults = numberLookupResults.filter(lead => {
+                      if (numberLookupFilters.status.length > 0 && !numberLookupFilters.status.includes(lead.status)) return false;
+                      return true;
+                    });
+                    return filteredResults.length !== numberLookupResults.length ? (
+                      <div className="mb-4 text-sm text-gray-600">
+                        Showing {filteredResults.length} of {numberLookupResults.length} lead(s)
+                      </div>
+                    ) : null;
+                  })()}
                   
                   <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200 border border-gray-200 rounded-lg">
@@ -3922,8 +4305,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                         <tr>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead Number</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer Name</th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone & Customer Numbers</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer Number</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Selected Number(s)</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Group</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Team</th>
@@ -3932,7 +4316,10 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {numberLookupResults.map((lead) => (
+                        {numberLookupResults.filter(lead => {
+                          if (numberLookupFilters.status.length > 0 && !numberLookupFilters.status.includes(lead.status)) return false;
+                          return true;
+                        }).map((lead) => (
                           <tr key={lead.id} className="hover:bg-gray-50">
                             <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-indigo-600">
                               {lead.leadNumber || 'N/A'}
@@ -3941,45 +4328,65 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                               {lead.customerName || 'N/A'}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-600">
-                              <div className="flex flex-col gap-1">
-                                <div className="font-mono">
-                                  <span className="text-gray-500 text-xs">Phone: </span>
-                                  <span>{lead.customerPhone || 'N/A'}</span>
-                                </div>
-                                {lead.customerNumbers && lead.customerNumbers.length > 0 && (
-                                  <div className="flex flex-col gap-0.5 mt-1">
-                                    {lead.customerNumbers.map((custNum, idx) => (
-                                      <div key={idx} className="text-xs">
-                                        <span className="text-gray-500">Customer #{idx + 1}: </span>
-                                        <span className="font-mono text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
-                                          {custNum.number}
-                                        </span>
-                                        {custNum.alternativeNumber && (
-                                          <>
-                                            <span className="text-gray-400 mx-1">|</span>
-                                            <span className="font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">
-                                              Alt: {custNum.alternativeNumber}
-                                            </span>
-                                          </>
-                                        )}
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
+                              <div className="font-mono">
+                                <span className={lead.customerNumber ? 'text-indigo-700 font-medium' : 'text-gray-400'}>
+                                  {lead.customerNumber || 'N/A'}
+                                </span>
                               </div>
-                            </td>
-                            <td className="px-4 py-3 text-sm text-gray-600">
-                              {lead.plans && lead.plans.length > 0 ? (
-                                <div className="flex flex-col gap-1">
-                                  {lead.plans.map((plan, idx) => (
-                                    <span key={idx} className="font-mono text-teal-700 bg-teal-50 px-2 py-1 rounded">
-                                      {plan.number || 'N/A'}
-                                    </span>
+                              {lead.customerNumbers && lead.customerNumbers.length > 0 && (
+                                <div className="flex flex-col gap-0.5 mt-1">
+                                  {lead.customerNumbers.map((custNum, idx) => (
+                                    <div key={idx} className="text-xs">
+                                      <span className="text-gray-500">Customer #{idx + 1}: </span>
+                                      <span className="font-mono text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                                        {custNum.number}
+                                      </span>
+                                      {custNum.alternativeNumber && (
+                                        <>
+                                          <span className="text-gray-400 mx-1">|</span>
+                                          <span className="font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">
+                                            Alt: {custNum.alternativeNumber}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
                                   ))}
                                 </div>
-                              ) : (
-                                <span className="text-gray-400">No numbers</span>
                               )}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              {(() => {
+                                const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
+                                if (plansWithGroup.length > 0) {
+                                  return (
+                                    <div className="flex flex-col gap-1">
+                                      {plansWithGroup.map((plan: any, idx: number) => (
+                                        <span key={idx} className="font-mono text-teal-700 bg-teal-50 px-2 py-1 rounded">
+                                          {plan.number || 'N/A'}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                }
+                                return <span className="text-gray-400">No numbers</span>;
+                              })()}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              {(() => {
+                                const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
+                                if (plansWithGroup.length > 0) {
+                                  return (
+                                    <div className="flex flex-col gap-1">
+                                      {plansWithGroup.map((plan: any, idx: number) => (
+                                        <span key={idx} className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                                          {plan.poolGroup && plan.poolGroup !== 'N/A' ? plan.poolGroup : 'N/A'}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                }
+                                return <span className="text-gray-400">N/A</span>;
+                              })()}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap">
                               <span className={`px-2 py-1 text-xs font-medium rounded-full ${

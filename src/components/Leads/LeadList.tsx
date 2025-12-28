@@ -46,7 +46,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot, documentId, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot, documentId, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { Lead, CoordinatorType, VerifierGroups } from '../../types';
@@ -65,6 +65,7 @@ import {
   XCircle,
   Zap,
   Hash,
+  Tag,
   Trash2,
   AlertCircle,
   ChevronDown,
@@ -93,6 +94,7 @@ import { TransferLeadModal } from './TransferLeadModal';
 import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppConversationView';
 import { checkConversation } from '../../utils/whatsappRouter';
 import { normalizeTimestamp, formatTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
+import { logLeadAction } from '../../utils/leadLogging';
 
 // ✅ PERFORMANCE: Optimized load sizes for faster initial loading
 const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
@@ -257,6 +259,10 @@ export function LeadList() {
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
+  const [selectedLeadForDelete, setSelectedLeadForDelete] = useState<Lead | null>(null);
+  const [showDeleteConfirmDialog, setShowDeleteConfirmDialog] = useState(false);
+  const [deleteConfirmNumber, setDeleteConfirmNumber] = useState('');
+  const [isDeletingLead, setIsDeletingLead] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
   const [hasMore, setHasMore] = useState(true);
@@ -275,8 +281,13 @@ export function LeadList() {
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const logsContainerRef = useRef<HTMLDivElement | null>(null);
+  const whatsAppLogsUnsubscribeRef = useRef<(() => void) | null>(null);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [selectedLeadForTransfer, setSelectedLeadForTransfer] = useState<Lead | null>(null);
+  const [showChangeGroupModal, setShowChangeGroupModal] = useState(false);
+  const [selectedLeadForGroupChange, setSelectedLeadForGroupChange] = useState<Lead | null>(null);
+  const [newGroup, setNewGroup] = useState<string>('');
+  const [isUpdatingGroup, setIsUpdatingGroup] = useState(false);
   const [statusTimers, setStatusTimers] = useState<Record<string, number>>({});
   const [leadStrikes, setLeadStrikes] = useState<Record<string, number>>({});
 
@@ -1217,6 +1228,124 @@ export function LeadList() {
     }
   };
 
+  const handleDeleteSingleLead = async () => {
+    if (!isAdmin() || !selectedLeadForDelete) {
+      return;
+    }
+
+    // Validate that the entered number matches the lead number
+    if (deleteConfirmNumber.trim() !== selectedLeadForDelete.leadNumber) {
+      toast.error('Entered number does not match. Please enter the correct lead number.');
+      return;
+    }
+
+    setIsDeletingLead(true);
+
+    try {
+      const leadRef = doc(db, 'leads', selectedLeadForDelete.id);
+      const leadData = selectedLeadForDelete;
+
+      // Log the deletion before deleting
+      await logLeadAction(
+        selectedLeadForDelete.id,
+        selectedLeadForDelete.leadNumber || selectedLeadForDelete.id,
+        'deleted',
+        leadData,
+        undefined,
+        `Lead deleted by admin ${user?.name || 'Unknown'}`
+      );
+
+      // Clean up number pool - release numbers back to open
+      if (leadData.plans && leadData.plans.length > 0) {
+        const realPlans = leadData.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+        const numberUpdatePromises = realPlans.map(async (plan) => {
+          if (plan.numberId) {
+            try {
+              const numberRef = doc(db, 'numberPool', plan.numberId);
+              const numberDoc = await getDoc(numberRef);
+              if (numberDoc.exists()) {
+                await updateDoc(numberRef, {
+                  status: 'open',
+                  lastStatusChange: new Date(),
+                  leadId: null,
+                  reservedBy: null,
+                  reservedAt: null,
+                  claimingAgentId: null,
+                  claimingStartedAt: null,
+                  claimingExpiresAt: null,
+                  claimQueue: []
+                });
+              }
+            } catch (error) {
+              console.error(`Error updating number ${plan.numberId}:`, error);
+            }
+          }
+        });
+        await Promise.all(numberUpdatePromises);
+      }
+
+      // Delete the lead
+      await deleteDoc(leadRef);
+
+      toast.success('Lead deleted successfully');
+      
+      // Clear caches and reload
+      leadsCache.clear();
+      numberGroupsCache.clear();
+      agentInfoCache.clear();
+      loadLeads(true);
+
+      // Close dialog
+      setShowDeleteConfirmDialog(false);
+      setSelectedLeadForDelete(null);
+      setDeleteConfirmNumber('');
+    } catch (error) {
+      console.error('Error deleting lead:', error);
+      toast.error('Failed to delete lead');
+    } finally {
+      setIsDeletingLead(false);
+    }
+  };
+
+  const handleChangePlanGroup = async () => {
+    if (!selectedLeadForGroupChange || !newGroup) {
+      toast.error('Please select a new group');
+      return;
+    }
+
+    setIsUpdatingGroup(true);
+
+    try {
+      const leadRef = doc(db, 'leads', selectedLeadForGroupChange.id);
+      
+      // Update all plans with the new group
+      const updatedPlans = (selectedLeadForGroupChange.plans || []).map(plan => ({
+        ...plan,
+        group: newGroup
+      }));
+
+      await updateDoc(leadRef, {
+        plans: updatedPlans,
+        updatedAt: new Date()
+      });
+
+      toast.success(`Successfully changed plan group to ${newGroup}`);
+      setShowChangeGroupModal(false);
+      setSelectedLeadForGroupChange(null);
+      setNewGroup('');
+      
+      // Clear cache and reload
+      leadsCache.clear();
+      numberGroupsCache.clear();
+      loadLeads(true);
+    } catch (error) {
+      console.error('Error changing plan group:', error);
+      toast.error('Failed to change plan group');
+    } finally {
+      setIsUpdatingGroup(false);
+    }
+  };
+
   // ✅ OPTIMIZED: Enhanced cleanup function with proper listener management - Mobile optimized
   useEffect(() => {
     // Cleanup function when component unmounts or user changes
@@ -1301,7 +1430,7 @@ export function LeadList() {
         batchConstraints.push(limit(BATCH_SIZE));
 
         const q = query(baseQuery, ...batchConstraints);
-        const snapshot = await getDocs(q);
+      const snapshot = await getDocs(q);
 
         if (snapshot.empty) {
           hasMore = false;
@@ -1329,6 +1458,19 @@ export function LeadList() {
         })
         .filter((lead: any) => {
           const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
+          
+          // Check SR numbers (legacy single value, array, or in plans)
+          const srNumberMatch = 
+            lead.srNumber?.toString?.().toLowerCase().includes(normalizedSearch) ||
+            lead.srNo?.toString?.().toLowerCase().includes(normalizedSearch) ||
+            lead.sr?.toString?.().toLowerCase().includes(normalizedSearch) ||
+            (Array.isArray(lead.srNumbers) && lead.srNumbers.some((sr: string) => 
+              sr?.toString?.().toLowerCase().includes(normalizedSearch)
+            )) ||
+            (lead.plans && lead.plans.some((plan: any) => 
+              plan.srNumber?.toString?.().toLowerCase().includes(normalizedSearch)
+            ));
+          
           return (
             lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
             lead.customerName?.toLowerCase().includes(normalizedSearch) ||
@@ -1339,6 +1481,7 @@ export function LeadList() {
             ) ||
             lead.status?.toLowerCase().includes(normalizedSearch) ||
             lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+            srNumberMatch ||
             (canSearchEtisalatId && (
               lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
               (lead.etisalatLeadIds && Array.isArray(lead.etisalatLeadIds) 
@@ -1476,6 +1619,19 @@ export function LeadList() {
     const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
 
     return filtered.filter(lead => {
+      // Check SR numbers (legacy single value, array, or in plans)
+      const srNumberMatch = normalizedSearch && (
+        (lead as any).srNumber?.toString?.().toLowerCase().includes(normalizedSearch) ||
+        (lead as any).srNo?.toString?.().toLowerCase().includes(normalizedSearch) ||
+        (lead as any).sr?.toString?.().toLowerCase().includes(normalizedSearch) ||
+        (Array.isArray((lead as any).srNumbers) && (lead as any).srNumbers.some((sr: string) => 
+          sr?.toString?.().toLowerCase().includes(normalizedSearch)
+        )) ||
+        (lead.plans && lead.plans.some((plan: any) => 
+          plan.srNumber?.toString?.().toLowerCase().includes(normalizedSearch)
+        ))
+      );
+      
       const matchesSearch = !normalizedSearch || (
         lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.customerName?.toLowerCase().includes(normalizedSearch) ||
@@ -1486,6 +1642,7 @@ export function LeadList() {
         ) ||
         lead.status?.toLowerCase().includes(normalizedSearch) ||
         lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+        srNumberMatch ||
         (canSearchEtisalatId && (
           lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
           ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
@@ -1509,13 +1666,29 @@ export function LeadList() {
 
   // Combine loaded leads with Firebase search results when searching
   const finalFilteredLeads = useMemo(() => {
-    if (searchTerm.trim() && filteredLeads.length === 0 && firebaseSearchResults.length > 0) {
-      // Use Firebase search results if no results in loaded leads
-      // Apply status filter to Firebase results
+    // When searching, prioritize Firebase search results (which has ALL matching leads)
+    // and combine with filteredLeads to ensure we show all results
+    if (searchTerm.trim()) {
+      // Prioritize firebaseSearchResults (has all matching leads from Firebase)
+      // Combine with filteredLeads to catch any leads in loaded set that might not be in Firebase results yet
+      // Put firebaseSearchResults first so it takes priority
+      const combined = [...firebaseSearchResults, ...filteredLeads];
+      
+      // Deduplicate by lead ID only (not by number) to ensure all leads with same number/name/etc are shown
+      const seenIds = new Set<string>();
+      const uniqueLeads = combined.filter(lead => {
+        if (seenIds.has(lead.id)) {
+          return false; // Skip duplicate by ID
+        }
+        seenIds.add(lead.id);
+        return true;
+      });
+      
+      // Apply status filter if not 'all'
       if (statusFilter === 'all') {
-        return firebaseSearchResults;
+        return uniqueLeads;
       }
-      return firebaseSearchResults.filter(lead => {
+      return uniqueLeads.filter(lead => {
         let matchesStatus = lead.status === statusFilter;
         if (!matchesStatus && statusFilter === 'pending_assignment' && isManager()) {
           matchesStatus = lead.status === 'pending_assignment' || 
@@ -1527,43 +1700,13 @@ export function LeadList() {
     return filteredLeads;
   }, [filteredLeads, firebaseSearchResults, searchTerm, statusFilter, isManager]);
 
-  // Search Firebase when search term changes and no results in loaded leads
+  // Search Firebase when search term changes to ensure all matching leads are found
   useEffect(() => {
     const debounceTimer = setTimeout(() => {
       if (searchTerm.trim()) {
-        // Check if search term matches any leads in the loaded set (before status filter)
-        const normalizedSearch = searchTerm.trim().toLowerCase();
-        const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
-        
-        // First check if any loaded leads match the search term
-        const hasMatchesInLoaded = leads.some(lead => {
-          return (
-            lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
-            lead.customerName?.toLowerCase().includes(normalizedSearch) ||
-            lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
-            lead.plans?.some(plan => 
-              plan.number?.toLowerCase().includes(normalizedSearch) ||
-              plan.plan?.toLowerCase().includes(normalizedSearch)
-            ) ||
-            lead.status?.toLowerCase().includes(normalizedSearch) ||
-            lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
-            (canSearchEtisalatId && (
-              lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
-              ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
-                ? (lead as any).etisalatLeadIds.some((id: string) => id?.toString?.().toLowerCase().includes(normalizedSearch))
-                : false) ||
-              (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
-            ))
-          );
-        });
-
-        // If no matches in loaded leads, search Firebase
-        if (!hasMatchesInLoaded && filteredLeads.length === 0) {
-          searchFirebase(searchTerm);
-        } else {
-          // Clear Firebase search results if we have matches in loaded leads
-          setFirebaseSearchResults([]);
-        }
+        // Always search Firebase when there's a search term to get ALL matching leads
+        // This ensures we find all leads with the same number, not just those in the loaded set
+        searchFirebase(searchTerm);
       } else {
         // Clear Firebase search results when search is cleared
         setFirebaseSearchResults([]);
@@ -1571,7 +1714,7 @@ export function LeadList() {
     }, 500); // Debounce Firebase search
 
     return () => clearTimeout(debounceTimer);
-  }, [searchTerm, filteredLeads.length, leads, user?.role, searchFirebase]);
+  }, [searchTerm, searchFirebase]);
 
   // Add sorting function
   const handleSort = useCallback((field: string) => {
@@ -1994,7 +2137,7 @@ export function LeadList() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 pt-0 pb-4 sm:pb-12 px-3 sm:px-4 lg:px-8">
       {/* Delete Confirmation Dialog */}
       <AnimatePresence>
       {showDeleteDialog && (
@@ -2064,13 +2207,13 @@ export function LeadList() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
-          className="sm:flex sm:items-center"
+          className="flex items-start justify-between gap-3 pt-2"
         >
-        <div className="sm:flex-auto">
-            <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
+          <div className="flex-auto min-w-0">
+            <h1 className="text-2xl sm:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
               Leads
             </h1>
-            <p className="mt-2 text-sm text-gray-600">
+            <p className="mt-1 sm:mt-2 text-xs sm:text-sm text-gray-600">
               {dateRange.from || dateRange.to ? (
                 <>
                   Showing leads from{' '}
@@ -2083,16 +2226,17 @@ export function LeadList() {
               )}
           </p>
         </div>
-        <div className="mt-4 sm:mt-0 sm:ml-16 sm:flex-none space-x-4">
+          <div className="flex-shrink-0 flex items-center gap-2">
           {isAdmin() && selectedLeads.length > 0 && (
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
               onClick={() => setShowDeleteDialog(true)}
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg text-white bg-red-600 hover:bg-red-700 shadow-lg hover:shadow-xl transition-all duration-200"
+                className="inline-flex items-center px-3 py-1.5 sm:px-4 sm:py-2 border border-transparent text-xs sm:text-sm font-medium rounded-lg text-white bg-red-600 hover:bg-red-700 shadow-lg hover:shadow-xl transition-all duration-200"
             >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete Selected ({selectedLeads.length})
+                <Trash2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2" />
+                <span className="hidden sm:inline">Delete Selected ({selectedLeads.length})</span>
+                <span className="sm:hidden">Delete ({selectedLeads.length})</span>
               </motion.button>
           )}
           {user?.role === 'agent' && (
@@ -2102,10 +2246,11 @@ export function LeadList() {
               >
             <Link
               to="/dashboard/leads/create"
-                  className="inline-flex items-center justify-center rounded-lg border border-transparent bg-gradient-to-r from-indigo-600 to-purple-600 px-4 py-2 text-sm font-medium text-white shadow-lg hover:shadow-xl transition-all duration-200"
+                  className="inline-flex items-center justify-center rounded-lg border border-transparent bg-gradient-to-r from-indigo-600 to-purple-600 px-2.5 py-1 sm:px-3 sm:py-1.5 text-xs sm:text-sm font-medium text-white shadow-lg hover:shadow-xl transition-all duration-200"
             >
-              <Plus className="h-4 w-4 mr-2" />
-              New Lead
+                  <Plus className="h-3.5 w-3.5 sm:h-4 sm:w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">New Lead</span>
+                  <span className="sm:hidden">New</span>
             </Link>
               </motion.div>
           )}
@@ -2117,57 +2262,58 @@ export function LeadList() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.1 }}
-          className="mt-6 flex flex-col sm:flex-row gap-4"
+          className="mt-4 sm:mt-6 space-y-2 sm:space-y-0 sm:flex sm:flex-row sm:gap-4"
         >
           {/* Search Bar */}
           <div className="relative flex-1">
-            <div className="relative rounded-xl shadow-sm group bg-white border border-gray-200 hover:border-indigo-200 transition-all duration-200">
-              <div className="absolute inset-y-0 left-0 flex items-center pl-4 pointer-events-none">
-                <Search className="h-5 w-5 text-gray-400 group-focus-within:text-indigo-500 transition-colors duration-200" />
+            <div className="relative rounded-lg sm:rounded-xl shadow-sm group bg-white border border-gray-200 hover:border-indigo-200 transition-all duration-200">
+              <div className="absolute inset-y-0 left-0 flex items-center pl-3 sm:pl-4 pointer-events-none">
+                <Search className="h-4 w-4 sm:h-5 sm:w-5 text-gray-400 group-focus-within:text-indigo-500 transition-colors duration-200" />
               </div>
               <input
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search by name, number, plan, or status..."
-                className="block w-full rounded-xl border-0 pl-11 pr-4 py-3.5 text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-indigo-500/20 sm:text-sm"
+                placeholder="Search by name, number, plan..."
+                className="block w-full rounded-lg sm:rounded-xl border-0 pl-9 sm:pl-11 pr-3 sm:pr-4 py-2 sm:py-3.5 text-xs sm:text-sm text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-indigo-500/20"
               />
             </div>
           </div>
 
-          {/* Filters - Stack vertically on mobile */}
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="flex items-center gap-2 bg-white rounded-xl border border-gray-200 hover:border-indigo-200 px-4 py-2 transition-all duration-200">
-              <span className="text-sm font-medium text-gray-600">Show</span>
+          {/* Filters - Compact on mobile */}
+          <div className="flex gap-2 sm:gap-4">
+            <div className="flex items-center gap-1 sm:gap-2 bg-white rounded-lg sm:rounded-xl border border-gray-200 hover:border-indigo-200 px-2 sm:px-4 py-1.5 sm:py-2 transition-all duration-200">
+              <span className="text-[10px] sm:text-sm font-medium text-gray-600">Show</span>
               <select
                 value={itemsPerPage}
                 onChange={(e) => handleItemsPerPageChange(Number(e.target.value))}
-                className="rounded-lg border-0 bg-transparent py-1.5 pl-2 pr-8 text-sm font-medium text-gray-900 focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
+                className="rounded-md sm:rounded-lg border-0 bg-transparent py-0.5 sm:py-1.5 pl-1 sm:pl-2 pr-6 sm:pr-8 text-[10px] sm:text-sm font-medium text-gray-900 focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
               >
                 <option value={10}>10</option>
                 <option value={20}>20</option>
                 <option value={100}>100</option>
               </select>
-              <span className="text-sm font-medium text-gray-600">entries</span>
+              <span className="text-[10px] sm:text-sm font-medium text-gray-600 hidden sm:inline">entries</span>
             </div>
 
             {/* Advanced Search Button - Admin & Coordinator */}
             {(isAdmin() || isCoordinator()) && (
               <button
                 onClick={() => setShowAdvancedSearch(true)}
-                className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-xl hover:from-purple-700 hover:to-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                className="flex items-center space-x-1 sm:space-x-2 px-2 sm:px-4 py-1.5 sm:py-2 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg sm:rounded-xl hover:from-purple-700 hover:to-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
               >
-                <Settings className="h-4 w-4" />
-                <span className="text-sm font-medium">Advanced Search</span>
+                <Settings className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+                <span className="text-[10px] sm:text-sm font-medium hidden sm:inline">Advanced Search</span>
+                <span className="text-[10px] sm:text-sm font-medium sm:hidden">Adv</span>
               </button>
             )}
-            <div className="relative">
-              <div className="relative rounded-xl shadow-sm group bg-white border border-gray-200 hover:border-indigo-200 transition-all duration-200">
-                <div className="absolute inset-y-0 left-0 flex items-center pl-4 pointer-events-none">
-                  <Filter className="h-5 w-5 text-gray-400 group-focus-within:text-indigo-500 transition-colors duration-200" />
+            <div className="relative flex-1 sm:flex-none">
+              <div className="relative rounded-lg sm:rounded-xl shadow-sm group bg-white border border-gray-200 hover:border-indigo-200 transition-all duration-200">
+                <div className="absolute inset-y-0 left-0 flex items-center pl-3 sm:pl-4 pointer-events-none">
+                  <Filter className="h-4 w-4 sm:h-5 sm:w-5 text-gray-400 group-focus-within:text-indigo-500 transition-colors duration-200" />
                 </div>
                 <select
-                  className="block w-full rounded-xl border-0 pl-11 pr-8 py-3.5 text-gray-900 focus:ring-2 focus:ring-indigo-500/20 sm:text-sm cursor-pointer appearance-none bg-transparent"
+                  className="block w-full rounded-lg sm:rounded-xl border-0 pl-9 sm:pl-11 pr-7 sm:pr-8 py-2 sm:py-3.5 text-xs sm:text-sm text-gray-900 focus:ring-2 focus:ring-indigo-500/20 cursor-pointer appearance-none bg-transparent"
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
                 >
@@ -2182,8 +2328,8 @@ export function LeadList() {
                   <option value="pending_coordinator">Pending Coordinator</option>
                   <option value="non_verified">Non Verified</option>
                 </select>
-                <div className="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none">
-                  <ChevronDown className="h-4 w-4 text-gray-400" />
+                <div className="absolute inset-y-0 right-0 flex items-center pr-3 sm:pr-4 pointer-events-none">
+                  <ChevronDown className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-gray-400" />
                 </div>
               </div>
             </div>
@@ -2195,7 +2341,7 @@ export function LeadList() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.15 }}
-          className="mt-4 flex items-center gap-2 text-sm text-gray-600"
+          className="mt-3 sm:mt-4 flex items-center gap-1.5 sm:gap-2 text-xs sm:text-sm text-gray-600"
         >
           <span>Showing</span>
           <span className="font-medium text-gray-900">{startIndex + 1}</span>
@@ -2203,7 +2349,7 @@ export function LeadList() {
           <span className="font-medium text-gray-900">{Math.min(endIndex, sortedAndFilteredLeads.length)}</span>
           <span>of</span>
           <span className="font-medium text-gray-900">{sortedAndFilteredLeads.length}</span>
-          <span>entries</span>
+          <span className="hidden sm:inline">entries</span>
         </motion.div>
 
         {/* Leads Table Container */}
@@ -2290,12 +2436,20 @@ export function LeadList() {
                   {/* Desktop Layout */}
                   <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
                     {/* Customer Information */}
-                    <div className="col-span-3 flex items-center">
+                    <div className="col-span-3 flex flex-col">
+                      {lead.leadNumber && (
+                        <div className="mb-1.5">
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50">
+                            <Tag className="h-3 w-3 mr-1" />
+                            {lead.leadNumber}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-center space-x-2">
                         <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
                           <User2 className="h-5 w-5 text-indigo-600" />
                       </div>
-                        <div>
+                        <div className="flex-1">
                           <h3 className="text-sm font-semibold text-gray-900">
                           {lead.customerName || 'Unnamed Customer'}
                         </h3>
@@ -2307,19 +2461,12 @@ export function LeadList() {
                           )}
                           <div className="flex items-center text-xs text-gray-500 mt-1">
                             <Phone className="h-3 w-3 mr-1.5" />
-                          {lead.customerNumber}
+                          <span className="font-bold">{lead.customerNumber}</span>
                         </div>
                           <div className="flex items-center text-xs text-gray-500 mt-1">
                             <Calendar className="h-3 w-3 mr-1.5" />
                             {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
                           </div>
-                          {lead.leadNumber && (
-                            <div className="mt-1">
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
-                                {lead.leadNumber}
-                              </span>
-                          </div>
-                        )}
                         </div>
                       </div>
                     </div>
@@ -2483,6 +2630,36 @@ export function LeadList() {
                             <ArrowRightLeft className="h-4 w-4" />
                           </motion.button>
                         )}
+                        {isAdmin() && (
+                          <motion.button
+                            whileHover={{ scale: 1.02, y: -1 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => {
+                              setSelectedLeadForGroupChange(lead);
+                              setNewGroup(lead.plans[0]?.group || '');
+                              setShowChangeGroupModal(true);
+                            }}
+                            title="Change Plan Group"
+                            className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-purple-50/80 text-purple-700 border border-purple-100 hover:bg-purple-50 hover:border-purple-200 transition-all duration-200"
+                          >
+                            <Settings className="h-4 w-4" />
+                          </motion.button>
+                        )}
+                        {isAdmin() && (
+                          <motion.button
+                            whileHover={{ scale: 1.02, y: -1 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => {
+                              setSelectedLeadForDelete(lead);
+                              setDeleteConfirmNumber('');
+                              setShowDeleteConfirmDialog(true);
+                            }}
+                            title="Delete Lead"
+                            className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-red-50/80 text-red-700 border border-red-100 hover:bg-red-50 hover:border-red-200 transition-all duration-200"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </motion.button>
+                        )}
                       <motion.div
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
@@ -2490,7 +2667,7 @@ export function LeadList() {
                       >
                         <Link
                           to={`/dashboard/leads/${lead.id}`}
-                          className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                          className="inline-flex items-center px-4 py-2 bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50 rounded-lg hover:from-indigo-500/30 hover:via-indigo-400/30 hover:to-purple-500/30 transition-all duration-200 group"
                         >
                           <Eye className="h-4 w-4 mr-2" />
                           View Details
@@ -2502,70 +2679,55 @@ export function LeadList() {
                   </div>
 
                   {/* Mobile Layout */}
-                  <div className="sm:hidden">
-                    {/* Customer Info Card with Status */}
-                    <div className="flex items-start gap-4">
-                      <div className="flex-shrink-0">
-                        <motion.div 
-                          whileHover={{ scale: 1.05 }}
-                          className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center ring-2 ring-white shadow-sm"
-                        >
-                          <Phone className="h-7 w-7 text-indigo-600" />
-                        </motion.div>
-                      </div>
+                  <div className="sm:hidden space-y-2">
+                    {/* Header Section - Customer Name & Status */}
+                    <div className="flex items-start justify-between gap-2 pb-2 border-b border-gray-200">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                            <h3 className="text-lg font-semibold text-gray-900 group-hover:text-indigo-600 transition-colors duration-200 truncate">
+                        {lead.leadNumber && (
+                          <div className="mb-1.5">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50">
+                              <Tag className="h-2.5 w-2.5 mr-0.5" />
+                              {lead.leadNumber}
+                            </span>
+                              </div>
+                            )}
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <div className="p-1.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-md">
+                            <User2 className="h-3.5 w-3.5 text-indigo-600" />
+                            </div>
+                          <h3 className="text-sm font-bold text-gray-900 truncate">
                               {lead.customerName || 'Unnamed Customer'}
                             </h3>
-                            </div>
-                            {isManager() && (lead as any).agentName && (
-                              <div className="flex items-center text-sm text-gray-600 font-medium mt-1">
-                                <User2 className="h-4 w-4 mr-1.5 flex-shrink-0" />
-                                <span>Agent: {(lead as any).agentName}</span>
                               </div>
-                            )}
-                            <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200 mt-1">
-                              <Phone className="h-4 w-4 mr-1.5 flex-shrink-0" />
-                              <span className="truncate">{lead.customerNumber}</span>
-                            </div>
-                            {lead.leadNumber && (
-                              <div className="flex items-center text-sm text-gray-500 mt-1">
-                                <Hash className="h-3 w-3 mr-1.5" />
-                                <span className="font-medium text-indigo-600">{lead.leadNumber}</span>
+                        <div className="flex items-center text-[11px] text-gray-600 mb-0.5">
+                          <Phone className="h-3 w-3 mr-1 flex-shrink-0" />
+                          <span className="truncate font-bold">{lead.customerNumber}</span>
                               </div>
-                            )}
-                            <div className="flex items-center text-sm text-gray-500 hover:text-gray-700 transition-colors duration-200 mt-1">
-                              <Clock className="h-4 w-4 mr-1.5 flex-shrink-0" />
-                              <span>{format(lead.createdAt, 'MMM d, yyyy')}</span>
+                        <div className="flex items-center text-[11px] text-gray-500">
+                          <Calendar className="h-3 w-3 mr-1 flex-shrink-0" />
+                          <span>{format(lead.createdAt, 'MMM d, yyyy')} at {format(lead.createdAt, 'h:mm a')}</span>
                             </div>
                           </div>
                           {/* Status Badge */}
-                          <motion.div
-                            whileHover={{ scale: 1.02 }}
-                            className="flex-shrink-0"
-                          >
-                            <div className="flex flex-col items-end gap-1">
+                      <div className="flex flex-col items-end gap-1 flex-shrink-0">
                             <motion.span
                               className={clsx(
-                                "inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-medium shadow-sm ring-1 ring-opacity-5",
+                            "inline-flex items-center px-2 py-1 rounded-md text-[10px] font-semibold shadow-sm ring-1 ring-opacity-5",
                                 getStatusBadgeClass(lead.status),
                                 "ring-current"
                               )}
                             >
                               {getStatusIcon(lead.status)}
-                                {getStatusDisplayText(lead.status)}
+                          <span className="ml-0.5">{getStatusDisplayText(lead.status)}</span>
                             </motion.span>
                               {/* Strikes Count */}
                               {leadStrikes[lead.id] > 0 && (
                                 <motion.div
                                   initial={{ opacity: 0, scale: 0.9 }}
                                   animate={{ opacity: 1, scale: 1 }}
-                                  className="inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1"
+                            className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-100 text-red-700 border border-red-200"
                                 >
-                                  <AlertCircle className="h-3 w-3 mr-1" />
+                            <AlertCircle className="h-2 w-2 mr-0.5" />
                                   {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
                                 </motion.div>
                               )}
@@ -2579,89 +2741,119 @@ export function LeadList() {
                                 const remainingMs = twentyFourHoursMs - elapsed;
 
                                 if (hoursElapsed >= 24) {
-                                  // More than 24 hours - show "At Risk"
                                   return (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-red-100 text-red-700 border border-red-200 whitespace-nowrap">
-                                      <AlertCircle className="h-3 w-3 mr-1" />
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-semibold bg-red-100 text-red-700 border border-red-200">
+                                <AlertCircle className="h-2 w-2 mr-0.5" />
                                       At Risk
                                     </span>
                                   );
                                 } else {
-                                  // Less than 24 hours - show countdown
                                   return (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-yellow-100 text-yellow-700 border border-yellow-200 whitespace-nowrap">
-                                      <Clock className="h-3 w-3 mr-1" />
-                                      {formatCountdown(remainingMs)} remaining
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-semibold bg-yellow-100 text-yellow-700 border border-yellow-200">
+                                <Clock className="h-2 w-2 mr-0.5" />
+                                {formatCountdown(remainingMs)}
                                     </span>
                                   );
                                 }
                               })()}
+                        {/* Assignment Duration for Assigned Leads */}
+                        {lead.status === 'assigned' && (() => {
+                          const duration = getAssignmentDuration(lead);
+                          if (duration) {
+                            return (
+                              <div className="flex items-center text-[9px] text-indigo-600 px-1.5 py-0.5 bg-indigo-50 rounded border border-indigo-200">
+                                <Clock className="h-2 w-2 mr-0.5" />
+                                <span className="font-semibold">{duration}</span>
                             </div>
-                          </motion.div>
+                            );
+                          }
+                          return null;
+                        })()}
+                        {/* Agent/Team Info - Below Status */}
+                        {(isManager() || isAdmin()) && (lead as any).agentName && (
+                          <div className="mt-2 pt-2 border-t border-gray-200/50 w-full">
+                            <div className="text-[10px] font-semibold text-gray-900 truncate text-right">
+                              {(lead as any).agentName}
                         </div>
+                            {lead.teamName && (
+                              <div className="text-[9px] text-gray-500 mt-0.5 truncate text-right">
+                                {lead.teamName}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
                     {/* Plan Details Section */}
-                    <div className="mt-4 space-y-3">
-                      {/* Plan Details Cards */}
-                      <div className="space-y-3">
-                        {lead.plans?.map((plan, planIndex) => (
-                          <React.Fragment key={planIndex}>
+                    <div className="space-y-2">
+                      {lead.plans?.map((plan, planIndex) => {
+                        const planEtisalatId = (plan as any).etisalatLeadId || 
+                          ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
+                            ? (lead as any).etisalatLeadIds[planIndex] 
+                            : (planIndex === 0 ? lead.etisalatLeadId : null));
+                        
+                        return (
                         <motion.div
-                          whileHover={{ scale: 1.02 }}
-                          className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl p-4 ring-1 ring-indigo-100"
+                            key={planIndex}
+                            whileHover={{ scale: 1.01 }}
+                            className="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 rounded-lg p-2.5 ring-1 ring-indigo-100/50 border border-indigo-100"
                         >
-                          <div className="flex items-start gap-3">
-                            <div className="p-2 bg-white rounded-lg shadow-sm">
-                              <Hash className="h-5 w-5 text-indigo-600" />
+                            <div className="space-y-2">
+                              {/* Number Section */}
+                              <div className="flex items-start gap-2">
+                                <div className="p-1 bg-white rounded-md shadow-sm flex-shrink-0">
+                                  <Hash className="h-3.5 w-3.5 text-indigo-600" />
                             </div>
                             <div className="flex-1 min-w-0">
-                              <p className="text-xs font-medium text-gray-500">Selected Number</p>
-                              <p className="text-base font-semibold text-gray-900 break-all">
+                                  <div className="flex items-center gap-1.5 mb-0.5">
+                                    <p className="text-[11px] font-semibold text-gray-900 break-all">
                                     {plan.number || 'N/A'}
+                                    </p>
                                     {plan.group && (
-                                      <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-700">
+                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 flex-shrink-0">
                                         {plan.group}
                                       </span>
                                     )}
-                              </p>
-                              {lead.etisalatLeadId && (
-                                <p className="mt-0.5 text-[11px] font-medium text-gray-500">
-                                  Etisalat ID: {lead.etisalatLeadId}
+                                  </div>
+                                  {planEtisalatId && (
+                                    <p className="text-[9px] font-medium text-gray-600">
+                                      Etisalat ID: <span className="text-gray-900">{planEtisalatId}</span>
                                 </p>
                               )}
                             </div>
                           </div>
-                        </motion.div>
-
-                        <motion.div
-                          whileHover={{ scale: 1.02 }}
-                          className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl p-4 ring-1 ring-indigo-100"
-                        >
-                          <div className="flex items-start gap-3">
-                            <div className="p-2 bg-white rounded-lg shadow-sm">
-                              <Package className="h-5 w-5 text-indigo-600" />
+                              
+                              {/* Plan Section */}
+                              <div className="flex items-start gap-2 pt-1.5 border-t border-indigo-100/50">
+                                <div className="p-1 bg-white rounded-md shadow-sm flex-shrink-0">
+                                  <Package className="h-3.5 w-3.5 text-indigo-600" />
                             </div>
                             <div className="flex-1 min-w-0">
-                              <p className="text-xs font-medium text-gray-500">Plan Details</p>
-                              <p className="text-base font-semibold text-gray-900 break-all">
+                                  <p className="text-[9px] font-medium text-gray-500 mb-0.5">Plan</p>
+                                  <p className="text-[11px] font-bold text-gray-900 break-words">
                                     {plan.plan || 'N/A'}
                               </p>
+                                  {plan.category && (
+                                    <p className="text-[9px] text-gray-600 mt-0.5">
+                                      Category: <span className="font-medium">{plan.category}</span>
+                                    </p>
+                                  )}
+                                </div>
                             </div>
                           </div>
                         </motion.div>
-                          </React.Fragment>
-                        ))}
-                      </div>
+                        );
+                      })}
                     </div>
 
-                    {/* Action Buttons */}
-                    <div className="mt-4 flex gap-2">
+                    {/* Action Buttons - All in One Row */}
+                    <div className="pt-2 border-t border-gray-200">
+                      <div className="flex gap-1.5 items-center">
                       {(isAdmin() || isCoordinator() || (isAgent() && lead.agentId === user?.id)) && (lead as any).verificationMethod === 'whatsapp' && (
                         <motion.button
-                          whileHover={{ scale: 1.02, y: -1 }}
-                          whileTap={{ scale: 0.98 }}
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                           onClick={() => {
                             setSelectedLeadForChat(lead);
                             setShowWhatsAppChat(true);
@@ -2690,41 +2882,71 @@ export function LeadList() {
                             whatsAppLogsUnsubscribeRef.current = unsubscribe;
                           }}
                           title="WhatsApp Verification"
-                          className="inline-flex items-center justify-center h-11 w-11 rounded-full bg-green-50/80 text-green-700 border border-green-100 hover:bg-green-50 hover:border-green-200 transition-all duration-200 flex-shrink-0"
+                            className="inline-flex items-center justify-center h-8 px-2 rounded-md bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition-all duration-200"
                         >
-                          <svg viewBox="0 0 32 32" className="h-5 w-5" fill="currentColor" aria-hidden="true">
+                            <svg viewBox="0 0 32 32" className="h-3.5 w-3.5" fill="currentColor">
                             <path d="M19.11 17.46c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.12-.41-2.12-1.31-.78-.69-1.31-1.54-1.46-1.8-.15-.27-.02-.41.11-.54.11-.11.27-.29.41-.45.14-.16.18-.27.27-.45.09-.18.05-.34-.02-.48-.07-.13-.61-1.46-.83-2-.22-.52-.44-.45-.61-.45h-.52c-.18 0-.45.07-.68.34-.23.27-.9.88-.9 2.15 0 1.27.92 2.5 1.05 2.67.14.18 1.81 2.77 4.4 3.88.62.27 1.11.43 1.49.55.63.2 1.2.17 1.65.1.5-.07 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.31zM16 3C8.82 3 3 8.82 3 16c0 2.29.62 4.48 1.79 6.42L3 29l6.74-1.77C11.58 28.38 13.76 29 16 29c7.18 0 13-5.82 13-13S23.18 3 16 3zm0 23.73c-2.12 0-4.11-.62-5.78-1.78l-.41-.26-4.01 1.05 1.07-3.9-.27-.41C5.43 20.76 4.73 18.43 4.73 16 4.73 9.94 9.94 4.73 16 4.73S27.27 9.94 27.27 16 22.06 26.73 16 26.73z"/>
                           </svg>
                         </motion.button>
                       )}
                       {isAdmin() && (
+                          <>
                         <motion.button
-                          whileHover={{ scale: 1.02, y: -1 }}
-                          whileTap={{ scale: 0.98 }}
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
                           onClick={() => {
                             setSelectedLeadForTransfer(lead);
                             setShowTransferModal(true);
                           }}
                           title="Transfer Lead"
-                          className="inline-flex items-center justify-center h-11 w-11 rounded-full bg-blue-50/80 text-blue-700 border border-blue-100 hover:bg-blue-50 hover:border-blue-200 transition-all duration-200 flex-shrink-0"
+                              className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-all duration-200"
                         >
-                          <ArrowRightLeft className="h-5 w-5" />
+                              <ArrowRightLeft className="h-3.5 w-3.5" />
                         </motion.button>
+                            <motion.button
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => {
+                                setSelectedLeadForGroupChange(lead);
+                                setNewGroup(lead.plans[0]?.group || '');
+                                setShowChangeGroupModal(true);
+                              }}
+                              title="Change Plan Group"
+                              className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 transition-all duration-200"
+                            >
+                              <Settings className="h-3.5 w-3.5" />
+                            </motion.button>
+                            <motion.button
+                              whileHover={{ scale: 1.05 }}
+                              whileTap={{ scale: 0.95 }}
+                              onClick={() => {
+                                setSelectedLeadForDelete(lead);
+                                setDeleteConfirmNumber('');
+                                setShowDeleteConfirmDialog(true);
+                              }}
+                              title="Delete Lead"
+                              className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-all duration-200"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </motion.button>
+                          </>
                       )}
+                        {/* View Details Button */}
                       <motion.div
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
+                          whileHover={{ scale: 1.01 }}
+                          whileTap={{ scale: 0.99 }}
                         className="relative z-20 flex-1"
                       >
                         <Link
                           to={`/dashboard/leads/${lead.id}`}
-                          className="inline-flex items-center justify-center w-full px-4 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl hover:from-indigo-700 hover:to-purple-700 transition-all duration-200 group shadow-lg shadow-indigo-500/20"
+                            className="flex items-center justify-center h-8 px-2 bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50 rounded-md hover:from-indigo-500/30 hover:via-indigo-400/30 hover:to-purple-500/30 transition-all duration-200 font-semibold text-[10px]"
                         >
-                          <Eye className="h-5 w-5 mr-2" />
-                          <span className="font-medium">View Details</span>
-                          <ArrowRight className="h-5 w-5 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
+                            <Eye className="h-3.5 w-3.5 mr-1" />
+                            <span className="truncate">View</span>
+                            <ArrowRight className="h-3.5 w-3.5 ml-1" />
                         </Link>
                       </motion.div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -2901,6 +3123,241 @@ export function LeadList() {
           }}
         />
       )}
+
+      {/* Change Plan Group Modal */}
+      <AnimatePresence>
+        {showChangeGroupModal && selectedLeadForGroupChange && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+            onClick={() => {
+              if (!isUpdatingGroup) {
+                setShowChangeGroupModal(false);
+                setSelectedLeadForGroupChange(null);
+                setNewGroup('');
+              }
+            }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-purple-100 rounded-lg">
+                    <Settings className="h-5 w-5 text-purple-600" />
+                  </div>
+                  <h2 className="text-xl font-semibold text-gray-900">Change Plan Group</h2>
+                </div>
+                <button
+                  onClick={() => {
+                    if (!isUpdatingGroup) {
+                      setShowChangeGroupModal(false);
+                      setSelectedLeadForGroupChange(null);
+                      setNewGroup('');
+                    }
+                  }}
+                  disabled={isUpdatingGroup}
+                  className="text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="mb-6">
+                <p className="text-sm text-gray-600 mb-4">
+                  Lead: <span className="font-medium text-gray-900">{selectedLeadForGroupChange.customerName}</span>
+                </p>
+                <p className="text-sm text-gray-600 mb-2">
+                  Current Group: <span className="font-medium text-gray-900">{selectedLeadForGroupChange.plans[0]?.group || 'N/A'}</span>
+                </p>
+                <div className="mt-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Select New Group
+                  </label>
+                  <select
+                    value={newGroup}
+                    onChange={(e) => setNewGroup(e.target.value)}
+                    disabled={isUpdatingGroup}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <option value="">Select a group</option>
+                    <option value="G1">G1</option>
+                    <option value="G2">G2</option>
+                    <option value="G3">G3</option>
+                  </select>
+                </div>
+                {selectedLeadForGroupChange.plans && selectedLeadForGroupChange.plans.length > 1 && (
+                  <p className="mt-3 text-xs text-amber-600 bg-amber-50 p-2 rounded">
+                    This lead has {selectedLeadForGroupChange.plans.length} plans. All plans will be updated to the selected group.
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={() => {
+                    if (!isUpdatingGroup) {
+                      setShowChangeGroupModal(false);
+                      setSelectedLeadForGroupChange(null);
+                      setNewGroup('');
+                    }
+                  }}
+                  disabled={isUpdatingGroup}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleChangePlanGroup}
+                  disabled={isUpdatingGroup || !newGroup || newGroup === selectedLeadForGroupChange.plans[0]?.group}
+                  className="px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {isUpdatingGroup ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+                      Updating...
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-4 w-4" />
+                      Update Group
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Lead Confirmation Dialog */}
+      <AnimatePresence>
+        {showDeleteConfirmDialog && selectedLeadForDelete && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+            onClick={() => {
+              if (!isDeletingLead) {
+                setShowDeleteConfirmDialog(false);
+                setSelectedLeadForDelete(null);
+                setDeleteConfirmNumber('');
+              }
+            }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-red-100 rounded-lg">
+                    <Trash2 className="h-5 w-5 text-red-600" />
+                  </div>
+                  <h2 className="text-xl font-semibold text-gray-900">Delete Lead</h2>
+                </div>
+                <button
+                  onClick={() => {
+                    if (!isDeletingLead) {
+                      setShowDeleteConfirmDialog(false);
+                      setSelectedLeadForDelete(null);
+                      setDeleteConfirmNumber('');
+                    }
+                  }}
+                  disabled={isDeletingLead}
+                  className="text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="mb-6">
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm font-medium text-red-900 mb-1">Warning: This action cannot be undone</p>
+                      <p className="text-xs text-red-700">
+                        Deleting this lead will permanently remove it and release associated numbers back to the pool.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600 mb-2">
+                    Lead: <span className="font-medium text-gray-900">{selectedLeadForDelete.customerName}</span>
+                  </p>
+                  <p className="text-sm text-gray-600 mb-2">
+                    Lead Number: <span className="font-medium text-gray-900 font-mono">{selectedLeadForDelete.leadNumber}</span>
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Enter lead number to confirm deletion
+                  </label>
+                  <input
+                    type="text"
+                    value={deleteConfirmNumber}
+                    onChange={(e) => setDeleteConfirmNumber(e.target.value)}
+                    placeholder={selectedLeadForDelete.leadNumber}
+                    disabled={isDeletingLead}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 disabled:opacity-50 disabled:cursor-not-allowed font-mono"
+                    autoFocus
+                  />
+                  <p className="mt-2 text-xs text-gray-500">
+                    Type <span className="font-mono font-medium">{selectedLeadForDelete.leadNumber}</span> to confirm
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={() => {
+                    if (!isDeletingLead) {
+                      setShowDeleteConfirmDialog(false);
+                      setSelectedLeadForDelete(null);
+                      setDeleteConfirmNumber('');
+                    }
+                  }}
+                  disabled={isDeletingLead}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDeleteSingleLead}
+                  disabled={isDeletingLead || deleteConfirmNumber.trim() !== selectedLeadForDelete.leadNumber}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {isDeletingLead ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-4 w-4" />
+                      Delete Lead
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

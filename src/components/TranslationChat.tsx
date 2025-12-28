@@ -258,6 +258,7 @@ const TranslationChat: React.FC = () => {
   const [bubbleExit, setBubbleExit] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatBoxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { user } = useAuthStore();
   const navigate = useNavigate();
   const [copiedEnIndex, setCopiedEnIndex] = useState<number | null>(null);
@@ -280,12 +281,18 @@ const TranslationChat: React.FC = () => {
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      // Check if click is outside the chat box
       if (chatBoxRef.current && !chatBoxRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     };
 
     if (isOpen) {
+      // Focus input when chat opens
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 100);
+      
       document.addEventListener('mousedown', handleClickOutside);
       
       // Show welcome message if this is the first time opening
@@ -583,8 +590,20 @@ const TranslationChat: React.FC = () => {
 
       {/* Chat Modal */}
       {isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-end justify-end p-4 sm:p-6" ref={chatBoxRef}>
-          <div className="bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col w-full max-w-sm sm:max-w-md md:max-w-lg lg:max-w-md h-[500px] sm:h-[600px]">
+        <div 
+          className="fixed inset-0 z-[100] flex items-end justify-end p-4 sm:p-6"
+          onClick={(e) => {
+            // Close when clicking on the overlay (outside the chat box)
+            if (e.target === e.currentTarget) {
+              setIsOpen(false);
+            }
+          }}
+        >
+          <div 
+            className="bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col w-full max-w-sm sm:max-w-md md:max-w-lg lg:max-w-md h-[500px] sm:h-[600px]"
+            ref={chatBoxRef}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="p-3 border-b flex justify-between items-center bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-t-lg">
               <div>
               <h2 className="text-sm font-semibold">AI Assistant</h2>
@@ -709,12 +728,18 @@ const TranslationChat: React.FC = () => {
               <div className="flex gap-2 items-center">
                 <div className="flex-1 flex items-center gap-2 bg-white rounded-full border border-gray-200 px-3 py-2 shadow-sm">
                 <input
+                  ref={inputRef}
                   type="text"
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Type in English or Arabic…"
-                    className="flex-1 bg-transparent text-sm focus:outline-none"
+                  onClick={(e) => {
+                    // Keep focus on input when clicked
+                    e.currentTarget.focus();
+                  }}
+                  placeholder="Type in English or Arabic…"
+                  className="flex-1 bg-transparent text-sm focus:outline-none"
                   disabled={isLoading}
+                  autoFocus
                 />
                 </div>
                 <button
