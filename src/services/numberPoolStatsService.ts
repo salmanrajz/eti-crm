@@ -70,71 +70,132 @@ class NumberPoolStatsService {
 
   /**
    * Get total pages for a specific page size
+   * Prioritizes combination stats when multiple filters are active
    */
   async getTotalPages(pageSize: number, category?: string, group?: string, initials?: string): Promise<number> {
     const stats = await this.getStats();
     if (!stats) return 0;
 
-    // Use initials-specific stats if available (highest priority)
-    if (initials && initials !== 'all') {
+    const hasCategory = category && category !== 'all';
+    const hasGroup = group && group !== 'all';
+    const hasInitials = initials && initials !== 'all';
+
+    // Priority 1: Check for combination stats when multiple filters are active
+    // Category + Initials (e.g., "Gold" + "050")
+    if (hasCategory && hasInitials) {
+      const combinationKey = `categoryInitialsTotalPages_${pageSize}_${category}_${initials}` as keyof NumberPoolStats;
+      if (stats[combinationKey] && typeof stats[combinationKey] === 'number') {
+        return stats[combinationKey] as number;
+      }
+    }
+
+    // Category + Group (e.g., "Gold" + "G1")
+    if (hasCategory && hasGroup) {
+      const combinationKey = `categoryGroupTotalPages_${pageSize}_${category}_${group}` as keyof NumberPoolStats;
+      if (stats[combinationKey] && typeof stats[combinationKey] === 'number') {
+        return stats[combinationKey] as number;
+      }
+    }
+
+    // Group + Initials (e.g., "G1" + "050")
+    if (hasGroup && hasInitials) {
+      const combinationKey = `groupInitialsTotalPages_${pageSize}_${group}_${initials}` as keyof NumberPoolStats;
+      if (stats[combinationKey] && typeof stats[combinationKey] === 'number') {
+        return stats[combinationKey] as number;
+      }
+    }
+
+    // Priority 2: Use initials-specific stats if available (highest priority for single filter)
+    if (hasInitials) {
       const initialsKey = `initialsTotalPages_${pageSize}_${initials}` as keyof NumberPoolStats;
       if (stats[initialsKey] && typeof stats[initialsKey] === 'number') {
         return stats[initialsKey] as number;
       }
     }
 
-    // Use group-specific stats if available
-    if (group && group !== 'all') {
+    // Priority 3: Use group-specific stats if available
+    if (hasGroup) {
       const groupKey = `groupTotalPages_${pageSize}_${group}` as keyof NumberPoolStats;
       if (stats[groupKey] && typeof stats[groupKey] === 'number') {
         return stats[groupKey] as number;
       }
     }
 
-    // Use category-specific stats if available
-    if (category && category !== 'all') {
+    // Priority 4: Use category-specific stats if available
+    if (hasCategory) {
       const categoryKey = `totalPages_${pageSize}_${category}` as keyof NumberPoolStats;
       if (stats[categoryKey] && typeof stats[categoryKey] === 'number') {
         return stats[categoryKey] as number;
       }
     }
 
-    // Fall back to global stats
+    // Priority 5: Fall back to global stats
     const globalKey = `totalPages_${pageSize}` as keyof NumberPoolStats;
     return (stats[globalKey] as number) || 0;
   }
 
   /**
    * Get total items count
+   * Prioritizes combination stats when multiple filters are active
    */
   async getTotalItems(category?: string, group?: string, initials?: string): Promise<number> {
     const stats = await this.getStats();
     if (!stats) return 0;
 
-    // Use initials-specific stats if available (highest priority)
-    if (initials && initials !== 'all') {
+    const hasCategory = category && category !== 'all';
+    const hasGroup = group && group !== 'all';
+    const hasInitials = initials && initials !== 'all';
+
+    // Priority 1: Check for combination stats when multiple filters are active
+    // Category + Initials (e.g., "Gold" + "050")
+    if (hasCategory && hasInitials) {
+      const combinationKey = `categoryInitialsTotalItems_${category}_${initials}` as keyof NumberPoolStats;
+      if (stats[combinationKey] && typeof stats[combinationKey] === 'number') {
+        return stats[combinationKey] as number;
+      }
+    }
+
+    // Category + Group (e.g., "Gold" + "G1")
+    if (hasCategory && hasGroup) {
+      const combinationKey = `categoryGroupTotalItems_${category}_${group}` as keyof NumberPoolStats;
+      if (stats[combinationKey] && typeof stats[combinationKey] === 'number') {
+        return stats[combinationKey] as number;
+      }
+    }
+
+    // Group + Initials (e.g., "G1" + "050")
+    if (hasGroup && hasInitials) {
+      const combinationKey = `groupInitialsTotalItems_${group}_${initials}` as keyof NumberPoolStats;
+      if (stats[combinationKey] && typeof stats[combinationKey] === 'number') {
+        return stats[combinationKey] as number;
+      }
+    }
+
+    // Priority 2: Use initials-specific stats if available (highest priority for single filter)
+    if (hasInitials) {
       const initialsKey = `initialsTotalItems_${initials}` as keyof NumberPoolStats;
       if (stats[initialsKey] && typeof stats[initialsKey] === 'number') {
         return stats[initialsKey] as number;
       }
     }
 
-    // Use group-specific stats if available
-    if (group && group !== 'all') {
+    // Priority 3: Use group-specific stats if available
+    if (hasGroup) {
       const groupKey = `groupTotalItems_${group}` as keyof NumberPoolStats;
       if (stats[groupKey] && typeof stats[groupKey] === 'number') {
         return stats[groupKey] as number;
       }
     }
 
-    // Use category-specific stats if available
-    if (category && category !== 'all') {
+    // Priority 4: Use category-specific stats if available
+    if (hasCategory) {
       const categoryKey = `totalItems_${category}` as keyof NumberPoolStats;
       if (stats[categoryKey] && typeof stats[categoryKey] === 'number') {
         return stats[categoryKey] as number;
       }
     }
 
+    // Priority 5: Fall back to global stats
     return stats.totalItems || 0;
   }
 

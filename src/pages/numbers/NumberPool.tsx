@@ -415,12 +415,17 @@ interface StatusCheck {
  * @param onCategoryChange - Optional callback for category changes
  */
 
-// Helper function to check if current time is within claim hours (9 AM - 8 PM UAE time)
+// Helper function to check if current time is within claim hours (8 AM - 10:30 PM UAE time)
 const isWithinClaimHours = (): boolean => {
   const now = new Date();
   const uaeTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Dubai' }));
   const currentHour = uaeTime.getHours();
-  return currentHour >= 9 && currentHour < 20; // 9 AM to 8 PM (20:00)
+  const currentMinute = uaeTime.getMinutes();
+
+  // Check if time is between 8 AM and 10:30 PM
+  if (currentHour >= 8 && currentHour < 22) return true; // 8 AM to 10 PM
+  if (currentHour === 22 && currentMinute <= 30) return true; // 10:00 PM to 10:30 PM
+  return false;
 };
 
 export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCategory, onCategoryChange }: NumberPoolProps = {}) {
@@ -2026,6 +2031,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   
   };
 
+  // Prevent body scroll when edit dialog is open
+  useEffect(() => {
+    if (showEditDialog) {
+      // Save current scroll position
+      const scrollY = window.scrollY;
+      // Lock body scroll
+      document.body.style.position = 'fixed';
+      document.body.style.top = `-${scrollY}px`;
+      document.body.style.width = '100%';
+      document.body.style.overflow = 'hidden';
+      
+      return () => {
+        // Restore scroll position when modal closes
+        document.body.style.position = '';
+        document.body.style.top = '';
+        document.body.style.width = '';
+        document.body.style.overflow = '';
+        window.scrollTo(0, scrollY);
+      };
+    }
+  }, [showEditDialog]);
+
   const handleUpdateNumber = async () => {
     if (!editingNumber || updatingNumber) {
       return;
@@ -2077,6 +2104,148 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
     try {
       setUpdatingNumber(true);
+
+      // Check if number is from deletedNumbers collection
+      const isFromDeletedNumbers = (editingNumber as any)?.isDeleted === true;
+      
+      // If number is from deletedNumbers and status is being set to 'open', move it back to numberPool
+      if (isFromDeletedNumbers && editPoolStatus === 'open') {
+        const deletedNumberRef = doc(db, 'deletedNumbers', editingNumber.id);
+        const deletedNumberDoc = await getDoc(deletedNumberRef);
+        
+        if (!deletedNumberDoc.exists()) {
+          toast.error('Number not found in deleted numbers');
+          return;
+        }
+
+        const deletedNumberData = deletedNumberDoc.data();
+        const batch = writeBatch(db);
+        
+        // Prepare number data for numberPool (remove deletedNumbers-specific fields)
+        const { deletedAt, originalId, originalCollection, ...numberData } = deletedNumberData;
+        const numberPoolData: any = {
+          ...numberData,
+          number: num,
+          category: cat,
+          code,
+          group: group.trim(),
+          status: 'open',
+          lastStatusChange: serverTimestamp(),
+          reservedBy: null,
+          reservedAt: null,
+          expiresAt: null,
+          claimingAgentId: null,
+          claimingStartedAt: null,
+          claimingExpiresAt: null,
+          claimQueue: [],
+          originalAgentId: null,
+          originalReservedAt: null,
+          originalExpiresAt: null
+        };
+
+        // Add passcode for admin/coordinator
+        if (isAdmin() || isCoordinator) {
+          numberPoolData.passcode = editPoolPasscode.trim();
+        }
+        // Handle team visibility
+        if (isAdmin() || isCoordinator) {
+          if (editPoolTeamVisibility.trim()) {
+            numberPoolData.teamVisibility = editPoolTeamVisibility.trim();
+          } else {
+            numberPoolData.teamVisibility = null;
+          }
+        }
+        
+        // Create document in numberPool collection
+        const numberPoolRef = doc(db, 'numberPool', editingNumber.id);
+        batch.set(numberPoolRef, numberPoolData);
+        
+        // Delete from deletedNumbers
+        batch.delete(deletedNumberRef);
+        
+        await batch.commit();
+
+        // Log the number restoration
+        await logNumberAction(
+          editingNumber.id,
+          editingNumber.number || num,
+          'created',
+          { status: 'returned' },
+          { status: 'open' },
+          `Number restored from deletedNumbers and moved back to numberPool`
+        );
+        
+        toast.success('Number restored and moved back to number pool!');
+        await refreshNumberData(editingNumber.id);
+        setShowEditDialog(false);
+        setEditingNumber(null);
+        // Reset form
+        setEditPoolNumber('');
+        setEditPoolCategory('');
+        setEditPoolCode('');
+        setEditPoolGroup('');
+        setEditPoolPasscode('');
+        setEditPoolTeamVisibility('');
+        setEditPoolStatus('open');
+        setEditPhoneError('');
+        return;
+      }
+
+      // If status is being set to 'returned', delete number and add to deletedNumbers
+      if (editPoolStatus === 'returned') {
+        const numberRef = doc(db, 'numberPool', editingNumber.id);
+        const numberDoc = await getDoc(numberRef);
+        
+        if (!numberDoc.exists()) {
+          toast.error('Number not found');
+          return;
+        }
+
+        const numberData = numberDoc.data();
+        const batch = writeBatch(db);
+        
+        // Create document in deletedNumbers collection with status "returned"
+        const deletedNumberRef = doc(db, 'deletedNumbers', editingNumber.id);
+        batch.set(deletedNumberRef, {
+          ...numberData,
+          status: 'returned',
+          deletedAt: serverTimestamp(),
+          originalId: editingNumber.id,
+          originalCollection: 'numberPool'
+        });
+        
+        // Delete from numberPool
+        batch.delete(numberRef);
+        
+        await batch.commit();
+
+        // Log the number deletion
+        await logNumberAction(
+          editingNumber.id,
+          editingNumber.number || num,
+          'deleted',
+          { status: numberData?.status },
+          { status: 'returned' },
+          `Number marked as returned and moved to deletedNumbers`
+        );
+        
+        toast.success('Number returned and moved to deleted numbers!');
+        await refreshNumberData(editingNumber.id);
+        setShowEditDialog(false);
+        setEditingNumber(null);
+        // Reset form
+        setEditPoolNumber('');
+        setEditPoolCategory('');
+        setEditPoolCode('');
+        setEditPoolGroup('');
+        setEditPoolPasscode('');
+        setEditPoolTeamVisibility('');
+        setEditPoolStatus('open');
+        setEditPhoneError('');
+        return;
+      }
+
+      // For numbers in numberPool, update normally
       const numberData: any = {
         number: num,
         category: cat,
@@ -4042,15 +4211,15 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              {isAdmin() && (
+            {isAdmin() && (
                 <>
-                  <motion.button
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={handleCheckDuplicates}
-                    disabled={checkingDuplicates}
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleCheckDuplicates}
+                  disabled={checkingDuplicates}
                     className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed border border-gray-200"
-                  >
+                >
                     <div className="bg-gradient-to-br from-orange-500 to-red-600 p-1 rounded flex-shrink-0">
                       {checkingDuplicates ? (
                         <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
@@ -4059,24 +4228,24 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       )}
                     </div>
                     <span className="text-xs font-medium text-gray-700 whitespace-nowrap">
-                      {checkingDuplicates ? 'Checking...' : 'Check Duplicates'}
-                    </span>
-                  </motion.button>
-                  <button
-                    onClick={() => {
-                      setShowExportModal(true);
-                    }}
-                    type="button"
+                        {checkingDuplicates ? 'Checking...' : 'Check Duplicates'}
+                      </span>
+                </motion.button>
+                <button
+                  onClick={() => {
+                    setShowExportModal(true);
+                  }}
+                  type="button"
                     className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer border border-gray-200"
-                  >
+                >
                     <div className="bg-gradient-to-br from-emerald-500 to-green-600 p-1 rounded flex-shrink-0">
                       <Download className="w-3.5 h-3.5 text-white" />
                     </div>
                     <div className="flex flex-col items-start leading-tight">
                       <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Export</span>
                       <span className="text-[10px] text-gray-500 whitespace-nowrap">Choose columns</span>
-                    </div>
-                  </button>
+                  </div>
+                </button>
                 </>
               )}
               {user?.role === 'agent' && (
@@ -4093,13 +4262,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 >
                   <div className="bg-gradient-to-br from-purple-500 to-pink-600 p-1 rounded flex-shrink-0">
                     <Clipboard className="w-3.5 h-3.5 text-white" />
-                  </div>
+              </div>
                   <div className="flex flex-col items-start leading-tight">
                     <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Check Your List</span>
                   </div>
                 </motion.button>
-              )}
-              {(isCoordinator || isAdmin()) && (
+            )}
+            {(isCoordinator || isAdmin()) && (
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
@@ -4108,10 +4277,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 >
                   <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1 rounded flex-shrink-0">
                     <Hash className="w-3.5 h-3.5 text-white" />
-                  </div>
+                    </div>
                   <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Add Number</span>
                 </motion.button>
-              )}
+            )}
             </div>
             {/* Agent Utilities */}
             {user?.role === 'agent' && (
@@ -4313,6 +4482,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 placeholder="Search numbers or codes..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  // Prevent form submission on Enter key
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                  }
+                }}
                 className="pl-10 sm:pl-12 pr-28 sm:pr-32 py-2.5 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 text-sm sm:text-base"
               />
               {isSearching && (
@@ -4360,6 +4535,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               </div>
               {/* Manual Refresh Button */}
               <button
+                type="button"
                 onClick={async () => {
                   try {
                     // If there's active search, clear it first to avoid conflicts
@@ -4517,7 +4693,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   <div className="text-[11px] text-gray-800 leading-snug bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-100 rounded-md px-3 py-2">
                     <div>• Max 3 claims per day</div>
                     <div>• Per-number queue cap: 3</div>
-                    <div>• Claim window: 9 AM–8 PM (UAE time)</div>
+                    <div>• Claim window: 8 AM–10:30 PM (UAE time)</div>
                   </div>
                 </div>
 
@@ -4916,46 +5092,52 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center z-[9999] p-0 sm:p-4"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) {
+                  setShowEditDialog(false);
+                }
+              }}
             >
               <motion.div
-                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                initial={{ scale: 0.95, opacity: 0, y: 20 }}
                 animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.9, opacity: 0, y: 20 }}
-                transition={{ type: 'spring', duration: 0.5, bounce: 0.3 }}
-                className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl mx-auto overflow-hidden border border-gray-100"
+                exit={{ scale: 0.95, opacity: 0, y: 20 }}
+                transition={{ type: 'spring', duration: 0.3, bounce: 0.2 }}
+                className="bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl w-full max-w-4xl mx-auto border border-gray-100 max-h-[95vh] sm:max-h-[90vh] flex flex-col overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
               >
-                {/* Header */}
-                <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-6 py-4 text-white">
+                {/* Header - Fixed */}
+                <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-4 sm:px-6 py-3 sm:py-4 text-white flex-shrink-0">
                   <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-xl font-bold tracking-tight">Edit Number</h2>
-                      <p className="text-blue-100 text-sm">Modify details and settings</p>
+                    <div className="flex-1 min-w-0">
+                      <h2 className="text-lg sm:text-xl font-bold tracking-tight truncate">Edit Number</h2>
+                      <p className="text-blue-100 text-xs sm:text-sm mt-0.5">Modify details and settings</p>
                     </div>
-                    <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
-                      <Edit className="h-6 w-6" />
+                    <div className="p-1.5 sm:p-2 bg-white/20 rounded-lg backdrop-blur-sm ml-2 flex-shrink-0">
+                      <Edit className="h-4 w-4 sm:h-6 sm:w-6" />
                     </div>
                   </div>
                 </div>
 
-                {/* Form Content */}
-                <div className="px-6 py-4">
+                {/* Form Content - Scrollable */}
+                <div className="px-4 sm:px-6 py-3 sm:py-4 overflow-y-auto flex-1 min-h-0">
                   {/* Basic Information Card */}
-                  <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg p-4 mb-3 border border-gray-200/50">
-                    <div className="flex items-center mb-3">
-                      <div className="p-1.5 bg-indigo-100 rounded-md mr-2">
-                        <Phone className="h-4 w-4 text-indigo-600" />
+                  <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg p-3 sm:p-4 mb-3 border border-gray-200/50">
+                    <div className="flex items-center mb-2 sm:mb-3">
+                      <div className="p-1 sm:p-1.5 bg-indigo-100 rounded-md mr-2">
+                        <Phone className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-indigo-600" />
                       </div>
-                      <h3 className="text-base font-semibold text-gray-900">Basic Information</h3>
+                      <h3 className="text-sm sm:text-base font-semibold text-gray-900">Basic Information</h3>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
                       {/* Number Field */}
-                      <div className="space-y-2">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center">
-                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
-                          Phone Number
-                          <span className="ml-2 text-xs text-gray-500 font-normal">(10 digits required)</span>
+                      <div className="space-y-1.5 sm:space-y-2">
+                        <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center flex-wrap gap-1">
+                          <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full"></span>
+                          <span>Phone Number</span>
+                          <span className="text-xs text-gray-500 font-normal">(10 digits)</span>
                         </label>
                         <div className="relative">
                           <input
@@ -4975,7 +5157,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                                 }
                               }
                             }}
-                            className={`w-full pl-3 pr-10 py-2.5 bg-white border-2 rounded-lg focus:ring-2 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm ${
+                            className={`w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 rounded-lg focus:ring-2 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm ${
                               editPhoneError
                                 ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
                                 : 'border-gray-200 focus:border-indigo-500 focus:ring-indigo-500/20'
@@ -4983,10 +5165,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             placeholder="1234567890"
                             maxLength={10}
                           />
-                          <div className={`absolute right-3 top-1/2 transform -translate-y-1/2 ${
+                          <div className={`absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 ${
                             editPhoneError ? 'text-red-400' : 'text-gray-400'
                           }`}>
-                            <Phone className="h-4 w-4" />
+                            <Phone className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                           </div>
                         </div>
                         {/* Character counter */}
@@ -4998,8 +5180,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             {editPoolNumber.length}/10 digits
                           </span>
                           {editPoolNumber.length === 10 && (
-                            <span className="text-green-600 flex items-center">
-                              <CheckCircle2 className="h-3 w-3 mr-1" />
+                            <span className="text-green-600 flex items-center text-xs">
+                              <CheckCircle2 className="h-3 w-3 mr-0.5" />
                               Valid
                             </span>
                           )}
@@ -5008,7 +5190,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           <motion.p
                             initial={{ opacity: 0, y: -10 }}
                             animate={{ opacity: 1, y: 0 }}
-                            className="text-xs text-red-600 flex items-center mt-1"
+                            className="text-xs text-red-600 flex items-center mt-0.5"
                           >
                             <AlertCircle className="h-3 w-3 mr-1" />
                             {editPhoneError}
@@ -5017,16 +5199,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       </div>
 
                       {/* Category Field */}
-                      <div className="space-y-2">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center">
-                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                      <div className="space-y-1.5 sm:space-y-2">
+                        <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full mr-1.5 sm:mr-2"></span>
                           Category
                         </label>
                         <div className="relative">
                           <select
                             value={editPoolCategory}
                             onChange={(e) => setEditPoolCategory((e.target as HTMLSelectElement).value)}
-                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                            className="w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
                           >
                             <option value="" className="text-gray-400">Select a category</option>
                             {Array.from(CATEGORIES).map((c) => (
@@ -5035,16 +5217,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                               </option>
                             ))}
                           </select>
-                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none">
-                            <ChevronDown className="h-4 w-4" />
+                          <div className="absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none">
+                            <ChevronDown className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                           </div>
                         </div>
                       </div>
 
                       {/* Code Field */}
-                      <div className="space-y-2">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center">
-                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                      <div className="space-y-1.5 sm:space-y-2">
+                        <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full mr-1.5 sm:mr-2"></span>
                           Code
                         </label>
                         <div className="relative">
@@ -5052,19 +5234,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             type="text"
                             value={editPoolCode}
                             onChange={(e) => setEditPoolCode((e.target as HTMLInputElement).value)}
-                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
-                            placeholder="e.g., 050, 051"
+                            className="w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                            placeholder="e.g., 28DECSILG2"
                           />
-                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
-                            <Tag className="h-4 w-4" />
+                          <div className="absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
+                            <Tag className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                           </div>
                         </div>
                       </div>
 
                       {/* Group Field */}
-                      <div className="space-y-2">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center">
-                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                      <div className="space-y-1.5 sm:space-y-2">
+                        <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full mr-1.5 sm:mr-2"></span>
                           Group
                         </label>
                         <div className="relative">
@@ -5072,26 +5254,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             type="text"
                             value={editPoolGroup}
                             onChange={(e) => setEditPoolGroup((e.target as HTMLInputElement).value)}
-                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
-                            placeholder="e.g., G1, G2, VIP"
+                            className="w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                            placeholder="e.g., G1, G2"
                           />
-                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
-                            <Package className="h-4 w-4" />
+                          <div className="absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
+                            <Package className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                           </div>
                         </div>
                       </div>
 
                       {/* Status Field */}
-                      <div className="space-y-2">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center">
-                          <span className="w-1.5 h-1.5 bg-purple-500 rounded-full mr-2"></span>
+                      <div className="space-y-1.5 sm:space-y-2">
+                        <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
+                          <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-purple-500 rounded-full mr-1.5 sm:mr-2"></span>
                           Status
                         </label>
                         <div className="relative">
                           <select
                             value={editPoolStatus}
                             onChange={(e) => setEditPoolStatus((e.target as HTMLSelectElement).value as NumberStatus)}
-                            className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-purple-200 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                            className="w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 border-purple-200 rounded-lg focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
                           >
                             <option value="open" className="text-gray-900">Open</option>
                             <option value="reserved" className="text-gray-900">Reserved</option>
@@ -5100,9 +5282,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             <option value="rejected" className="text-gray-900">Rejected</option>
                             <option value="non_verified" className="text-gray-900">Non Verified</option>
                             <option value="activated" className="text-gray-900">Activated</option>
+                            <option value="returned" className="text-gray-900">Returned</option>
                           </select>
-                          <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-purple-400 pointer-events-none">
-                            <ChevronDown className="h-4 w-4" />
+                          <div className="absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 text-purple-400 pointer-events-none">
+                            <ChevronDown className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                           </div>
                         </div>
                         <p className="text-xs text-gray-600">
@@ -5125,9 +5308,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {/* Passcode Field */}
                         {(isAdmin() || isCoordinator) && (
-                          <div className="space-y-2">
-                            <label className="text-sm font-semibold text-gray-700 flex items-center">
-                              <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
+                          <div className="space-y-1.5 sm:space-y-2">
+                            <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
+                              <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full mr-1.5 sm:mr-2"></span>
                               Passcode
                             </label>
                             <div className="relative">
@@ -5135,11 +5318,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                                 type="text"
                                 value={editPoolPasscode}
                                 onChange={(e) => setEditPoolPasscode((e.target as HTMLInputElement).value)}
-                                className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-blue-200 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
-                                placeholder="Enter security passcode"
+                                className="w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 border-blue-200 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200 text-gray-900 placeholder-gray-400 text-sm"
+                                placeholder="Enter passcode"
                               />
-                              <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-blue-400">
-                                <Lock className="h-4 w-4" />
+                              <div className="absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 text-blue-400">
+                                <Lock className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                               </div>
                             </div>
                           </div>
@@ -5147,17 +5330,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
                         {/* Team Visibility Field */}
                         {(isAdmin() || isCoordinator) && (
-                          <div className="space-y-2">
-                            <label className="text-sm font-semibold text-gray-700 flex items-center">
-                              <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2"></span>
-                              Team Visibility
-                              <span className="ml-2 text-xs text-gray-500 font-normal">(optional)</span>
+                          <div className="space-y-1.5 sm:space-y-2">
+                            <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center flex-wrap gap-1">
+                              <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-green-500 rounded-full"></span>
+                              <span>Team Visibility</span>
+                              <span className="text-xs text-gray-500 font-normal">(optional)</span>
                             </label>
                             <div className="relative">
                               <select
                                 value={editPoolTeamVisibility}
                                 onChange={(e) => setEditPoolTeamVisibility((e.target as HTMLSelectElement).value)}
-                                className="w-full pl-3 pr-10 py-2.5 bg-white border-2 border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
+                                className="w-full pl-2.5 sm:pl-3 pr-8 sm:pr-10 py-2 sm:py-2.5 bg-white border-2 border-green-200 rounded-lg focus:border-green-500 focus:ring-2 focus:ring-green-500/20 transition-all duration-200 text-gray-900 appearance-none text-sm"
                               >
                                 <option value="" className="text-gray-400">Visible to all teams</option>
                                 {teams.map((team) => (
@@ -5166,8 +5349,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                                   </option>
                                 ))}
                               </select>
-                              <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-green-400 pointer-events-none">
-                                <ChevronDown className="h-4 w-4" />
+                              <div className="absolute right-2 sm:right-3 top-1/2 transform -translate-y-1/2 text-green-400 pointer-events-none">
+                                <ChevronDown className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                               </div>
                             </div>
                             <p className="text-xs text-gray-600">
@@ -5178,9 +5361,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       </div>
                     </div>
                   )}
+                </div>
 
-                  {/* Action Buttons */}
-                  <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 pt-6 border-t border-gray-200">
+                {/* Action Buttons - Fixed at Bottom */}
+                <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-gray-200 bg-white flex-shrink-0">
                     <motion.button
                       type="button"
                       whileHover={{ scale: 1.02 }}
@@ -5199,7 +5383,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         setEditPhoneError('');
                       }}
                       disabled={updatingNumber}
-                      className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
+                    className="w-full sm:w-auto px-4 py-2.5 sm:py-2 text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md"
                     >
                       Cancel
                     </motion.button>
@@ -5215,7 +5399,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       disabled={updatingNumber}
                       style={{ pointerEvents: 'auto' }}
                       className={clsx(
-                        'px-4 py-2 text-sm font-semibold text-white rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed',
+                      'w-full sm:w-auto px-4 py-2.5 sm:py-2 text-sm font-semibold text-white rounded-lg transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed',
                         updatingNumber
                           ? 'bg-gray-400 cursor-not-allowed'
                           : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 transform hover:scale-[1.02]'
@@ -5235,7 +5419,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         )}
                       </div>
                     </motion.button>
-                  </div>
                 </div>
               </motion.div>
             </motion.div>
@@ -5690,7 +5873,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               Striked
             </motion.span>
           )}
-          {/* Claim button - Only visible to agents and only between 9 AM - 8 PM UAE time */}
+          {/* Claim button - Only visible to agents and only between 8 AM - 10:30 PM UAE time */}
           {user?.role === 'agent' && number.status === 'reserved' && 
                            number.reservedBy !== user?.id && 
                            number.claimingAgentId !== user?.id &&
@@ -5901,6 +6084,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                  searchHasMore && 
                  displayPagination.currentPage === displayPagination.totalPages && (
                   <motion.button
+                    type="button"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => performSearch(true)}
@@ -6013,7 +6197,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   <div className="mt-2 text-[11px] text-gray-800 leading-snug bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-100 rounded-md px-3 py-2">
                     <div>• Max 3 claims per day</div>
                     <div>• Per-number queue cap: 3</div>
-                    <div>• Claim window: 9 AM–8 PM (UAE time)</div>
+                    <div>• Claim window: 8 AM–10:30 PM (UAE time)</div>
                   </div>
                   </div>
                 <button

@@ -57,7 +57,7 @@ import { useAuthStore } from '../store/authStore';
  * Available action types for number pool logging
  * Covers all major operations that can be performed on numbers
  */
-export type NumberLogAction = 
+export type NumberLogAction =
   | 'created'                    // Number added to pool
   | 'updated'                    // General number updates
   | 'reserved'                   // Number reserved by agent
@@ -70,6 +70,24 @@ export type NumberLogAction =
   | 'passcode_changed'           // Passcode field modified
   | 'group_changed'              // Group assignment changed
   | 'team_visibility_changed';   // Team visibility modified
+
+/**
+ * Array of all available action types for UI dropdowns and filtering
+ */
+export const actionTypes: NumberLogAction[] = [
+  'created',
+  'updated',
+  'reserved',
+  'claimed',
+  'opened',
+  'released',
+  'deleted',
+  'lead_created',
+  'status_changed',
+  'passcode_changed',
+  'group_changed',
+  'team_visibility_changed'
+];
 
 /**
  * Number log entry interface defining the structure for logged activities

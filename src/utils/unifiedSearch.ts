@@ -1314,7 +1314,7 @@ export class UnifiedSearch {
           // Filter for case-insensitive substring match (contains, not just startsWith)
           const matchedDocs = [];
           for (const doc of allDocs) {
-            if (matchedDocs.length >= maxResults + 1) break;
+              if (matchedDocs.length >= maxResults + 1) break;
             const data = doc.data() as NumberPool;
             const code = (data.code || '').toLowerCase();
             const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
@@ -1341,7 +1341,7 @@ export class UnifiedSearch {
           // Add to results
           docs.forEach(doc => {
             const data = doc.data() as NumberPool;
-            results.set(doc.id, { ...data, id: doc.id });
+              results.set(doc.id, { ...data, id: doc.id });
           });
         } else if (matchedStatus) {
           // Status search with pagination
@@ -1527,7 +1527,7 @@ export class UnifiedSearch {
                 const matchingDocs: any[] = [];
                 
                 for (const doc of allDocs) {
-                  if (matchingDocs.length >= maxResults + 1) break;
+                    if (matchingDocs.length >= maxResults + 1) break;
                   const data = doc.data() as NumberPool;
                   const code = (data.code || '').toLowerCase();
                   const codeNormalized = code.replace(/[^0-9a-zA-Z]/g, '');
