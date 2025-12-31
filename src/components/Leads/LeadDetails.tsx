@@ -1561,8 +1561,62 @@ export function LeadDetails() {
       };
       await updateDoc(leadRef, updateData);
       if (pendingVerifierUpdates.plans && user.role === 'verifier') {
-        const realPlans = pendingVerifierUpdates.plans.filter(p => !p.numberId?.startsWith('virtual-'));
-        const updatePromises = realPlans.map(async plan => {
+        const originalPlans = (leadData.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+        const newPlans = pendingVerifierUpdates.plans.filter(p => !p.numberId?.startsWith('virtual-'));
+        
+        // Find removed numbers (in original plans but not in new plans)
+        const removedNumbers = originalPlans.filter((oldPlan: any) => 
+          !newPlans.some((newPlan: any) => newPlan.numberId === oldPlan.numberId)
+        );
+        
+        const updatePromises: Promise<void>[] = [];
+        
+        // Handle removed numbers - set to 'open'
+        removedNumbers.forEach((plan: any) => {
+          if (plan?.numberId) {
+            updatePromises.push(
+              (async () => {
+                try {
+                  const numberRef = doc(db, 'numberPool', plan.numberId);
+                  const numberDoc = await getDoc(numberRef);
+                  
+                  if (numberDoc.exists()) {
+                    const numberData = numberDoc.data();
+                    await updateDoc(numberRef, {
+                      status: 'open',
+                      lastStatusChange: new Date(),
+                      leadId: null,
+                      reservedBy: null,
+                      reservedAt: null,
+                      claimingAgentId: null,
+                      claimingStartedAt: null,
+                      claimingExpiresAt: null,
+                      claimQueue: []
+                    });
+                    
+                    // Log the number release
+                    await logNumberAction(
+                      plan.numberId,
+                      plan.number || '',
+                      'lead_removed',
+                      { status: numberData?.status || 'unknown', leadId: id },
+                      { status: 'open', leadId: null },
+                      `Number removed from lead by verifier ${user.name}`
+                    );
+                  }
+                } catch (err) {
+                  console.error('Failed updating removed number in numberPool', plan.numberId, err);
+                }
+              })()
+            );
+          }
+        });
+        
+        // Handle remaining/new numbers - update their status
+        const realPlans = newPlans;
+        realPlans.forEach((plan: any) => {
+          updatePromises.push(
+            (async () => {
           try {
             const numberRef = doc(db, 'numberPool', plan.numberId);
             await updateDoc(numberRef, {
@@ -1574,7 +1628,10 @@ export function LeadDetails() {
           } catch (err) {
             console.error('Failed updating numberPool for plan', plan.numberId, err);
           }
+            })()
+          );
         });
+        
         await Promise.all(updatePromises);
       }
       setLead(prev => prev ? { ...prev, ...pendingVerifierUpdates } : null);

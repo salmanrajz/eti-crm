@@ -58,7 +58,7 @@ import {
 } from 'lucide-react';
 import { collection, query as fsQuery, orderBy, limit as fsLimit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { fetchNumberLogs, NumberLog, NumberLogFilters, getActionColor, getActionIcon, formatActionText, formatTimestamp, formatDataValue, formatDataValueWithUserNames, processDetailsWithAgentNames } from '../../utils/numberLogging';
+import { fetchNumberLogs, NumberLog, NumberLogFilters, getActionColor, getActionIcon, formatActionText, formatTimestamp, formatDataValue, formatDataValueWithUserNames, processDetailsWithAgentNames, actionTypes } from '../../utils/numberLogging';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 

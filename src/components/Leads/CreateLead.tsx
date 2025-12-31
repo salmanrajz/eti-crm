@@ -1091,7 +1091,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       const selectedNumber = firstPlan?.number || '';
       const selectedNumberId = firstPlan?.numberId || '';
       const selectedCategory = firstPlan?.category || 'Standard';
-      
+
       const leadData: Partial<Lead> = {
         ...cleanedFormData,
         customerAddress: formData.customerAddress,

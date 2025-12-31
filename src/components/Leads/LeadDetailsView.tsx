@@ -50,7 +50,7 @@ import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppC
 import { normalizeTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, onSnapshot, orderBy } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, onSnapshot, orderBy, deleteDoc, writeBatch, setDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
@@ -238,6 +238,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [showCoordinatorDialog, setShowCoordinatorDialog] = useState(false);
   const [coordinatorAction, setCoordinatorAction] = useState<'assign' | 'activate' | 'activate_non_verified' | 'followup' | 'later' | 'reject' | 'reassign' | 'reverification' | null>(null);
   const [coordinatorNote, setCoordinatorNote] = useState('');
+  const [rejectionReason, setRejectionReason] = useState<string>('');
   const [scheduledForDate, setScheduledForDate] = useState<string>('');
   const [showManagerAssignDialog, setShowManagerAssignDialog] = useState(false);
   const [managerNote, setManagerNote] = useState('');
@@ -2004,6 +2005,12 @@ Language: ${lead.language || 'N/A'}`;
         : country === 'CA' ? '1'
         : '971';
       
+      // Remove leading zero if present (e.g., 0501234567 -> 501234567)
+      if (formattedNumber.startsWith('0')) {
+        formattedNumber = formattedNumber.substring(1);
+      }
+      
+      // Add country code if not present
       if (!formattedNumber.startsWith(countryCode)) {
         formattedNumber = `${countryCode}${formattedNumber}`;
       }
@@ -2845,7 +2852,13 @@ Language: ${lead.language || 'N/A'}`;
           updateData.status = 'activated_non_verified';
         }
       } else if (coordinatorAction === 'reject') {
-        // Reject flow - Set number status to 'open'
+        // Validate rejection reason is selected
+        if (!rejectionReason) {
+          toast.error('Please select a rejection reason');
+          return;
+        }
+
+        // Reject flow - Handle different rejection reasons
         if (lead.plans && lead.plans.length > 0) {
           const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
           const updatePromises = realPlans.map(async (plan) => {
@@ -2855,6 +2868,58 @@ Language: ${lead.language || 'N/A'}`;
               return;
             }
             const numberData = numberDoc.data();
+
+            if (rejectionReason === 'number_already_active') {
+              // Set number status to 'activated'
+              await updateDoc(numberRef, {
+                status: 'activated',
+                lastStatusChange: new Date(),
+                leadId: null,
+                reservedBy: null,
+                reservedAt: null,
+                claimingAgentId: null,
+                claimingStartedAt: null,
+                claimingExpiresAt: null,
+                claimQueue: []
+              });
+
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status },
+                { status: 'activated', leadId: null },
+                `Coordinator ${user?.name || 'Unknown'} rejected lead (Number Already Active), set number to activated`
+              );
+            } else if (rejectionReason === 'number_return') {
+              // Delete number from numberPool and add to deletedNumbers with status 'returned'
+              const batch = writeBatch(db);
+              
+              // Create document in deletedNumbers collection with status "returned"
+              const deletedNumberRef = doc(db, 'deletedNumbers', plan.numberId);
+              batch.set(deletedNumberRef, {
+                ...numberData,
+                status: 'returned',
+                deletedAt: serverTimestamp(),
+                originalId: plan.numberId,
+                originalCollection: 'numberPool'
+              });
+              
+              // Delete from numberPool
+              batch.delete(numberRef);
+              
+              await batch.commit();
+
+              await logNumberAction(
+                plan.numberId,
+                plan.number || '',
+                'status_changed',
+                { status: numberData?.status, leadId: lead.id },
+                { status: 'returned', leadId: null },
+                `Coordinator ${user?.name || 'Unknown'} rejected lead (Number Return), deleted number and moved to deletedNumbers`
+              );
+            } else {
+              // Default: Set number status to 'open' (for billing_issue, cap_limit)
             await updateDoc(numberRef, {
               status: 'open',
               lastStatusChange: new Date(),
@@ -2867,14 +2932,18 @@ Language: ${lead.language || 'N/A'}`;
               claimQueue: []
             });
 
+              const reasonText = rejectionReason === 'billing_issue' ? 'Billing issue' : 
+                                rejectionReason === 'cap_limit' ? 'Cap Limit' : 'Unknown';
+
             await logNumberAction(
               plan.numberId,
               plan.number || '',
               'status_changed',
               { status: numberData?.status },
               { status: 'open', leadId: null },
-              `Coordinator ${user?.name || 'Unknown'} rejected lead, set number to open`
+                `Coordinator ${user?.name || 'Unknown'} rejected lead (${reasonText}), set number to open`
             );
+            }
           });
           
           await Promise.all(updatePromises);
@@ -3038,6 +3107,7 @@ Language: ${lead.language || 'N/A'}`;
         setShowCoordinatorDialog(false);
         setCoordinatorNote('');
         setScheduledForDate('');
+      setRejectionReason('');
         setCoordinatorAction(null);
         navigate('/dashboard/leads');
       }
@@ -3206,6 +3276,7 @@ Language: ${lead.language || 'N/A'}`;
                   <button
                     onClick={() => {
                       setCoordinatorAction('reject');
+                      setRejectionReason(''); // Reset rejection reason when opening dialog
                       setShowCoordinatorDialog(true);
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
@@ -3260,6 +3331,7 @@ Language: ${lead.language || 'N/A'}`;
                   <button
                     onClick={() => {
                       setCoordinatorAction('reject');
+                      setRejectionReason(''); // Reset rejection reason when opening dialog
                       setShowCoordinatorDialog(true);
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
@@ -3314,6 +3386,7 @@ Language: ${lead.language || 'N/A'}`;
                   <button
                     onClick={() => {
                       setCoordinatorAction('reject');
+                      setRejectionReason(''); // Reset rejection reason when opening dialog
                       setShowCoordinatorDialog(true);
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
@@ -3344,6 +3417,7 @@ Language: ${lead.language || 'N/A'}`;
                   <button
                     onClick={() => {
                       setCoordinatorAction('reject');
+                      setRejectionReason(''); // Reset rejection reason when opening dialog
                       setShowCoordinatorDialog(true);
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
@@ -3386,6 +3460,7 @@ Language: ${lead.language || 'N/A'}`;
                   <button
                     onClick={() => {
                       setCoordinatorAction('reject');
+                      setRejectionReason(''); // Reset rejection reason when opening dialog
                       setShowCoordinatorDialog(true);
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
@@ -4626,6 +4701,24 @@ Language: ${lead.language || 'N/A'}`;
               )}
               {coordinatorAction === 'reject' && (
                 <>
+                  {/* Rejection Reason Dropdown */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-semibold text-gray-900">
+                      Rejection Reason <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 transition-all duration-200 text-gray-900"
+                      value={rejectionReason}
+                      onChange={(e) => setRejectionReason(e.target.value)}
+                      required
+                    >
+                      <option value="">Select a reason</option>
+                      <option value="billing_issue">Billing issue</option>
+                      <option value="cap_limit">Cap Limit</option>
+                      <option value="number_return">Number Return</option>
+                      <option value="number_already_active">Number Already Active</option>
+                    </select>
+                  </div>
                   {/* Notes for Reject action */}
                   <div className="space-y-2">
                     <label className="block text-sm font-semibold text-gray-900">
@@ -4887,6 +4980,7 @@ Language: ${lead.language || 'N/A'}`;
                     setShowCoordinatorDialog(false);
                     setCoordinatorNote('');
                     setScheduledForDate('');
+                    setRejectionReason('');
                     setCoordinatorAction(null);
                     setNewNumbers([]);
                     setShowAddNumberForm(false);

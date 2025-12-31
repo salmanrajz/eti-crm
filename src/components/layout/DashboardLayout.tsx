@@ -257,7 +257,7 @@ export function DashboardLayout() {
       return cleanup; // Cleanup on unmount or user change
     }
   }, [user]);
-
+  
   /**
    * Sets up real-time notification listener via Firestore
    * Handles notification updates, sound alerts, and automatic panel display
@@ -1195,34 +1195,53 @@ export function DashboardLayout() {
       </div>
 
       {/* Mobile Navigation Bar - Premium Redesign */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 overflow-visible" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-        {/* Enhanced glass morphism background with gradient - with arc cutouts for round button */}
-        <div className="absolute inset-0 bg-gradient-to-t from-white via-white/95 to-white/90 backdrop-blur-2xl border-t border-gray-200/60 shadow-[0_-4px_24px_rgba(0,0,0,0.08)]">
-          {/* Arc cutouts using positioned divs - creating subtle notch effect on both sides */}
-          <div className="absolute left-1/2 top-0 -translate-x-1/2 w-14 h-14 pointer-events-none overflow-visible">
-            {/* Center circle cutout - where button sits */}
-            <div className="absolute left-0 top-0 w-14 h-14 bg-white rounded-full" />
-            {/* Left arc cutout - subtle curved notch on left side */}
-            <div className="absolute -left-3 top-0 w-3 h-3 bg-white" style={{ borderBottomRightRadius: '100%' }} />
-            {/* Right arc cutout - subtle curved notch on right side */}
-            <div className="absolute -right-3 top-0 w-3 h-3 bg-white" style={{ borderBottomLeftRadius: '100%' }} />
-          </div>
+      <div 
+        className="md:hidden fixed bottom-0 left-0 right-0 z-50" 
+        style={{ 
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          height: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
+          minHeight: '4rem',
+          maxHeight: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
+          transform: 'translateZ(0)',
+          willChange: 'transform',
+          backfaceVisibility: 'hidden'
+        }}
+      >
+        {/* Enhanced glass morphism background with gradient */}
+        <div 
+          className="absolute inset-0 bg-gradient-to-t from-white via-white/95 to-white/90 backdrop-blur-2xl border-t border-gray-200/60 shadow-[0_-4px_24px_rgba(0,0,0,0.08)]"
+          style={{
+            height: '100%',
+            minHeight: '4rem',
+            maxHeight: '100%'
+          }}
+        >
         </div>
         
         {/* Subtle top glow effect - positioned slightly above to prevent clipping */}
         <div className="absolute -top-px left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-indigo-200/50 to-transparent" />
         
-        <div className="relative flex items-center justify-around h-16 px-2.5 pb-1.5" style={{ paddingBottom: 'calc(0.375rem + env(safe-area-inset-bottom, 0px))' }}>
+        <div 
+          className="relative flex items-center justify-around px-2.5" 
+          style={{ 
+            height: '4rem',
+            minHeight: '4rem',
+            maxHeight: '4rem',
+            paddingBottom: 'calc(0.375rem + env(safe-area-inset-bottom, 0px))'
+          }}
+        >
           {/* Dashboard Button */}
           <Link
             to="/dashboard"
             className={clsx(
               "group relative flex flex-col items-center justify-center flex-1 h-full mx-1 rounded-xl transition-all duration-300 ease-out touch-manipulation",
               "active:scale-[0.92] active:transition-transform active:duration-150",
+              "flex-shrink-0 min-w-0",
               location.pathname === '/dashboard'
                 ? "text-indigo-600"
                 : "text-gray-500"
             )}
+            style={{ flexBasis: 0, minWidth: 0 }}
           >
             {/* Active state background with gradient */}
             {location.pathname === '/dashboard' && (
@@ -1251,27 +1270,29 @@ export function DashboardLayout() {
             )}
             
             {/* Content */}
-            <div className="relative z-10 flex flex-col items-center justify-center gap-0.5">
+            <div className="relative z-10 flex flex-col items-center justify-center gap-0.5 flex-shrink-0" style={{ minWidth: 0, width: '100%' }}>
               <motion.div
                 animate={location.pathname === '/dashboard' ? { scale: [1, 1.15, 1] } : {}}
                 transition={{ duration: 0.4, ease: "easeOut" }}
-                className="relative"
+                className="relative flex-shrink-0"
+                style={{ width: '20px', height: '20px' }}
               >
                 <LayoutDashboard 
                   className={clsx(
-                    "h-5 w-5 transition-all duration-300",
+                    "h-5 w-5 transition-all duration-300 flex-shrink-0",
                     location.pathname === '/dashboard'
                       ? "text-indigo-600 drop-shadow-sm"
                       : "text-gray-500 group-active:text-gray-700 group-active:scale-110"
                   )} 
                   strokeWidth={location.pathname === '/dashboard' ? 2.5 : 2}
+                  style={{ width: '20px', height: '20px', flexShrink: 0 }}
                 />
                 {location.pathname === '/dashboard' && (
                   <div className="absolute inset-0 bg-indigo-400/20 blur-md -z-10" />
                 )}
               </motion.div>
               <span className={clsx(
-                "text-[9px] font-semibold transition-all duration-300 leading-tight",
+                "text-[9px] font-semibold transition-all duration-300 leading-tight flex-shrink-0 whitespace-nowrap",
                 location.pathname === '/dashboard'
                   ? "text-indigo-600"
                   : "text-gray-500 group-active:text-gray-700"
@@ -1286,19 +1307,21 @@ export function DashboardLayout() {
             to="/dashboard/numbers"
             className={clsx(
               "group relative flex flex-col items-center justify-center flex-1 h-full mx-1 transition-all duration-300 ease-out touch-manipulation",
-              "active:scale-[0.88] active:transition-transform active:duration-150"
+              "active:scale-[0.88] active:transition-transform active:duration-150",
+              "flex-shrink-0 min-w-0"
             )}
+            style={{ flexBasis: 0, minWidth: 0 }}
           >
             {/* Round Button Container - Perfectly Round, Nested Above Nav Bar */}
             <motion.div
               className={clsx(
-                "relative w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 -mt-7 z-10",
+                "relative w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 -mt-7 z-10 flex-shrink-0",
                 "aspect-square", // Ensure perfect circle
               location.pathname === '/dashboard/numbers'
                   ? "bg-gradient-to-br from-cyan-500 via-blue-500 to-indigo-600 shadow-[0_8px_24px_rgba(6,182,212,0.4),0_4px_12px_rgba(59,130,246,0.3)]"
                   : "bg-gradient-to-br from-gray-100 via-gray-200 to-gray-300 shadow-[0_4px_12px_rgba(0,0,0,0.15)] group-active:shadow-[0_2px_8px_rgba(0,0,0,0.2)]"
             )}
-              style={{ borderRadius: '50%' }} // Force perfect circle
+              style={{ borderRadius: '50%', width: '56px', height: '56px', flexShrink: 0 }} // Force perfect circle
               animate={location.pathname === '/dashboard/numbers' ? { 
                 scale: [1, 1.05, 1],
                 y: [0, -2, 0]
@@ -1312,22 +1335,25 @@ export function DashboardLayout() {
                   scale: [1, 1.1, 1]
                 } : {}}
                 transition={{ duration: 0.6, ease: "easeOut" }}
+                className="flex-shrink-0"
+                style={{ width: '24px', height: '24px' }}
               >
                 <PhoneCall 
                   className={clsx(
-                    "h-6 w-6 transition-all duration-300",
+                    "h-6 w-6 transition-all duration-300 flex-shrink-0",
               location.pathname === '/dashboard/numbers'
                       ? "text-white drop-shadow-lg"
                       : "text-gray-600 group-active:text-gray-700 group-active:scale-110"
                   )} 
                   strokeWidth={location.pathname === '/dashboard/numbers' ? 2.5 : 2}
+                  style={{ width: '24px', height: '24px', flexShrink: 0 }}
                 />
               </motion.div>
             </motion.div>
             
             {/* Label Below Button */}
             <span className={clsx(
-              "text-[9px] font-semibold transition-all duration-300 leading-tight mt-0.5",
+              "text-[9px] font-semibold transition-all duration-300 leading-tight mt-0.5 flex-shrink-0 whitespace-nowrap",
               location.pathname === '/dashboard/numbers'
                 ? "text-indigo-600"
                 : "text-gray-500 group-active:text-gray-700"
@@ -1342,10 +1368,12 @@ export function DashboardLayout() {
             className={clsx(
               "group relative flex flex-col items-center justify-center flex-1 h-full mx-1 rounded-xl transition-all duration-300 ease-out touch-manipulation",
               "active:scale-[0.92] active:transition-transform active:duration-150",
+              "flex-shrink-0 min-w-0",
               location.pathname === '/dashboard/leads'
                 ? "text-indigo-600"
                 : "text-gray-500"
             )}
+            style={{ flexBasis: 0, minWidth: 0 }}
           >
             {/* Active state background with gradient */}
             {location.pathname === '/dashboard/leads' && (
@@ -1374,27 +1402,29 @@ export function DashboardLayout() {
             )}
             
             {/* Content */}
-            <div className="relative z-10 flex flex-col items-center justify-center gap-0.5">
+            <div className="relative z-10 flex flex-col items-center justify-center gap-0.5 flex-shrink-0" style={{ minWidth: 0, width: '100%' }}>
               <motion.div
                 animate={location.pathname === '/dashboard/leads' ? { scale: [1, 1.15, 1] } : {}}
                 transition={{ duration: 0.4, ease: "easeOut" }}
-                className="relative"
+                className="relative flex-shrink-0"
+                style={{ width: '20px', height: '20px' }}
               >
                 <ClipboardList 
                   className={clsx(
-                    "h-5 w-5 transition-all duration-300",
+                    "h-5 w-5 transition-all duration-300 flex-shrink-0",
                     location.pathname === '/dashboard/leads'
                       ? "text-indigo-600 drop-shadow-sm"
                       : "text-gray-500 group-active:text-gray-700 group-active:scale-110"
                   )} 
                   strokeWidth={location.pathname === '/dashboard/leads' ? 2.5 : 2}
+                  style={{ width: '20px', height: '20px', flexShrink: 0 }}
                 />
                 {location.pathname === '/dashboard/leads' && (
                   <div className="absolute inset-0 bg-indigo-400/20 blur-md -z-10" />
                 )}
               </motion.div>
               <span className={clsx(
-                "text-[9px] font-semibold transition-all duration-300 leading-tight",
+                "text-[9px] font-semibold transition-all duration-300 leading-tight flex-shrink-0 whitespace-nowrap",
                 location.pathname === '/dashboard/leads'
                   ? "text-indigo-600"
                   : "text-gray-500 group-active:text-gray-700"

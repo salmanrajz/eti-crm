@@ -43,8 +43,8 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { collection, query, getDocs, where, orderBy, doc, getDoc, updateDoc, addDoc, onSnapshot, serverTimestamp, deleteDoc, limit, writeBatch, setDoc, deleteField } from 'firebase/firestore';
-import { getFunctions, httpsCallable } from 'firebase/functions';
-import { db } from '../../lib/firebase';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions } from '../../lib/firebase';
 import { User, Team, Lead, NumberPool } from '../../types';
 import { AdminManagerPhoneNumbers } from '../settings/AdminManagerPhoneNumbers';
 import { PlanManagement } from '../admin/PlanManagement';
@@ -370,6 +370,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
   const [initializingStats, setInitializingStats] = useState(false);
   const [initStatsResult, setInitStatsResult] = useState<string | null>(null);
+  const [initializingGroupStats, setInitializingGroupStats] = useState(false);
+  const [initGroupStatsResult, setInitGroupStatsResult] = useState<string | null>(null);
   // Team target editing state
   const [editingTeamTarget, setEditingTeamTarget] = useState<string | null>(null);
   const [teamTargetValue, setTeamTargetValue] = useState<number>(0);
@@ -991,9 +993,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         return activatedAt && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
       });
         
-      // Historical verified count: any lead that has ever been verified,
-      // based ONLY on presence of verifiedAt (regardless of current status)
-      const verifiedCount = allLeads.filter(
+      // Current month verified count: leads verified in the current month
+      const verifiedCount = currentMonthLeads.filter(
         l => (l as any).verifiedAt
       ).length;
       
@@ -2269,7 +2270,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     try {
       setInitializingStats(true);
       setInitStatsResult(null);
-      const fn = httpsCallable(getFunctions(), 'initializeNumberPoolStats');
+      const fn = httpsCallable(functions, 'initializeNumberPoolStats');
       const res = await fn({});
       const data = res.data as any;
       setInitStatsResult(
@@ -2285,6 +2286,29 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       toast.error(errorMsg);
     } finally {
       setInitializingStats(false);
+    }
+  };
+
+  // Handle regenerate group and initials stats only
+  const handleRegenerateGroupStats = async () => {
+    try {
+      setInitializingGroupStats(true);
+      setInitGroupStatsResult(null);
+      const fn = httpsCallable(functions, 'initializeNumberPoolGroupStats');
+      const res = await fn({});
+      const data = res.data as any;
+      setInitGroupStatsResult(
+        `Group & Initials stats regenerated! ` +
+        `Groups: ${Object.keys(data.groupCounts || {}).length}, ` +
+        `Initials: ${Object.keys(data.initialsCounts || {}).length}`
+      );
+      toast.success('Group and Initials stats regenerated successfully');
+    } catch (err: any) {
+      const errorMsg = `Failed to regenerate group stats: ${err?.message || 'Unknown error'}`;
+      setInitGroupStatsResult(errorMsg);
+      toast.error(errorMsg);
+    } finally {
+      setInitializingGroupStats(false);
     }
   };
 
@@ -2455,7 +2479,18 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-3 gap-2 sm:gap-4 md:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-6 sm:mb-12">
-        {stats.map((stat) => (
+        {stats.filter(stat =>
+          stat.name !== 'Lead Logs' &&
+          stat.name !== 'Return numbers' &&
+          stat.name !== 'Add to Deleted Numbers' &&
+          stat.name !== 'Bulk Number Search' &&
+          stat.name !== 'Bulk Deleted Number Search' &&
+          stat.name !== 'Number Lookup' &&
+          stat.name !== 'Number Visibility' &&
+          stat.name !== 'Total Leads' &&
+          stat.name !== 'Total Activated' &&
+          stat.name !== 'Rejected'
+        ).map((stat) => (
           stat.name === 'Number Visibility' ? (
             <button
               key={stat.name}
@@ -2891,6 +2926,34 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           </div>
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
         </button>
+
+        {/* Regenerate Group & Initials Stats Button - Hidden */}
+        {false && <button
+          onClick={handleRegenerateGroupStats}
+          disabled={initializingGroupStats}
+          className="bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-green-200"
+          type="button"
+        >
+          <div className="p-2 sm:p-4 md:p-6">
+            <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+              <div className="p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 group-hover:scale-110 transition-transform duration-300">
+                <Database className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+              </div>
+              <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                {initializingGroupStats ? 'Regenerating...' : 'Groups & Initials'}
+              </div>
+            </div>
+            <div className="space-y-1 sm:space-y-2">
+              <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                {initializingGroupStats ? 'Regenerating...' : 'Regenerate Group & Initials Stats'}
+              </h3>
+              {initGroupStatsResult && (
+                <p className="text-xs text-gray-600 mt-1">{initGroupStatsResult}</p>
+              )}
+            </div>
+          </div>
+          <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-green-500 to-emerald-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
+        </button>}
       </div>
 
       {/* Team Performance Section */}
@@ -4201,17 +4264,17 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                         <Database className="w-4 h-4" />
                         Export Excel
                       </button>
-                      <button
-                        onClick={() => {
-                          setNumberLookupResults([]);
-                          setNumberLookupInput('');
+                    <button
+                      onClick={() => {
+                        setNumberLookupResults([]);
+                        setNumberLookupInput('');
                           setNumberLookupFilters({ status: [] });
-                        }}
-                        className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
-                      >
-                        <X className="w-4 h-4" />
-                        Clear Results
-                      </button>
+                      }}
+                      className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
+                    >
+                      <X className="w-4 h-4" />
+                      Clear Results
+                    </button>
                     </div>
                   </div>
 
@@ -4328,44 +4391,44 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                               {lead.customerName || 'N/A'}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-600">
-                              <div className="font-mono">
+                                <div className="font-mono">
                                 <span className={lead.customerNumber ? 'text-indigo-700 font-medium' : 'text-gray-400'}>
                                   {lead.customerNumber || 'N/A'}
                                 </span>
-                              </div>
-                              {lead.customerNumbers && lead.customerNumbers.length > 0 && (
-                                <div className="flex flex-col gap-0.5 mt-1">
-                                  {lead.customerNumbers.map((custNum, idx) => (
-                                    <div key={idx} className="text-xs">
-                                      <span className="text-gray-500">Customer #{idx + 1}: </span>
-                                      <span className="font-mono text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
-                                        {custNum.number}
-                                      </span>
-                                      {custNum.alternativeNumber && (
-                                        <>
-                                          <span className="text-gray-400 mx-1">|</span>
-                                          <span className="font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">
-                                            Alt: {custNum.alternativeNumber}
-                                          </span>
-                                        </>
-                                      )}
-                                    </div>
-                                  ))}
                                 </div>
-                              )}
+                                {lead.customerNumbers && lead.customerNumbers.length > 0 && (
+                                  <div className="flex flex-col gap-0.5 mt-1">
+                                    {lead.customerNumbers.map((custNum, idx) => (
+                                      <div key={idx} className="text-xs">
+                                        <span className="text-gray-500">Customer #{idx + 1}: </span>
+                                        <span className="font-mono text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                                          {custNum.number}
+                                        </span>
+                                        {custNum.alternativeNumber && (
+                                          <>
+                                            <span className="text-gray-400 mx-1">|</span>
+                                            <span className="font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">
+                                              Alt: {custNum.alternativeNumber}
+                                            </span>
+                                          </>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-600">
                               {(() => {
                                 const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
                                 if (plansWithGroup.length > 0) {
                                   return (
-                                    <div className="flex flex-col gap-1">
+                                <div className="flex flex-col gap-1">
                                       {plansWithGroup.map((plan: any, idx: number) => (
-                                        <span key={idx} className="font-mono text-teal-700 bg-teal-50 px-2 py-1 rounded">
-                                          {plan.number || 'N/A'}
-                                        </span>
-                                      ))}
-                                    </div>
+                                    <span key={idx} className="font-mono text-teal-700 bg-teal-50 px-2 py-1 rounded">
+                                      {plan.number || 'N/A'}
+                                    </span>
+                                  ))}
+                                </div>
                                   );
                                 }
                                 return <span className="text-gray-400">No numbers</span>;

@@ -1706,7 +1706,7 @@ export function LeadList() {
       if (searchTerm.trim()) {
         // Always search Firebase when there's a search term to get ALL matching leads
         // This ensures we find all leads with the same number, not just those in the loaded set
-        searchFirebase(searchTerm);
+          searchFirebase(searchTerm);
       } else {
         // Clear Firebase search results when search is cleared
         setFirebaseSearchResults([]);
