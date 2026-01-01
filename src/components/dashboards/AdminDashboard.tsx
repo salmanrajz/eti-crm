@@ -292,6 +292,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     totalLeads: 0,
     pendingVerification: 0,
     verified: 0,
+    currentMonthVerified: 0,
     rejected: 0,
     activated: 0, // Current month activated
     totalActivated: 0, // All-time activated
@@ -393,7 +394,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     loadOpenRequests();
     loadGroupTargetsForMonth(selectedMonth);
     loadGroupAliases();
-  }, [user]);
+  }, [user, selectedMonth]);
 
   // Load existing broadcast poster for editing convenience
   useEffect(() => {
@@ -987,6 +988,18 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         return isNaN(d.getTime()) ? null : d;
       };
 
+      const getVerifiedAt = (lead: any): Date | null => {
+        const raw = lead?.verifiedAt;
+        if (!raw) return null;
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
       // Filter leads for current month by activatedAt (fallback updatedAt)
       const currentMonthLeads = allLeads.filter(lead => {
         const activatedAt = getActivatedAt(lead);
@@ -994,10 +1007,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       });
         
       // Current month verified count: leads verified in the current month
-      const verifiedCount = currentMonthLeads.filter(
-        l => (l as any).verifiedAt
-      ).length;
-      
+      // Historical verified count: any lead that has ever been verified
+      const verifiedCount = allLeads.filter(l => getVerifiedAt(l) !== null).length;
+
+      // Filter leads verified in current month by verifiedAt
+      const currentMonthVerifiedLeads = allLeads.filter(lead => {
+        const verifiedAt = getVerifiedAt(lead);
+        return verifiedAt && verifiedAt >= currentMonthStart && verifiedAt <= currentMonthEnd;
+      });
+
       // Calculate activated leads for current month
       // Properly handle Firestore timestamps by converting them to Date objects
       const currentMonthActivatedLeads = currentMonthLeads.filter(lead => 
@@ -1022,6 +1040,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         totalLeads: allLeads.length,
         pendingVerification: allLeads.filter(l => l.status === 'pending_verification').length,
         verified: verifiedCount,
+        currentMonthVerified: currentMonthVerifiedLeads.length,
         rejected: currentMonthLeads.filter(l => l.status === 'rejected').length,
         activated: monthlyActivated, // Current month
         totalActivated: totalActivated, // All-time
@@ -1587,8 +1606,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         color: 'from-yellow-500 to-yellow-600'
       },
       {
-        name: 'Verified',
-        value: metrics.verified,
+        name: 'Verified (Monthly)',
+        value: metrics.currentMonthVerified,
         icon: CheckCircle,
         href: '#verified',
         color: 'from-green-500 to-green-600'
@@ -1738,9 +1757,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-orange-600',
     },
     {
-      name: 'Verified',
-      description: 'Successfully verified',
-      value: metrics.verified,
+      name: 'Verified (Monthly)',
+      description: 'Verified this month',
+      value: metrics.currentMonthVerified,
       href: '/dashboard/leads?status=verified',
       icon: CheckCircle,
       color: 'bg-gradient-to-br from-green-500 to-green-600',
@@ -1932,7 +1951,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
       textColor: 'text-indigo-600',
     },
-  ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
+  ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.currentMonthVerified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
   // Memoize sorted team metrics to prevent unnecessary re-sorting
   const sortedTeamMetrics = useMemo(() => {
