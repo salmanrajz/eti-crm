@@ -2852,12 +2852,6 @@ Language: ${lead.language || 'N/A'}`;
           updateData.status = 'activated_non_verified';
         }
       } else if (coordinatorAction === 'reject') {
-        // Validate rejection reason is selected
-        if (!rejectionReason) {
-          toast.error('Please select a rejection reason');
-          return;
-        }
-
         // Reject flow - Handle different rejection reasons
         if (lead.plans && lead.plans.length > 0) {
           const realPlans = lead.plans.filter(p => !p.numberId?.startsWith('virtual-'));
@@ -2932,8 +2926,9 @@ Language: ${lead.language || 'N/A'}`;
               claimQueue: []
             });
 
-              const reasonText = rejectionReason === 'billing_issue' ? 'Billing issue' : 
-                                rejectionReason === 'cap_limit' ? 'Cap Limit' : 'Unknown';
+              const reasonText = rejectionReason === 'billing_issue' ? 'Billing issue' :
+                                rejectionReason === 'cap_limit' ? 'Cap Limit' :
+                                rejectionReason === 'not_answer' ? 'Not Answer' : 'Unknown';
 
             await logNumberAction(
               plan.numberId,
@@ -4704,17 +4699,17 @@ Language: ${lead.language || 'N/A'}`;
                   {/* Rejection Reason Dropdown */}
                   <div className="space-y-2">
                     <label className="block text-sm font-semibold text-gray-900">
-                      Rejection Reason <span className="text-red-500">*</span>
+                      Rejection Reason
                     </label>
                     <select
                       className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 transition-all duration-200 text-gray-900"
                       value={rejectionReason}
                       onChange={(e) => setRejectionReason(e.target.value)}
-                      required
                     >
                       <option value="">Select a reason</option>
                       <option value="billing_issue">Billing issue</option>
                       <option value="cap_limit">Cap Limit</option>
+                      <option value="not_answer">Not Answer</option>
                       <option value="number_return">Number Return</option>
                       <option value="number_already_active">Number Already Active</option>
                     </select>
