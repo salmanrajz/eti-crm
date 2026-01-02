@@ -303,16 +303,25 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
 
   // Get the current status from URL params
   const currentStatus = searchParams.get('status') || 'verified';
+
+  // Sync statusFilter with currentStatus (for card clicks)
+  useEffect(() => {
+    if (currentStatus !== statusFilter) {
+      setStatusFilter(currentStatus);
+    }
+  }, [currentStatus, statusFilter]);
   
   // Get coordinator type and team assignments from user
   const coordinatorType = user.coordinatorType || 'all';
   const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
 
-  // Load group targets for current month
+  // Load group targets for selected/current month
   useEffect(() => {
     const loadTargets = async () => {
       try {
-        const monthId = format(new Date(), 'yyyy-MM');
+        // Use selectedMonth if available, otherwise current month
+        const targetMonth = selectedMonth ? new Date(selectedMonth + '-01') : new Date();
+        const monthId = format(targetMonth, 'yyyy-MM');
         const ref = doc(db, 'groupTargets', monthId);
         const snap = await getDoc(ref);
         if (snap.exists()) {
@@ -327,7 +336,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       }
     };
     loadTargets();
-  }, []);
+  }, [selectedMonth]);
 
   const searchVerifiedLeadsForAssign = async () => {
     const term = assignSearchTerm.trim().toLowerCase();
@@ -482,7 +491,6 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   useEffect(() => {
     if (!coordinatorTeams || coordinatorTeams.length === 0) return;
     if (!teams || teams.length === 0) {
-      console.log('[CoordinatorDashboard] Teams not loaded yet for debug');
       return;
     }
 
@@ -564,8 +572,6 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             const ets10AssignedToCord = assignedToCordLeads.filter(
               lead => lead.teamId === '1QcXTOSGX7AobfOknLXw'
             );
-            console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord leads found: ${ets10AssignedToCord.length}`, ets10AssignedToCord.map(l => ({ id: l.id, teamId: l.teamId, status: l.status })));
-            console.log(`[CoordinatorDashboard] Total assigned_to_cord leads: ${assignedToCordLeads.length}`, assignedToCordLeads.map(l => ({ id: l.id, teamId: l.teamId, status: l.status })));
           }
           
           // Include leads with scheduledFor matching today (marked "for later" by coordinator)
@@ -633,8 +639,6 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           if (coordinatorTeams && coordinatorTeams.includes('1QcXTOSGX7AobfOknLXw')) {
             const ets10InFiltered = filteredCoordinatorLeads.filter(l => l.teamId === '1QcXTOSGX7AobfOknLXw');
             const ets10AssignedToCordInFiltered = ets10InFiltered.filter(l => l.status === 'assigned_to_cord');
-            console.log(`[CoordinatorDashboard] ETS-10 leads in filteredCoordinatorLeads: ${ets10InFiltered.length}`);
-            console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord in filteredCoordinatorLeads: ${ets10AssignedToCordInFiltered.length}`, ets10AssignedToCordInFiltered.map(l => ({ id: l.id, status: l.status })));
           }
 
           // Get selected month's start and end dates
@@ -655,16 +659,13 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
           const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
 
-          // Filter leads by selected month for metrics calculation
-          let leadsForMetrics = filteredCoordinatorLeads;
-          if (selectedMonth) {
-            leadsForMetrics = filteredCoordinatorLeads.filter(lead => {
+          // For metrics calculation: filter by current/selected month for regular statuses
+          let leadsForMetrics = filteredCoordinatorLeads.filter(lead => {
               const leadDate = lead.createdAt || lead.updatedAt;
               if (!leadDate) return false;
               const leadDateObj = leadDate instanceof Date ? leadDate : new Date(leadDate);
               return leadDateObj >= startOfMonth && leadDateObj <= endOfMonth;
             });
-          }
 
           // Filter activated leads for selected month using activatedAt (fallback updatedAt)
           const currentMonthActivatedLeads = leadsForMetrics.filter(lead => {
@@ -728,7 +729,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           // EXCLUDE: follow_up, activated, rejected, assigned leads, and later leads with scheduledFor date in the future
           const todayDate = new Date();
           todayDate.setHours(0, 0, 0, 0);
-          const managerAssignedUnassignedCount = leadsForMetrics.filter(
+          const managerAssignedUnassignedCount = filteredCoordinatorLeads.filter(
             l => {
               // Exclude follow_up, activated, rejected, and assigned leads
               if (l.status === 'follow_up' || l.status === 'activated' || l.status === 'rejected' || l.status === 'assigned') {
@@ -769,16 +770,17 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             coordinatorType === 'g3' ? 'G3' : null;
           const activatedForScope = scopedGroup ? (groupCounts[scopedGroup] || 0) : totalActivations;
 
+          // Calculate metrics: historical statuses from all data, regular statuses from month-filtered data
           const computedMetrics = {
             totalLeads: leadsForMetrics.length,
-            verified: managerAssignedUnassignedCount, // Manager-assigned verified and follow_up leads show as "unassigned" to coordinators
-            assigned: leadsForMetrics.filter(l => l.status === 'assigned').length, // Only actual assigned leads
-            activated: activatedForScope, // Group-scoped activations when applicable
-            activatedNonVerified: leadsForMetrics.filter(l => l.status === 'activated_non_verified').length,
-            followUp: leadsForMetrics.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Follow_up leads not assigned by manager
-            later: leadsForMetrics.filter(l => l.status === 'later').length,
-            rejected: leadsForMetrics.filter(l => l.status === 'rejected').length,
-            yesterday: leadsForMetrics.filter(l => {
+            verified: managerAssignedUnassignedCount, // Manager-assigned verified leads (calculated separately above)
+            assigned: filteredCoordinatorLeads.filter(l => l.status === 'assigned').length, // Historical count
+            activated: activatedForScope, // Group-scoped activations (month-filtered)
+            activatedNonVerified: leadsForMetrics.filter(l => l.status === 'activated_non_verified').length, // Month-filtered
+            followUp: filteredCoordinatorLeads.filter(l => l.status === 'follow_up' && !l.managerAssigned).length, // Historical count
+            later: filteredCoordinatorLeads.filter(l => l.status === 'later').length, // Historical count
+            rejected: leadsForMetrics.filter(l => l.status === 'rejected').length, // Month-filtered
+            yesterday: filteredCoordinatorLeads.filter(l => {
               const ts = (l.updatedAt || l.createdAt);
               return ts &&
               ts >= yesterdayStart &&
@@ -835,14 +837,12 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                 return (lead.status === 'verified' && lead.managerAssigned === true) ||
                        (lead.status === 'assigned_to_cord');
               });
+
               
               // Debug: Log what's being shown in verified tab
               if (coordinatorTeams && coordinatorTeams.includes('1QcXTOSGX7AobfOknLXw')) {
                 const ets10InVerifiedTab = nextLeads.filter(l => l.teamId === '1QcXTOSGX7AobfOknLXw');
                 const ets10AssignedToCordInTab = ets10InVerifiedTab.filter(l => l.status === 'assigned_to_cord');
-                console.log(`[CoordinatorDashboard] Current tab: "${currentStatus}"`);
-                console.log(`[CoordinatorDashboard] ETS-10 leads in verified tab: ${ets10InVerifiedTab.length}`, ets10InVerifiedTab.map(l => ({ id: l.id, status: l.status })));
-                console.log(`[CoordinatorDashboard] ETS-10 assigned_to_cord in verified tab: ${ets10AssignedToCordInTab.length}`, ets10AssignedToCordInTab.map(l => ({ id: l.id, status: l.status })));
               }
             } else if (currentStatus === 'activated') {
               // Show activated plus activated_non_verified together for display, but counts remain unchanged
@@ -953,11 +953,15 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       const now = new Date();
       const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
       const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
-      matchesStatus = !!(lead.createdAt && lead.createdAt >= yesterdayStart && lead.createdAt <= yesterdayEnd && lead.status !== 'pending_verification' && lead.status !== 'follow_up' && lead.status !== 'later');
+      const ts = (lead.updatedAt || lead.createdAt);
+      matchesStatus = !!(ts && ts >= yesterdayStart && ts <= yesterdayEnd && lead.status !== 'pending_verification' && lead.status !== 'follow_up' && lead.status !== 'later');
     }
 
-    // Filter by selected month
-    if (selectedMonth) {
+    // Filter by selected month (skip for historical statuses)
+    const historicalStatuses = ['verified', 'assigned', 'follow_up', 'later', 'yesterday'];
+    const isHistoricalStatus = historicalStatuses.includes(statusFilter);
+
+    if (selectedMonth && !isHistoricalStatus) {
       const [year, month] = selectedMonth.split('-').map(Number);
       const monthStart = new Date(year, month - 1, 1, 0, 0, 0, 0);
       const monthEnd = new Date(year, month, 0, 23, 59, 59, 999);
@@ -2056,7 +2060,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           </div>
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => {
+              const newStatus = e.target.value;
+              setStatusFilter(newStatus);
+              setSearchParams({ status: newStatus });
+            }}
             className="pl-10 pr-4 py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           >
             <option value="all">All Status</option>
