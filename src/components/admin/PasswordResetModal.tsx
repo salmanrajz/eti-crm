@@ -140,56 +140,54 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
+        className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-50 p-4"
+        style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <motion.div
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
-          className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 relative"
+          className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-2 sm:mx-4 relative z-[101] max-h-[calc(100vh-2rem)] overflow-y-auto"
         >
           {/* Header */}
-          <div className="px-6 py-4 border-b border-gray-200">
+          <div className="px-4 py-3 sm:px-6 sm:py-4 border-b border-gray-200">
             <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gradient-to-r from-red-500 to-pink-600 rounded-xl flex items-center justify-center">
-                  <Lock className="h-5 w-5 text-white" />
+              <div className="flex items-center space-x-2 sm:space-x-3">
+                <div className="w-8 h-8 sm:w-10 sm:h-10 bg-gradient-to-r from-red-500 to-pink-600 rounded-lg sm:rounded-xl flex items-center justify-center">
+                  <Lock className="h-4 w-4 sm:h-5 sm:w-5 text-white" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-900">Reset Password</h3>
-                  <p className="text-sm text-gray-500">for {user.name}</p>
+                  <h3 className="text-base sm:text-lg font-semibold text-gray-900">Reset Password</h3>
+                  <p className="text-xs sm:text-sm text-gray-500">for {user.name}</p>
                 </div>
               </div>
               <button
                 onClick={handleClose}
-                className="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100"
+                className="text-gray-400 hover:text-gray-600 p-1.5 sm:p-2 rounded-lg hover:bg-gray-100"
               >
-                <AlertCircle className="h-5 w-5" />
+                <AlertCircle className="h-4 w-4 sm:h-5 sm:w-5" />
               </button>
             </div>
           </div>
 
           {/* Content */}
-          <div className="px-6 py-6">
+          <div className="px-4 py-4 sm:px-6 sm:py-6">
             {step === 'new' && (
               <motion.div
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="space-y-6"
+                className="space-y-4 sm:space-y-6"
               >
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-gradient-to-r from-red-100 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Lock className="h-8 w-8 text-red-600" />
+                  <div className="w-12 h-12 sm:w-16 sm:h-16 bg-gradient-to-r from-red-100 to-pink-100 rounded-full flex items-center justify-center mx-auto mb-3 sm:mb-4">
+                    <Lock className="h-6 w-6 sm:h-8 sm:w-8 text-red-600" />
                   </div>
-                  <h4 className="text-lg font-semibold text-gray-900 mb-2">Reset Password</h4>
-                  <p className="text-gray-600">
-                    Enter a new password for <span className="font-semibold">{user.name}</span>. The user will be required to change it on their next login.
-                  </p>
+                  <h4 className="text-base sm:text-lg font-semibold text-gray-900 mb-1 sm:mb-2">Reset Password</h4>
                 </div>
 
-                <form onSubmit={handleSubmit} className="space-y-4">
+                <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5 sm:mb-2">
                       New Password
                     </label>
                     <div className="relative">
@@ -197,7 +195,7 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
                         type={showNewPassword ? 'text' : 'password'}
                         value={newPassword}
                         onChange={(e) => setNewPassword(e.target.value)}
-                        className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200 ${
+                        className={`w-full px-3 py-2.5 sm:px-4 sm:py-3 border rounded-lg sm:rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200 text-sm sm:text-base ${
                           errors.newPassword ? 'border-red-300' : 'border-gray-300'
                         }`}
                         placeholder="Enter new password"
@@ -220,7 +218,7 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5 sm:mb-2">
                       Confirm New Password
                     </label>
                     <div className="relative">
@@ -228,7 +226,7 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
                         type={showConfirmPassword ? 'text' : 'password'}
                         value={confirmPassword}
                         onChange={(e) => setConfirmPassword(e.target.value)}
-                        className={`w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200 ${
+                        className={`w-full px-3 py-2.5 sm:px-4 sm:py-3 border rounded-lg sm:rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200 text-sm sm:text-base ${
                           errors.confirmPassword ? 'border-red-300' : 'border-gray-300'
                         }`}
                         placeholder="Confirm new password"
@@ -251,9 +249,9 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
                   </div>
 
                   {/* Password Requirements */}
-                  <div className="bg-gray-50 rounded-xl p-4">
-                    <h5 className="text-sm font-semibold text-gray-700 mb-3">Password Requirements:</h5>
-                    <div className="space-y-2">
+                  <div className="bg-gray-50 rounded-lg sm:rounded-xl p-3 sm:p-4">
+                    <h5 className="text-xs sm:text-sm font-semibold text-gray-700 mb-2 sm:mb-3">Password Requirements:</h5>
+                    <div className="space-y-1.5 sm:space-y-2">
                       <div className="flex items-center space-x-2">
                         <div className={`w-4 h-4 rounded-full flex items-center justify-center ${
                           passwordValidation.minLength ? 'bg-green-500' : 'bg-gray-300'
@@ -307,18 +305,18 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
                     </div>
                   </div>
 
-                  <div className="flex space-x-3 pt-4">
+                  <div className="flex space-x-2 sm:space-x-3 pt-3 sm:pt-4">
                     <button
                       type="button"
                       onClick={handleClose}
-                      className="flex-1 px-4 py-3 border border-gray-300 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors"
+                      className="flex-1 px-3 py-2.5 sm:px-4 sm:py-3 border border-gray-300 text-gray-700 rounded-lg sm:rounded-xl hover:bg-gray-50 transition-colors text-sm sm:text-base"
                     >
                       Cancel
                     </button>
                     <button
                       type="submit"
                       disabled={isLoading || !passwordValidation.isValid || newPassword !== confirmPassword}
-                      className="flex-1 px-4 py-3 bg-gradient-to-r from-red-600 to-pink-600 text-white rounded-xl hover:from-red-700 hover:to-pink-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                      className="flex-1 px-3 py-2.5 sm:px-4 sm:py-3 bg-gradient-to-r from-red-600 to-pink-600 text-white rounded-lg sm:rounded-xl hover:from-red-700 hover:to-pink-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 text-sm sm:text-base"
                     >
                       {isLoading ? (
                         <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto"></div>
@@ -335,18 +333,18 @@ export function PasswordResetModal({ isOpen, onClose, user }: PasswordResetModal
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="text-center py-8"
+                className="text-center py-6 sm:py-8"
               >
-                <div className="w-20 h-20 bg-gradient-to-r from-green-100 to-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <CheckCircle className="h-10 w-10 text-green-600" />
+                <div className="w-16 h-16 sm:w-20 sm:h-20 bg-gradient-to-r from-green-100 to-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4 sm:mb-6">
+                  <CheckCircle className="h-8 w-8 sm:h-10 sm:w-10 text-green-600" />
                 </div>
-                <h4 className="text-xl font-semibold text-gray-900 mb-3">Password Reset Complete!</h4>
-                <p className="text-gray-600 mb-6">
+                <h4 className="text-lg sm:text-xl font-semibold text-gray-900 mb-2 sm:mb-3">Password Reset Complete!</h4>
+                <p className="text-sm sm:text-base text-gray-600 mb-4 sm:mb-6">
                   The password for {user.name} has been successfully reset.
                 </p>
                 <button
                   onClick={handleClose}
-                  className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl hover:from-blue-700 hover:to-indigo-700 transition-all duration-200"
+                  className="w-full px-3 py-2.5 sm:px-4 sm:py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg sm:rounded-xl hover:from-blue-700 hover:to-indigo-700 transition-all duration-200 text-sm sm:text-base"
                 >
                   Close
                 </button>
