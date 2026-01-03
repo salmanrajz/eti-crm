@@ -1841,7 +1841,7 @@ export function LeadList() {
               'SR Number': planSrNumber || 'N/A',
               'Service Order Number': planServiceOrderNumber,
               'Selected Numbers': plan.number || 'N/A',
-              'Plans': `${plan.plan || 'N/A'} (${plan.number || 'N/A'})`,
+              'Plans': plan.plan || 'N/A',
               'Plan Categories': plan.category || 'N/A',
               'Plan Groups': planActivationGroup,
               'Created Date': lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : 'N/A',
