@@ -91,12 +91,20 @@ export function NumberLogsDashboard() {
       const raw = localStorage.getItem(CACHE_KEY);
       if (raw) {
         const cached = JSON.parse(raw) as { logs: NumberLog[] };
-        if (Array.isArray(cached.logs)) {
+        if (Array.isArray(cached.logs) && cached.logs.length > 0) {
+          console.log('NumberLogsDashboard: Loaded', cached.logs.length, 'logs from cache');
           setLogs(cached.logs);
           setLoading(false);
         }
       }
-    } catch {}
+    } catch (error) {
+      console.warn('NumberLogsDashboard: Failed to load cache, clearing corrupted data');
+      try {
+        localStorage.removeItem(CACHE_KEY);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -105,16 +113,34 @@ export function NumberLogsDashboard() {
       const q = fsQuery(
         collection(db, 'number_logs'),
         orderBy('timestamp', 'desc'),
-        fsLimit(1000)
+        fsLimit(5000) // Increased limit to load more logs
       );
 
       const unsub = onSnapshot(q, async (snap) => {
         try {
           const live: NumberLog[] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+          console.log('NumberLogsDashboard: Loaded', live.length, 'logs from Firestore');
           setLogs(live);
-          localStorage.setItem(CACHE_KEY, JSON.stringify({ logs: live }));
+
+          // Cache only recent logs to avoid quota exceeded error
+          try {
+            // Only cache the most recent 200 logs to save space
+            const recentLogs = live.slice(0, 200);
+            localStorage.setItem(CACHE_KEY, JSON.stringify({ logs: recentLogs }));
+            console.log('NumberLogsDashboard: Cached', recentLogs.length, 'recent logs');
+          } catch (cacheError) {
+            console.warn('NumberLogsDashboard: Failed to cache logs (storage quota exceeded), continuing without cache');
+            // Try to clear old cache entries if possible
+            try {
+              localStorage.removeItem(CACHE_KEY);
+            } catch {
+              // Ignore cleanup errors
+            }
+          }
+
           setLoading(false);
         } catch (e) {
+          console.error('Error processing logs:', e);
           // ignore
         }
       }, (error) => {
@@ -161,6 +187,24 @@ export function NumberLogsDashboard() {
           }
           return true;
         });
+
+        console.log('NumberLogsDashboard: Base logs:', base.length, 'Filtered logs:', filtered.length);
+        if (filters.startDate || filters.endDate) {
+          console.log('NumberLogsDashboard: Date filters - Start:', filters.startDate, 'End:', filters.endDate);
+          console.log('NumberLogsDashboard: Sample log timestamps:', base.slice(0, 3).map(log => {
+            const t = log.timestamp?.toDate ? log.timestamp.toDate() : new Date(log.timestamp);
+            return { original: log.timestamp, parsed: t, iso: t.toISOString() };
+          }));
+
+          // Debug: Check if any logs fall within the date range
+          const inRange = base.filter(log => {
+            const t = log.timestamp?.toDate ? log.timestamp.toDate() : new Date(log.timestamp);
+            const startOk = !filters.startDate || t >= filters.startDate;
+            const endOk = !filters.endDate || t <= filters.endDate;
+            return startOk && endOk;
+          });
+          console.log('NumberLogsDashboard: Logs in date range:', inRange.length);
+        }
 
         // Group by number
         const groupedMap = new Map<string, NumberLog[]>();
@@ -220,6 +264,37 @@ export function NumberLogsDashboard() {
 
   const clearFilters = () => {
     setFilters({});
+  };
+
+  // Debug function to show all logs temporarily
+  const showAllLogs = () => {
+    setFilters({});
+    console.log('NumberLogsDashboard: Showing all logs, filters cleared');
+  };
+
+  // Clear cache function
+  const clearCache = () => {
+    try {
+      localStorage.removeItem(CACHE_KEY);
+      console.log('NumberLogsDashboard: Cache cleared');
+      toast.success('Cache cleared successfully');
+    } catch (error) {
+      console.error('NumberLogsDashboard: Failed to clear cache', error);
+      toast.error('Failed to clear cache');
+    }
+  };
+
+  // Load recent logs (last 30 days)
+  const loadRecentLogs = () => {
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 30);
+
+    setFilters({
+      startDate,
+      endDate
+    });
+    console.log('NumberLogsDashboard: Loading logs from last 30 days');
   };
 
   const toggleNumberExpansion = (number: string) => {
@@ -324,6 +399,11 @@ export function NumberLogsDashboard() {
               <div>
                 <h1 className="text-2xl font-bold text-gray-900">Number Activity Logs</h1>
                 <p className="text-gray-600">Track all number operations and changes</p>
+                {!loading && (
+                  <p className="text-sm text-gray-500 mt-1">
+                    Total logs loaded: {logs?.length || 0} | Filtered: {groupedLogs.length}
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center space-x-3">
@@ -432,12 +512,24 @@ export function NumberLogsDashboard() {
                 </div>
               </div>
 
-              <div className="flex justify-end mt-4">
+              <div className="flex justify-end space-x-2 mt-4">
                 <button
                   onClick={clearFilters}
                   className="px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
                 >
                   Clear Filters
+                </button>
+                <button
+                  onClick={loadRecentLogs}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                >
+                  Recent Logs (30 days)
+                </button>
+                <button
+                  onClick={showAllLogs}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Show All Logs
                 </button>
               </div>
             </motion.div>

@@ -211,6 +211,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     legendaryStatus: 0
   });
   const [selectedMonth, setSelectedMonth] = useState(new Date());
+  const [dashboardMonth, setDashboardMonth] = useState(new Date()); // For main dashboard cards
   const [monthlyAgentMetrics, setMonthlyAgentMetrics] = useState<MonthlyAgentMetrics[]>([]);
   const [viewMode, setViewMode] = useState<'table' | 'charts'>('table');
   const [showReservedModal, setShowReservedModal] = useState(false);
@@ -238,7 +239,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     loadManagerData();
     loadBonusAmounts();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedMonth]);
+  }, [selectedMonth, dashboardMonth]);
 
   async function loadManagerData() {
     try {
@@ -330,10 +331,9 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         nonVerified: 0
       };
 
-      // Calculate monthly metrics
-      const now = new Date();
-      const startOfCurrentMonth = startOfMonth(now);
-      const endOfCurrentMonth = endOfMonth(now);
+      // Calculate monthly metrics for selected dashboard month
+      const startOfCurrentMonth = startOfMonth(dashboardMonth);
+      const endOfCurrentMonth = endOfMonth(dashboardMonth);
       const monthlyMetricsData = {
         totalLeads: 0,
         pendingVerification: 0,
@@ -500,8 +500,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     }
   }
 
-  // Load team target with auto-carry-forward logic
-  // If current month doesn't have a target, check previous month and carry forward
+  // Load team target - managers can only read existing targets
   async function loadTeamTarget(month: Date) {
     if (!user?.teamId) return;
     
@@ -515,33 +514,8 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         const target = teamTargetDoc.data()?.target;
         setTeamTarget(target || null);
       } else {
-        // Current month doesn't have a target, check previous month
-        const previousMonth = subMonths(month, 1);
-        const previousMonthStr = format(previousMonth, 'yyyy-MM');
-        const previousTeamTargetRef = doc(db, 'teamTargets', `${user.teamId}_${previousMonthStr}`);
-        const previousTeamTargetDoc = await getDoc(previousTeamTargetRef);
-        
-        if (previousTeamTargetDoc.exists()) {
-          // Carry forward from previous month
-          const previousTarget = previousTeamTargetDoc.data()?.target;
-          if (previousTarget !== undefined) {
-            // Auto-carry forward: save to current month without changing previous month
-            await setDoc(teamTargetRef, {
-              teamId: user.teamId,
-              target: previousTarget,
-              month: monthStr,
-              updatedAt: serverTimestamp(),
-              setBy: 'auto-carry-forward',
-              carriedFrom: previousMonthStr
-            }, { merge: true });
-            setTeamTarget(previousTarget);
-          } else {
+        // No target set for this month
             setTeamTarget(null);
-          }
-        } else {
-          // No target in previous month either
-          setTeamTarget(null);
-        }
       }
     } catch (error) {
       console.error('Error loading team target:', error);
@@ -1305,17 +1279,15 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
 
   const stats = [
     {
-      name: 'Total Leads',
-      description: 'Total leads (all time)',
-      value: metrics.totalLeads,
-      href: '/dashboard/leads',
-      icon: Users,
-      color: 'bg-gradient-to-br from-blue-500 to-blue-600',
-      textColor: 'text-blue-600',
+      name: 'Verified',
+      value: metrics.verified,
+      href: '/dashboard/leads?status=verified',
+      icon: CheckCircle,
+      color: 'bg-gradient-to-br from-green-500 to-green-600',
+      textColor: 'text-green-600',
     },
     {
       name: 'Assigned Leads',
-      description: 'Currently assigned leads',
       value: metrics.assigned,
       href: '/dashboard/leads?status=assigned',
       icon: ClipboardList,
@@ -1323,8 +1295,15 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
       textColor: 'text-indigo-600',
     },
     {
+      name: 'Activated',
+      value: monthlyMetrics.activated,
+      href: '/dashboard/leads?status=activated',
+      icon: Zap,
+      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
+      textColor: 'text-purple-600',
+    },
+    {
       name: 'Pending Verification',
-      description: 'Awaiting verification',
       value: metrics.pendingVerification,
       href: '/dashboard/leads?status=pending_verification',
       icon: Clock,
@@ -1333,7 +1312,6 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     },
     {
       name: 'Pending Assignment',
-      description: 'Awaiting assignment',
       value: metrics.pendingAssignment,
       href: '/dashboard/leads?status=pending_assignment',
       icon: Building2,
@@ -1341,40 +1319,31 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
       textColor: 'text-orange-600',
     },
     {
-      name: 'Verified',
-      description: 'Successfully verified',
-      value: metrics.verified,
-      href: '/dashboard/leads?status=verified',
-      icon: CheckCircle,
-      color: 'bg-gradient-to-br from-green-500 to-green-600',
-      textColor: 'text-green-600',
-    },
-    {
-      name: 'Activated',
-      description: 'Activated this month',
-      value: monthlyMetrics.activated,
-      href: '/dashboard/leads?status=activated',
-      icon: Zap,
-      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
-      textColor: 'text-purple-600',
+      name: 'Total Leads',
+      value: metrics.totalLeads,
+      href: '/dashboard/leads',
+      icon: Users,
+      color: 'bg-gradient-to-br from-blue-500 to-blue-600',
+      textColor: 'text-blue-600',
+      bgColor: 'bg-blue-50',
     },
     {
       name: 'Rejected',
-      description: 'Rejected leads',
       value: metrics.rejected,
       href: '/dashboard/leads?status=rejected',
       icon: XCircle,
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
+      bgColor: 'bg-red-50',
     },
     {
       name: 'Non-Verified Leads',
-      description: 'Non verified',
       value: metrics.nonVerified,
       href: '/dashboard/leads?status=non_verified',
       icon: AlertCircle,
       color: 'bg-gradient-to-br from-amber-500 to-amber-600',
       textColor: 'text-amber-600',
+      bgColor: 'bg-amber-50',
     },
   ];
 
@@ -1767,104 +1736,114 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 pb-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <div className="flex-1">
-              <h1 className="text-3xl font-bold text-gray-900">
-                Welcome back, {user?.name}!
+              <h1 className="text-lg sm:text-3xl font-bold text-gray-900">
+                Welcome back, <span className="bg-gradient-to-r from-orange-500 to-pink-500 bg-clip-text text-transparent">{user?.name}</span>!
               </h1>
-              <p className="mt-2 text-lg text-gray-600">
+              <p className="mt-2 text-lg text-gray-600 hidden sm:block">
                 Here's what's happening with your team this month.
               </p>
             </div>
-            <div className="hidden sm:flex items-center space-x-3 text-sm text-gray-600">
+            <div className="flex items-center space-x-3 text-sm text-gray-600">
               <button
                 type="button"
                 onClick={() => setShowReservedModal(true)}
                 className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-indigo-200 text-indigo-700 bg-white hover:bg-indigo-50 transition-colors shadow-sm"
               >
                 <Phone className="h-4 w-4" />
-                <span className="font-semibold">Team Reserved Numbers</span>
+                <span className="hidden sm:inline font-semibold">Team Reserved Numbers</span>
               </button>
-              <div className="flex items-center space-x-2">
+              <div className="hidden sm:flex items-center space-x-2">
               <Calendar className="h-5 w-5" />
-              <span>{format(new Date(), 'MMMM yyyy')}</span>
+                <input
+                  type="month"
+                  value={format(dashboardMonth, 'yyyy-MM')}
+                  onChange={(e) => setDashboardMonth(new Date(e.target.value + '-01'))}
+                  className="bg-transparent border-none text-gray-900 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 rounded px-1"
+                />
               </div>
             </div>
           </div>
         </div>
 
         {/* Team target strip (MAR-style) */}
-        <div className="flex flex-wrap gap-4 mb-8">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:gap-4 lg:grid lg:grid-cols-4 lg:gap-6 mb-8">
           {/* Target card */}
-          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-rose-50 to-red-50 border border-red-200 rounded-lg px-5 py-4 shadow-sm">
-            <Target className="h-6 w-6 text-red-600" />
+          <div className="bg-gradient-to-r from-rose-50 to-red-50 border border-red-200 rounded-lg px-3 py-3 sm:px-5 sm:py-4 shadow-sm">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <Target className="h-4 w-4 sm:h-6 sm:w-6 text-red-600" />
             <div className="flex flex-col">
-              <p className="text-xs font-semibold text-red-700">Team Target</p>
-              <p className="text-4xl font-extrabold text-red-600 leading-none">
-                {teamTarget !== null ? teamTarget : 200}
+                <p className="text-[10px] sm:text-xs font-semibold text-red-700">Team Target</p>
+                <p className="text-lg sm:text-4xl font-extrabold text-red-600 leading-none">
+                  {teamTarget !== null ? teamTarget : '-'}
               </p>
+              </div>
             </div>
           </div>
 
           {/* Achieved card */}
-          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-indigo-50 to-blue-50 border border-blue-200 rounded-lg px-5 py-4 shadow-sm">
-            <Zap className="h-6 w-6 text-indigo-600" />
+          <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border border-blue-200 rounded-lg px-3 py-3 sm:px-5 sm:py-4 shadow-sm">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <Zap className="h-4 w-4 sm:h-6 sm:w-6 text-indigo-600" />
             <div className="flex flex-col">
-              <p className="text-xs font-semibold text-indigo-700">Achieved</p>
-              <p className="text-4xl font-extrabold text-indigo-900 leading-none">{monthlyMetrics.activated}</p>
+                <p className="text-[10px] sm:text-xs font-semibold text-indigo-700">Achieved</p>
+                <p className="text-lg sm:text-4xl font-extrabold text-indigo-900 leading-none">{monthlyMetrics.activated}</p>
+              </div>
             </div>
           </div>
 
           {/* Remaining card */}
-          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg px-5 py-4 shadow-sm">
-            <CheckCircle className="h-6 w-6 text-amber-600" />
+          <div className="bg-gradient-to-r from-amber-50 to-yellow-50 border border-amber-200 rounded-lg px-3 py-3 sm:px-5 sm:py-4 shadow-sm">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <CheckCircle className="h-4 w-4 sm:h-6 sm:w-6 text-amber-600" />
             <div className="flex flex-col">
-              <p className="text-xs font-semibold text-amber-700">Remaining</p>
-              <p className="text-4xl font-extrabold text-amber-900 leading-none">
-                {Math.max((teamTarget !== null ? teamTarget : 200) - monthlyMetrics.activated, 0)}
+                <p className="text-[10px] sm:text-xs font-semibold text-amber-700">Remaining</p>
+                <p className="text-lg sm:text-4xl font-extrabold text-amber-900 leading-none">
+                  {teamTarget !== null ? Math.max(teamTarget - monthlyMetrics.activated, 0) : '-'}
               </p>
+              </div>
             </div>
           </div>
 
           {/* Average per Agent card */}
-          <div className="flex-1 min-w-[240px] flex items-center gap-3 bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-lg px-5 py-4 shadow-sm">
-            <Users className="h-6 w-6 text-emerald-600" />
+          <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-200 rounded-lg px-3 py-3 sm:px-5 sm:py-4 shadow-sm">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <Users className="h-4 w-4 sm:h-6 sm:w-6 text-emerald-600" />
             <div className="flex flex-col">
-              <p className="text-xs font-semibold text-emerald-700">Avg per Agent</p>
-              <p className="text-4xl font-extrabold text-emerald-900 leading-none">
+                <p className="text-[10px] sm:text-xs font-semibold text-emerald-700">Avg per Agent</p>
+                <p className="text-lg sm:text-4xl font-extrabold text-emerald-900 leading-none">
                 {teamMembers.length > 0 ? (monthlyMetrics.activated / teamMembers.length).toFixed(1) : '0.0'}
               </p>
+              </div>
             </div>
           </div>
 
         </div>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-12">
+        <div className="grid grid-cols-2 gap-3 sm:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-12">
           {stats.map((stat) => (
             <Link
               to={stat.href || '#'}
               key={stat.name}
               className="bg-white overflow-hidden shadow-lg rounded-xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative"
             >
-              <div className="p-6">
+              <div className={`p-3 sm:p-6 ${stat.bgColor || ''}`}>
                 <div className="flex items-center">
-                  <div className={`flex-shrink-0 p-3 rounded-xl ${stat.color}`}>
-                    <stat.icon className="h-6 w-6 text-white" />
+                  <div className={`flex-shrink-0 p-2 sm:p-3 rounded-xl ${stat.color}`}>
+                    <stat.icon className="h-4 w-4 sm:h-6 sm:w-6 text-white" />
                   </div>
-                  <div className="ml-5 w-0 flex-1">
+                  <div className="ml-3 sm:ml-5 w-0 flex-1">
                     <dl>
-                      <dt className="text-sm font-medium text-gray-900 truncate">
+                      <dt className="text-xs sm:text-sm font-medium text-gray-900 truncate">
                         {stat.name}
                       </dt>
-                      <dd className={`text-2xl font-bold ${stat.textColor}`}>
+                      <dd className={`text-lg sm:text-2xl font-bold ${stat.textColor}`}>
                         {stat.value}
-                      </dd>
-                      <dd className="text-xs text-gray-500 mt-1">
-                        {stat.description}
                       </dd>
                     </dl>
                   </div>
@@ -1875,7 +1854,7 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         </div>
 
         {/* Action Buttons Section */}
-        <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mb-8">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:justify-between sm:items-center sm:gap-4 mb-8">
           <button
             onClick={() => {
               if (teamData?.commissionBased) {
@@ -1884,14 +1863,14 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                 setIsBonusSettingsCollapsed(!isBonusSettingsCollapsed);
               }
             }}
-            className="group relative inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+            className="hidden sm:flex group relative inline-flex items-center gap-2 px-3 py-2 sm:px-6 sm:py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
           >
             <div className="absolute inset-0 bg-gradient-to-r from-indigo-600 to-purple-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-            <div className="relative flex items-center gap-3">
-              <div className="p-1.5 bg-white/20 rounded-lg backdrop-blur-sm">
-                {teamData?.commissionBased ? <DollarSign className="h-5 w-5" /> : <Target className="h-5 w-5" />}
+            <div className="relative flex items-center gap-2 sm:gap-3">
+              <div className="p-1 bg-white/20 rounded-lg backdrop-blur-sm">
+                {teamData?.commissionBased ? <DollarSign className="h-4 w-4 sm:h-5 sm:w-5" /> : <Target className="h-4 w-4 sm:h-5 sm:w-5" />}
               </div>
-              <span className="text-sm font-semibold">
+              <span className="text-xs sm:text-sm font-semibold">
                 {teamData?.commissionBased 
                   ? 'Commission Settings' 
                   : (isBonusSettingsCollapsed ? 'View Bonus Settings' : 'Hide Bonus Settings')
@@ -1909,55 +1888,50 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
             </div>
           </button>
 
+          <div className="hidden sm:block">
           <PayrollButton role="manager" user={user} />
+          </div>
 
           {/* Attendance Button */}
           <button
             onClick={() => setAttendanceOpen(true)}
-            className="group relative inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+            className="group relative inline-flex items-center gap-2 px-3 py-2 sm:px-6 sm:py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
           >
             <div className="absolute inset-0 bg-gradient-to-r from-green-600 to-emerald-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-            <div className="relative flex items-center gap-3">
-              <div className="p-1.5 bg-white/20 rounded-lg backdrop-blur-sm">
-                <UserCheck className="h-5 w-5" />
+            <div className="relative flex items-center gap-2 sm:gap-3">
+              <div className="p-1 bg-white/20 rounded-lg backdrop-blur-sm">
+                <UserCheck className="h-4 w-4 sm:h-5 sm:w-5" />
               </div>
-              <span className="text-sm font-semibold">Team Attendance</span>
+              <span className="text-xs sm:text-sm font-semibold">Team Attendance</span>
             </div>
           </button>
 
           {/* Leave Application Button */}
           <button
             onClick={() => setLeaveModalOpen(true)}
-            className="group relative inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-blue-500 to-cyan-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+            className="group relative inline-flex items-center gap-2 px-3 py-2 sm:px-6 sm:py-3 bg-gradient-to-r from-blue-500 to-cyan-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
           >
             <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-cyan-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-            <div className="relative flex items-center gap-3">
-              <div className="p-1.5 bg-white/20 rounded-lg backdrop-blur-sm">
-                <FileText className="h-5 w-5" />
+            <div className="relative flex items-center gap-2 sm:gap-3">
+              <div className="p-1 bg-white/20 rounded-lg backdrop-blur-sm">
+                <FileText className="h-4 w-4 sm:h-5 sm:w-5" />
               </div>
-              <span className="text-sm font-semibold">Leave Applications</span>
+              <span className="text-xs sm:text-sm font-semibold">Leave Applications</span>
             </div>
           </button>
 
           <button
             onClick={() => setIsDailyPerformanceCollapsed(!isDailyPerformanceCollapsed)}
-            className="group relative inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-green-500 to-blue-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+            className="flex group relative inline-flex items-center gap-2 px-3 py-2 sm:px-6 sm:py-3 bg-gradient-to-r from-green-500 to-blue-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
           >
             <div className="absolute inset-0 bg-gradient-to-r from-green-600 to-blue-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-            <div className="relative flex items-center gap-3">
-              <div className="p-1.5 bg-white/20 rounded-lg backdrop-blur-sm">
-                <Calendar className="h-5 w-5" />
+            <div className="relative flex items-center gap-2 sm:gap-3">
+              <div className="p-1 bg-white/20 rounded-lg backdrop-blur-sm">
+                <Calendar className="h-4 w-4 sm:h-5 sm:w-5" />
               </div>
-              <span className="text-sm font-semibold">
-                {isDailyPerformanceCollapsed ? 'View Daily Performance' : 'Hide Daily Performance'}
+              <span className="text-xs sm:text-sm font-semibold">
+                Daily Performance
               </span>
-              <div className="p-1 bg-white/20 rounded-lg backdrop-blur-sm transition-transform duration-300 group-hover:scale-110">
-                {isDailyPerformanceCollapsed ? (
-                  <ChevronDown className="h-4 w-4" />
-                ) : (
-                  <ChevronUp className="h-4 w-4" />
-                )}
-              </div>
             </div>
           </button>
         </div>
@@ -2020,54 +1994,105 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
         {/* Team Performance */}
         {agentMetrics.length > 0 && (
           <div className="mb-12">
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <h2 className="text-xl font-bold text-gray-900">Team Performance</h2>
-                  <p className="text-sm text-gray-500 mt-1">
-                    Detailed performance metrics for {format(selectedMonth, 'MMMM yyyy')}
-                  </p>
+            <div className="bg-white rounded-xl shadow-lg p-3 sm:p-6">
+              {/* Phone Layout: Separate rows */}
+              <div className="block sm:hidden mb-3">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-xs font-bold text-gray-900">Team Performance</h2>
                 </div>
-                <div className="flex items-center space-x-4">
-                  <div className="flex items-center space-x-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-1">
                     <button
                       onClick={handlePreviousMonth}
-                      className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                      className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
                     >
-                      <ChevronLeft className="h-5 w-5 text-gray-600" />
+                      <ChevronLeft className="h-4 w-4 text-gray-600" />
                     </button>
-                    <span className="text-sm font-medium text-gray-700">
+                    <span className="text-[10px] font-medium text-gray-700">
                       {format(selectedMonth, 'MMMM yyyy')}
                     </span>
                     <button
                       onClick={handleNextMonth}
                       disabled={format(selectedMonth, 'yyyy-MM') === format(new Date(), 'yyyy-MM')}
                       className={clsx(
-                        "p-2 rounded-lg transition-colors",
+                        "p-1.5 rounded-lg transition-colors",
                         format(selectedMonth, 'yyyy-MM') === format(new Date(), 'yyyy-MM')
                           ? "text-gray-400 cursor-not-allowed"
                           : "hover:bg-gray-100 text-gray-600"
                       )}
                     >
-                      <ChevronRight className="h-5 w-5" />
+                      <ChevronRight className="h-4 w-4" />
                     </button>
                   </div>
-                  <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-1">
                     <button
                       onClick={handleExportToExcel}
-                      className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg hover:from-green-600 hover:to-emerald-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      className="inline-flex items-center px-2 py-1.5 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg hover:from-green-600 hover:to-emerald-700 transition-all duration-200 shadow-md hover:shadow-lg"
                       title="Export to Excel"
                     >
-                      <FileText className="h-4 w-4 mr-2" />
-                      <span className="text-sm font-medium">Export Excel</span>
+                      <FileText className="h-3 w-3 mr-1" />
+                      <span className="text-xs font-medium">Export Excel</span>
                     </button>
                     <button
                       onClick={handleExportToPDF}
-                      className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-red-500 to-rose-600 text-white rounded-lg hover:from-red-600 hover:to-rose-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      className="inline-flex items-center px-2 py-1.5 bg-gradient-to-r from-red-500 to-rose-600 text-white rounded-lg hover:from-red-600 hover:to-rose-700 transition-all duration-200 shadow-md hover:shadow-lg"
                       title="Export to PDF"
                     >
-                      <Download className="h-4 w-4 mr-2" />
-                      <span className="text-sm font-medium">Export PDF</span>
+                      <Download className="h-3 w-3 mr-1" />
+                      <span className="text-xs font-medium">Export PDF</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Desktop Layout: Same row */}
+              <div className="hidden sm:flex items-center justify-between mb-3 sm:mb-6">
+                <div>
+                  <h2 className="text-xs sm:text-sm lg:text-xl font-bold text-gray-900">Team Performance</h2>
+                  <p className="text-xs sm:text-sm text-gray-500 mt-1 hidden sm:block">
+                    Detailed performance metrics for {format(selectedMonth, 'MMMM yyyy')}
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2 sm:space-x-4">
+                  <div className="flex items-center space-x-1 sm:space-x-2">
+                    <button
+                      onClick={handlePreviousMonth}
+                      className="p-1.5 sm:p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                    >
+                      <ChevronLeft className="h-4 w-4 sm:h-5 sm:w-5 text-gray-600" />
+                    </button>
+                    <span className="text-[10px] sm:text-xs lg:text-sm font-medium text-gray-700">
+                      {format(selectedMonth, 'MMMM yyyy')}
+                    </span>
+                    <button
+                      onClick={handleNextMonth}
+                      disabled={format(selectedMonth, 'yyyy-MM') === format(new Date(), 'yyyy-MM')}
+                      className={clsx(
+                        "p-1.5 sm:p-2 rounded-lg transition-colors",
+                        format(selectedMonth, 'yyyy-MM') === format(new Date(), 'yyyy-MM')
+                          ? "text-gray-400 cursor-not-allowed"
+                          : "hover:bg-gray-100 text-gray-600"
+                      )}
+                    >
+                      <ChevronRight className="h-4 w-4 sm:h-5 sm:w-5" />
+                    </button>
+                  </div>
+                  <div className="flex items-center space-x-1 sm:space-x-2">
+                    <button
+                      onClick={handleExportToExcel}
+                      className="inline-flex items-center px-2 py-1.5 sm:px-4 sm:py-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg hover:from-green-600 hover:to-emerald-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      title="Export to Excel"
+                    >
+                      <FileText className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                      <span className="hidden sm:inline text-xs sm:text-sm font-medium">Export Excel</span>
+                    </button>
+                    <button
+                      onClick={handleExportToPDF}
+                      className="inline-flex items-center px-2 py-1.5 sm:px-4 sm:py-2 bg-gradient-to-r from-red-500 to-rose-600 text-white rounded-lg hover:from-red-600 hover:to-rose-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      title="Export to PDF"
+                    >
+                      <Download className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                      <span className="hidden sm:inline text-xs sm:text-sm font-medium">Export PDF</span>
                     </button>
                     <button
                       onClick={() => setViewMode('table')}

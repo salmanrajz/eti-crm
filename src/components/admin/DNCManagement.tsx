@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Plus, Trash2, Search, AlertTriangle, CheckCircle, Clock, X, Settings, Globe } from 'lucide-react';
+import { Shield, Plus, Trash2, Search, AlertTriangle, CheckCircle, Clock, X, Settings, Globe, Download } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { useAuthStore } from '../../store/authStore';
-import { addToDNC, removeFromDNC, getAllDNCNumbers, getUserNames, getUserDetails, getWhatsAppCheckLogs, checkDNCNumber, DNCRecord, WhatsAppCheckLog } from '../../utils/dncService';
+import { addToDNC, removeFromDNC, getAllDNCNumbers, getDNCNumbersByDateRange, getUserNames, getUserDetails, getWhatsAppCheckLogs, checkDNCNumber, DNCRecord, WhatsAppCheckLog } from '../../utils/dncService';
 import { getAppConfig, updateWhatsAppApiEndpoint, AppConfig } from '../../utils/configService';
 
 interface DNCManagementProps {
@@ -22,6 +22,11 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
   const [showSuccessMessage, setShowSuccessMessage] = useState(false);
   const [addedNumber, setAddedNumber] = useState('');
   const [duplicateMessage, setDuplicateMessage] = useState('');
+
+  // Date range export states
+  const [exportStartDate, setExportStartDate] = useState('');
+  const [exportEndDate, setExportEndDate] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
   
   // Pagination state
   const [hasMore, setHasMore] = useState(true);
@@ -61,7 +66,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
     }
 
     try {
-      const result = await getAllDNCNumbers(20, reset ? undefined : lastDoc);
+      const result = await getAllDNCNumbers(300, reset ? undefined : lastDoc);
       
       if (reset) {
         setDncNumbers(result.records);
@@ -121,7 +126,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
     }
 
     try {
-      const result = await getWhatsAppCheckLogs(20, reset ? undefined : logsLastDoc);
+      const result = await getWhatsAppCheckLogs(300, reset ? undefined : logsLastDoc);
       
       if (reset) {
         setCheckLogs(result.records);
@@ -262,6 +267,85 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
       toast.error(error.message || 'Failed to update API endpoint');
     } finally {
       setIsUpdatingEndpoint(false);
+    }
+  };
+
+  // Export DNC numbers to Excel
+  const exportToExcel = async (useDateRange: boolean = false) => {
+    try {
+      setIsExporting(true);
+      const XLSX = await import('xlsx');
+
+      let exportData: any[] = [];
+      let filename: string;
+
+      if (useDateRange && exportStartDate && exportEndDate) {
+        // Export by date range - fetch directly from Firebase
+        const startDate = new Date(exportStartDate);
+        const endDate = new Date(exportEndDate);
+        endDate.setHours(23, 59, 59, 999); // End of day
+
+        const result = await getDNCNumbersByDateRange(startDate, endDate, 5000); // Get up to 5000 records
+
+        // Get user details for all records
+        const userIds = result.records.map(record => record.addedBy);
+        const uniqueUserIds = [...new Set(userIds)];
+        const [userNamesMap, userDetailsMap] = await Promise.all([
+          getUserNames(uniqueUserIds),
+          getUserDetails(uniqueUserIds)
+        ]);
+
+        exportData = result.records.map((dnc) => ({
+          'Phone Number': dnc.number,
+          'Reason': dnc.reason || 'N/A',
+          'Added By': userNamesMap[dnc.addedBy] || 'Unknown User',
+          'Team': userDetailsMap[dnc.addedBy]?.teamName || 'No Team',
+          'Added Date': new Date(dnc.addedAt).toLocaleDateString(),
+          'Added Time': new Date(dnc.addedAt).toLocaleTimeString(),
+          'Source': dnc.source || 'manual'
+        }));
+
+        filename = `DNC_Numbers_${exportStartDate}_to_${exportEndDate}.xlsx`;
+
+        if (result.records.length === 0) {
+          toast.error('No DNC numbers found in the selected date range');
+          return;
+        }
+
+        toast.success(`Exported ${result.records.length} DNC numbers from date range!`);
+      } else {
+        // Export currently loaded numbers
+        if (filteredNumbers.length === 0) {
+          toast.error('No DNC numbers to export');
+          return;
+        }
+
+        exportData = filteredNumbers.map((dnc) => ({
+          'Phone Number': dnc.number,
+          'Reason': dnc.reason || 'N/A',
+          'Added By': userNames[dnc.addedBy] || 'Unknown User',
+          'Team': userDetails[dnc.addedBy]?.teamName || 'No Team',
+          'Added Date': new Date(dnc.addedAt).toLocaleDateString(),
+          'Added Time': new Date(dnc.addedAt).toLocaleTimeString(),
+          'Source': dnc.source || 'manual'
+        }));
+
+        const dateStr = new Date().toISOString().split('T')[0];
+        filename = `DNC_Numbers_Loaded_${dateStr}.xlsx`;
+
+        toast.success('Currently loaded DNC numbers exported to Excel successfully!');
+      }
+
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'DNC Numbers');
+
+      XLSX.writeFile(wb, filename);
+    } catch (error) {
+      console.error('Error exporting to Excel:', error);
+      toast.error('Failed to export DNC numbers to Excel');
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -479,9 +563,11 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
           {/* Search and List Section - Only for Admins and Managers */}
           {['admin', 'manager'].includes(user?.role || '') && (
             <div className="flex-1 overflow-hidden flex flex-col">
-            {/* Search */}
-            <div className="p-6 border-b border-gray-200">
-              <div className="relative">
+            {/* Search and Export */}
+            <div className="p-6 border-b border-gray-200 space-y-4">
+              {/* Search Bar */}
+              <div className="flex flex-col sm:flex-row gap-4">
+                <div className="flex-1 relative">
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
                 <input
                   type="text"
@@ -490,6 +576,54 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                   placeholder="Search by number or reason..."
                   className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
                 />
+                </div>
+                <button
+                  onClick={() => exportToExcel(false)}
+                  disabled={filteredNumbers.length === 0 || isExporting}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 whitespace-nowrap"
+                  title="Export loaded DNC numbers to Excel"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Export Loaded</span>
+                </button>
+              </div>
+
+              {/* Date Range Export */}
+              <div className="flex flex-col sm:flex-row gap-4 items-end">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Export by Date Range (Added Date)
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <input
+                        type="date"
+                        value={exportStartDate}
+                        onChange={(e) => setExportStartDate(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                        placeholder="Start Date"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <input
+                        type="date"
+                        value={exportEndDate}
+                        onChange={(e) => setExportEndDate(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                        placeholder="End Date"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => exportToExcel(true)}
+                  disabled={!exportStartDate || !exportEndDate || isExporting}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 whitespace-nowrap"
+                  title="Export DNC numbers by date range from Firebase"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>{isExporting ? 'Exporting...' : 'Export Range'}</span>
+                </button>
               </div>
             </div>
 

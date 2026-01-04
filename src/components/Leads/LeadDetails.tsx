@@ -1882,7 +1882,7 @@ export function LeadDetails() {
                     Read-only (Lead Rejected)
                   </span>
                 )}
-                {lead.status === 'activated' && (
+                {lead.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin' && (
                   <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
                     Read-only (Lead Activated)
                   </span>
@@ -2043,13 +2043,13 @@ export function LeadDetails() {
                     placeholder={
                       lead?.status === 'rejected' 
                         ? 'Cannot send messages to rejected leads' 
-                        : lead?.status === 'activated'
+                        : lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin'
                         ? 'Cannot send messages to activated leads'
                         : 'Type a message...💡 You can send audio notes, images, PDFs, and files (max 3MB)'
                     }
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                    disabled={lead?.status === 'rejected' || lead?.status === 'activated' || sendingMessage || uploadingMedia}
+                    disabled={lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') || sendingMessage || uploadingMedia}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey && !sendingMessage && !uploadingMedia && newMessage.trim()) {
                         e.preventDefault();
@@ -2060,7 +2060,7 @@ export function LeadDetails() {
                 </div>
                 <button
                   type="button"
-                  disabled={uploadingMedia || sendingMessage || recording || lead?.status === 'rejected' || lead?.status === 'activated'}
+                  disabled={uploadingMedia || sendingMessage || recording || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
                   onClick={() => fileInputRef.current?.click()}
                   className="inline-flex items-center px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors"
                   title="Attach file"
@@ -2070,7 +2070,7 @@ export function LeadDetails() {
                 {!recording && (
                   <button
                     type="button"
-                    disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || lead?.status === 'activated'}
+                    disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
                     onClick={(e) => {
                       e.preventDefault();
                       startRecording();

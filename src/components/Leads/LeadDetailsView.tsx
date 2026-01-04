@@ -45,6 +45,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppConversationView';
 import { normalizeTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
@@ -3984,16 +3985,23 @@ Language: ${lead.language || 'N/A'}`;
         </div>
       )}
 
-      {showCoordinatorDialog && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-6xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+      {showCoordinatorDialog && createPortal(
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-1 sm:p-4"
+             style={{
+               paddingTop: 'max(0.25rem, env(safe-area-inset-top))',
+               paddingBottom: 'max(0.25rem, env(safe-area-inset-bottom))',
+               zIndex: 999999,
+               position: 'fixed'
+             }}>
+          <div className="bg-white rounded-xl sm:rounded-2xl shadow-2xl border border-gray-100 max-w-6xl w-full mx-1 sm:mx-4 max-h-[calc(100vh-0.5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] sm:max-h-[calc(100vh-2rem)] overflow-hidden flex flex-col"
+               style={{ zIndex: 1000000 }}>
             {/* Header */}
-            <div className={`px-6 py-4 ${
+            <div className={`px-3 py-2.5 sm:px-6 sm:py-4 ${
               coordinatorAction === 'reject' ? 'bg-gradient-to-r from-red-500 to-red-600' :
               'bg-gradient-to-r from-indigo-500 to-purple-600'
             }`}>
-              <div className="flex items-center space-x-3">
-                <div className="p-2 bg-white/20 rounded-lg">
+              <div className="flex items-center space-x-1.5 sm:space-x-3">
+                <div className="p-1 sm:p-2 bg-white/20 rounded-md sm:rounded-lg">
                   {coordinatorAction === 'assign' || coordinatorAction === 'reassign' ? (
                     <User2 className="h-5 w-5 text-white" />
                   ) : isActivationDialog ? (
@@ -4009,7 +4017,7 @@ Language: ${lead.language || 'N/A'}`;
                   )}
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-white">
+                  <h3 className="text-sm sm:text-base lg:text-lg font-semibold text-white">
                     {coordinatorAction === 'assign' ? 'Assign Lead' :
                      coordinatorAction === 'reassign' ? 'Reassign Lead' :
                      isActivationDialog ? 'Activate Lead (Pending Verification)' : 
@@ -4017,7 +4025,7 @@ Language: ${lead.language || 'N/A'}`;
                      coordinatorAction === 'later' ? 'Mark for Later' : 
                      coordinatorAction === 'reject' ? 'Reject Lead' : 'Mark for Follow-up'}
                   </h3>
-                  <p className="text-indigo-100 text-sm">
+                  <p className="text-indigo-100 text-[10px] sm:text-xs lg:text-sm">
                     {coordinatorAction === 'assign' ? 'Assign this lead to Etisalat system' :
                      coordinatorAction === 'reassign' ? 'Update Etisalat Lead ID and assignment details' :
                      isActivationDialog ? 'Activate the lead; status stays Pending Verification until verifier approves' :
@@ -4031,7 +4039,7 @@ Language: ${lead.language || 'N/A'}`;
             </div>
 
             {/* Form Content */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-3 sm:space-y-4 lg:space-y-6">
               {isActivationDialog && (
                 <>
                   {lead.plans && lead.plans.length > 1 ? (
@@ -4888,7 +4896,7 @@ Language: ${lead.language || 'N/A'}`;
                         </div>
                         <input
                           type="text"
-                          className="w-full pl-8 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500"
+                          className="w-full pl-8 pr-4 py-2.5 sm:py-3 bg-gray-50 border border-gray-200 rounded-lg sm:rounded-xl focus:border-red-300 focus:ring-2 focus:ring-red-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 text-sm sm:text-base"
                           value={etisalatLeadId}
                           onChange={(e) => {
                             setEtisalatLeadId(e.target.value);
@@ -4913,7 +4921,7 @@ Language: ${lead.language || 'N/A'}`;
                         <MapPin className="h-4 w-4 text-gray-400" />
                       </div>
                       <select
-                        className="w-full pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 focus:bg-white transition-all duration-200 text-gray-900 appearance-none cursor-pointer"
+                        className="w-full pl-10 pr-4 py-2.5 sm:py-3 bg-gray-50 border border-gray-200 rounded-lg sm:rounded-xl focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 focus:bg-white transition-all duration-200 text-gray-900 appearance-none cursor-pointer text-sm sm:text-base"
                         value={selectedEmirate}
                         onChange={(e) => setSelectedEmirate(e.target.value)}
                         required
@@ -4968,8 +4976,8 @@ Language: ${lead.language || 'N/A'}`;
             </div>
 
             {/* Footer Actions */}
-            <div className="bg-gray-50 px-6 py-4 border-t border-gray-100">
-              <div className="flex flex-col sm:flex-row justify-end gap-3">
+            <div className="bg-gray-50 px-3 py-2.5 sm:px-6 sm:py-4 border-t border-gray-100">
+              <div className="flex flex-col sm:flex-row justify-end gap-1.5 sm:gap-3">
                 <button
                   onClick={() => {
                     setShowCoordinatorDialog(false);
@@ -4985,14 +4993,14 @@ Language: ${lead.language || 'N/A'}`;
                     setRemovedPlanIndices(new Set());
                   }}
                   disabled={isCoordinatorActionProcessing}
-                  className="px-6 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-xl hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                  className="px-3 py-2 sm:px-6 sm:py-2.5 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md sm:rounded-xl hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleCoordinatorAction}
                   disabled={isCoordinatorActionProcessing}
-                  className={`px-6 py-2.5 text-sm font-medium text-white rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm ${
+                  className={`px-3 py-2 sm:px-6 sm:py-2.5 text-xs sm:text-sm font-medium text-white rounded-md sm:rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm ${
                     coordinatorAction === 'assign' || coordinatorAction === 'reassign' ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 focus:ring-indigo-100' :
                     isActivationDialog ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 focus:ring-green-100' :
                     coordinatorAction === 'reverification' ? 'bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 focus:ring-blue-100' :
@@ -5053,8 +5061,7 @@ Language: ${lead.language || 'N/A'}`;
               </div>
             </div>
           </div>
-        </div>
-      )}
+        </div>, document.body)}
 
       {/* Assignment Message Dialog */}
       {showAssignmentMessage && (

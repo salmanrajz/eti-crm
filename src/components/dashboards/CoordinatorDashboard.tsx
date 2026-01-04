@@ -213,6 +213,7 @@ const isLeadInCoordinatorScope = (
 export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
   const [loading, setLoading] = useState(true);
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [filteredCoordinatorLeads, setFilteredCoordinatorLeads] = useState<Lead[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [groupTargets, setGroupTargets] = useState<Record<string, number>>({});
   const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
@@ -852,11 +853,26 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                       : new Date(activatedAtRaw);
                 return activatedAt >= monthStart && activatedAt <= monthEnd;
               });
+            } else if (currentStatus === 'activated_non_verified') {
+              // Show only activated_non_verified for the selected month by activation date
+              nextLeads = filteredCoordinatorLeads.filter(lead => {
+                if (lead.status !== 'activated_non_verified') return false;
+                const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
+                if (!activatedAtRaw) return false;
+                const activatedAt =
+                  typeof activatedAtRaw.toDate === 'function'
+                    ? activatedAtRaw.toDate()
+                    : activatedAtRaw instanceof Date
+                      ? activatedAtRaw
+                      : new Date(activatedAtRaw);
+                return activatedAt >= monthStart && activatedAt <= monthEnd;
+              });
             } else {
               nextLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
             }
           }
 
+          setFilteredCoordinatorLeads(filteredCoordinatorLeads);
           setLeads(nextLeads);
           setLoading(false);
         } catch (error) {
@@ -880,7 +896,107 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     return () => {
       unsubscribe();
     };
-  }, [user?.id, currentStatus, coordinatorType, selectedMonth]);
+  }, [user?.id, coordinatorType, selectedMonth]);
+
+  // Filter leads by status in memory (no server reload)
+  useEffect(() => {
+    if (!filteredCoordinatorLeads || filteredCoordinatorLeads.length === 0) return;
+
+    // Get selected month's start and end dates
+    const now = new Date();
+    let monthStart: Date;
+    let monthEnd: Date;
+
+    if (selectedMonth) {
+      const [year, month] = selectedMonth.split('-').map(Number);
+      monthStart = new Date(year, month - 1, 1, 0, 0, 0, 0);
+      monthEnd = new Date(year, month, 0, 23, 59, 59, 999);
+    } else {
+      // Fallback to current month if no month selected
+      monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    }
+
+    let nextLeads: Lead[] = [];
+
+    if (currentStatus === 'verified') {
+      // Show ONLY: manager-assigned verified leads, assigned_to_cord leads, plus later leads scheduled for today
+      const todayDate = new Date();
+      todayDate.setHours(0, 0, 0, 0);
+      nextLeads = filteredCoordinatorLeads.filter(lead => {
+        // Include manager-assigned verified leads
+        if (lead.status === 'verified' && lead.managerAssigned === true) {
+          return true;
+        }
+
+        // Include assigned_to_cord leads
+        if (lead.status === 'assigned_to_cord') {
+          return true;
+        }
+
+        // Include later leads scheduled for today
+        if (lead.status === 'later' && lead.scheduledFor) {
+          const scheduledRaw: any = lead.scheduledFor;
+          const scheduledDate =
+            scheduledRaw && typeof scheduledRaw.toDate === 'function'
+              ? scheduledRaw.toDate()
+              : scheduledRaw instanceof Date
+                ? scheduledRaw
+                : new Date(scheduledRaw);
+          if (scheduledDate < todayDate) {
+            return false; // Past scheduled date
+          }
+          const tomorrow = new Date(todayDate);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          if (scheduledDate >= tomorrow) {
+            return false; // Future scheduled date
+          }
+          return true; // Today scheduled date
+        }
+
+        // Exclude everything else
+        return false;
+      });
+
+      // Debug: ETS-10 coordinator gets special logging
+      if (coordinatorTeams && coordinatorTeams.includes('1QcXTOSGX7AobfOknLXw')) {
+        const ets10InVerifiedTab = nextLeads.filter(l => l.teamId === '1QcXTOSGX7AobfOknLXw');
+        const ets10AssignedToCordInTab = ets10InVerifiedTab.filter(l => l.status === 'assigned_to_cord');
+      }
+    } else if (currentStatus === 'activated') {
+      // Show activated plus activated_non_verified for the selected month by activation date
+      nextLeads = filteredCoordinatorLeads.filter(lead => {
+        if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
+        const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
+        if (!activatedAtRaw) return false;
+        const activatedAt =
+          typeof activatedAtRaw.toDate === 'function'
+            ? activatedAtRaw.toDate()
+            : activatedAtRaw instanceof Date
+              ? activatedAtRaw
+              : new Date(activatedAtRaw);
+        return activatedAt >= monthStart && activatedAt <= monthEnd;
+      });
+    } else if (currentStatus === 'activated_non_verified') {
+      // Show only activated_non_verified for the selected month by activation date
+      nextLeads = filteredCoordinatorLeads.filter(lead => {
+        if (lead.status !== 'activated_non_verified') return false;
+        const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
+        if (!activatedAtRaw) return false;
+        const activatedAt =
+          typeof activatedAtRaw.toDate === 'function'
+            ? activatedAtRaw.toDate()
+            : activatedAtRaw instanceof Date
+              ? activatedAtRaw
+              : new Date(activatedAtRaw);
+        return activatedAt >= monthStart && activatedAt <= monthEnd;
+      });
+    } else {
+      nextLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
+    }
+
+    setLeads(nextLeads);
+  }, [currentStatus, filteredCoordinatorLeads, selectedMonth, coordinatorTeams]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -961,7 +1077,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     }
 
     // Filter by selected month (skip for historical statuses)
-    const historicalStatuses = ['verified', 'assigned', 'follow_up', 'later', 'yesterday', 'activated', 'activated_non_verified'];
+    const historicalStatuses = ['verified', 'assigned', 'follow_up', 'later', 'yesterday', 'activated'];
     const isHistoricalStatus = historicalStatuses.includes(statusFilter);
 
     if (selectedMonth && !isHistoricalStatus) {
@@ -991,35 +1107,39 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
 
   const stats = [
     {
-      name: 'Unassigned Leads',
+      name: 'Unassigned',
       value: metrics.verified,
       icon: CheckCircle,
       color: 'bg-green-500',
       textColor: 'text-green-600',
+      countColor: 'text-green-600',
       status: 'verified'
     },
     {
-      name: 'Assigned Leads',
+      name: 'Assigned',
       value: metrics.assigned,
       icon: Clock,
       color: 'bg-blue-500',
       textColor: 'text-blue-600',
+      countColor: 'text-blue-600',
       status: 'assigned'
     },
     {
-      name: 'Activated Leads',
+      name: 'Activated',
       value: metrics.activated,
       icon: Zap,
       color: 'bg-purple-500',
       textColor: 'text-purple-600',
+      countColor: 'text-purple-600',
       status: 'activated'
     },
     {
-      name: 'Active Non Verified',
+      name: 'Active NV',
       value: metrics.activatedNonVerified,
       icon: AlertCircle,
       color: 'bg-amber-500',
       textColor: 'text-amber-600',
+      countColor: 'text-amber-600',
       status: 'activated_non_verified'
     },
     {
@@ -1028,30 +1148,34 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       icon: AlertTriangle,
       color: 'bg-orange-500',
       textColor: 'text-orange-600',
+      countColor: 'text-orange-600',
       status: 'follow_up'
     },
     {
-      name: 'Later Leads',
+      name: 'Later',
       value: metrics.later,
       icon: Clock,
       color: 'bg-yellow-500',
       textColor: 'text-yellow-600',
+      countColor: 'text-yellow-600',
       status: 'later'
     },
     {
-      name: 'Rejected Leads',
+      name: 'Rejected',
       value: metrics.rejected,
       icon: XCircle,
       color: 'bg-red-500',
       textColor: 'text-red-600',
+      countColor: 'text-red-600',
       status: 'rejected'
     },
     {
-      name: 'Yesterday Leads',
+      name: 'Yesterday',
       value: metrics.yesterday,
       icon: Calendar,
       color: 'bg-gray-500',
       textColor: 'text-gray-600',
+      countColor: 'text-gray-600',
       status: 'yesterday'
     }
   ];
@@ -1567,33 +1691,33 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       )}
 
       {/* Dashboard Header */}
-      <div className="mb-8">
+      <div className="mb-4">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">
+            <h1 className="text-xl sm:text-3xl font-bold text-gray-900">
               Welcome back, {user?.name}!
             </h1>
-            <p className="mt-2 text-lg text-gray-600">
+            <p className="mt-2 text-lg text-gray-600 hidden sm:block">
                 Here's an overview of leads requiring coordination.
               </p>
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="mt-1 text-sm text-gray-500 hidden sm:block">
               {coordinatorType === 'g1' && 'You are assigned to handle leads with G1 group numbers only.'}
               {coordinatorType === 'g2' && 'You are assigned to handle leads with G2 group numbers only.'}
               {coordinatorType === 'g3' && 'You are assigned to handle leads with G3 group numbers only.'}
               {coordinatorType === 'all' && 'You are assigned to handle leads from all groups (G1, G2, G3, G4, G5).'}
             </p>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1 sm:gap-3 flex-wrap sm:flex-nowrap">
             {coordinatorType === 'all' && (
               <>
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
                   onClick={() => setShowStatusChecks(!showStatusChecks)}
-                  className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 text-sm"
+                  className="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 text-sm"
                 >
-                  <CheckSquare className="h-4 w-4 mr-1.5" />
-                  <span className="font-medium">Status Checks</span>
+                  <CheckSquare className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-1.5" />
+                  <span className="hidden sm:inline text-sm sm:text-base font-medium">Status Checks</span>
                   {statusChecks.length > 0 && (
                     <span className="ml-1.5 px-1.5 py-0.5 bg-white/25 rounded-full text-xs font-semibold">
                       {statusChecks.length}
@@ -1604,10 +1728,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
                   onClick={() => setShowStruckNumbers((prev) => !prev)}
-                  className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 text-sm"
+                  className="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 bg-gradient-to-r from-red-500 to-orange-500 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 text-sm"
                 >
-                  <AlertTriangle className="h-4 w-4 mr-1.5" />
-                  <span className="font-medium">Struck Numbers</span>
+                  <AlertTriangle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-1.5" />
+                  <span className="hidden sm:inline text-sm sm:text-base font-medium">Struck Numbers</span>
                   <span className="ml-1.5 px-1.5 py-0.5 bg-white/25 rounded-full text-xs font-semibold">
                     {struckLoading ? '...' : struckNumbers.length}
                   </span>
@@ -1618,10 +1742,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             <div className="relative flex items-center" ref={calendarPickerRef}>
               <button
                 onClick={() => setShowCalendarPicker(!showCalendarPicker)}
-                className="inline-flex items-center pl-3 pr-4 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium hover:bg-gray-50 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                className="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg border border-gray-300 bg-white text-sm font-medium hover:bg-gray-50 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               >
-                <Calendar className="h-5 w-5 text-gray-400 mr-2" />
-                <span>{format(new Date(parseInt(selectedMonth.split('-')[0]), parseInt(selectedMonth.split('-')[1]) - 1, 1), 'MMMM yyyy')}</span>
+                <Calendar className="h-3 w-3 sm:h-4 sm:w-4 text-gray-400 mr-1 sm:mr-1.5" />
+                <span className="hidden sm:inline text-sm sm:text-base">{format(new Date(parseInt(selectedMonth.split('-')[0]), parseInt(selectedMonth.split('-')[1]) - 1, 1), 'MMMM yyyy')}</span>
               </button>
               
               {/* Calendar Picker Dropdown */}
@@ -1746,8 +1870,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         </div>
       </div>
 
-      {/* Group Targets for coordinators */}
-      <div className="flex flex-wrap gap-4 mb-8">
+        {/* Group Targets for coordinators */}
+       <div className="grid grid-cols-3 gap-3 mb-8">
         {(
           coordinatorType === 'all'
             ? ['G1', 'G2', 'G3']
@@ -1762,47 +1886,95 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
             grp === 'G3' ? 'from-amber-50 to-amber-100 border-amber-200 text-amber-900' :
             'from-slate-50 to-slate-100 border-slate-200 text-slate-900';
           return (
-            <div key={grp} className={`flex-1 min-w-[220px] bg-gradient-to-r ${color} rounded-lg border px-5 py-4 shadow-sm`}>
-              <div className="flex items-center justify-between mb-2">
+            <div key={grp} className={`rounded-xl shadow-md border p-3 ${
+              grp === 'G1' ? 'bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200' :
+              grp === 'G2' ? 'bg-gradient-to-br from-green-50 to-green-100 border-green-200' :
+              'bg-gradient-to-br from-purple-50 to-purple-100 border-purple-200'
+            }`}>
+              <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <Target className="h-5 w-5 text-gray-700" />
-                  <span className="text-sm font-semibold">{grp} Target</span>
+                  <div className="w-6 h-6 sm:w-7 sm:h-7 lg:w-8 lg:h-8 rounded-lg bg-white/80 backdrop-blur-sm flex items-center justify-center shadow-sm">
+                    <Target className={`h-3 w-3 sm:h-3.5 sm:w-3.5 lg:h-4 lg:w-4 ${
+                      grp === 'G1' ? 'text-blue-700' :
+                      grp === 'G2' ? 'text-green-700' : 'text-purple-700'
+                    }`} />
+                  </div>
+                  <span className="text-xs sm:text-sm lg:text-base font-bold text-gray-900">{grp} Group</span>
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-3 text-sm font-semibold text-center">
-                <div className="flex flex-col items-center">
-                  <p className="text-xs text-gray-600">Target</p>
-                  <p className="text-2xl font-extrabold text-red-600">{target}</p>
+              {/* Phone layout: stacked */}
+              <div className="space-y-1.5 sm:space-y-2 lg:hidden">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] sm:text-xs text-gray-500">Target</span>
+                  <span className="text-xs sm:text-sm font-bold text-red-600">{target}</span>
                 </div>
-                <div className="flex flex-col items-center">
-                  <p className="text-xs text-gray-600">Achieved</p>
-                  <p className="text-2xl font-extrabold text-emerald-600">{achieved}</p>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] sm:text-xs text-gray-500">Achieved</span>
+                  <span className="text-xs sm:text-sm font-bold text-emerald-600">{achieved}</span>
                 </div>
-                <div className="flex flex-col items-center">
-                  <p className="text-xs text-gray-600">Remaining</p>
-                  <p className="text-2xl font-extrabold text-amber-600">{remaining}</p>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] sm:text-xs text-gray-500">Remaining</span>
+                  <span className="text-xs sm:text-sm font-bold text-amber-600">{remaining}</span>
                 </div>
+                {grp === 'G2' && (
+                 <div className="mt-3 pt-2 border-t border-gray-100 hidden sm:block">
+                   <div className="flex items-center justify-center gap-2">
+                     {(() => {
+                       const breakdown = groupBreakdown[grp] || { newCount: 0, mnp: 0, p2p: 0 };
+                       return (
+                         <>
+                           <span className="px-2 py-1 rounded-md bg-blue-50 text-blue-700 font-medium text-xs">
+                             New: {breakdown.newCount}
+                           </span>
+                           <span className="px-2 py-1 rounded-md bg-green-50 text-green-700 font-medium text-xs">
+                             MNP: {breakdown.mnp}
+                           </span>
+                           <span className="px-2 py-1 rounded-md bg-purple-50 text-purple-700 font-medium text-xs">
+                             P2P: {breakdown.p2p}
+                           </span>
+                        </>
+                      );
+                    })()}
+                  </div>
+                 </div>
+                )}
               </div>
-              {grp === 'G2' && (
-                <div className="mt-3 flex flex-wrap justify-center gap-2 text-xs text-center">
-                  {(() => {
-                    const breakdown = groupBreakdown[grp] || { newCount: 0, mnp: 0, p2p: 0 };
-                    return (
-                      <>
-                        <span className="px-2 py-1 rounded-full bg-white/70 border text-gray-700 font-semibold">
-                          New: {breakdown.newCount}
-                        </span>
-                        <span className="px-2 py-1 rounded-full bg-white/70 border text-gray-700 font-semibold">
-                          MNP: {breakdown.mnp}
-                        </span>
-                        <span className="px-2 py-1 rounded-full bg-white/70 border text-gray-700 font-semibold">
-                          P2P: {breakdown.p2p}
-                        </span>
-                      </>
-                    );
-                  })()}
+
+              {/* Desktop layout: labels row, values row */}
+              <div className="hidden lg:block">
+                <div className="grid grid-cols-3 gap-4 mb-3">
+                  <span className="text-sm lg:text-base text-gray-500 text-center font-medium">Target</span>
+                  <span className="text-sm lg:text-base text-gray-500 text-center font-medium">Achieved</span>
+                  <span className="text-sm lg:text-base text-gray-500 text-center font-medium">Remaining</span>
                 </div>
-              )}
+                <div className="grid grid-cols-3 gap-4 mb-3">
+                  <span className="text-lg lg:text-xl font-bold text-red-600 text-center">{target}</span>
+                  <span className="text-lg lg:text-xl font-bold text-emerald-600 text-center">{achieved}</span>
+                  <span className="text-lg lg:text-xl font-bold text-amber-600 text-center">{remaining}</span>
+                </div>
+                {grp === 'G2' && (
+                 <div className="pt-2 border-t border-gray-100">
+                   <div className="flex items-center justify-center gap-2">
+                     {(() => {
+                       const breakdown = groupBreakdown[grp] || { newCount: 0, mnp: 0, p2p: 0 };
+                       return (
+                         <>
+                           <span className="px-2 py-1 rounded-md bg-blue-50 text-blue-700 font-medium text-xs">
+                             New: {breakdown.newCount}
+                           </span>
+                           <span className="px-2 py-1 rounded-md bg-green-50 text-green-700 font-medium text-xs">
+                             MNP: {breakdown.mnp}
+                           </span>
+                           <span className="px-2 py-1 rounded-md bg-purple-50 text-purple-700 font-medium text-xs">
+                             P2P: {breakdown.p2p}
+                           </span>
+                        </>
+                      );
+                    })()}
+                  </div>
+                 </div>
+                )}
+              </div>
             </div>
           );
         })}
@@ -1821,24 +1993,24 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       {/* Show StatusChecksSection only when showStatusChecks is true and coordinator is All Groups */}
       {showStatusChecks && coordinatorType === 'all' && <StatusChecksSection />}
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        {/* Stats Grid */}
+       <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6 mb-8">
         {stats.map((stat) => (
           <button
             key={stat.status}
             onClick={() => handleStatClick(stat.status)}
-            className={`bg-white rounded-2xl shadow-lg p-6 border border-gray-100 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer ${
+            className={`bg-white rounded-2xl shadow-lg p-3 sm:p-6 border border-gray-100 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer ${
               currentStatus === stat.status ? 'ring-2 ring-indigo-500' : ''
             }`}
           >
           <div className="flex items-center">
-              <div className={`p-3 rounded-xl ${stat.color}`}>
-                <stat.icon className="h-6 w-6 text-white" />
-            </div>
-            <div className="ml-4">
-                <h3 className="text-sm font-medium text-gray-500">{stat.name}</h3>
-                <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
-        </div>
+              <div className={`p-2 sm:p-3 rounded-xl ${stat.color}`}>
+                <stat.icon className="h-4 w-4 sm:h-6 sm:w-6 text-white" />
+              </div>
+             <div className="ml-2 sm:ml-4">
+                 <h3 className="text-xs sm:text-sm font-medium text-gray-500">{stat.name}</h3>
+                 <p className={`text-lg sm:text-2xl font-bold ${stat.countColor}`}>{stat.value}</p>
+             </div>
             </div>
           </button>
         ))}
@@ -2043,23 +2215,23 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       )}
 
       {/* Filters */}
-      <div className="mb-8 grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="mb-8 grid grid-cols-3 md:grid-cols-4 gap-2 sm:gap-4">
         <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search className="h-5 w-5 text-gray-400" />
+          <div className="absolute inset-y-0 left-0 pl-2 sm:pl-3 flex items-center pointer-events-none">
+            <Search className="h-4 w-4 sm:h-5 sm:w-5 text-gray-400" />
           </div>
           <input
             type="text"
             placeholder="Search leads..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="pl-10 pr-4 py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            className="pl-8 pr-3 py-1.5 sm:pl-10 sm:pr-4 sm:py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
           />
         </div>
 
         <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Filter className="h-5 w-5 text-gray-400" />
+          <div className="absolute inset-y-0 left-0 pl-2 sm:pl-3 flex items-center pointer-events-none">
+            <Filter className="h-4 w-4 sm:h-5 sm:w-5 text-gray-400" />
           </div>
           <select
             value={statusFilter}
@@ -2068,7 +2240,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               setStatusFilter(newStatus);
               setSearchParams({ status: newStatus });
             }}
-            className="pl-10 pr-4 py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            className="pl-8 pr-3 py-1.5 sm:pl-10 sm:pr-4 sm:py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
           >
             <option value="all">All Status</option>
             <option value="verified">Verified</option>
@@ -2085,7 +2257,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           <select
             value={pageSize}
             onChange={(e) => setPageSize(Number(e.target.value) as typeof PAGE_SIZES[number])}
-            className="pl-4 pr-4 py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            className="pl-3 pr-3 py-1.5 sm:pl-4 sm:pr-4 sm:py-2 w-full rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
           >
             {PAGE_SIZES.map(size => (
               <option key={size} value={size}>{size} per page</option>

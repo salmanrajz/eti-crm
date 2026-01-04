@@ -605,6 +605,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     if (openRequests.length > 0) fetchStrikes();
   }, [openRequests]);
 
+  const monthChangeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const handleMonthChange = (date: Date) => {
     setSelectedMonth(date);
     // Reload group targets/activations for new month
@@ -613,6 +615,22 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     computeGroupActivations(teamLeads, date);
     // Reload team metrics for the new month
     loadTeamMetricsForMonth(date);
+  };
+
+  const handleMonthInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newDate = new Date(e.target.value);
+
+    // Clear any existing timeout
+    if (monthChangeTimeoutRef.current) {
+      clearTimeout(monthChangeTimeoutRef.current);
+    }
+
+    // Set a new timeout to apply the change after 1 second
+    // This allows users to change both month and year without triggering immediate loads
+    monthChangeTimeoutRef.current = setTimeout(() => {
+      handleMonthChange(newDate);
+      monthChangeTimeoutRef.current = null;
+    }, 1000);
   };
 
   // ✅ PERFORMANCE: Load team metrics for specific month with caching
@@ -2466,12 +2484,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             
             <div className="flex items-center space-x-1 text-[10px] sm:text-sm text-gray-600">
               <Calendar className="h-2.5 w-2.5 sm:h-4 sm:w-4 md:h-5 md:w-5" />
-              <input
-                type="month"
-                value={format(selectedMonth, 'yyyy-MM')}
-                onChange={(e) => handleMonthChange(new Date(e.target.value))}
-                className="border rounded px-1.5 py-0.5 sm:px-3 sm:py-2 text-[10px] sm:text-sm focus:ring-1 sm:focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-              />
+                <input
+                  type="month"
+                  value={format(selectedMonth, 'yyyy-MM')}
+                  onChange={handleMonthInputChange}
+                  className="border rounded px-1.5 py-0.5 sm:px-3 sm:py-2 text-[10px] sm:text-sm focus:ring-1 sm:focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                />
             </div>
             <PayrollButton role="admin" user={user} />
             
@@ -2996,12 +3014,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           </div>
           <div className="flex items-center gap-2">
             <Calendar className="w-5 h-5 text-gray-400" />
-            <input
-              type="month"
-              value={format(selectedMonth, 'yyyy-MM')}
-              onChange={(e) => handleMonthChange(new Date(e.target.value))}
-              className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            />
+              <input
+                type="month"
+                value={format(selectedMonth, 'yyyy-MM')}
+                onChange={handleMonthInputChange}
+                className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
           </div>
         </div>
 
