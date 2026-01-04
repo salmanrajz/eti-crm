@@ -1,5 +1,5 @@
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, addDoc, deleteDoc, doc, orderBy, limit, startAfter, serverTimestamp, DocumentSnapshot, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, addDoc, deleteDoc, doc, orderBy, limit, startAfter, serverTimestamp, DocumentSnapshot, getDoc, Timestamp } from 'firebase/firestore';
 
 export interface DNCRecord {
   id?: string;
@@ -107,6 +107,67 @@ export async function removeFromDNC(number: string): Promise<void> {
   } catch (error) {
     console.error('Error removing number from DNC:', error);
     throw error;
+  }
+}
+
+/**
+ * Get DNC numbers by date range (admin only)
+ * @param startDate - Start date for filtering
+ * @param endDate - End date for filtering
+ * @param limitCount - Maximum number of records to return
+ * @param lastDoc - Last document for pagination (optional)
+ */
+export async function getDNCNumbersByDateRange(
+  startDate: Date,
+  endDate: Date,
+  limitCount: number = 1000,
+  lastDoc?: DocumentSnapshot
+): Promise<{ records: DNCRecord[]; lastDoc: DocumentSnapshot | null; hasMore: boolean }> {
+  try {
+    // Convert dates to Firestore Timestamps
+    const startTimestamp = Timestamp.fromDate(startDate);
+    const endTimestamp = Timestamp.fromDate(endDate);
+
+    let dncQuery = query(
+      collection(db, 'dncNumbers'),
+      where('addedAt', '>=', startTimestamp),
+      where('addedAt', '<=', endTimestamp),
+      orderBy('addedAt', 'desc'),
+      limit(limitCount + 1) // Get one extra to check if there are more
+    );
+
+    if (lastDoc) {
+      dncQuery = query(
+        collection(db, 'dncNumbers'),
+        where('addedAt', '>=', startTimestamp),
+        where('addedAt', '<=', endTimestamp),
+        orderBy('addedAt', 'desc'),
+        startAfter(lastDoc),
+        limit(limitCount + 1)
+      );
+    }
+
+    const querySnapshot = await getDocs(dncQuery);
+    const docs = querySnapshot.docs;
+
+    const hasMore = docs.length > limitCount;
+    const records = docs.slice(0, limitCount).map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        addedAt: data.addedAt?.toDate ? data.addedAt.toDate() : new Date(data.addedAt)
+      } as DNCRecord;
+    });
+
+    return {
+      records,
+      lastDoc: hasMore ? docs[limitCount - 1] : null,
+      hasMore
+    };
+  } catch (error) {
+    console.error('Error getting DNC numbers by date range:', error);
+    return { records: [], lastDoc: null, hasMore: false };
   }
 }
 

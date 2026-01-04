@@ -59,7 +59,7 @@ import { NumberPoolPagination, paginationUtils } from '../../utils/pagination';
 import { numberPoolManager } from '../../utils/numberPoolManager';
 import { unifiedSearch } from '../../utils/unifiedSearch';
 import { useAuthStore } from '../../store/authStore';
-import { NumberPool as NumberPoolType, NumberStatus } from '../../types';
+import { NumberPool as NumberPoolType, NumberStatus, ActivatedNumber } from '../../types';
 import { toast } from 'react-hot-toast';
 import { useSearchParams } from 'react-router-dom';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -1395,6 +1395,71 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
   }, [isAdmin]);
 
+  // Helper function to search activatedNumbers collection (admin and coordinator only)
+  const searchActivatedNumbers = useCallback(async (searchTerm: string, category: string, endsWith: boolean) => {
+    if (!isAdmin() && user?.role !== 'coordinator') {
+      return [];
+    }
+
+    try {
+      const activatedNumbersRef = collection(db, 'activatedNumbers');
+      const cleanTerm = searchTerm.trim();
+      const isNumeric = /^\d+$/.test(cleanTerm);
+
+      let activatedQuery: any = activatedNumbersRef;
+      const constraints: any[] = [];
+
+      // Apply category filter if not 'all'
+      if (category !== 'all') {
+        constraints.push(where('category', '==', category));
+      }
+
+      // Build search query based on search type
+      if (isNumeric) {
+        // For numeric searches, check if it's an "ends with" search
+        if (endsWith && /^\d{2,5}$/.test(cleanTerm)) {
+          const length = cleanTerm.length;
+          const fieldName = length === 2 ? 'last2Digits' :
+                           length === 3 ? 'last3Digits' :
+                           length === 4 ? 'last4Digits' :
+                           'last5Digits';
+          constraints.push(where(fieldName, '==', cleanTerm));
+          constraints.push(orderBy('number'));
+        } else {
+          // Search in number field (contains) - requires orderBy
+          constraints.push(where('number', '>=', cleanTerm));
+          constraints.push(where('number', '<=', cleanTerm + '\uf8ff'));
+          constraints.push(orderBy('number'));
+        }
+      } else {
+        // For non-numeric searches, search in code field
+        constraints.push(where('code', '>=', cleanTerm.toLowerCase()));
+        constraints.push(where('code', '<=', cleanTerm.toLowerCase() + '\uf8ff'));
+        constraints.push(orderBy('code'));
+      }
+
+      constraints.push(limit(500));
+      activatedQuery = query(activatedNumbersRef, ...constraints);
+
+      const snapshot = await getDocs(activatedQuery);
+      const activatedNumbers = snapshot.docs.map(doc => {
+        const data = doc.data() as any;
+        return {
+          ...data,
+          id: doc.id,
+          status: 'activated' as NumberStatus,
+          isActivated: true // Flag to identify activated numbers
+        } as NumberPoolType & { isActivated?: boolean };
+      });
+
+      return activatedNumbers;
+    } catch (error) {
+      console.error('Error searching activated numbers:', error);
+      // If query fails (e.g., missing index), return empty array
+      return [];
+    }
+  }, [isAdmin, user?.role]);
+
   const performSearch = useCallback(async (loadMore: boolean = false) => {
     if (loadMore) {
       setIsLoadingMore(true);
@@ -1430,6 +1495,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           'all', // Always search all categories
           endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         );
+
+        // Also search activatedNumbers collection if admin or coordinator (search all categories)
+        const activatedResults = await searchActivatedNumbers(
+          debouncedSearchTerm,
+          'all', // Always search all categories
+          endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
+        );
         
         // Avoid race conditions: only apply if term hasn't changed
         if (termAtStart === debouncedSearchTerm) {
@@ -1437,6 +1509,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           
           // Add deleted numbers to results (they already have status 'returned')
           filteredResults = [...filteredResults, ...deletedResults];
+
+          // Add activated numbers to results (they already have status 'activated')
+          filteredResults = [...filteredResults, ...activatedResults];
           
           // Store the original unfiltered results for in-memory filtering
           const originalUnfilteredResults = [...filteredResults];
@@ -1543,7 +1618,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         setIsLoadingMore(false);
         }
       }
-  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers]);
+  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers]);
 
   // DISABLED: Real-time listeners for search results
   // Search already fetches fresh data, no need for additional real-time listeners

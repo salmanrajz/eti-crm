@@ -206,6 +206,19 @@ export interface DeletedNumber extends NumberPool {
   status: 'returned';
 }
 
+/**
+ * Activated Number - stores numbers that were activated from numberPool
+ * Contains all original number data plus activation metadata
+ */
+export interface ActivatedNumber extends NumberPool {
+  activatedAt: Date;
+  activatedBy: string;
+  originalId: string;
+  originalCollection: 'numberPool';
+  leadId: string; // The lead that activated this number
+  status: 'activated';
+}
+
 export interface CustomerNumber {
   number: string;
   alternativeNumber?: string;

@@ -57,7 +57,7 @@ import { useAuthStore } from '../store/authStore';
  * Available action types for number pool logging
  * Covers all major operations that can be performed on numbers
  */
-export type NumberLogAction =
+export type NumberLogAction = 
   | 'created'                    // Number added to pool
   | 'updated'                    // General number updates
   | 'reserved'                   // Number reserved by agent

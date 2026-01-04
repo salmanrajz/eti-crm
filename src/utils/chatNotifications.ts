@@ -94,20 +94,20 @@ export async function sendChatMessageWhatsAppNotification(
     // Extended retry logic for new leads - leadNumber generation might be asynchronous
     // This addresses the issue where new lead notifications show "N/A" instead of proper lead number
     while (leadNumberRetry < maxRetries && (!latestLead.leadNumber || latestLead.leadNumber === latestLead.id)) {
-      try {
-        const leadRef = doc(db, 'leads', lead.id);
-        const leadDoc = await getDoc(leadRef);
-        if (leadDoc.exists()) {
-          latestLead = { id: leadDoc.id, ...leadDoc.data() } as Lead;
-        }
+    try {
+      const leadRef = doc(db, 'leads', lead.id);
+      const leadDoc = await getDoc(leadRef);
+      if (leadDoc.exists()) {
+        latestLead = { id: leadDoc.id, ...leadDoc.data() } as Lead;
+      }
 
         // For new leads, use longer delays as leadNumber generation might be asynchronous
         if ((!latestLead.leadNumber || latestLead.leadNumber === latestLead.id) && leadNumberRetry < maxRetries - 1) {
           await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second for new leads
         }
-      } catch (error) {
+    } catch (error) {
         console.error('Error fetching latest lead data for new lead:', error);
-        // Continue with the provided lead if fetch fails
+      // Continue with the provided lead if fetch fails
         break;
       }
       leadNumberRetry++;
