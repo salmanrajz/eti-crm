@@ -1062,10 +1062,27 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     
     // Handle manager-assigned verified and follow_up leads - they should show when statusFilter is 'verified' (Unassigned Leads)
     if (!matchesStatus && statusFilter === 'verified') {
-      // Show manager-assigned verified and follow_up leads, and assigned_to_cord leads in the "verified" filter (Unassigned Leads)
-      matchesStatus = (lead.status === 'verified' && lead.managerAssigned === true) ||
-                      (lead.status === 'follow_up' && lead.managerAssigned === true) ||
-                      (lead.status === 'assigned_to_cord');
+      // Show manager-assigned verified and follow_up leads, and assigned_to_cord leads, and later leads scheduled for today in the "verified" filter (Unassigned Leads)
+      const isManagerAssigned = (lead.status === 'verified' && lead.managerAssigned === true) ||
+                               (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+                               (lead.status === 'assigned_to_cord');
+
+      // Include later leads scheduled for today
+      const isLaterToday = lead.status === 'later' && lead.scheduledFor && (() => {
+        const todayDate = new Date();
+        todayDate.setHours(0, 0, 0, 0);
+        const scheduledRaw: any = lead.scheduledFor;
+        const scheduledDate =
+          scheduledRaw && typeof scheduledRaw.toDate === 'function'
+            ? scheduledRaw.toDate()
+            : scheduledRaw instanceof Date
+              ? scheduledRaw
+              : new Date(scheduledRaw);
+        scheduledDate.setHours(0, 0, 0, 0);
+        return scheduledDate.getTime() === todayDate.getTime();
+      })();
+
+      matchesStatus = isManagerAssigned || isLaterToday;
     }
     
     if (!matchesStatus && statusFilter === 'yesterday') {
