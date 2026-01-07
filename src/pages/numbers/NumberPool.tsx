@@ -2171,7 +2171,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return;
     }
     // Validate passcode for admin/coordinator
-    if ((isAdmin() || isCoordinator) && !editPoolPasscode.trim()) {
+    if ((isAdmin() || isCoordinator()) && !editPoolPasscode.trim()) {
       toast.error('Passcode is required');
       return;
     }
@@ -2229,11 +2229,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         };
 
         // Add passcode for admin/coordinator
-        if (isAdmin() || isCoordinator) {
+        if (isAdmin() || isCoordinator()) {
           numberPoolData.passcode = editPoolPasscode.trim();
         }
         // Handle team visibility
-        if (isAdmin() || isCoordinator) {
+        if (isAdmin() || isCoordinator()) {
           if (editPoolTeamVisibility.trim()) {
             numberPoolData.teamVisibility = editPoolTeamVisibility.trim();
           } else {
@@ -2341,7 +2341,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       };
 
       // If status is being set to 'open', clear all reserved data (for admin or coordinator)
-      if (editPoolStatus === 'open' && (isAdmin() || isCoordinator || user?.role === 'coordinator')) {
+      if (editPoolStatus === 'open' && (isAdmin() || isCoordinator() || user?.role === 'coordinator')) {
         numberData.reservedBy = null;
         numberData.reservedAt = null;
         numberData.expiresAt = null;
@@ -2355,11 +2355,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       }
 
       // Add passcode for admin/coordinator
-      if (isAdmin() || isCoordinator) {
+      if (isAdmin() || isCoordinator()) {
         numberData.passcode = editPoolPasscode.trim();
       }
       // Handle team visibility - set to empty string if cleared, or to the selected team ID
-      if (isAdmin() || isCoordinator) {
+      if (isAdmin() || isCoordinator()) {
       if (editPoolTeamVisibility.trim()) {
         numberData.teamVisibility = editPoolTeamVisibility.trim();
         } else {
@@ -4926,7 +4926,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   </div>
 
                   {/* Security & Access Card */}
-                  {(isAdmin() || isCoordinator) && (
+                  {(isAdmin() || isCoordinator()) && (
                     <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg p-4 mb-3 border border-blue-200/50">
                       <div className="flex items-center mb-3">
                         <div className="p-1.5 bg-blue-100 rounded-md mr-2">
@@ -4937,7 +4937,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {/* Passcode Field */}
-                        {(isAdmin() || isCoordinator) && (
+                        {(isAdmin() || isCoordinator()) && (
                           <div className="space-y-2">
                             <label className="text-sm font-semibold text-gray-700 flex items-center">
                               <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
@@ -4962,7 +4962,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         )}
 
                         {/* Team Visibility Field */}
-                        {isCoordinator && (
+                        {isCoordinator() && (
                           <div className="space-y-2">
                             <label className="text-sm font-semibold text-gray-700 flex items-center">
                               <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-2"></span>
@@ -5048,7 +5048,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           return;
                         }
                         // Validate passcode for admin/coordinator
-                        if ((isAdmin() || isCoordinator) && !newPoolPasscode.trim()) {
+                        if ((isAdmin() || isCoordinator()) && !newPoolPasscode.trim()) {
                           toast.error('Passcode is required');
                           return;
                         }
@@ -5093,7 +5093,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           };
 
                           // Add passcode for admin/coordinator
-                          if (isAdmin() || isCoordinator) {
+                          if (isAdmin() || isCoordinator()) {
                             numberData.passcode = newPoolPasscode.trim();
                           }
                           // Only add team visibility if it has a value
@@ -5368,7 +5368,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   </div>
 
                   {/* Security & Access Card */}
-                  {(isAdmin() || isCoordinator) && (
+                  {(isAdmin() || isCoordinator()) && (
                     <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg p-4 mb-3 border border-blue-200/50">
                       <div className="flex items-center mb-3">
                         <div className="p-1.5 bg-blue-100 rounded-md mr-2">
@@ -5379,7 +5379,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {/* Passcode Field */}
-                        {(isAdmin() || isCoordinator) && (
+                        {(isAdmin() || isCoordinator()) && (
                           <div className="space-y-1.5 sm:space-y-2">
                             <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
                               <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full mr-1.5 sm:mr-2"></span>
@@ -5401,7 +5401,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         )}
 
                         {/* Team Visibility Field */}
-                        {(isAdmin() || isCoordinator) && (
+                        {(isAdmin() || isCoordinator()) && (
                           <div className="space-y-1.5 sm:space-y-2">
                             <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center flex-wrap gap-1">
                               <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-green-500 rounded-full"></span>
@@ -5666,7 +5666,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     <SortIcon field="group" />
                   </div>
                 </th>
-                {(isAdmin() || isCoordinator) && (
+                {(isAdmin() || isCoordinator()) && (
                   <>
                     <th 
                       className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
@@ -5697,7 +5697,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     Time Left
                   </div>
                 </th>
-                {(isAdmin() || isCoordinator) && (
+                {(isAdmin() || isCoordinator()) && (
                   <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     <div className="flex items-center">
                       <UserCheck className="h-4 w-4 mr-1" />
@@ -5782,7 +5782,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       <td className="px-6 py-4 whitespace-nowrap">
         <div className="text-sm text-gray-500">{number.group || '-'}</div>
       </td>
-                    {(isAdmin() || isCoordinator) && (
+                    {(isAdmin() || isCoordinator()) && (
                       <>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="text-sm text-gray-500">{number.passcode || '-'}</div>
@@ -5868,7 +5868,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <div className="text-sm text-gray-400">-</div>
         )}
       </td>
-                    {(isAdmin() || isCoordinator) && (
+                    {(isAdmin() || isCoordinator()) && (
         <td className="px-6 py-4 whitespace-nowrap">
           {number.status !== 'open' && (number.reservedBy || number.claimingAgentId || number.originalAgentId || number.leadId) ? (
             <AgentTeamInfo 
@@ -6027,7 +6027,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           {/* Admin can edit all numbers; coordinator limited by status */}
                         {(
               isAdmin() ||
-              (isCoordinator &&
+              (isCoordinator() &&
                 ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
             ) && (
             <motion.button
