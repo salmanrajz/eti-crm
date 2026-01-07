@@ -627,7 +627,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           const now = new Date();
           let monthStart: Date;
           let monthEnd: Date;
-
+          
           if (selectedMonth) {
             const [year, month] = selectedMonth.split('-').map(Number);
             monthStart = new Date(year, month - 1, 1, 0, 0, 0, 0);
@@ -1064,8 +1064,8 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
     if (!matchesStatus && statusFilter === 'verified') {
       // Show manager-assigned verified and follow_up leads, and assigned_to_cord leads, and later leads scheduled for today in the "verified" filter (Unassigned Leads)
       const isManagerAssigned = (lead.status === 'verified' && lead.managerAssigned === true) ||
-                               (lead.status === 'follow_up' && lead.managerAssigned === true) ||
-                               (lead.status === 'assigned_to_cord');
+                      (lead.status === 'follow_up' && lead.managerAssigned === true) ||
+                      (lead.status === 'assigned_to_cord');
 
       // Include later leads scheduled for today
       const isLaterToday = lead.status === 'later' && lead.scheduledFor && (() => {
@@ -1887,7 +1887,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         </div>
       </div>
 
-        {/* Group Targets for coordinators */}
+      {/* Group Targets for coordinators */}
        <div className="grid grid-cols-3 gap-3 mb-8">
         {(
           coordinatorType === 'all'
@@ -1915,10 +1915,10 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                       grp === 'G1' ? 'text-blue-700' :
                       grp === 'G2' ? 'text-green-700' : 'text-purple-700'
                     }`} />
-                  </div>
-                  <span className="text-xs sm:text-sm lg:text-base font-bold text-gray-900">{grp} Group</span>
                 </div>
+                  <span className="text-xs sm:text-sm lg:text-base font-bold text-gray-900">{grp} Group</span>
               </div>
+                </div>
               {/* Phone layout: stacked */}
               <div className="space-y-1.5 sm:space-y-2 lg:hidden">
                 <div className="flex items-center justify-between">
@@ -1932,29 +1932,29 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] sm:text-xs text-gray-500">Remaining</span>
                   <span className="text-xs sm:text-sm font-bold text-amber-600">{remaining}</span>
-                </div>
-                {grp === 'G2' && (
+              </div>
+              {grp === 'G2' && (
                  <div className="mt-3 pt-2 border-t border-gray-100 hidden sm:block">
                    <div className="flex items-center justify-center gap-2">
-                     {(() => {
-                       const breakdown = groupBreakdown[grp] || { newCount: 0, mnp: 0, p2p: 0 };
-                       return (
-                         <>
+                  {(() => {
+                    const breakdown = groupBreakdown[grp] || { newCount: 0, mnp: 0, p2p: 0 };
+                    return (
+                      <>
                            <span className="px-2 py-1 rounded-md bg-blue-50 text-blue-700 font-medium text-xs">
-                             New: {breakdown.newCount}
-                           </span>
+                          New: {breakdown.newCount}
+                        </span>
                            <span className="px-2 py-1 rounded-md bg-green-50 text-green-700 font-medium text-xs">
-                             MNP: {breakdown.mnp}
-                           </span>
+                          MNP: {breakdown.mnp}
+                        </span>
                            <span className="px-2 py-1 rounded-md bg-purple-50 text-purple-700 font-medium text-xs">
-                             P2P: {breakdown.p2p}
-                           </span>
-                        </>
-                      );
-                    })()}
+                          P2P: {breakdown.p2p}
+                        </span>
+                      </>
+                    );
+                  })()}
                   </div>
-                 </div>
-                )}
+                </div>
+              )}
               </div>
 
               {/* Desktop layout: labels row, values row */}
@@ -2010,7 +2010,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
       {/* Show StatusChecksSection only when showStatusChecks is true and coordinator is All Groups */}
       {showStatusChecks && coordinatorType === 'all' && <StatusChecksSection />}
 
-        {/* Stats Grid */}
+      {/* Stats Grid */}
        <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6 mb-8">
         {stats.map((stat) => (
           <button
@@ -2023,11 +2023,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
           <div className="flex items-center">
               <div className={`p-2 sm:p-3 rounded-xl ${stat.color}`}>
                 <stat.icon className="h-4 w-4 sm:h-6 sm:w-6 text-white" />
-              </div>
+            </div>
              <div className="ml-2 sm:ml-4">
                  <h3 className="text-xs sm:text-sm font-medium text-gray-500">{stat.name}</h3>
                  <p className={`text-lg sm:text-2xl font-bold ${stat.countColor}`}>{stat.value}</p>
-             </div>
+        </div>
             </div>
           </button>
         ))}

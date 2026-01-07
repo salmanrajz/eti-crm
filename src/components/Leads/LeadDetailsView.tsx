@@ -957,6 +957,11 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     (user?.role === 'agent' &&
       user.id === lead.agentId &&
       (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
+    // Multi-team managers can edit non_verified leads from their managed teams
+    (isManager() &&
+      user?.managedTeams &&
+      user.managedTeams.includes(lead.teamId || '') &&
+      (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
     isAdmin() ||
     isCoordinator()
   );
@@ -965,8 +970,10 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const isActivationDialog = coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified';
   // Manager can assign any of their verified, follow_up, or later leads to coordinator
   // (even if previously managerAssigned) – UI should always show the option
+  // Multi-team managers can assign leads from any of their managed teams
   const canManagerAssign = (isUserManager &&
-    user?.id === lead.managerId &&
+    ((user?.id === lead.managerId) ||
+     (user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
     (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later')) ||
     (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later'));
   // Agent can also request assignment to coordinator for their own verified/follow_up/later leads
@@ -3540,8 +3547,8 @@ Language: ${lead.language || 'N/A'}`;
                 : 'Edit Lead'}
             </button>
           )}
-          {user?.role === 'agent' &&
-            user.id === lead.agentId &&
+          {((user?.role === 'agent' && user.id === lead.agentId) ||
+            (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
             (lead.status === 'non_verified' || lead.status === 'follow_verification') && (
             <button
               onClick={() => !isResubmitting && onResubmit && onResubmit()}
@@ -3561,7 +3568,9 @@ Language: ${lead.language || 'N/A'}`;
               )}
             </button>
           )}
-          {user?.role === 'agent' && user?.id === lead.agentId && !['pending_verification', 'activated', 'rejected'].includes(localStatus) && (
+          {((user?.role === 'agent' && user?.id === lead.agentId) ||
+            (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
+            !['pending_verification', 'activated', 'rejected'].includes(localStatus) && (
             <button
               onClick={() => setShowRejectDialog(true)}
               disabled={rejecting}
@@ -3579,6 +3588,10 @@ Language: ${lead.language || 'N/A'}`;
           {(() => {
             // Agents can only see chat for their own WhatsApp leads
             if (user?.role === 'agent' && user.id === lead.agentId && (lead as any).verificationMethod === 'whatsapp') {
+              return true;
+            }
+            // Multi-team managers can see chat for WhatsApp leads in their managed teams
+            if (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || '') && (lead as any).verificationMethod === 'whatsapp') {
               return true;
             }
             // Coordinators and Admins can see chat for ALL leads (they can initiate WhatsApp anytime)

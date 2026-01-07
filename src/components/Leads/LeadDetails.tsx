@@ -1699,7 +1699,11 @@ export function LeadDetails() {
                   if (!current.exists()) return;
                   const data = current.data();
                   // Allow agent resubmission for both 'non_verified' and legacy 'follow_verification' statuses
-                  if (user.role === 'agent' && (data.status === 'non_verified' || data.status === 'follow_verification')) {
+                  // Also allow multi-team managers to resubmit leads from their managed teams
+                  const canResubmit = (user.role === 'agent' && data.agentId === user.id) ||
+                    (user.role === 'manager' && user.managedTeams && user.managedTeams.includes(data.teamId || '') && (data.status === 'non_verified' || data.status === 'follow_verification'));
+
+                  if (canResubmit) {
                     // Get all numbers attached to this lead
                     const plans = (data.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
                     
@@ -1716,8 +1720,8 @@ export function LeadDetails() {
                           const numberStatus = numberData?.status;
                           const reservedBy = numberData?.reservedBy;
                           
-                          // Number is valid if it's open OR reserved by this agent
-                          const isValid = numberStatus === 'open' || reservedBy === user.id;
+                          // Number is valid if it's open OR reserved by this agent (or lead's agent for managers)
+                          const isValid = numberStatus === 'open' || reservedBy === user.id || reservedBy === data.agentId;
                           
                           if (!isValid) {
                             const reason = numberStatus === 'reserved' 

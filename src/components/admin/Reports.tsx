@@ -28,8 +28,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, getDocs, where, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { Lead, Team, User } from '../../types';
+import { Lead, Team, User, NumberPool } from '../../types';
 import { format, startOfDay, endOfDay, startOfMonth, endOfMonth, subMonths, getDaysInMonth, differenceInDays, isAfter, isBefore, isToday } from 'date-fns';
+import ExcelJS from 'exceljs';
 import { 
   BarChart3, 
   Users, 
@@ -47,7 +48,8 @@ import {
   X,
   ArrowLeft,
   User2,
-  AlertTriangle
+  AlertTriangle,
+  FileDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'react-hot-toast';
@@ -200,6 +202,9 @@ export function Reports() {
   const [selectedMonth, setSelectedMonth] = useState(new Date());
   const [loading, setLoading] = useState(true);
   const [dailyMetrics, setDailyMetrics] = useState<DailyMetrics | null>(null);
+  const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [downloadGroup, setDownloadGroup] = useState<string>('all');
+  const [downloading, setDownloading] = useState(false);
   const [monthlyMetrics, setMonthlyMetrics] = useState<MonthlyMetrics | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -1115,6 +1120,175 @@ export function Reports() {
     });
   }, [groupTargets, groupAliases]);
 
+  // Download Number Pool function
+  const handleDownloadNumberPool = async () => {
+    setDownloading(true);
+    try {
+      // Fetch all numbers from numberPool collection, excluding active and activated numbers
+      const numbersRef = collection(db, 'numberPool');
+      let queryConstraints: any[] = [];
+
+      // Add group filter if not 'all'
+      if (downloadGroup !== 'all') {
+        queryConstraints.push(where('group', '==', downloadGroup));
+      }
+
+      // Get all numbers first, then filter out active/activated numbers
+      const allNumbersQuery = query(numbersRef, ...queryConstraints);
+      const snapshot = await getDocs(allNumbersQuery);
+
+      // Filter out active and activated numbers (including struck-through numbers)
+      const filteredNumbers = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() } as NumberPool))
+        .filter(number => {
+          const status = number.status || '';
+          const isStruckThrough = number.struckThrough === true;
+
+          // Exclude numbers with these statuses or marked as struck through
+          const excludedStatuses = ['active', 'activated', 'activated_non_verified'];
+          return !excludedStatuses.includes(status) && !isStruckThrough;
+        });
+
+      if (filteredNumbers.length === 0) {
+        toast.error('No available numbers found for the selected criteria');
+        return;
+      }
+
+      // Create Excel workbook with proper formatting
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Number Pool');
+
+      // Define columns with headers
+      worksheet.columns = [
+        { header: 'Number', key: 'number', width: 15 },
+        { header: 'Category', key: 'category', width: 12 },
+        { header: 'Group', key: 'group', width: 8 },
+        { header: 'Code', key: 'code', width: 10 },
+        { header: 'Status', key: 'status', width: 15 }
+      ];
+
+      // Style the auto-generated header row
+      const headerRow = worksheet.getRow(1);
+      headerRow.eachCell((cell, colNumber) => {
+        cell.font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FF2563EB' } // Blue color
+        };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+        };
+      });
+
+      worksheet.getRow(1).height = 20;
+
+      // Add data rows with individual cell styling
+      filteredNumbers.forEach((number, index) => {
+        const rowNumber = index + 2; // +1 for header, +1 for 1-based indexing
+        const row = worksheet.addRow([
+          number.number || '',
+          number.category || '',
+          number.group || '',
+          number.code || '',
+          number.status || ''
+        ]);
+
+        // Style data row
+        row.height = 16;
+
+        // Alternate row background (only for data rows)
+        if (index % 2 === 1) { // Even rows get light gray (0-based index)
+          row.eachCell((cell) => {
+            if (cell.value) {
+              cell.fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: 'FFF8FAFC' } // Light gray
+              };
+            }
+          });
+        }
+
+        // Style individual cells
+        row.eachCell((cell, colNumber) => {
+          if (cell.value) {
+            // Set alignment for all data cells
+            cell.alignment = { horizontal: 'left', vertical: 'middle' };
+
+            // Add borders to cells with data
+            cell.border = {
+              top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+              left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+              bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+              right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+            };
+
+            // Special styling for status column (column 5)
+            if (colNumber === 5) {
+              const statusValue = cell.value?.toString() || '';
+              switch (statusValue.toLowerCase()) {
+                case 'open':
+                  cell.font = { color: { argb: 'FF059669' }, bold: true };
+                  break;
+                case 'verified':
+                  cell.font = { color: { argb: 'FF0891B2' }, bold: true };
+                  break;
+                case 'assigned':
+                  cell.font = { color: { argb: 'FF7C3AED' }, bold: true };
+                  break;
+                case 'follow_up':
+                  cell.font = { color: { argb: 'FFF59E0B' }, bold: true };
+                  break;
+                case 'non_verified':
+                  cell.font = { color: { argb: 'FFDC2626' }, bold: true };
+                  break;
+                case 'rejected':
+                  cell.font = { color: { argb: 'FFDC2626' }, bold: true };
+                  break;
+                case 'later':
+                  cell.font = { color: { argb: 'FF7C2D12' }, bold: true };
+                  break;
+                default:
+                  cell.font = { color: { argb: 'FF374151' } };
+              }
+            }
+          }
+        });
+      });
+
+      // Generate and download Excel file
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+
+      const groupName = downloadGroup === 'all' ? 'All_Groups' : downloadGroup;
+      const timestamp = format(new Date(), 'yyyy-MM-dd_HH-mm-ss');
+      link.setAttribute('download', `number_pool_${groupName}_${timestamp}.xlsx`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      toast.success(`Downloaded ${filteredNumbers.length} numbers successfully`);
+      setShowDownloadModal(false);
+    } catch (error) {
+      console.error('Error downloading number pool:', error);
+      toast.error('Failed to download number pool data');
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   if (loading && !dailyMetrics && !monthlyMetrics) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
@@ -1741,6 +1915,15 @@ export function Reports() {
               >
                   <RefreshCw className={`h-3 w-3 sm:h-4 sm:w-4 ${refreshing ? 'animate-spin' : ''}`} />
                   <span className="hidden sm:inline">Refresh</span>
+              </button>
+              <button
+                onClick={() => setShowDownloadModal(true)}
+                disabled={downloading}
+                className="px-3 sm:px-4 md:px-5 py-1.5 sm:py-2 md:py-2.5 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg sm:rounded-xl hover:from-green-600 hover:to-emerald-700 transition-all disabled:opacity-50 flex items-center gap-1.5 sm:gap-2 shadow-lg hover:shadow-xl text-xs sm:text-sm md:text-base"
+              >
+                <FileDown className={`h-3 w-3 sm:h-4 sm:w-4 ${downloading ? 'animate-pulse' : ''}`} />
+                <span className="hidden sm:inline">Download Numbers</span>
+                <span className="sm:hidden">Download</span>
               </button>
             </div>
           </div>
@@ -2750,6 +2933,97 @@ export function Reports() {
                       </div>
                     </>
                   )}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Download Number Pool Modal */}
+        <AnimatePresence>
+          {showDownloadModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
+              onClick={() => setShowDownloadModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-lg shadow-xl max-w-md w-full"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-green-100 rounded-lg">
+                        <FileDown className="h-6 w-6 text-green-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-semibold text-gray-900">Download Number Pool</h3>
+                        <p className="text-sm text-gray-600">Download available numbers as Excel file</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowDownloadModal(false)}
+                      disabled={downloading}
+                      className="text-gray-400 hover:text-gray-600 disabled:opacity-50"
+                    >
+                      <X className="h-6 w-6" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Select Group
+                      </label>
+                      <select
+                        value={downloadGroup}
+                        onChange={(e) => setDownloadGroup(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                        disabled={downloading}
+                      >
+                        <option value="all">All Groups</option>
+                        <option value="G1">G1</option>
+                        <option value="G2">G2</option>
+                        <option value="G3">G3</option>
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Download numbers from the selected group only, or all groups
+                      </p>
+                    </div>
+
+                    <div className="flex gap-3 pt-4">
+                      <button
+                        onClick={() => setShowDownloadModal(false)}
+                        disabled={downloading}
+                        className="flex-1 px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-md transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleDownloadNumberPool}
+                        disabled={downloading}
+                        className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-md transition-colors flex items-center justify-center gap-2"
+                      >
+                        {downloading ? (
+                          <>
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                            Downloading...
+                          </>
+                        ) : (
+                          <>
+                            <FileDown className="h-4 w-4" />
+                            Download Excel
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </motion.div>
             </motion.div>

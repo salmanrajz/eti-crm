@@ -295,6 +295,7 @@ interface FormErrors {
   customerName?: string;
   customerNumber?: string;
   customerAge?: string;
+  agentId?: string;
   homeWifiEmail?: string;
   homeWifiId?: string;
   locationUrl?: string;
@@ -349,6 +350,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     initialData?.plans?.[0]?.category || 'Standard'
   );
   const [showNumberPool, setShowNumberPool] = useState(true);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>(user?.id || '');
+  const [managedAgents, setManagedAgents] = useState<User[]>([]);
   const [teamManagerId, setTeamManagerId] = useState<string | null>(null);
   const planErrorRef = useRef<HTMLDivElement | null>(null);
   const [showSuccessPopup, setShowSuccessPopup] = useState(false);
@@ -419,6 +422,33 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       setSelectedPlans(initialData.plans as unknown as PlanSelection[]);
     }
   }, [isEditing, initialData?.plans]);
+
+  // Load agents from managed teams for multi-team managers
+  useEffect(() => {
+    const loadManagedAgents = async () => {
+      if (user?.role === 'manager' && user.managedTeams && user.managedTeams.length > 0) {
+        try {
+          const agentsRef = collection(db, 'users');
+          const agentsQuery = query(
+            agentsRef,
+            where('role', '==', 'agent'),
+            where('teamId', 'in', user.managedTeams)
+          );
+          const agentsSnapshot = await getDocs(agentsQuery);
+          const agents = agentsSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          } as User));
+          setManagedAgents(agents);
+        } catch (error) {
+          console.error('Error loading managed agents:', error);
+          toast.error('Failed to load agents');
+        }
+      }
+    };
+
+    loadManagedAgents();
+  }, [user]);
 
   // Filter and group plans based on their category field from Firebase
   // The plan's `category` field stores the number category (e.g., "Standard", "Silver", "Gold", "Platinum")
@@ -924,6 +954,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         errors.customerAge = 'Age must be 21 or above';
       }
     }
+
+    // Agent selection for multi-team managers
+    if (user?.role === 'manager' && user.managedTeams && user.managedTeams.length > 0) {
+      if (!selectedAgentId || selectedAgentId.trim().length === 0) {
+        errors.agentId = 'Please select an agent to assign this lead to';
+      } else {
+        // For multi-team managers, ensure the selected agent is either themselves or from their managed teams
+        const isValidAgent = selectedAgentId === user.id ||
+          managedAgents.some(agent => agent.id === selectedAgentId);
+        if (!isValidAgent) {
+          errors.agentId = 'Please select a valid agent from your managed teams';
+        }
+      }
+    }
     // Date & Time (skip strict validation for coordinators when editing)
     const skipDateTimeValidation = isEditing && user?.role === 'coordinator';
     if (!skipDateTimeValidation) {
@@ -1125,29 +1169,41 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           }
           return p;
         }),
-        agentId: user!.id,
-        teamId: user!.teamId,
+        agentId: selectedAgentId || user!.id,
+        teamId: (() => {
+          // For multi-team managers, use the selected agent's team
+          if (user?.role === 'manager' && user.managedTeams && selectedAgentId !== user.id) {
+            const selectedAgent = managedAgents.find(agent => agent.id === selectedAgentId);
+            return selectedAgent?.teamId || user.teamId;
+          }
+          return user!.teamId;
+        })(),
         managerId: teamManagerId || null,
         ...(assignedVerifierId && { verifierId: assignedVerifierId }),
         ...(isEditing ? {} : { createdAt: new Date() }),
         updatedAt: new Date(),
         startDate: new Date(formData.startDate),
         status: currentStatus,
+      };
+
+      // Add additional fields to leadData
+      const finalLeadData = {
+        ...leadData,
         sharedWith: formData.sharedWith ? [formData.sharedWith] : [],
         remarks: formData.remarks || 'Please Verify'
       };
       
       // Store selected number as separate field (using a custom field name since Lead interface doesn't have it)
-      (leadData as any).selectedNumber = selectedNumber;
+      (finalLeadData as any).selectedNumber = selectedNumber;
 
       // Remove any remaining undefined values
-      let finalLeadData = Object.fromEntries(
-        Object.entries(leadData).filter(([_, value]) => value !== undefined)
+      let cleanedLeadData = Object.fromEntries(
+        Object.entries(finalLeadData).filter(([_, value]) => value !== undefined)
       ) as Partial<Lead>;
       
       // For coordinators editing, only include allowed fields: customerName, customerAddress, customerAge
       if (isCoordinatorEditing && isEditing) {
-        finalLeadData = {
+        cleanedLeadData = {
           customerName: formData.customerName,
           customerAddress: formData.customerAddress,
           customerAge: parseInt(formData.customerAge, 10),
@@ -1157,7 +1213,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
       if (isEditing && onSave) {
         try {
-        await onSave(finalLeadData);
+        await onSave(cleanedLeadData);
         } catch (error) {
           console.error('Error saving lead:', error);
           toast.error(error instanceof Error ? error.message : 'Failed to save lead. Please try again.');
@@ -1165,8 +1221,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           return;
         }
       } else {
-        
-        const docRef = await addDoc(collection(db, 'leads'), finalLeadData);
+        const docRef = await addDoc(collection(db, 'leads'), cleanedLeadData);
         
         // Log lead creation
         try {
@@ -1218,7 +1273,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 status: 'pending_verification',
                 lastStatusChange: new Date(),
                 leadId: docRef.id,
-                reservedBy: user?.id || null
+                reservedBy: selectedAgentId || user?.id || null
               });
               
               // Log the lead creation action
@@ -1750,6 +1805,31 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               onChange={(e) => setFormData(prev => ({ ...prev, gender: e.target.value }))}
             />
           </FormSection>
+
+          {/* Agent Selection for Multi-Team Managers */}
+          {user?.role === 'manager' && user.managedTeams && user.managedTeams.length > 0 && (
+            <FormSection
+              icon={Users}
+              title="Agent Assignment"
+              description="Select the agent this lead should be assigned to"
+            >
+              <FormSelect
+                label="Assign to Agent"
+                icon={Users}
+                required
+                options={[
+                  { value: '', label: 'Select an agent...' },
+                  ...managedAgents.map(agent => ({
+                    value: agent.id,
+                    label: `${agent.name} (${agent.email})`
+                  }))
+                ]}
+                value={selectedAgentId}
+                onChange={(e) => setSelectedAgentId(e.target.value)}
+                error={formErrors.agentId}
+              />
+            </FormSection>
+          )}
 
           <FormSection
             icon={Building2}

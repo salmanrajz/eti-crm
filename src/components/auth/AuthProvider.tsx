@@ -130,6 +130,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               verifierGroups: userData.verifierGroups,
               phoneNumbers: userData.phoneNumbers,
               isActive: userData.isActive,
+              managedTeams: userData.managedTeams, // Add managedTeams for multi-team managers
               // Handle potentially missing timestamp fields
               createdAt: userData.createdAt?.toDate() || new Date(),
               updatedAt: userData.updatedAt?.toDate() || new Date()

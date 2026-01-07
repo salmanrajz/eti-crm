@@ -585,6 +585,7 @@ export function LeadList() {
             ? fixedCachedLeads.filter((lead: Lead) => lead.agentId === user.id)
             : fixedCachedLeads;
 
+
           setLeads(filteredCachedLeads);
           setLastDoc(cachedData.lastDoc || null);
           setHasMore(cachedData.hasMore);
@@ -611,6 +612,7 @@ export function LeadList() {
       let constraints = [];
 
       // Add role-based filters
+
       if (user.role === 'agent' || user.role === 'freelancer') {
         constraints.push(where('agentId', '==', user.id));
       } else if (isVerifier()) {
@@ -620,8 +622,15 @@ export function LeadList() {
             'activated_non_verified'
           ])
         );
-      } else if (isManager() && user.teamId) {
+      } else if (isManager()) {
+        // Check if user is a multi-team manager
+        if (user.managedTeams && user.managedTeams.length > 0) {
+          // Multi-team manager: can see leads from all assigned teams
+          constraints.push(where('teamId', 'in', user.managedTeams));
+        } else if (user.teamId) {
+          // Regular manager: can see leads from their single team
         constraints.push(where('teamId', '==', user.teamId));
+        }
       }
 
       // Add ordering
@@ -2239,7 +2248,7 @@ export function LeadList() {
                 <span className="sm:hidden">Delete ({selectedLeads.length})</span>
               </motion.button>
           )}
-          {user?.role === 'agent' && (
+          {(user?.role === 'agent' || (isManager() && user?.managedTeams && user.managedTeams.length > 0)) && (
               <motion.div
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
