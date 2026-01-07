@@ -60,7 +60,7 @@ export function AppRoutes() {
         <Route
           path="leads/create"
           element={
-            <RoleBasedRoute allowedRoles={['agent', 'freelancer']}>
+            <RoleBasedRoute allowedRoles={['agent', 'freelancer', 'manager']}>
               <CreateLead />
             </RoleBasedRoute>
           }

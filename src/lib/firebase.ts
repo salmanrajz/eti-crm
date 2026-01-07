@@ -135,6 +135,7 @@ interface CreateUserOptions {
   teamId?: string;
   managerId?: string;
   coordinatorType?: CoordinatorType;
+  managedTeams?: string[];
 }
 
 export async function createUserWithDocument(
@@ -151,6 +152,7 @@ export async function createUserWithDocument(
     if (options.teamId) extra.teamId = options.teamId;
     if (options.managerId) extra.managerId = options.managerId;
     if (options.coordinatorType) extra.coordinatorType = options.coordinatorType;
+    if (options.managedTeams) extra.managedTeams = options.managedTeams;
     const res = await callable({ email, password, role, name, extra });
     return res.data as any;
   } catch (error: any) {

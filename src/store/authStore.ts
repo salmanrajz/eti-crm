@@ -28,6 +28,9 @@
 
 import { create } from 'zustand';
 import { User } from '../types';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { auth } from '../lib/firebase';
 
 /**
  * Authentication state interface defining the shape of auth-related state
@@ -37,7 +40,8 @@ interface AuthState {
   loading: boolean;                     // Loading state for auth operations
   setUser: (user: User | null) => void; // Function to update user state
   setLoading: (loading: boolean) => void; // Function to update loading state
-  
+  refreshUser: () => Promise<void>;     // Function to refresh user data from Firestore
+
   // Role-based helper methods for conditional rendering and logic
   isAdmin: () => boolean;
   isManager: () => boolean;
@@ -58,6 +62,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   // State setters for updating authentication state
   setUser: (user) => set({ user }),
   setLoading: (loading) => set({ loading }),
+
+  // Refresh user data from Firestore
+  refreshUser: async () => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) return;
+
+    try {
+      const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
+      if (userDoc.exists()) {
+        const userData = {
+          id: userDoc.id,
+          ...userDoc.data(),
+          createdAt: userDoc.data().createdAt?.toDate(),
+          updatedAt: userDoc.data().updatedAt?.toDate()
+        } as User;
+        set({ user: userData });
+      }
+    } catch (error) {
+      console.error('Error refreshing user data:', error);
+    }
+  },
   
   // Role checking helper methods for component logic
   isAdmin: () => get().user?.role === 'admin',

@@ -132,7 +132,7 @@ import { ChatBox } from '../../components/ChatBox';
 const AgentTeamInfo = ({ agentId, leadId }: { agentId?: string; leadId?: string }) => {
   const [agentInfo, setAgentInfo] = useState<{ name: string; teamName: string } | null>(null);
   const [loading, setLoading] = useState(true);
-  const { user, isAdmin } = useAuthStore();
+  const { user, isAdmin, isCoordinator } = useAuthStore();
 
   useEffect(() => {
     const fetchAgentInfo = async () => {
@@ -438,7 +438,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [loading, setLoading] = useState(true);
   const [showPool, setShowPool] = useState(true);
   const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
-  const { user, isAdmin } = useAuthStore();
+  const { user, isAdmin, isCoordinator } = useAuthStore();
   
   // Track claim hours state for real-time updates
   const [isWithinClaimWindow, setIsWithinClaimWindow] = useState(isWithinClaimHours());
@@ -557,7 +557,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [searchParams] = useSearchParams();
   const numberIdFromUrl = searchParams.get('numberId');
   const [statusChecks, setStatusChecks] = useState<StatusCheck[]>([]);
-  const [isCoordinator, setIsCoordinator] = useState(false);
   const [agentLeadNumberIds, setAgentLeadNumberIds] = useState<Set<string>>(new Set());
   const [showDuplicateDialog, setShowDuplicateDialog] = useState(false);
   const [duplicateNumbers, setDuplicateNumbers] = useState<Array<{ number: string; entries: NumberPoolType[] }>>([]);
@@ -1330,9 +1329,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, endsWithToggle]);
 
   // Perform search function - accessible for "Load More" button
-  // Helper function to search deletedNumbers collection (admin only)
+  // Helper function to search deletedNumbers collection (admin and coordinator)
   const searchDeletedNumbers = useCallback(async (searchTerm: string, category: string, endsWith: boolean) => {
-    if (!isAdmin()) {
+    if (!isAdmin() && !isCoordinator()) {
       return [];
     }
 
@@ -1403,7 +1402,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
     try {
       const activatedNumbersRef = collection(db, 'activatedNumbers');
-      const cleanTerm = searchTerm.trim();
+      const cleanTerm = searchTerm.trim().toLowerCase();
       const isNumeric = /^\d+$/.test(cleanTerm);
 
       let activatedQuery: any = activatedNumbersRef;
@@ -1414,8 +1413,15 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         constraints.push(where('category', '==', category));
       }
 
+      // Special case: if searching for "activated", return all activated numbers
+      if (cleanTerm === 'activated') {
+        // Get all activated numbers (with category filter if specified)
+        constraints.push(orderBy('activatedAt', 'desc'));
+        constraints.push(limit(1000)); // Higher limit for "show all" searches
+        activatedQuery = query(activatedNumbersRef, ...constraints);
+      }
       // Build search query based on search type
-      if (isNumeric) {
+      else if (isNumeric) {
         // For numeric searches, check if it's an "ends with" search
         if (endsWith && /^\d{2,5}$/.test(cleanTerm)) {
           const length = cleanTerm.length;
@@ -1431,14 +1437,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           constraints.push(where('number', '<=', cleanTerm + '\uf8ff'));
           constraints.push(orderBy('number'));
         }
+        constraints.push(limit(500));
+        activatedQuery = query(activatedNumbersRef, ...constraints);
       } else {
         // For non-numeric searches, search in code field
-        constraints.push(where('code', '>=', cleanTerm.toLowerCase()));
-        constraints.push(where('code', '<=', cleanTerm.toLowerCase() + '\uf8ff'));
+        constraints.push(where('code', '>=', cleanTerm));
+        constraints.push(where('code', '<=', cleanTerm + '\uf8ff'));
         constraints.push(orderBy('code'));
+        constraints.push(limit(500));
+        activatedQuery = query(activatedNumbersRef, ...constraints);
       }
 
-      constraints.push(limit(500));
+      // Build the final query
       activatedQuery = query(activatedNumbersRef, ...constraints);
 
       const snapshot = await getDocs(activatedQuery);
@@ -1489,7 +1499,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           endsWith: endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         });
         
-        // Also search deletedNumbers collection if admin (search all categories)
+        // Also search deletedNumbers collection if admin or coordinator (search all categories)
         const deletedResults = await searchDeletedNumbers(
           debouncedSearchTerm, 
           'all', // Always search all categories
@@ -2548,19 +2558,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
   }, [numberIdFromUrl, numbers]);
 
-  // Add useEffect to check coordinator status and fetch status checks
-  useEffect(() => {
-    const checkCoordinatorStatus = async () => {
-      if (!user?.id) return;
-      
-      const userDoc = await getDoc(doc(db, 'users', user.id));
-      if (userDoc.exists()) {
-        setIsCoordinator(userDoc.data().role === 'coordinator');
-      }
-    };
-
-    checkCoordinatorStatus();
-  }, [user?.id]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -4322,7 +4319,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   </div>
                 </button>
                 </>
-              )}
+            )}
               {user?.role === 'agent' && (
                 <motion.button
                   whileHover={{ scale: 1.02 }}
@@ -4337,13 +4334,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 >
                   <div className="bg-gradient-to-br from-purple-500 to-pink-600 p-1 rounded flex-shrink-0">
                     <Clipboard className="w-3.5 h-3.5 text-white" />
-              </div>
+                    </div>
                   <div className="flex flex-col items-start leading-tight">
                     <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Check Your List</span>
                   </div>
                 </motion.button>
             )}
-            {(isCoordinator || isAdmin()) && (
+            {isAdmin() && (
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
@@ -4352,7 +4349,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 >
                   <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1 rounded flex-shrink-0">
                     <Hash className="w-3.5 h-3.5 text-white" />
-                    </div>
+              </div>
                   <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Add Number</span>
                 </motion.button>
             )}

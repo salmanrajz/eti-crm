@@ -111,6 +111,7 @@ export interface User {
   coordinatorType?: CoordinatorType; // For coordinators - which groups they handle
   coordinatorTeams?: CoordinatorTeams; // For coordinators - which teams' leads they can see
   verifierGroups?: VerifierGroups; // For verifiers - which groups they handle (multiple groups)
+  managedTeams?: string[]; // For multi-team managers - array of team IDs they can manage
   isActive?: boolean; // User active status - inactive users cannot login (default: true)
   createdAt: Date;
   updatedAt: Date;
