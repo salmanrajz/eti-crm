@@ -1,51 +1,64 @@
 /**
  * ===============================================================================
- * AGENT DASHBOARD COMPONENT - AGENT WORKFLOW INTERFACE
+ * ADMIN DASHBOARD COMPONENT - SYSTEM ADMINISTRATION INTERFACE
  * ===============================================================================
  * 
- * This component provides the main dashboard for agents, displaying their personal
- * performance metrics, lead management tools, and quick access to essential
- * workflows and information.
+ * This component provides the main administrative dashboard for system administrators.
+ * It displays comprehensive system metrics, team performance data, lead statistics,
+ * and provides access to administrative tools and settings.
  * 
  * FEATURES:
  * 
- * 1. PERSONAL PERFORMANCE METRICS
- *    - Total leads created and current status breakdown
- *    - Target achievement tracking with MAR (Minimum Achievement Required)
- *    - Real-time progress indicators and performance charts
+ * 1. SYSTEM OVERVIEW METRICS
+ *    - Total users, teams, and leads across the system
+ *    - Monthly and all-time activated leads tracking
+ *    - Real-time performance indicators and charts
  * 
- * 2. LEAD MANAGEMENT TOOLS
- *    - Recent leads display with quick access actions
- *    - Lead status tracking and workflow navigation
- *    - Quick lead creation and management interface
+ * 2. TEAM PERFORMANCE MANAGEMENT
+ *    - Detailed team metrics and agent performance breakdowns
+ *    - Target achievement tracking and progress visualization
+ *    - Team comparison and ranking systems
  * 
- * 3. STRIKE SYSTEM INTEGRATION
- *    - Number claiming strike limits and tracking
- *    - Strike history and remaining strikes display
- *    - Integration with number pool claiming system
+ * 3. ADMINISTRATIVE TOOLS
+ *    - Plan management and configuration
+ *    - DNC (Do Not Call) list management
+ *    - Trusted devices administration
+ *    - WhatsApp settings configuration
  * 
- * 4. WORKFLOW QUICK ACCESS
- *    - Direct navigation to lead creation and management
- *    - Access to payroll and attendance systems
- *    - Number pool and reservation management
+ * 4. REAL-TIME MONITORING
+ *    - Live updates for critical system metrics
+ *    - Performance charts and trend analysis
+ *    - Recent activity feeds and notifications
  * 
- * 5. PERFORMANCE OPTIMIZATION
- *    - Advanced caching system with localStorage persistence
- *    - Real-time updates with efficient Firestore listeners
- *    - Optimized loading states and error handling
+ * 5. DATA MANAGEMENT
+ *    - Advanced caching with localStorage persistence
+ *    - Optimized Firestore queries with pagination
+ *    - Performance monitoring and error handling
  * 
  * USAGE:
- * This component is used by users with 'agent' role to provide a focused
- * interface for daily agent operations and performance tracking.
+ * This component is restricted to users with 'admin' role and provides
+ * comprehensive system oversight and management capabilities.
  * ===============================================================================
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { collection, query, where, getDocs, orderBy, limit, doc, getDoc, onSnapshot, updateDoc, deleteDoc } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
-import { User, Lead } from '../../types';
-import { Link, useNavigate } from 'react-router-dom';
-import { format, formatDistanceToNow, addHours, startOfMonth, endOfMonth } from 'date-fns';
+import { collection, query, getDocs, where, orderBy, doc, getDoc, updateDoc, addDoc, onSnapshot, serverTimestamp, deleteDoc, limit, writeBatch, setDoc, deleteField } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions } from '../../lib/firebase';
+import { User, Team, Lead, NumberPool } from '../../types';
+import { AdminManagerPhoneNumbers } from '../settings/AdminManagerPhoneNumbers';
+import { PlanManagement } from '../admin/PlanManagement';
+import { DNCManagement } from '../admin/DNCManagement';
+import { TrustedDevicesAdmin } from '../admin/TrustedDevicesAdmin';
+import { WhatsAppSettings } from '../admin/WhatsAppSettings';
+import { BulkDNCImport } from '../admin/BulkDNCImport';
+import { BulkDeleteNumbers } from '../admin/BulkDeleteNumbers';
+import { AddToDeletedNumbers } from '../admin/AddToDeletedNumbers';
+import { BulkNumberSearch } from '../admin/BulkNumberSearch';
+import { BulkDeletedNumberSearch } from '../admin/BulkDeletedNumberSearch';
+import { CustomerLinkTracking } from '../admin/CustomerLinkTracking';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
 import { 
   Users, 
   CheckCircle, 
@@ -53,575 +66,1695 @@ import {
   Clock, 
   Zap, 
   Calendar, 
+  Building2, 
   ClipboardList,
-  PlusCircle,
-  Phone,
-  Package,
-  Hash,
-  User2,
-  Eye,
-  ArrowRight,
+  ArrowLeft,
   Target,
   CheckCircle2,
-  UserCheck,
-  FileText,
+  BarChart3,
+  TrendingUp,
   Shield,
-  MessageCircle,
-  AlertCircle,
-  MapPin,
-  ShoppingCart,
+  Phone,
+  Package,
+  User2,
+  MessageSquare,
+  ArrowRight,
+  Filter,
+  Smartphone,
+  Search,
+  Eye,
+  AlertTriangle,
+  CheckSquare,
+  Hash,
+  Activity,
+  Timer,
+  Bell,
+  ChevronRight,
+  SortAsc,
+  SortDesc,
+  RefreshCw,
+  AlertOctagon,
+  Unlock,
+  Lock,
+  UserCheck,
+  Square,
+  CheckSquare2,
+  X,
+  Database,
   Trash2,
-  CheckSquare
+  Archive,
+  Sparkles,
+  RefreshCw as RefreshCwIcon
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { clsx } from 'clsx';
+import { Line, Bar } from 'react-chartjs-2';
+import { useAuthStore } from '../../store/authStore';
 import { motion } from 'framer-motion';
-import { StruckNumbers, useStruckNumbers, useStrikeLimit } from './StruckNumbers';
-import PayrollAndAttendanceDashboard from '../PayrollAndAttendanceDashboard';
-import { dashboardPerf } from '../../utils/performance';
-// ✅ ENHANCED: Import enhanced cache system
-import { metricsCache, leadsCache, targetCache } from '../../utils/cache';
-import { AgentLinkGenerator } from '../AgentLinkGenerator';
+import PayrollButton from '../PayrollButton';
+import AttendanceTable from '../AttendanceTable';
 
 // ===============================================================================
 // INTERFACE DEFINITIONS
 // ===============================================================================
 
 /**
- * Props interface for the AgentDashboard component
+ * Interface for open number requests in the system
+ * Represents requests from agents to access specific numbers
  */
-interface AgentDashboardProps {
-  user: User; // Current authenticated agent user
+interface OpenRequest {
+  id: string;
+  numberId: string;
+  number: string;
+  requestedBy: string;
+  requestedByName: string;
+  requestedAt: Date;
+  status: 'pending' | 'approved' | 'rejected';
+  strikes: number;
+  numberStatus: string;
 }
 
 /**
- * Interface for agent target and performance requirements
- * Includes target goals and minimum achievement requirements (MAR)
+ * Props interface for the AdminDashboard component
  */
-interface AgentTarget {
-  agentId: string;
-  target: number;
-  mar: number; // Min Target Required
+interface AdminDashboardProps {
+  user: User; // Current authenticated admin user
+}
+
+/**
+ * Interface for team performance metrics and statistics
+ * Contains aggregated data for team performance analysis
+ */
+interface TeamMetrics {
+  teamId: string;
+  teamName: string;
+  managerName: string;
+  totalLeads: number;
+  pendingVerification: number;
+  verified: number;
+  rejected: number;
+  activated: number;
+  pendingAssignment: number;
+  assigned: number;
+  teamTarget?: number; // Team target set by admin (optional, falls back to sum of agent targets)
+  agents: {
+    id: string;
+    name: string;
+    role: string;
+    totalLeads: number;
+    verified: number;
+    activated: number;
+    target: number;
+    achievement: number;
+  }[];
+}
+
+/**
+ * Interface for agent performance statistics by month
+ * Used for performance tracking and trend analysis
+ */
+interface AgentPerformanceData {
   month: string;
+  totalLeads: number;
+  activated: number;
+  target: number;
+  achievement: number;
 }
 
 // ===============================================================================
-// PERFORMANCE CONFIGURATION
+// CACHE CONFIGURATION AND PERFORMANCE SETTINGS
 // ===============================================================================
 
 /**
- * Cache and performance configuration constants
- * Optimized for agent dashboard responsiveness
+ * Cache configuration constants for optimal performance
+ * Extended cache duration with real-time update intervals for balance
  */
-const CACHE_DURATION = 60 * 60 * 1000; // 1 hour cache duration
-const LEADS_LIMIT = 6; // Only load 6 most recent leads for performance
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes cache (extended)
+const REALTIME_UPDATE_INTERVAL = 2 * 60 * 1000; // 2 minutes for realtime updates
 
 /**
- * Active listeners tracker to prevent duplicate Firestore listeners
- * Ensures proper cleanup and prevents memory leaks
+ * Cache key constants for different data types
+ * Versioned to handle cache schema changes gracefully
  */
-const activeListeners: Map<string, () => void> = new Map();
+const ADMIN_CACHE_KEY = 'admin_dashboard_v4';
+const ADMIN_LEADS_CACHE_KEY = 'admin_leads_v4';
+const ADMIN_TEAMS_CACHE_KEY = 'admin_teams_v4';
+const ADMIN_TEAM_METRICS_CACHE_KEY = 'admin_team_metrics_v4';
+const ADMIN_METRICS_CACHE_KEY = 'admin_metrics_v4';
+const CACHE_VERSION = 'v4'; // Updated version for new cache strategy
 
-export function AgentDashboard({ user }: AgentDashboardProps) {
+/**
+ * Interface for cached data structure
+ * Includes metadata for expiration and version control
+ */
+interface CacheData {
+  data: any;
+  timestamp: number;
+  expiresAt: number;
+  version: string;
+}
+
+// ✅ PERFORMANCE: Smart cache utilities
+const getCachedData = (key: string): any | null => {
+  try {
+    const cached = localStorage.getItem(key);
+    if (!cached) return null;
+    
+    const cacheData: CacheData = JSON.parse(cached);
+    
+    // Check expiration
+    if (Date.now() > cacheData.expiresAt) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    
+    // Check version compatibility
+    if (cacheData.version !== CACHE_VERSION) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    
+    return cacheData.data;
+  } catch (error) {
+    localStorage.removeItem(key);
+    return null;
+  }
+};
+
+const setCachedData = (key: string, data: any): void => {
+  try {
+    const cacheData: CacheData = {
+      data,
+      timestamp: Date.now(),
+      expiresAt: Date.now() + CACHE_DURATION,
+      version: CACHE_VERSION
+    };
+    localStorage.setItem(key, JSON.stringify(cacheData));
+  } catch (error) {
+    // Cache failed silently
+  }
+};
+
+// ✅ PERFORMANCE: Clear all admin cache
+const clearAdminCache = (): void => {
+  // Clear all admin cache keys
+  [ADMIN_CACHE_KEY, ADMIN_LEADS_CACHE_KEY, ADMIN_TEAMS_CACHE_KEY, ADMIN_METRICS_CACHE_KEY].forEach(key => {
+    localStorage.removeItem(key);
+  });
+  
+  // Clear all month-specific team metrics cache keys
+  Object.keys(localStorage).forEach(key => {
+    if (key.startsWith(ADMIN_TEAM_METRICS_CACHE_KEY)) {
+      localStorage.removeItem(key);
+    }
+  });
+};
+
+export function AdminDashboard({ user }: AdminDashboardProps) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  
+  // Glassmorphism helper - returns different gradient styles for specific cards
+  const getGlassmorphismClass = (cardName: string) => {
+    const glassmorph = {
+      'Number Logs': 'bg-gradient-to-br from-cyan-400/20 via-blue-400/20 to-purple-400/20 backdrop-blur-sm border-2 border-cyan-200/50',
+      'Reports': 'bg-gradient-to-br from-pink-400/20 via-rose-400/20 to-red-400/20 backdrop-blur-sm border-2 border-pink-200/50',
+      'Number Visibility': 'bg-gradient-to-br from-purple-400/20 via-indigo-400/20 to-blue-400/20 backdrop-blur-sm border-2 border-purple-200/50',
+      'Manager WhatsApp': 'bg-gradient-to-br from-green-400/20 via-emerald-400/20 to-teal-400/20 backdrop-blur-sm border-2 border-green-200/50',
+      'Plan Management': 'bg-gradient-to-br from-amber-400/20 via-orange-400/20 to-red-400/20 backdrop-blur-sm border-2 border-amber-200/50',
+      'DNC Management': 'bg-gradient-to-br from-red-400/20 via-rose-400/20 to-pink-400/20 backdrop-blur-sm border-2 border-red-200/50',
+      'Bulk DNC Import': 'bg-gradient-to-br from-blue-400/20 via-cyan-400/20 to-sky-400/20 backdrop-blur-sm border-2 border-blue-200/50',
+      'Trusted Devices': 'bg-gradient-to-br from-slate-400/20 via-gray-400/20 to-zinc-400/20 backdrop-blur-sm border-2 border-slate-200/50',
+      'WhatsApp Settings': 'bg-gradient-to-br from-lime-400/20 via-green-400/20 to-emerald-400/20 backdrop-blur-sm border-2 border-lime-200/50',
+    };
+    return glassmorph[cardName as keyof typeof glassmorph] || '';
+  };
+  
   const [metrics, setMetrics] = useState({
     totalLeads: 0,
     pendingVerification: 0,
     verified: 0,
-    follow_up: 0,
-    activated: 0,
-    assigned: 0,
-    nonVerified: 0,
-    target: 0,
-    mar: 0,
-    achieved: 0
+    currentMonthVerified: 0,
+    rejected: 0,
+    activated: 0, // Current month activated
+    totalActivated: 0, // All-time activated
+    pendingAssignment: 0,
+    assigned: 0
   });
+  const [teamMetrics, setTeamMetrics] = useState<TeamMetrics[]>([]);
+  const [teamLeads, setTeamLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [customerSubmissions, setCustomerSubmissions] = useState<any[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState<TeamMetrics | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<{
+    id: string;
+    name: string;
+    teamName: string;
+    performanceData: any[];
+  } | null>(null);
+  const [selectedMonth, setSelectedMonth] = useState(new Date());
+  const [dateRange, setDateRange] = useState({
+    start: subMonths(new Date(), 5),
+    end: new Date()
+  });
+  const [selectedAgentDetails, setSelectedAgentDetails] = useState<{
+    agent: TeamMetrics['agents'][0];
+    teamName: string;
+    performanceData: AgentPerformanceData[];
+  } | null>(null);
+  const [isLoadingAgentDetails, setIsLoadingAgentDetails] = useState(false);
+  const [openRequests, setOpenRequests] = useState<OpenRequest[]>([]);
+  const [openRequestsLoading, setOpenRequestsLoading] = useState(true);
+  const [openRequestsModal, setOpenRequestsModal] = useState(false);
+  const [liveStrikes, setLiveStrikes] = useState<{ [numberId: string]: number }>({});
+  const [attendanceOpen, setAttendanceOpen] = useState(false);
+  const [attendanceMonth, setAttendanceMonth] = useState(new Date());
+  const [numberVisibilityOpen, setNumberVisibilityOpen] = useState(false);
+  const [hiddenNumbers, setHiddenNumbers] = useState<NumberPool[]>([]);
+  const [hiddenNumbersLoading, setHiddenNumbersLoading] = useState(false);
+  const [selectedNumbers, setSelectedNumbers] = useState<Set<string>>(new Set());
+  const [codeFilter, setCodeFilter] = useState('');
+  const [showCodeFilter, setShowCodeFilter] = useState(false);
+  const [bulkImportOpen, setBulkImportOpen] = useState(false);
+  const [dncManagementOpen, setDncManagementOpen] = useState(false);
+  const [trustedDevicesModalOpen, setTrustedDevicesModalOpen] = useState(false);
+  const [managerPhoneModalOpen, setManagerPhoneModalOpen] = useState(false);
+  const [planManagementModalOpen, setPlanManagementModalOpen] = useState(false);
+  const [whatsappSettingsModalOpen, setWhatsappSettingsModalOpen] = useState(false);
+  const [bulkDeleteModalOpen, setBulkDeleteModalOpen] = useState(false);
+  const [addToDeletedModalOpen, setAddToDeletedModalOpen] = useState(false);
+  const [bulkNumberSearchModalOpen, setBulkNumberSearchModalOpen] = useState(false);
+  const [bulkDeletedNumberSearchModalOpen, setBulkDeletedNumberSearchModalOpen] = useState(false);
+  const [customerLinkTrackingModalOpen, setCustomerLinkTrackingModalOpen] = useState(false);
+  // Number lookup states
+  const [numberLookupOpen, setNumberLookupOpen] = useState(false);
+  const [numberLookupInput, setNumberLookupInput] = useState('');
+  const [numberLookupResults, setNumberLookupResults] = useState<Lead[]>([]);
+  const [numberLookupLoading, setNumberLookupLoading] = useState(false);
+  const [numberLookupFilters, setNumberLookupFilters] = useState<{
+    status: string[];
+  }>({
+    status: []
+  });
+  const [showNumberLookupFilters, setShowNumberLookupFilters] = useState(false);
+  // Broadcast poster states
+  const [posterTitle, setPosterTitle] = useState('');
+  const [posterMessage, setPosterMessage] = useState('');
+  const [isSendingPoster, setIsSendingPoster] = useState(false);
+  const [showPosterPreview, setShowPosterPreview] = useState(false);
+  const [posterModalOpen, setPosterModalOpen] = useState(false);
+  // Group targets and activations (dynamic groups like G1..G5 and custom)
+  const [groupTargets, setGroupTargets] = useState<{ groups: Record<string, number>; visibleToCoordinators: boolean }>({ groups: { G1: 0, G2: 0, G3: 0 }, visibleToCoordinators: false });
+  const [groupActivations, setGroupActivations] = useState<Record<string, number>>({});
+  const [savingGroupTargets, setSavingGroupTargets] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupAlias, setNewGroupAlias] = useState('');
+  const [showAliasInput, setShowAliasInput] = useState(false);
+  const [editingGroups, setEditingGroups] = useState(false);
+  const [groupAliases, setGroupAliases] = useState<Record<string, string>>({});
+  const [initializingStats, setInitializingStats] = useState(false);
+  const [initStatsResult, setInitStatsResult] = useState<string | null>(null);
+  const [initializingGroupStats, setInitializingGroupStats] = useState(false);
+  const [initGroupStatsResult, setInitGroupStatsResult] = useState<string | null>(null);
+  // Team target editing state
+  const [editingTeamTarget, setEditingTeamTarget] = useState<string | null>(null);
+  const [teamTargetValue, setTeamTargetValue] = useState<number>(0);
+  const [savingTeamTarget, setSavingTeamTarget] = useState(false);
   const navigate = useNavigate();
-  const { struckNumbers, loading: struckLoading } = useStruckNumbers(user.id);
-  const { remainingStrikes, lastStrikeTime } = useStrikeLimit(user.id);
-  const [showStruck, setShowStruck] = useState(false);
-  const [payrollOpen, setPayrollOpen] = useState(false);
-  const [uaeNow, setUaeNow] = useState<Date>(() => new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Dubai' })));
 
-  // ✅ OPTIMIZED: Use refs to store unsubscribe functions for proper cleanup
-  const metricsUnsubscribeRef = useRef<(() => void) | null>(null);
-  const leadsUnsubscribeRef = useRef<(() => void) | null>(null);
-  const submissionsUnsubscribeRef = useRef<(() => void) | null>(null);
+  // ✅ PERFORMANCE: Performance optimization refs
+  const isMountedRef = useRef(true);
+  const lastLoadTimeRef = useRef<number>(0);
+  const lastRealtimeUpdateRef = useRef<number>(0);
+  
+  // ✅ REALTIME: Real-time update state
+  const [realtimeEnabled] = useState(true);
+  const unsubscribeRefs = useRef<(() => void)[]>([]);
+  const loadingStartTime = useRef<number>(0);
 
-  // ✅ ENHANCED: Memoize cache keys with better specificity
-  const metricsKey = useMemo(() => `metrics_${user.id}_${format(new Date(), 'yyyy-MM')}`, [user.id]);
-  const leadsKey = useMemo(() => `leads_${user.id}`, [user.id]);
-  const targetKey = useMemo(() => `target_${user.id}_${format(new Date(), 'yyyy-MM')}`, [user.id]);
-
-  // Keep UAE time updated (minute resolution)
   useEffect(() => {
-    const updateUaeTime = () => setUaeNow(new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Dubai' })));
-    updateUaeTime();
-    const interval = setInterval(updateUaeTime, 60 * 1000);
-    return () => clearInterval(interval);
-  }, []);
+    loadAdminData();
+    loadOpenRequests();
+    loadGroupTargetsForMonth(selectedMonth);
+    loadGroupAliases();
+  }, [user, selectedMonth]);
 
-  // ✅ ENHANCED: Separate target loading with persistent caching for better performance
-  const loadTarget = useCallback(async () => {
-    if (!user?.id) return null;
-
-    // ✅ ENHANCED: Check persistent cache first (auto-handles expiration)
-    const cachedTarget = targetCache.get(targetKey);
-    if (cachedTarget) {
-      return { target: cachedTarget.target, mar: cachedTarget.mar };
-    }
-
-    try {
-      const currentMonth = format(new Date(), 'yyyy-MM');
-      const targetsQuery = query(
-        collection(db, 'agentTargets'),
-        where('agentId', '==', user.id),
-        where('month', '==', currentMonth),
-        limit(1) // Only need one result
-      );
-      const targetsSnapshot = await getDocs(targetsQuery);
-      const targetData = !targetsSnapshot.empty ? targetsSnapshot.docs[0].data() as AgentTarget : null;
-
-      const result = {
-        target: targetData?.target || 0,
-        mar: targetData?.mar || 0
-      };
-
-      // ✅ ENHANCED: Store in persistent cache
-      targetCache.set(targetKey, result);
-
-      return result;
-    } catch (error) {
-      console.error('Error loading agent target:', error);
-      return { target: 0, mar: 0 };
-    }
-  }, [user.id, targetKey]);
-
-  // ✅ ENHANCED: Enhanced metrics calculation with memoization
-  const calculateMetrics = useCallback((allLeads: any[], targetData: { target: number; mar: number }) => {
-    const getActivatedAt = (lead: any): Date | null => {
-      const raw = lead?.activatedAt || lead?.updatedAt;
-      if (!raw) return null;
-      if (typeof raw.toDate === 'function') {
-        const d = raw.toDate();
-        return isNaN(d.getTime()) ? null : d;
-      }
-      if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
-      const d = new Date(raw);
-      return isNaN(d.getTime()) ? null : d;
-    };
-
-    const now = new Date();
-    const startOfCurrentMonth = startOfMonth(now);
-    const endOfCurrentMonth = endOfMonth(now);
-
-    // ✅ ENHANCED: Use reduce for multiple calculations in single pass
-    const counts = allLeads.reduce((acc, lead) => {
-      // Count by status
-      switch (lead.status) {
-        case 'pending_verification':
-          acc.pendingVerification++;
-          break;
-        case 'verified':
-          acc.verified++;
-          break;
-        case 'follow_up':
-          acc.follow_up++;
-          break;
-        case 'assigned':
-          acc.assigned++;
-          break;
-        case 'non_verified':
-          acc.nonVerified++;
-          break;
-      }
-
-      // Count activated plans for current month using activatedAt (fallback updatedAt)
-      if ((lead.status === 'activated' || lead.status === 'activated_non_verified') && lead.plans) {
-        const activatedAt = getActivatedAt(lead);
-        if (activatedAt && activatedAt >= startOfCurrentMonth && activatedAt <= endOfCurrentMonth) {
-        acc.activated += lead.plans.length;
+  // Load existing broadcast poster for editing convenience
+  useEffect(() => {
+    const loadPoster = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'config', 'broadcastPoster'));
+        if (snap.exists()) {
+          const data = snap.data();
+          setPosterTitle(data?.title || '');
+          setPosterMessage(data?.message || '');
         }
+      } catch (error) {
+        console.error('Failed to load broadcast poster', error);
       }
-
-      acc.totalLeads++;
-      return acc;
-    }, {
-      totalLeads: 0,
-      pendingVerification: 0,
-      verified: 0,
-      follow_up: 0,
-      activated: 0,
-      assigned: 0,
-      nonVerified: 0
-    });
-
-    // When setting metrics, always default mar to 0 if undefined or null
-    setMetrics({
-      ...counts,
-      target: targetData.target ?? 0,
-      mar: targetData.mar ?? 0,
-      achieved: counts.activated // Same as activated
-    });
-
-    return {
-      ...counts,
-      target: targetData.target,
-      mar: targetData.mar,
-      achieved: counts.activated // Same as activated
     };
+    loadPoster();
   }, []);
 
-  // ✅ ENHANCED: Enhanced metrics loading with persistent caching and better onSnapshot management
-  const loadMetrics = useCallback(async () => {
-      if (!user?.id) return;
-
-    // ✅ ENHANCED: Check persistent cache first for instant display
-    const cachedMetrics = metricsCache.get(metricsKey);
-    if (cachedMetrics) {
-      // ✅ PERFORMANCE: Cache hit - instant display
-      setMetrics(cachedMetrics);
-      setLoading(false);
-      // Still setup listener for real-time updates, but cache gives instant response
-    }
-
+  // Load numbers that are hidden from freelancers
+  const loadHiddenNumbers = async () => {
+    setHiddenNumbersLoading(true);
     try {
-      // Check for existing listener to prevent duplicates
-      const listenerKey = `metrics_${user.id}`;
-      if (activeListeners.has(listenerKey)) {
-        return;
-      }
-
-      // Enhanced query with better indexing
-      const leadsQuery = query(
-        collection(db, 'leads'),
-        where('agentId', '==', user.id),
-        orderBy('createdAt', 'desc'),
+      const hiddenQuery = query(
+        collection(db, 'numberPool'),
+        where('visibleToFreelancers', '==', false),
+        orderBy('lastStatusChange', 'desc'),
         limit(100)
       );
-
-      // Setup onSnapshot for real-time updates
-      const unsubscribe = onSnapshot(leadsQuery, async (snapshot) => {
-        try {
-          // Fetch the latest MAR value every time leads update (like MARStrip)
-          const now = new Date();
-          const currentMonth = format(now, 'yyyy-MM');
-          const targetsQuery = query(
-            collection(db, 'agentTargets'),
-            where('agentId', '==', user.id),
-            where('month', '==', currentMonth),
-            limit(1)
-          );
-          const targetsSnapshot = await getDocs(targetsQuery);
-          const targetData = !targetsSnapshot.empty ? targetsSnapshot.docs[0].data() as AgentTarget : null;
-          const mar = targetData?.mar || 0;
-          const target = targetData?.target || 0;
-
-          const allLeads = snapshot.docs
-            .map(doc => {
-              const data = doc.data();
-              return {
-                id: doc.id,
-                status: data.status,
-                createdAt: data.createdAt?.toDate(),
-                updatedAt: data.updatedAt?.toDate(),
-                plans: Array.isArray(data.plans)
-                  ? data.plans.map(plan => ({
-                      ...plan, // This spread operator automatically converts Map to object
-                      number: plan instanceof Map ? plan.get('number') : plan.number,
-                      plan: plan instanceof Map ? plan.get('plan') : plan.plan
-                    }))
-                  : []
-              };
-            })
-            .filter(lead => lead.status !== 'split');
-
-          // Calculate metrics efficiently
-          const agentMetrics = calculateMetrics(allLeads, { target, mar });
-
-          // Update persistent cache with fresh data
-          metricsCache.set(metricsKey, agentMetrics);
-
-          setMetrics(agentMetrics);
-          setLoading(false);
-        } catch (error) {
-          console.error('Error processing metrics snapshot:', error);
-        }
-      }, (error) => {
-        // ✅ FIX: Handle permission errors gracefully during logout
-        if (error.code === 'permission-denied') {
-          // User logged out or lost permissions - cleanup silently
-          activeListeners.delete(listenerKey);
-          if (metricsUnsubscribeRef.current) {
-            metricsUnsubscribeRef.current();
-            metricsUnsubscribeRef.current = null;
-          }
-          return;
-        }
-        
-        console.error('Error in metrics listener:', error);
-        activeListeners.delete(listenerKey);
-      });
-
-      metricsUnsubscribeRef.current = unsubscribe;
-      activeListeners.set(listenerKey, unsubscribe);
-
+      const snapshot = await getDocs(hiddenQuery);
+      const numbers = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        lastStatusChange: doc.data().lastStatusChange?.toDate()
+      })) as NumberPool[];
+      setHiddenNumbers(numbers);
     } catch (error) {
-      console.error('Error loading agent metrics:', error);
-      toast.error('Failed to load dashboard metrics');
-    }
-  }, [user.id, metricsKey, calculateMetrics]);
-
-  // ✅ ENHANCED: Enhanced recent leads loading with persistent caching
-  const loadRecentLeads = useCallback(async () => {
-    if (!user?.id) return;
-
-    // ✅ ENHANCED: Check persistent cache first for instant display
-    const cachedLeads = leadsCache.get(leadsKey);
-    if (cachedLeads && cachedLeads.leads) {
-      // ✅ PERFORMANCE: Cache hit - instant display
-      // Verify that cached data has proper plan structure (not Maps)
-      const hasValidPlans = cachedLeads.leads.every((lead: any) => 
-        !lead.plans || lead.plans.every((plan: any) => 
-          typeof plan === 'object' && !(plan instanceof Map) && plan.number && plan.plan
-        )
-      );
-      
-      if (hasValidPlans) {
-        setLeads(cachedLeads.leads);
-        // Don't return early - continue to set up real-time listener for updates
-      }
-    }
-
-    try {
-      // Guard against duplicate listener
-      if (leadsUnsubscribeRef.current) {
-        return;
-      }
-
-      // ✅ ENHANCED: Efficient query for recent leads
-      const recentLeadsQuery = query(
-        collection(db, 'leads'),
-        where('agentId', '==', user.id),
-        orderBy('createdAt', 'desc'),
-        limit(LEADS_LIMIT)
-      );
-
-      // Use onSnapshot for real-time updates on recent leads
-      const unsubscribe = onSnapshot(recentLeadsQuery, (snapshot) => {
-        try {
-          const recentLeads = snapshot.docs.map(doc => {
-            const data = doc.data();
-            return {
-              id: doc.id,
-              ...data,
-              createdAt: data.createdAt?.toDate(),
-              updatedAt: data.updatedAt?.toDate(),
-              plans: Array.isArray(data.plans)
-                ? data.plans.map(plan => ({
-                    ...plan, // This spread operator automatically converts Map to object
-                    number: plan instanceof Map ? plan.get('number') : plan.number,
-                    plan: plan instanceof Map ? plan.get('plan') : plan.plan
-                  }))
-                : []
-            };
-          }) as Lead[];
-
-          // Filter out split leads
-          const filteredLeads = recentLeads.filter(lead => lead.status !== 'split');
-
-          // ✅ ENHANCED: Update persistent cache with fresh data
-          leadsCache.set(leadsKey, {
-            leads: filteredLeads
-          });
-
-          setLeads(filteredLeads);
-        } catch (error) {
-          console.error('Error processing leads snapshot:', error);
-        }
-      }, (error) => {
-        // ✅ FIX: Handle permission errors gracefully during logout
-        if (error.code === 'permission-denied') {
-          // User logged out or lost permissions - cleanup silently
-          if (leadsUnsubscribeRef.current) {
-            leadsUnsubscribeRef.current();
-            leadsUnsubscribeRef.current = null;
-          }
-          return;
-        }
-        
-        console.error('Error in leads listener:', error);
-      });
-
-      // Store listener for cleanup
-      leadsUnsubscribeRef.current = unsubscribe;
-
-    } catch (error) {
-      console.error('Error loading recent leads:', error);
-      toast.error('Failed to load recent leads');
-    }
-  }, [user.id, leadsKey]);
-
-  // Load customer portal submissions
-  const loadCustomerSubmissions = useCallback(async () => {
-    if (!user?.id) return;
-
-    try {
-      const submissionsQuery = query(
-        collection(db, 'customerPortalSubmissions'),
-        where('agentId', '==', user.id),
-        orderBy('submittedAt', 'desc'),
-        limit(20)
-      );
-
-      const unsubscribe = onSnapshot(submissionsQuery, (snapshot) => {
-        const submissions = snapshot.docs.map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            ...data,
-            submittedAt: data.submittedAt?.toDate(),
-            createdAt: data.createdAt?.toDate(),
-          };
-        });
-        setCustomerSubmissions(submissions);
-      }, (error) => {
-        if (error.code === 'permission-denied') {
-          return;
-        }
-        console.error('Error loading customer submissions:', error);
-      });
-
-      return unsubscribe;
-    } catch (error) {
-      console.error('Error loading customer submissions:', error);
-    }
-  }, [user.id]);
-
-  // Mark submission as lead submitted
-  const markAsLeadSubmitted = async (submissionId: string) => {
-    try {
-      await updateDoc(doc(db, 'customerPortalSubmissions', submissionId), {
-        status: 'lead_submitted',
-        updatedAt: new Date(),
-      });
-      toast.success('Marked as Lead Submitted');
-    } catch (error) {
-      console.error('Error marking as lead submitted:', error);
-      toast.error('Failed to update submission');
+      toast.error('Failed to load hidden numbers');
+    } finally {
+      setHiddenNumbersLoading(false);
     }
   };
 
-  // Delete submission
-  const handleDeleteSubmission = async (submissionId: string) => {
-    if (!confirm('Are you sure you want to delete this submission? This action cannot be undone.')) {
+  // Toggle number visibility for freelancers
+  const toggleNumberVisibility = async (numberId: string, makeVisible: boolean) => {
+    try {
+      const numberRef = doc(db, 'numberPool', numberId);
+      await updateDoc(numberRef, {
+        visibleToFreelancers: makeVisible,
+        lastStatusChange: serverTimestamp()
+      });
+      
+      toast.success(`Number ${makeVisible ? 'made visible to' : 'hidden from'} freelancers`);
+      
+      // Reload hidden numbers list
+      await loadHiddenNumbers();
+    } catch (error) {
+      toast.error('Failed to update number visibility');
+    }
+  };
+
+  const handleSendBroadcastPoster = useCallback(async () => {
+    if (!posterTitle.trim() || !posterMessage.trim()) {
+      toast.error('Please add both title and message');
+      return;
+    }
+    setIsSendingPoster(true);
+    try {
+      const posterRef = doc(db, 'config', 'broadcastPoster');
+      await setDoc(posterRef, {
+        posterId: `${Date.now()}`,
+        title: posterTitle.trim(),
+        message: posterMessage.trim(),
+        createdAt: serverTimestamp(),
+        createdBy: user?.id || 'admin',
+        createdByName: user?.name || user?.email || 'Admin'
+      });
+      toast.success('Broadcast poster sent to all users');
+    } catch (error) {
+      console.error('Failed to send broadcast poster', error);
+      toast.error('Failed to send poster');
+    } finally {
+      setIsSendingPoster(false);
+    }
+  }, [posterTitle, posterMessage, user]);
+
+  // Make all hidden numbers visible (batched)
+  const makeAllHiddenVisible = async () => {
+    try {
+      setHiddenNumbersLoading(true);
+      // Fetch all docs where visibleToFreelancers == false (process in pages of 200)
+      let lastBatchCount = 0;
+      do {
+        const qHidden = query(
+          collection(db, 'numberPool'),
+          where('visibleToFreelancers', '==', false),
+          orderBy('lastStatusChange', 'desc'),
+          limit(200)
+        );
+        const snap = await getDocs(qHidden);
+        lastBatchCount = snap.size;
+        if (snap.empty) break;
+        const batch = writeBatch(db);
+        snap.docs.forEach(d => {
+          batch.update(doc(db, 'numberPool', d.id), {
+            visibleToFreelancers: true,
+            lastStatusChange: serverTimestamp()
+          });
+        });
+        await batch.commit();
+      } while (lastBatchCount === 200);
+
+      toast.success('All hidden numbers are now visible to freelancers');
+      await loadHiddenNumbers();
+    } catch (error) {
+      toast.error('Failed to make all hidden numbers visible');
+    } finally {
+      setHiddenNumbersLoading(false);
+    }
+  };
+
+  // Handle individual number selection
+  const toggleNumberSelection = (numberId: string) => {
+    setSelectedNumbers(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(numberId)) {
+        newSet.delete(numberId);
+      } else {
+        newSet.add(numberId);
+      }
+      return newSet;
+    });
+  };
+
+  // Select all visible numbers
+  const selectAllNumbers = () => {
+    setSelectedNumbers(new Set(filteredNumbers.map(n => n.id)));
+  };
+
+  // Clear selection
+  const clearSelection = () => {
+    setSelectedNumbers(new Set());
+  };
+
+  // Select numbers by code pattern
+  const selectByCode = (pattern: string) => {
+    const matchingNumbers = filteredNumbers.filter(n => 
+      n.code && n.code.toLowerCase().includes(pattern.toLowerCase())
+    );
+    setSelectedNumbers(new Set(matchingNumbers.map(n => n.id)));
+  };
+
+  // Memoize filtered numbers to prevent unnecessary re-renders
+  const filteredNumbers = useMemo(() => {
+    if (!codeFilter.trim()) return hiddenNumbers;
+    return hiddenNumbers.filter(n => 
+      n.code && n.code.toLowerCase().includes(codeFilter.toLowerCase())
+    );
+  }, [hiddenNumbers, codeFilter]);
+
+  // Make selected numbers visible
+  const makeSelectedVisible = async () => {
+    if (selectedNumbers.size === 0) {
+      toast.error('No numbers selected');
       return;
     }
 
     try {
-      await deleteDoc(doc(db, 'customerPortalSubmissions', submissionId));
-      toast.success('Submission deleted successfully');
+      setHiddenNumbersLoading(true);
+      const batch = writeBatch(db);
+      selectedNumbers.forEach(numberId => {
+        const numberRef = doc(db, 'numberPool', numberId);
+        batch.update(numberRef, {
+          visibleToFreelancers: true,
+          lastStatusChange: serverTimestamp()
+        });
+      });
+      await batch.commit();
+
+      toast.success(`${selectedNumbers.size} numbers are now visible to freelancers`);
+      setSelectedNumbers(new Set());
+      await loadHiddenNumbers();
     } catch (error) {
-      console.error('Error deleting submission:', error);
-      toast.error('Failed to delete submission');
+      toast.error('Failed to update selected numbers');
+    } finally {
+      setHiddenNumbersLoading(false);
     }
   };
 
-  // ✅ OPTIMIZED: Enhanced data loading with parallel execution and better error handling
   useEffect(() => {
-    if (!user?.id) return;
-
-    const loadData = async () => {
-      // ✅ PERFORMANCE: Track dashboard loading time
-      const endMeasure = dashboardPerf.measureDashboardLoad('agent', user.id);
-      
-      setLoading(true);
-      try {
-        // ✅ OPTIMIZED: Load metrics, leads, and customer submissions in parallel
-        const submissionsUnsubscribe = await loadCustomerSubmissions();
-        if (submissionsUnsubscribe) {
-          submissionsUnsubscribeRef.current = submissionsUnsubscribe;
+    async function fetchStrikes() {
+      const result: { [numberId: string]: number } = {};
+      for (const req of openRequests) {
+        try {
+          const docSnap = await getDoc(doc(db, 'numberPool', req.numberId));
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            const strikes = (data.claims || []).filter((claim: any) => claim.status === 'pending').length;
+            result[req.numberId] = strikes;
+          } else {
+            result[req.numberId] = 0;
+          }
+        } catch {
+          result[req.numberId] = 0;
         }
-        await Promise.all([
-          loadMetrics(),
-          loadRecentLeads()
-        ]);
-      } catch (error) {
-        console.error('Error loading dashboard data:', error);
-        toast.error('Failed to load dashboard data');
-    } finally {
-      setLoading(false);
-        // ✅ PERFORMANCE: End measurement
-        endMeasure();
+      }
+      setLiveStrikes(result);
     }
+    if (openRequests.length > 0) fetchStrikes();
+  }, [openRequests]);
+
+  const monthChangeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleMonthChange = (date: Date) => {
+    setSelectedMonth(date);
+    // Reload group targets/activations for new month
+    loadGroupTargetsForMonth(date);
+    // Recompute activations after month change - use teamLeads from state
+    computeGroupActivations(teamLeads, date);
+    // Reload team metrics for the new month
+    loadTeamMetricsForMonth(date);
+  };
+
+  const handleMonthInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newDate = new Date(e.target.value);
+
+    // Clear any existing timeout
+    if (monthChangeTimeoutRef.current) {
+      clearTimeout(monthChangeTimeoutRef.current);
+    }
+
+    // Set a new timeout to apply the change after 1 second
+    // This allows users to change both month and year without triggering immediate loads
+    monthChangeTimeoutRef.current = setTimeout(() => {
+      handleMonthChange(newDate);
+      monthChangeTimeoutRef.current = null;
+    }, 1000);
+  };
+
+  // ✅ PERFORMANCE: Load team metrics for specific month with caching
+  const loadTeamMetricsForMonth = useCallback(async (month: Date) => {
+    try {
+      const monthStr = format(month, 'yyyy-MM');
+      const cacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
+      
+      // Check cache first
+      const cachedTeamMetrics = getCachedData(cacheKey);
+      if (cachedTeamMetrics) {
+        setTeamMetrics(cachedTeamMetrics);
+        
+        // Check if teamId is in URL params and select the team
+        const teamIdFromUrl = searchParams.get('teamId');
+        if (teamIdFromUrl && cachedTeamMetrics) {
+          const team = cachedTeamMetrics.find((t: TeamMetrics) => t.teamId === teamIdFromUrl);
+          if (team) {
+            setSelectedTeam(team);
+          }
+        }
+        
+        return;
+      }
+
+      // Load fresh data
+      const [teamsSnapshot, usersSnapshot] = await Promise.all([
+        getDocs(query(collection(db, 'teams'))),
+        getDocs(query(collection(db, 'users'), where('role', 'in', ['agent', 'manager', 'freelancer'])))
+      ]);
+      
+      const teams = teamsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        name: doc.data().name || 'Unknown Team',
+        teamName: doc.data().name || doc.data().teamName || 'Unknown Team',
+        managerId: doc.data().managerId || '',
+        createdAt: doc.data().createdAt?.toDate(),
+        updatedAt: doc.data().updatedAt?.toDate()
+      })) as Team[];
+
+      const allUsers = usersSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as User[];
+
+      const usersMap = new Map(allUsers.map(user => [user.id, user]));
+      const currentMonthStart = startOfMonth(month);
+      const currentMonthEnd = endOfMonth(month);
+
+      const teamMetricsPromises = teams.map(async team => {
+        // Load team target from Firestore
+        const monthStr = format(month, 'yyyy-MM');
+        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
+        const teamTargetDoc = await getDoc(teamTargetRef);
+        const teamTarget = teamTargetDoc.exists() ? teamTargetDoc.data()?.target || undefined : undefined;
+        
+        const teamMetric: TeamMetrics = {
+          teamId: team.id,
+          teamName: team.name,
+          managerName: 'No Manager Assigned',
+          totalLeads: 0,
+          pendingVerification: 0,
+          verified: 0,
+          rejected: 0,
+          activated: 0,
+          pendingAssignment: 0,
+          assigned: 0,
+          agents: [],
+          teamTarget: teamTarget  // Add team target to the metric
+        };
+
+        const teamMembers = allUsers.filter(user => user.teamId === team.id);
+
+        if (team.managerId) {
+          const manager = usersMap.get(team.managerId);
+          if (manager) {
+            teamMetric.managerName = manager.name;
+          }
+        }
+
+        const teamLeadsForTeam = teamLeads.filter(lead => lead.teamId === team.id);
+        teamMetric.totalLeads = teamLeadsForTeam.length;
+        
+        const teamActivatedLeads = teamLeadsForTeam.filter(lead => 
+          (lead.status === 'activated' || lead.status === 'activated_non_verified') && 
+          lead.updatedAt && 
+          lead.updatedAt >= currentMonthStart && 
+          lead.updatedAt <= currentMonthEnd
+        );
+        
+        teamMetric.activated = teamActivatedLeads.reduce((count, lead) => {
+          return count + (lead.plans?.length || 0);
+        }, 0);
+
+        teamLeadsForTeam.forEach(lead => {
+          if (lead.status === 'pending_verification') teamMetric.pendingVerification++;
+          if (lead.status === 'verified') teamMetric.verified++;
+          if (lead.status === 'rejected') teamMetric.rejected++;
+          if (lead.status === 'pending_assignment') teamMetric.pendingAssignment++;
+          if (lead.status === 'assigned') teamMetric.assigned++;
+        });
+
+        const agentMetrics = await Promise.all(teamMembers.map(async member => {
+          if (member.role !== 'agent') return null;
+
+          const monthStr = format(month, 'yyyy-MM');
+          const targetRef = doc(db, 'agentTargets', `${member.id}_${monthStr}`);
+          const targetDoc = await getDoc(targetRef);
+          const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
+
+          const agentLeads = teamLeadsForTeam.filter(lead => lead.agentId === member.id);
+          const verified = agentLeads.filter(lead => lead.status === 'verified').length;
+          
+          const agentActivatedLeads = agentLeads.filter(lead => 
+            (lead.status === 'activated' || lead.status === 'activated_non_verified') && 
+            lead.updatedAt && 
+            lead.updatedAt >= currentMonthStart && 
+            lead.updatedAt <= currentMonthEnd
+          );
+          
+          const activated = agentActivatedLeads.reduce((count, lead) => {
+            return count + (lead.plans?.length || 0);
+          }, 0);
+
+          return {
+            id: member.id,
+            name: member.name,
+            role: member.role,
+            totalLeads: agentLeads.length,
+            verified,
+            activated,
+            target,
+            achievement: target > 0 ? (activated / target) * 100 : 0
+          };
+        }));
+
+        teamMetric.agents = agentMetrics.filter((agent): agent is NonNullable<typeof agent> => agent !== null);
+        return teamMetric;
+      });
+
+      const resolvedTeamMetrics = await Promise.all(teamMetricsPromises);
+      const sortedTeamMetrics = [...resolvedTeamMetrics].sort((a, b) => {
+        const nameA = a.teamName || 'Unknown Team';
+        const nameB = b.teamName || 'Unknown Team';
+        const prefixA = nameA.replace(/\d+/g, '').toLowerCase();
+        const prefixB = nameB.replace(/\d+/g, '').toLowerCase();
+        if (prefixA !== prefixB) {
+          return prefixA.localeCompare(prefixB, undefined, { numeric: true, sensitivity: 'base' });
+        }
+        const numA = parseInt((nameA.match(/\d+/) || ['0'])[0], 10);
+        const numB = parseInt((nameB.match(/\d+/) || ['0'])[0], 10);
+        if (numA !== numB) return numA - numB;
+        return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+      setTeamMetrics(sortedTeamMetrics);
+      setCachedData(cacheKey, sortedTeamMetrics);
+      
+      // Check if teamId is in URL params and select the team
+      const teamIdFromUrl = searchParams.get('teamId');
+      if (teamIdFromUrl && sortedTeamMetrics) {
+        const team = sortedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+        if (team) {
+          setSelectedTeam(team);
+        }
+      }
+    } catch (error) {
+    }
+  }, [teamLeads]);
+
+  // Note: Team metrics are now loaded by the main data loading function
+  // loadTeamMetricsForMonth is only called when user changes the month via handleMonthChange
+
+  // ✅ PERFORMANCE: Compute group activations function
+  // Matches the logic from Reports.tsx exactly
+  const computeGroupActivations = useCallback((allLeads: Lead[], month: Date) => {
+    const start = startOfMonth(month);
+    const end = endOfMonth(month);
+    const gCounts: Record<string, number> = {};
+    
+    // Normalize group function - matches Reports.tsx
+    const normalizeGroup = (group?: string): string => {
+      const g = (group || '').toUpperCase().trim();
+      return g || 'UNKNOWN';
     };
+    
+    const monthActivated = allLeads.filter(lead => {
+      if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
+      const updated = lead.updatedAt instanceof Date ? lead.updatedAt : new Date(lead.updatedAt);
+      return updated >= start && updated <= end;
+    });
+    
+    monthActivated.forEach(lead => {
+      const productType = (lead as any).productType;
 
-    loadData();
+      (lead.plans || []).forEach(plan => {
+        const grp = normalizeGroup(plan.group);
+        
+        // For Express Dial (G2), only count "New" productType towards the group target/achieved
+        // This matches the logic in Reports.tsx
+        const shouldCountForGroup =
+          grp === 'G2'
+            ? productType === 'New'
+            : true;
 
-    // ✅ OPTIMIZED: Cleanup function with proper listener management
+        if (shouldCountForGroup) {
+          gCounts[grp] = (gCounts[grp] || 0) + 1;
+        }
+      });
+    });
+    
+    // Always set group activations, even if empty, to ensure state is updated
+    setGroupActivations(gCounts);
+  }, []);
+
+  // ✅ PERFORMANCE: Recompute group activations when teamLeads change
+  // NOTE: The main calculation happens in loadTeamMetricsForMonth with all leads
+  // This useEffect is a backup to ensure group activations are computed when teamLeads updates
+  // We skip if loading to avoid race conditions, and we rely on the direct call in loadTeamMetricsForMonth
+  useEffect(() => {
+    // Only recompute if we're not currently loading (to avoid race conditions)
+    // and if we have some data (to avoid computing on empty state)
+    // The main computation happens in loadTeamMetricsForMonth, this is just a safety net
+    if (!loading && teamLeads.length > 0) {
+      computeGroupActivations(teamLeads, selectedMonth);
+    }
+  }, [teamLeads, selectedMonth, computeGroupActivations, loading]);
+
+  // ✅ REALTIME: Setup real-time snapshots for live updates
+  const setupRealtimeSnapshots = useCallback(() => {
+    if (!realtimeEnabled || !isMountedRef.current) return;
+
+    // Real-time leads snapshot
+    // NOTE: For accurate group activations, we need ALL leads, not just recent ones
+    // But loading all leads in realtime can be expensive, so we reload full data periodically
+    const leadsUnsubscribe = onSnapshot(
+      query(
+        collection(db, 'leads'),
+        orderBy('updatedAt', 'desc'),
+        limit(1000) // Increased limit to capture more leads for accurate group calculations
+      ),
+      (snapshot) => {
+        if (!isMountedRef.current) return;
+        
+        const now = Date.now();
+        // Only update if enough time has passed since last update
+        if (now - lastRealtimeUpdateRef.current < REALTIME_UPDATE_INTERVAL) {
+          return;
+        }
+        
+        const newLeads = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          createdAt: doc.data().createdAt?.toDate(),
+          updatedAt: doc.data().updatedAt?.toDate()
+        })) as Lead[];
+
+        // Update cache with fresh data
+        setCachedData(ADMIN_LEADS_CACHE_KEY, newLeads);
+        setTeamLeads(newLeads);
+        // NOTE: Don't recompute group activations from realtime snapshot
+        // Group activations should only be computed from full dataset in loadTeamMetricsForMonth
+        // The realtime snapshot is limited and would give incorrect counts
+        lastRealtimeUpdateRef.current = now;
+      },
+      (error) => {
+        // Handle permission errors gracefully
+        if (error.code === 'permission-denied') {
+          return;
+        }
+        if (error.code === 'unavailable') {
+          return;
+        }
+      }
+    );
+
+    // Real-time teams snapshot
+    const teamsUnsubscribe = onSnapshot(
+      query(collection(db, 'teams')),
+      (snapshot) => {
+        if (!isMountedRef.current) return;
+        
+        const newTeams = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          name: doc.data().name || 'Unknown Team',
+          teamName: doc.data().name || doc.data().teamName || 'Unknown Team', // ✅ FIX: Ensure teamName is always defined
+          managerId: doc.data().managerId || '',
+          createdAt: doc.data().createdAt?.toDate(),
+          updatedAt: doc.data().updatedAt?.toDate()
+        })) as Team[];
+
+        // Update cache with fresh data
+        setCachedData(ADMIN_TEAMS_CACHE_KEY, newTeams);
+      },
+      (error) => {
+        // Suppress permission denied errors during logout
+        if (error.code !== 'permission-denied') {
+          // Handle other errors if needed
+        }
+      }
+    );
+
+    // Store unsubscribe functions
+    unsubscribeRefs.current.push(leadsUnsubscribe, teamsUnsubscribe);
+    
     return () => {
-      // Cleanup listeners when component unmounts
-      if (metricsUnsubscribeRef.current) {
-        metricsUnsubscribeRef.current();
-        metricsUnsubscribeRef.current = null;
-      }
-      if (leadsUnsubscribeRef.current) {
-        leadsUnsubscribeRef.current();
-        leadsUnsubscribeRef.current = null;
-      }
-      if (submissionsUnsubscribeRef.current) {
-        submissionsUnsubscribeRef.current();
-        submissionsUnsubscribeRef.current = null;
-      }
-
-      // Remove from active listeners
-      const listenerKey = `metrics_${user.id}`;
-      activeListeners.delete(listenerKey);
-
-      // ✅ OPTIMIZED: DON'T clear cache on unmount for better performance with 1-hour cache
-      // Cache will naturally expire after 1 hour, keeping it for fast remounts
+      leadsUnsubscribe();
+      teamsUnsubscribe();
     };
-  }, [user?.id, loadMetrics, loadRecentLeads]);
+  }, [realtimeEnabled]);
 
-  // ✅ OPTIMIZED: Memoized stats with better dependency tracking
+  // ✅ REALTIME: Start real-time snapshots after initial load
+  useEffect(() => {
+    if (!loading && realtimeEnabled) {
+      const cleanup = setupRealtimeSnapshots();
+      return cleanup;
+    }
+  }, [loading, realtimeEnabled, setupRealtimeSnapshots]);
+
+  async function loadAdminData(forceRefresh = false) {
+    // ✅ PERFORMANCE: Check cache first
+    if (!forceRefresh) {
+      const cachedMetrics = getCachedData(ADMIN_CACHE_KEY);
+      const cachedLeads = getCachedData(ADMIN_LEADS_CACHE_KEY);
+      const cachedTeamMetrics = getCachedData(ADMIN_TEAM_METRICS_CACHE_KEY);
+      
+      if (cachedMetrics && cachedLeads && cachedTeamMetrics) {
+        setMetrics(cachedMetrics);
+        setTeamLeads(cachedLeads);
+        setTeamMetrics(cachedTeamMetrics);
+        
+        // Check if teamId is in URL params and select the team
+        const teamIdFromUrl = searchParams.get('teamId');
+        if (teamIdFromUrl && cachedTeamMetrics) {
+          const team = cachedTeamMetrics.find((t: TeamMetrics) => t.teamId === teamIdFromUrl);
+          if (team) {
+            setSelectedTeam(team);
+          }
+        }
+        
+        setLoading(false);
+        return;
+      }
+    }
+
+    try {
+      setLoading(true);
+      
+      // Load all leads - matches Reports.tsx approach for accurate group activations
+      const leadsQuery = query(collection(db, 'leads'));
+      const leadsSnapshot = await getDocs(leadsQuery);
+      const allLeads = leadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate(),
+        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
+      })) as Lead[];
+
+      // Filter leads for current month
+      const currentMonthStart = startOfMonth(selectedMonth);
+      const currentMonthEnd = endOfMonth(selectedMonth);
+      const getActivatedAt = (lead: any): Date | null => {
+        const raw = lead?.activatedAt || lead?.updatedAt;
+        if (!raw) return null;
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      const getVerifiedAt = (lead: any): Date | null => {
+        const raw = lead?.verifiedAt;
+        if (!raw) return null;
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      // Filter leads for current month by activatedAt (fallback updatedAt)
+      const currentMonthLeads = allLeads.filter(lead => {
+        const activatedAt = getActivatedAt(lead);
+        return activatedAt && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
+      });
+        
+      // Current month verified count: leads verified in the current month
+      // Historical verified count: any lead that has ever been verified
+      const verifiedCount = allLeads.filter(l => getVerifiedAt(l) !== null).length;
+
+      // Filter leads verified in current month by verifiedAt
+      const currentMonthVerifiedLeads = allLeads.filter(lead => {
+        const verifiedAt = getVerifiedAt(lead);
+        return verifiedAt && verifiedAt >= currentMonthStart && verifiedAt <= currentMonthEnd;
+      });
+
+      // Calculate activated leads for current month
+      // Properly handle Firestore timestamps by converting them to Date objects
+      const currentMonthActivatedLeads = currentMonthLeads.filter(lead => 
+        lead.status === 'activated' || lead.status === 'activated_non_verified'
+      );
+      
+      // Calculate all-time activated leads
+      const allTimeActivatedLeads = allLeads.filter(lead => 
+        lead.status === 'activated' || lead.status === 'activated_non_verified'
+      );
+      
+      // Count total activations by summing up plans in each activated lead
+      const monthlyActivated = currentMonthActivatedLeads.reduce((count, lead) => {
+        return count + (lead.plans?.length || 0);
+      }, 0);
+      
+      const totalActivated = allTimeActivatedLeads.reduce((count, lead) => {
+        return count + (lead.plans?.length || 0);
+      }, 0);
+      
+      const currentMetrics = {
+        totalLeads: allLeads.length,
+        pendingVerification: allLeads.filter(l => l.status === 'pending_verification').length,
+        verified: verifiedCount,
+        currentMonthVerified: currentMonthVerifiedLeads.length,
+        rejected: currentMonthLeads.filter(l => l.status === 'rejected').length,
+        activated: monthlyActivated, // Current month
+        totalActivated: totalActivated, // All-time
+        pendingAssignment: allLeads.filter(l => l.status === 'verified').length,
+        assigned: allLeads.filter(l => l.status === 'assigned').length
+      };
+
+      setMetrics(currentMetrics);
+      setTeamLeads(allLeads);
+      // Compute group activations for the selected month
+      // IMPORTANT: Always compute from allLeads (full dataset) to ensure accuracy
+      computeGroupActivations(allLeads, selectedMonth);
+
+      // Optimize: Load teams and users in parallel
+      const [teamsSnapshot, usersSnapshot] = await Promise.all([
+        getDocs(query(collection(db, 'teams'))),
+        getDocs(query(collection(db, 'users'), where('role', 'in', ['agent', 'manager', 'freelancer'])))
+      ]);
+      
+      const teams = teamsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        name: doc.data().name || 'Unknown Team',
+        teamName: doc.data().name || doc.data().teamName || 'Unknown Team', // ✅ FIX: Ensure teamName is always defined
+        managerId: doc.data().managerId || '',
+        createdAt: doc.data().createdAt?.toDate(),
+        updatedAt: doc.data().updatedAt?.toDate()
+      })) as Team[];
+
+      const allUsers = usersSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as User[];
+
+      // Create a map for faster user lookups
+      const usersMap = new Map(allUsers.map(user => [user.id, user]));
+
+      const teamMetricsPromises = teams.map(async team => {
+        // Load team target for the selected month (ALWAYS fetch fresh from Firestore)
+        const monthStr = format(selectedMonth, 'yyyy-MM');
+        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
+        const teamTargetDoc = await getDoc(teamTargetRef);
+        const teamTarget = teamTargetDoc.exists() ? teamTargetDoc.data()?.target : undefined;
+        
+        const teamMetric: TeamMetrics = {
+          teamId: team.id,
+          teamName: team.name,
+          managerName: 'No Manager Assigned',
+          totalLeads: 0,
+          pendingVerification: 0,
+          verified: 0,
+          rejected: 0,
+          activated: 0,
+          pendingAssignment: 0,
+          assigned: 0,
+          teamTarget: teamTarget,
+          agents: []
+        };
+
+        // Optimize: Use pre-loaded users instead of making individual queries
+        const teamMembers = allUsers.filter(user => user.teamId === team.id);
+
+        // Get manager name from pre-loaded users
+        if (team.managerId) {
+          const manager = usersMap.get(team.managerId);
+          if (manager) {
+            teamMetric.managerName = manager.name;
+          }
+        }
+
+        // Calculate team metrics
+        const teamLeads = allLeads.filter(lead => lead.teamId === team.id);
+        teamMetric.totalLeads = teamLeads.length;
+        
+        // Calculate activated leads for the team in current month
+        // Properly handle Firestore timestamps by converting them to Date objects
+        const teamActivatedLeads = teamLeads.filter(lead => {
+          if ((lead.status !== 'activated' && lead.status !== 'activated_non_verified') || !lead.updatedAt) return false;
+          
+          // Convert Firestore timestamp to Date if needed
+          let updatedAtDate: Date;
+          if (lead.updatedAt instanceof Date) {
+            updatedAtDate = lead.updatedAt;
+          } else if (lead.updatedAt && typeof (lead.updatedAt as any).toDate === 'function') {
+            updatedAtDate = (lead.updatedAt as any).toDate();
+          } else {
+            updatedAtDate = new Date(lead.updatedAt);
+          }
+          
+          return updatedAtDate >= currentMonthStart && updatedAtDate <= currentMonthEnd;
+        });
+        
+        // Count total activations by summing up plans in each activated lead
+        teamMetric.activated = teamActivatedLeads.reduce((count, lead) => {
+          return count + (lead.plans?.length || 0);
+        }, 0);
+
+        // Calculate other team metrics
+        teamLeads.forEach(lead => {
+          if (lead.status === 'pending_verification') teamMetric.pendingVerification++;
+          // Historical verified count per team: any lead with verifiedAt
+          if ((lead as any).verifiedAt) {
+            teamMetric.verified++;
+          }
+          if (lead.status === 'rejected') teamMetric.rejected++;
+          if (lead.status === 'pending_assignment') teamMetric.pendingAssignment++;
+          if (lead.status === 'assigned') teamMetric.assigned++;
+        });
+
+        // Calculate agent metrics
+        const agentMetrics = await Promise.all(teamMembers.map(async member => {
+          if (member.role !== 'agent') return null;
+
+          // Get agent's target for the selected month
+          const monthStr = format(selectedMonth, 'yyyy-MM');
+          const targetRef = doc(db, 'agentTargets', `${member.id}_${monthStr}`);
+          const targetDoc = await getDoc(targetRef);
+          const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
+
+          // Get agent's leads
+          const agentLeads = allLeads.filter(lead => lead.agentId === member.id);
+          // Historical verified count per agent: any lead with verifiedAt
+          const verified = agentLeads.filter(
+            lead => (lead as any).verifiedAt
+          ).length;
+          
+          // Calculate activated leads for the agent in current month
+          // Properly handle Firestore timestamps by converting them to Date objects
+          const agentActivatedLeads = agentLeads.filter(lead => {
+            if ((lead.status !== 'activated' && lead.status !== 'activated_non_verified') || !lead.updatedAt) return false;
+            
+            // Convert Firestore timestamp to Date if needed
+            let updatedAtDate: Date;
+            if (lead.updatedAt instanceof Date) {
+              updatedAtDate = lead.updatedAt;
+            } else if (lead.updatedAt && typeof (lead.updatedAt as any).toDate === 'function') {
+              updatedAtDate = (lead.updatedAt as any).toDate();
+            } else {
+              updatedAtDate = new Date(lead.updatedAt);
+            }
+            
+            return updatedAtDate >= currentMonthStart && updatedAtDate <= currentMonthEnd;
+          });
+          
+          // Count total activations by summing up plans in each activated lead
+          const activated = agentActivatedLeads.reduce((count, lead) => {
+            return count + (lead.plans?.length || 0);
+          }, 0);
+
+          return {
+            id: member.id,
+            name: member.name,
+            role: member.role,
+            totalLeads: agentLeads.length,
+            verified,
+            activated,
+            target,
+            achievement: target > 0 ? (activated / target) * 100 : 0
+          };
+        }));
+
+        teamMetric.agents = agentMetrics.filter((agent): agent is NonNullable<typeof agent> => agent !== null);
+        return teamMetric;
+      });
+
+      const resolvedTeamMetrics = await Promise.all(teamMetricsPromises);
+      // Sort teams by name with numeric-aware ordering (e.g., ETS-1, ETS-2, ...)
+      const sortedTeamMetrics = [...resolvedTeamMetrics].sort((a, b) => {
+        // ✅ FIX: Add robust null/undefined checks for teamName
+        const nameA = a.teamName || 'Unknown Team';
+        const nameB = b.teamName || 'Unknown Team';
+
+        // Compare the non-numeric prefix first (case-insensitive)
+        const prefixA = nameA.replace(/\d+/g, '').toLowerCase();
+        const prefixB = nameB.replace(/\d+/g, '').toLowerCase();
+        if (prefixA !== prefixB) {
+          return prefixA.localeCompare(prefixB, undefined, { numeric: true, sensitivity: 'base' });
+        }
+
+        // If same prefix, compare numeric parts
+        const numA = parseInt((nameA.match(/\d+/) || ['0'])[0], 10);
+        const numB = parseInt((nameB.match(/\d+/) || ['0'])[0], 10);
+        if (numA !== numB) return numA - numB;
+
+        // Fallback to full name comparison
+        return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+      });
+      setTeamMetrics(sortedTeamMetrics);
+
+      // ✅ PERFORMANCE: Cache the data
+      if (isMountedRef.current) {
+        setCachedData(ADMIN_CACHE_KEY, currentMetrics);
+        setCachedData(ADMIN_LEADS_CACHE_KEY, allLeads);
+        // Use month-specific cache key to match loadTeamMetricsForMonth
+        const monthStr = format(selectedMonth, 'yyyy-MM');
+        const teamMetricsCacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
+        setCachedData(teamMetricsCacheKey, sortedTeamMetrics);
+        lastLoadTimeRef.current = Date.now();
+        
+        // Check if teamId is in URL params and select the team
+        const teamIdFromUrl = searchParams.get('teamId');
+        if (teamIdFromUrl && sortedTeamMetrics) {
+          const team = sortedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
+          if (team) {
+            setSelectedTeam(team);
+          }
+        }
+      }
+    } catch (error) {
+      toast.error('Failed to load admin data');
+    } finally {
+      if (isMountedRef.current) {
+      setLoading(false);
+      }
+    }
+  }
+
+  async function loadGroupTargetsForMonth(month: Date) {
+    try {
+      const monthId = format(month, 'yyyy-MM');
+      const ref = doc(db, 'groupTargets', monthId);
+      const snap = await getDoc(ref);
+      
+      let visibleToCoordinators = false;
+      const currentGroups: Record<string, number> = {};
+      
+      // Only load groups that exist in the current month's document
+      // This ensures deleted groups stay deleted and don't reappear from other months
+      if (snap.exists()) {
+        const currentMonthData: any = snap.data();
+        if (currentMonthData.groups && typeof currentMonthData.groups === 'object') {
+          Object.entries(currentMonthData.groups).forEach(([k, v]: any) => {
+            if (!k) return;
+            currentGroups[String(k).toUpperCase()] = Number(v || 0);
+          });
+        } else {
+          // Backward compatibility: old fields g1,g2,g3
+          ['G1', 'G2', 'G3'].forEach(g => {
+            const value = Number(currentMonthData[g.toLowerCase()] || 0);
+            currentGroups[g] = value;
+          });
+        }
+        
+        // Use current month's visibility setting
+        visibleToCoordinators = Boolean(currentMonthData.visibleToCoordinators === true);
+      }
+      // No default groups - only groups from Firestore data
+      
+      setGroupTargets({
+        groups: currentGroups,
+        visibleToCoordinators
+      });
+    } catch (e) {
+      // Silent; UI remains usable
+    }
+  }
+
+  async function loadGroupAliases() {
+    try {
+      // Load aliases from all groupTargets documents and merge them
+      // This ensures we get aliases from all months
+      const allGroupsQuery = query(collection(db, 'groupTargets'));
+      const allGroupsSnapshot = await getDocs(allGroupsQuery);
+      
+      const mergedAliases: Record<string, string> = {};
+      
+      // Only load aliases from Firestore - no hardcoded defaults
+      allGroupsSnapshot.docs.forEach(doc => {
+        const data: any = doc.data();
+        if (data.aliases && typeof data.aliases === 'object') {
+          Object.assign(mergedAliases, data.aliases);
+        }
+      });
+      
+      setGroupAliases(mergedAliases);
+    } catch (e) {
+      console.error('Error loading group aliases:', e);
+      // No fallback - empty object if no data
+      setGroupAliases({});
+    }
+  }
+
+  async function saveGroupAliases(aliases: Record<string, string>) {
+    try {
+      // Save aliases to the current month's groupTargets document
+      const monthId = format(selectedMonth, 'yyyy-MM');
+      const ref = doc(db, 'groupTargets', monthId);
+      await setDoc(ref, { aliases, updatedAt: serverTimestamp() }, { merge: true });
+      setGroupAliases(aliases);
+      toast.success('Group alias saved');
+    } catch (e) {
+      toast.error('Failed to save group alias');
+    }
+  }
+
+  // Save team target function
+  const handleSaveTeamTarget = async (teamId: string) => {
+    if (user?.role !== 'admin') return;
+    
+    setSavingTeamTarget(true);
+    try {
+      const monthStr = format(selectedMonth, 'yyyy-MM');
+      const teamTargetRef = doc(db, 'teamTargets', `${teamId}_${monthStr}`);
+      
+      await setDoc(teamTargetRef, {
+        teamId: teamId,
+        target: teamTargetValue,
+        month: monthStr,
+        updatedAt: serverTimestamp(),
+        setBy: 'admin'
+      }, { merge: true });
+      
+      // Update local state
+      setTeamMetrics(prev => 
+        prev.map(team => 
+          team.teamId === teamId 
+            ? { ...team, teamTarget: teamTargetValue }
+            : team
+        )
+      );
+      
+      // Update the cache with new data
+      const teamMetricsCacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
+      const cachedTeamMetrics = getCachedData(teamMetricsCacheKey);
+      if (cachedTeamMetrics) {
+        const updatedCache = cachedTeamMetrics.map((team: TeamMetrics) =>
+          team.teamId === teamId
+            ? { ...team, teamTarget: teamTargetValue }
+            : team
+        );
+        setCachedData(teamMetricsCacheKey, updatedCache);
+      }
+      
+      setEditingTeamTarget(null);
+      toast.success('Team target saved successfully');
+    } catch (error) {
+      console.error('[AdminDashboard] Error saving team target:', error);
+      toast.error('Failed to save team target');
+    } finally {
+      setSavingTeamTarget(false);
+    }
+  };
+
+  const searchLeadsByNumbers = async () => {
+    if (!numberLookupInput.trim()) {
+      toast.error('Please enter at least one number');
+      return;
+    }
+
+    setNumberLookupLoading(true);
+    setNumberLookupResults([]);
+
+    try {
+      // Parse numbers from input (split by newline, comma, or space)
+      const numbers = numberLookupInput
+        .split(/[\n,\s]+/)
+        .map(num => num.trim().replace(/\D/g, '')) // Remove non-digits
+        .filter(num => num.length >= 10); // Filter valid numbers (at least 10 digits)
+
+      if (numbers.length === 0) {
+        toast.error('No valid numbers found. Please enter numbers with at least 10 digits.');
+        setNumberLookupLoading(false);
+        return;
+      }
+
+      // Get all leads, users, and teams in parallel
+      const [leadsSnapshot, usersSnapshot, teamsSnapshot] = await Promise.all([
+        getDocs(query(collection(db, 'leads'))),
+        getDocs(query(collection(db, 'users'))),
+        getDocs(query(collection(db, 'teams')))
+      ]);
+
+      const allLeads = leadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Lead[];
+
+      // Create maps for agent and team names
+      const agentMap = new Map<string, string>();
+      usersSnapshot.docs.forEach(doc => {
+        const userData = doc.data() as User;
+        agentMap.set(doc.id, userData.name || 'Unknown Agent');
+      });
+
+      const teamMap = new Map<string, string>();
+      teamsSnapshot.docs.forEach(doc => {
+        const teamData = doc.data() as Team;
+        teamMap.set(doc.id, teamData.name || 'Unknown Team');
+      });
+
+      // Find leads that match any of the provided numbers
+      const matchingLeads = allLeads.filter(lead => {
+        // Check customer phone
+        const customerPhone = lead.customerPhone?.replace(/\D/g, '') || '';
+        
+        // Check selected numbers in plans array
+        const planNumbers = (lead.plans || []).map(plan => plan.number?.replace(/\D/g, '') || '').filter(num => num.length >= 10);
+        
+        // Check if any of the search numbers match customer phone or any plan number
+        return numbers.some(searchNum => {
+          const searchLast10 = searchNum.slice(-10);
+          
+          // Check customer phone
+          if (customerPhone && (customerPhone.includes(searchLast10) || searchLast10 === customerPhone.slice(-10))) {
+            return true;
+          }
+          
+          // Check plan numbers
+          return planNumbers.some(planNum => {
+            return planNum.includes(searchLast10) || searchLast10 === planNum.slice(-10);
+          });
+        });
+      }).map(lead => ({
+        ...lead,
+        agentName: lead.agentId ? (agentMap.get(lead.agentId) || lead.agentName || 'Unknown Agent') : 'N/A',
+        teamName: lead.teamId ? (teamMap.get(lead.teamId) || lead.teamName || 'Unknown Team') : 'N/A'
+      }));
+
+      // Fetch number pool data for all plan numberIds to get groups
+      const numberPoolMap = new Map<string, { group?: string }>();
+      const numberIdsToFetch = new Set<string>();
+      
+      matchingLeads.forEach(lead => {
+        (lead.plans || []).forEach(plan => {
+          if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+            numberIdsToFetch.add(plan.numberId);
+          }
+        });
+      });
+
+      // Fetch number pool documents in batches
+      if (numberIdsToFetch.size > 0) {
+        const numberPoolPromises = Array.from(numberIdsToFetch).map(async (numberId) => {
+          try {
+            const numberDoc = await getDoc(doc(db, 'numberPool', numberId));
+            if (numberDoc.exists()) {
+              const numberData = numberDoc.data();
+              numberPoolMap.set(numberId, {
+                group: numberData.group || 'N/A'
+              });
+            }
+          } catch (error) {
+            console.error(`Error fetching number pool for ${numberId}:`, error);
+          }
+        });
+        
+        await Promise.all(numberPoolPromises);
+      }
+
+      // Add number pool group data to leads
+      const leadsWithNumberPoolData = matchingLeads.map(lead => ({
+        ...lead,
+        plansWithGroup: (lead.plans || []).map(plan => {
+          if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+            const poolData = numberPoolMap.get(plan.numberId);
+            return {
+              ...plan,
+              poolGroup: poolData?.group || 'N/A'
+            };
+          }
+          return {
+            ...plan,
+            poolGroup: 'N/A'
+          };
+        })
+      }));
+
+      setNumberLookupResults(leadsWithNumberPoolData as any);
+      
+      if (matchingLeads.length === 0) {
+        toast(`No leads found for ${numbers.length} number(s)`, { icon: 'ℹ️' });
+      } else {
+        toast.success(`Found ${matchingLeads.length} lead(s) for ${numbers.length} number(s)`);
+      }
+    } catch (error) {
+      console.error('Error searching leads by numbers:', error);
+      toast.error('Failed to search leads');
+    } finally {
+      setNumberLookupLoading(false);
+    }
+  };
+
+  const handleAddGroupWithAlias = async () => {
+    const key = newGroupName.trim().toUpperCase();
+    const alias = newGroupAlias.trim();
+    
+    if (!key) {
+      toast.error('Please enter a group name');
+      return;
+    }
+    
+    if (!alias) {
+      toast.error('Please enter an alias name');
+      return;
+    }
+    
+    try {
+      // Add group to targets and aliases
+      const updatedGroups = { ...groupTargets.groups, [key]: groupTargets.groups[key] ?? 0 };
+      const updatedAliases = { ...groupAliases, [key]: alias };
+      
+      // Update local state
+      setGroupTargets(prev => ({ ...prev, groups: updatedGroups }));
+      setGroupAliases(updatedAliases);
+      
+      // Save both groups and aliases to groupTargets document
+      await saveGroupTargets({ ...groupTargets, groups: updatedGroups });
+      
+      // Reset form
+      setNewGroupName('');
+      setNewGroupAlias('');
+      setShowAliasInput(false);
+      
+      toast.success(`Group ${key} added with alias "${alias}"`);
+    } catch (e) {
+      toast.error('Failed to add group');
+    }
+  };
+
+  async function saveGroupTargets(override?: { groups: Record<string, number>; visibleToCoordinators: boolean }) {
+    try {
+      setSavingGroupTargets(true);
+      const monthId = format(selectedMonth, 'yyyy-MM');
+      const ref = doc(db, 'groupTargets', monthId);
+      // Normalize group keys to uppercase
+      const source = override ?? groupTargets;
+      const groups: Record<string, number> = {};
+      Object.entries(source.groups).forEach(([k, v]) => {
+        const key = String(k).toUpperCase();
+        groups[key] = Number(v || 0);
+      });
+      const payload: any = {
+        groups,
+        aliases: groupAliases, // Include aliases in groupTargets document
+        visibleToCoordinators: !!source.visibleToCoordinators,
+        updatedAt: serverTimestamp()
+      };
+      // Upsert into specific doc id (monthId)
+      await setDoc(ref, { ...payload, createdAt: serverTimestamp() }, { merge: true });
+      toast.success('Group targets saved');
+    } catch (e) {
+      toast.error('Failed to save group targets');
+    } finally {
+      setSavingGroupTargets(false);
+    }
+  }
+
+  // Memoize expensive computations
+  const memoizedStats = useMemo(() => {
+    return [
+      {
+        name: 'Total Leads',
+        value: metrics.totalLeads,
+        icon: Users,
+        href: '#leads',
+        color: 'from-blue-500 to-blue-600'
+      },
+      {
+        name: 'Pending Verification',
+        value: metrics.pendingVerification,
+        icon: Clock,
+        href: '#pending-verification',
+        color: 'from-yellow-500 to-yellow-600'
+      },
+      {
+        name: 'Verified (Monthly)',
+        value: metrics.currentMonthVerified,
+        icon: CheckCircle,
+        href: '#verified',
+        color: 'from-green-500 to-green-600'
+      },
+      {
+        name: 'Rejected',
+        value: metrics.rejected,
+        icon: XCircle,
+        href: '#rejected',
+        color: 'from-red-500 to-red-600'
+      },
+      {
+        name: 'Activated (Monthly)',
+        value: metrics.activated,
+        icon: Zap,
+        href: '#activated',
+        color: 'from-purple-500 to-purple-600'
+      },
+      {
+        name: 'Total Activated',
+        value: metrics.totalActivated,
+        icon: Zap,
+        href: '#activated',
+        color: 'from-indigo-500 to-indigo-600'
+      },
+      {
+        name: 'Pending Assignment',
+        value: metrics.pendingAssignment,
+        icon: ClipboardList,
+        href: '#pending-assignment',
+        color: 'from-orange-500 to-orange-600'
+      },
+      {
+        name: 'Assigned',
+        value: metrics.assigned,
+        icon: UserCheck,
+        href: '#assigned',
+        color: 'from-indigo-500 to-indigo-600'
+      }
+    ];
+  }, [metrics]);
+
+  const handleTeamClick = (team: TeamMetrics) => {
+    setSelectedTeam(team);
+    setSelectedAgent(null);
+  };
+
+  const handleAgentClick = async (agent: TeamMetrics['agents'][0], teamName: string) => {
+    // Show modal immediately with skeleton loading
+    setSelectedAgentDetails({
+      agent,
+      teamName,
+      performanceData: []
+    });
+    setIsLoadingAgentDetails(true);
+
+    try {
+      // Get performance data for the last 6 months
+      const performanceData: AgentPerformanceData[] = [];
+      for (let i = 5; i >= 0; i--) {
+        const month = subMonths(selectedMonth, i);
+        const startDate = startOfMonth(month);
+        const endDate = endOfMonth(month);
+
+        // Get agent's leads for the month
+        const agentLeads = teamLeads.filter(lead => 
+          lead.agentId === agent.id && 
+          (lead.status === 'activated' || lead.status === 'activated_non_verified') &&
+          lead.updatedAt && 
+          lead.updatedAt >= startDate && 
+          lead.updatedAt <= endDate
+        );
+
+        // Calculate total activated numbers
+        const activatedNumbers = agentLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
+
+        // Get target for the month
+        const monthStr = format(month, 'yyyy-MM');
+        const targetRef = doc(db, 'agentTargets', `${agent.id}_${monthStr}`);
+        const targetDoc = await getDoc(targetRef);
+        const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
+
+        performanceData.push({
+          month: format(month, 'MMM yyyy'),
+          totalLeads: agentLeads.length,
+          activated: activatedNumbers,
+          target,
+          achievement: target > 0 ? (activatedNumbers / target) * 100 : 0
+        });
+      }
+
+      // Update the modal with the loaded data
+      setSelectedAgentDetails(prev => ({
+        ...prev!,
+        performanceData
+      }));
+    } catch (error) {
+      toast.error('Failed to load agent performance data');
+    } finally {
+      setIsLoadingAgentDetails(false);
+    }
+  };
+
+  const handleBack = () => {
+    if (selectedAgent) {
+      setSelectedAgent(null);
+    } else if (selectedTeam) {
+      setSelectedTeam(null);
+    }
+  };
+
   const stats = useMemo(() => [
     {
-      name: 'Target',
-      description: 'Monthly activation target',
-      value: metrics.target,
-      icon: Target,
-      color: 'bg-gradient-to-br from-pink-500 to-pink-600',
+      name: 'Reports',
+      description: 'Daily & Monthly analytics',
+      value: 'View',
+      href: '/dashboard/admin/reports',
+      icon: BarChart3,
+      color: 'bg-gradient-to-br from-pink-500 to-rose-600',
       textColor: 'text-pink-600',
-      href: '/dashboard/leads?status=activated',
-    },
-    {
-      name: 'Achieved',
-      description: 'Monthly activations achieved',
-      value: metrics.achieved,
-      icon: CheckCircle2,
-      color: 'bg-gradient-to-br from-emerald-500 to-emerald-600',
-      textColor: 'text-emerald-600',
-      href: '/dashboard/leads?status=activated',
     },
     {
       name: 'Total Leads',
-      description: 'Total leads in system',
+      description: 'All leads in system',
       value: metrics.totalLeads,
       href: '/dashboard/leads',
       icon: Users,
-      color: 'bg-gradient-to-br from-blue-500 to-blue-600',
-      textColor: 'text-blue-600',
-    },
-    {
-      name: 'Assigned Leads',
-      description: 'Currently assigned leads',
-      value: metrics.assigned,
-      href: '/dashboard/leads?status=assigned',
-      icon: ClipboardList,
-      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
-      textColor: 'text-indigo-600',
+      color: 'bg-gradient-to-br from-gray-500 to-gray-600',
+      textColor: 'text-gray-600',
     },
     {
       name: 'Pending Verification',
@@ -633,961 +1766,2786 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
       textColor: 'text-yellow-600',
     },
     {
-      name: 'Verified',
-      description: 'Successfully verified',
-      value: metrics.verified,
+      name: 'Pending Assignment',
+      description: 'Awaiting assignment',
+      value: metrics.pendingAssignment,
+      href: '/dashboard/leads?status=verified',
+      icon: Building2,
+      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
+      textColor: 'text-orange-600',
+    },
+    {
+      name: 'Verified (Monthly)',
+      description: 'Verified this month',
+      value: metrics.currentMonthVerified,
       href: '/dashboard/leads?status=verified',
       icon: CheckCircle,
       color: 'bg-gradient-to-br from-green-500 to-green-600',
       textColor: 'text-green-600',
     },
     {
-      name: 'Follow Up',
-      description: 'Follow Up leads',
-      value: metrics.follow_up,
-      href: '/dashboard/leads?status=follow_up',
+      name: 'Activated (Monthly)',
+      description: 'Activated this month',
+      value: metrics.activated,
+      href: (() => {
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        return `/dashboard/leads?status=activated&from=${startOfMonth.toISOString()}&to=${endOfMonth.toISOString()}`;
+      })(),
+      icon: Zap,
+      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
+      textColor: 'text-purple-600',
+    },
+    {
+      name: 'Total Activated',
+      description: 'All-time activations',
+      value: metrics.totalActivated,
+      href: '/dashboard/leads?status=activated',
+      icon: Zap,
+      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
+      textColor: 'text-indigo-600',
+    },
+    {
+      name: 'Rejected',
+      description: 'Rejected leads',
+      value: metrics.rejected,
+      href: '/dashboard/leads?status=rejected',
       icon: XCircle,
       color: 'bg-gradient-to-br from-red-500 to-red-600',
       textColor: 'text-red-600',
     },
     {
-      name: 'Non-Verified Leads',
-      description: 'Non verified',
-      value: metrics.nonVerified,
-      href: '/dashboard/leads?status=non_verified',
-      icon: AlertCircle,
+      name: 'Number Logs',
+      description: 'View all number activity',
+      value: 'View',
+      href: '/dashboard/number-logs',
+      icon: Activity,
+      color: 'bg-gradient-to-br from-cyan-500 to-cyan-600',
+      textColor: 'text-cyan-600',
+    },
+    {
+      name: 'Lead Logs',
+      description: 'View all lead activity',
+      value: 'View',
+      href: '/dashboard/lead-logs',
+      icon: ClipboardList,
+      color: 'bg-gradient-to-br from-violet-500 to-violet-600',
+      textColor: 'text-violet-600',
+    },
+    {
+      name: 'User Session Logs',
+      description: 'Track user activities',
+      value: 'View',
+      href: '/dashboard/user-session-logs',
+      icon: Activity,
+      color: 'bg-gradient-to-br from-blue-500 to-indigo-600',
+      textColor: 'text-blue-600',
+    },
+    {
+      name: 'Number Lookup',
+      description: 'Search leads by numbers',
+      value: 'Search',
+      href: '#number-lookup',
+      icon: Search,
+      color: 'bg-gradient-to-br from-teal-500 to-teal-600',
+      textColor: 'text-teal-600',
+    },
+    {
+      name: 'Number Visibility',
+      description: 'Control freelancer access',
+      value: 'Manage',
+      href: '#number-visibility',
+      icon: Eye,
+      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
+      textColor: 'text-purple-600',
+    },
+    {
+      name: 'Manager WhatsApp',
+      description: 'Manage notification numbers',
+      value: 'Configure',
+      href: '#manager-whatsapp',
+      icon: Phone,
+      color: 'bg-gradient-to-br from-green-500 to-green-600',
+      textColor: 'text-green-600',
+    },
+    {
+      name: 'Plan Management',
+      description: 'Manage plans and categories',
+      value: 'Manage',
+      href: '#plan-management',
+      icon: Package,
+      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
+      textColor: 'text-indigo-600',
+    },
+    {
+      name: 'DNC Management',
+      description: 'Manage Do Not Call registry',
+      value: 'Manage',
+      href: '#dnc-management',
+      icon: Shield,
+      color: 'bg-gradient-to-br from-red-500 to-red-600',
+      textColor: 'text-red-600',
+    },
+    {
+      name: 'Bulk DNC Import',
+      description: 'Import large DNC datasets',
+      value: 'Import',
+      href: '#bulk-import',
+      icon: Database,
+      color: 'bg-gradient-to-br from-blue-500 to-blue-600',
+      textColor: 'text-blue-600',
+      isSpecial: true, // Mark as special button
+    },
+    {
+      name: 'Trusted Devices',
+      description: 'Manage trusted device access',
+      value: 'Manage',
+      href: '#trusted-devices',
+      icon: Smartphone,
+      color: 'bg-gradient-to-br from-green-500 to-green-600',
+      textColor: 'text-green-600',
+    },
+    {
+      name: 'WhatsApp Settings',
+      description: 'WhatsApp verification',
+      value: 'Configure',
+      href: '#whatsapp-settings',
+      icon: MessageSquare,
+      color: 'bg-gradient-to-br from-emerald-500 to-emerald-600',
+      textColor: 'text-emerald-600',
+    },
+    {
+      name: 'Broadcast Poster',
+      description: 'Send announcement',
+      value: 'Send',
+      href: '#broadcast-poster',
+      icon: Sparkles,
       color: 'bg-gradient-to-br from-amber-500 to-amber-600',
       textColor: 'text-amber-600',
     },
-  ], [metrics]);
+    {
+      name: 'Return numbers',
+      description: 'Return multiple numbers',
+      value: 'Delete',
+      href: '#bulk-delete',
+      icon: Trash2,
+      color: 'bg-gradient-to-br from-red-500 to-red-600',
+      textColor: 'text-red-600',
+    },
+    {
+      name: 'Add to Deleted Numbers',
+      description: 'Add to deleted numbers',
+      value: 'Add',
+      href: '#add-to-deleted',
+      icon: Archive,
+      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
+      textColor: 'text-orange-600',
+    },
+    {
+      name: 'Bulk Number Search',
+      description: 'Search number pool',
+      value: 'Search',
+      href: '#bulk-number-search',
+      icon: Search,
+      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
+      textColor: 'text-purple-600',
+    },
+    {
+      name: 'Bulk Deleted Number Search',
+      description: 'Search deleted numbers',
+      value: 'Search',
+      href: '#bulk-deleted-number-search',
+      icon: Archive,
+      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
+      textColor: 'text-orange-600',
+    },
+    {
+      name: 'Customer Link Tracking',
+      description: 'Track link activities',
+      value: 'Track',
+      href: '#customer-link-tracking',
+      icon: BarChart3,
+      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
+      textColor: 'text-indigo-600',
+    },
+  ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.currentMonthVerified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
-  // ✅ OPTIMIZED: Enhanced loading state with skeleton
-  if (loading) {
+  // Memoize sorted team metrics to prevent unnecessary re-sorting
+  const sortedTeamMetrics = useMemo(() => {
+    return [...teamMetrics].sort((a, b) => {
+      // ✅ FIX: Add null/undefined checks for teamName
+      const nameA = a.teamName || 'Unknown Team';
+      const nameB = b.teamName || 'Unknown Team';
+      
+      // Compare the non-numeric prefix first (case-insensitive)
+      const prefixA = nameA.replace(/\d+/g, '').toLowerCase();
+      const prefixB = nameB.replace(/\d+/g, '').toLowerCase();
+      if (prefixA !== prefixB) {
+        return prefixA.localeCompare(prefixB, undefined, { numeric: true, sensitivity: 'base' });
+      }
+
+      // If same prefix, compare numeric parts
+      const numA = parseInt((nameA.match(/\d+/) || ['0'])[0], 10);
+      const numB = parseInt((nameB.match(/\d+/) || ['0'])[0], 10);
+      if (numA !== numB) return numA - numB;
+
+      // Fallback to full name comparison
+      return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+    });
+  }, [teamMetrics]);
+
+  const AgentDetailsModal = () => {
+    if (!selectedAgentDetails) return null;
+
+    const { agent, teamName, performanceData } = selectedAgentDetails;
+
+    // Calculate 6-month average activation
+    const sixMonthAverage = performanceData.length > 0 
+      ? performanceData.reduce((sum, d) => sum + d.activated, 0) / performanceData.length 
+      : 0;
+
+    const performanceChartData = {
+      labels: performanceData.map(d => d.month),
+      datasets: [
+        {
+          label: 'Activated',
+          data: performanceData.map(d => d.activated),
+          borderColor: 'rgb(147, 51, 234)',
+          backgroundColor: 'rgba(147, 51, 234, 0.5)',
+          tension: 0.4
+        },
+        {
+          label: 'Target',
+          data: performanceData.map(d => d.target),
+          borderColor: 'rgb(59, 130, 246)',
+          backgroundColor: 'rgba(59, 130, 246, 0.5)',
+          tension: 0.4
+        }
+      ]
+    };
+
+    const achievementChartData = {
+      labels: performanceData.map(d => d.month),
+      datasets: [{
+        label: 'Achievement %',
+        data: performanceData.map(d => d.achievement),
+        backgroundColor: 'rgba(34, 197, 94, 0.5)',
+        borderColor: 'rgb(34, 197, 94)',
+        borderWidth: 1
+      }]
+    };
+
+    const chartOptions = {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'top' as const,
+        },
+      },
+      scales: {
+        y: {
+          beginAtZero: true
+        }
+      }
+    };
+
     return (
-      <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto">
-          <div className="flex items-center justify-center h-64">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600" />
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">{agent.name}</h2>
+                <p className="text-sm text-gray-500">{teamName}</p>
+              </div>
+              <button
+                onClick={() => setSelectedAgentDetails(null)}
+                className="text-gray-400 hover:text-gray-500"
+              >
+                <XCircle className="w-6 h-6" />
+              </button>
+            </div>
+
+            {isLoadingAgentDetails ? (
+              <div className="space-y-6">
+                {/* Skeleton loading for cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {[...Array(4)].map((_, index) => (
+                    <div key={index} className="bg-gray-100 rounded-xl p-4 animate-pulse">
+                      <div className="h-4 bg-gray-200 rounded w-1/2 mb-2"></div>
+                      <div className="h-8 bg-gray-200 rounded w-3/4"></div>
+                    </div>
+                  ))}
+                </div>
+                {/* Skeleton loading for charts */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {[...Array(2)].map((_, index) => (
+                    <div key={index} className="bg-gray-100 rounded-xl p-4 animate-pulse">
+                      <div className="h-4 bg-gray-200 rounded w-1/3 mb-4"></div>
+                      <div className="h-64 bg-gray-200 rounded"></div>
+                    </div>
+                  ))}
+                </div>
+                {/* Skeleton loading for table */}
+                <div className="bg-gray-100 rounded-xl p-4 animate-pulse">
+                  <div className="h-4 bg-gray-200 rounded w-1/4 mb-4"></div>
+                  <div className="space-y-3">
+                    {[...Array(6)].map((_, index) => (
+                      <div key={index} className="h-10 bg-gray-200 rounded"></div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                  <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl p-4 text-white">
+                    <h4 className="text-sm font-medium mb-1">Total Leads</h4>
+                    <p className="text-2xl font-bold">
+                      {performanceData.reduce((sum, d) => sum + d.totalLeads, 0)}
+                    </p>
+                  </div>
+                  <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-4 text-white">
+                    <h4 className="text-sm font-medium mb-1">6-Month Average</h4>
+                    <p className="text-2xl font-bold">
+                      {sixMonthAverage.toFixed(1)}
+                    </p>
+                    <p className="text-xs text-green-100 mt-1">Monthly Activations</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-4 text-white">
+                    <h4 className="text-sm font-medium mb-1">Total Activated</h4>
+                    <p className="text-2xl font-bold">
+                      {performanceData.reduce((sum, d) => sum + d.activated, 0)}
+                    </p>
+                  </div>
+                  <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 rounded-xl p-4 text-white">
+                    <h4 className="text-sm font-medium mb-1">Average Achievement</h4>
+                    <p className="text-2xl font-bold">
+                      {(performanceData.reduce((sum, d) => sum + d.achievement, 0) / performanceData.length).toFixed(1)}%
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                  <div className="bg-white p-4 rounded-xl shadow-sm">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4">Performance Trend</h3>
+                    <div style={{ height: '300px' }}>
+                      <Line data={performanceChartData} options={chartOptions} />
+                    </div>
+                  </div>
+                  <div className="bg-white p-4 rounded-xl shadow-sm">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4">Achievement Rate</h3>
+                    <div style={{ height: '300px' }}>
+                      <Bar data={achievementChartData} options={chartOptions} />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-4 rounded-xl shadow-sm">
+                  <h3 className="text-lg font-semibold text-gray-900 mb-4">Monthly Breakdown</h3>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead>
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Month</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Target</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Activated</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Achievement</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {performanceData.map((data, index) => (
+                          <tr key={index}>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{data.month}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{data.target}</td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{data.activated}</td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="flex items-center">
+                                <div className="w-full bg-gray-200 rounded-full h-2.5 mr-2">
+                                  <div
+                                    className="h-2.5 rounded-full transition-all duration-500"
+                                    style={{
+                                      width: `${Math.min(data.achievement, 100)}%`,
+                                      backgroundImage: data.achievement >= 100 
+                                        ? 'linear-gradient(to right, #059669, #10b981)'
+                                        : data.achievement >= 80 
+                                          ? 'linear-gradient(to right, #3b82f6, #60a5fa)'
+                                          : data.achievement >= 60 
+                                            ? 'linear-gradient(to right, #d97706, #f59e0b)'
+                                            : 'linear-gradient(to right, #dc2626, #ef4444)'
+                                    }}
+                                  />
+                                </div>
+                                <span className="text-sm font-medium text-gray-900">
+                                  {data.achievement.toFixed(1)}%
+                                </span>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
+      </div>
+    );
+  };
+
+  // Load open requests
+  const loadOpenRequests = () => {
+    const q = query(
+      collection(db, 'setOpenRequests'),
+      where('status', '==', 'pending'),
+      orderBy('requestedAt', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const requests = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        requestedAt: doc.data().requestedAt?.toDate()
+      })) as OpenRequest[];
+      setOpenRequests(requests);
+      setOpenRequestsLoading(false);
+    }, (error) => {
+      // Suppress permission denied errors during logout
+      if (error.code !== 'permission-denied') {
+        setOpenRequestsLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  };
+
+  // Handle open request approval/rejection
+  const handleOpenRequest = async (request: OpenRequest, action: 'approve' | 'reject') => {
+    try {
+      const requestRef = doc(db, 'setOpenRequests', request.id);
+      
+      if (action === 'approve') {
+        // Update the number status to 'open' in numberPool
+        const numberRef = doc(db, 'numberPool', request.numberId);
+        await updateDoc(numberRef, {
+          status: 'open',
+          claims: [],
+          lastStatusChange: serverTimestamp()
+        });
+
+        // Update request status
+        await updateDoc(requestRef, {
+          status: 'approved',
+          processedAt: serverTimestamp(),
+          processedBy: user.id
+        });
+
+        toast.success('Number set to open successfully');
+      } else {
+        // Update request status to rejected
+        await updateDoc(requestRef, {
+          status: 'rejected',
+          processedAt: serverTimestamp(),
+          processedBy: user.id
+        });
+
+        toast.success('Request rejected');
+      }
+
+      // Send notification to coordinator
+      await addDoc(collection(db, 'notifications'), {
+        userId: request.requestedBy,
+        type: 'open_request_response',
+        title: 'Open Request Response',
+        message: `Your open request for number ${request.number} has been ${action === 'approve' ? 'approved' : 'rejected'}`,
+        read: false,
+        createdAt: serverTimestamp(),
+        numberId: request.numberId
+      });
+
+    } catch (error) {
+      toast.error('Failed to process request');
+    }
+  };
+
+  // Find lead by number
+  const findLeadByNumber = async (numberId: string) => {
+    try {
+      const leadsQuery = query(collection(db, 'leads'));
+      const leadsSnapshot = await getDocs(leadsQuery);
+      
+      for (const doc of leadsSnapshot.docs) {
+        const data = doc.data();
+        if (data.plans && Array.isArray(data.plans)) {
+          const hasNumber = data.plans.some((plan: any) => plan.numberId === numberId);
+          if (hasNumber) {
+            return doc.id;
+          }
+        }
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const handleViewLead = async (numberId: string) => {
+    const leadId = await findLeadByNumber(numberId);
+    if (leadId) {
+      navigate(`/dashboard/leads/${leadId}`);
+    } else {
+      toast.error('Lead not found for this number');
+    }
+  };
+
+  // Handle initialize number pool stats
+  const handleInitializeStats = async () => {
+    try {
+      setInitializingStats(true);
+      setInitStatsResult(null);
+      const fn = httpsCallable(functions, 'initializeNumberPoolStats');
+      const res = await fn({});
+      const data = res.data as any;
+      setInitStatsResult(
+        `Initialization completed! Total: ${data.totalItems} items. ` +
+        `Categories: ${Object.keys(data.categoryCounts || {}).length}, ` +
+        `Groups: ${Object.keys(data.groupCounts || {}).length}, ` +
+        `Initials: ${Object.keys(data.initialsCounts || {}).length}`
+      );
+      toast.success('Number pool stats initialized successfully');
+    } catch (err: any) {
+      const errorMsg = `Failed to initialize stats: ${err?.message || 'Unknown error'}`;
+      setInitStatsResult(errorMsg);
+      toast.error(errorMsg);
+    } finally {
+      setInitializingStats(false);
+    }
+  };
+
+  // Handle regenerate group and initials stats only
+  const handleRegenerateGroupStats = async () => {
+    try {
+      setInitializingGroupStats(true);
+      setInitGroupStatsResult(null);
+      const fn = httpsCallable(functions, 'initializeNumberPoolGroupStats');
+      const res = await fn({});
+      const data = res.data as any;
+      setInitGroupStatsResult(
+        `Group & Initials stats regenerated! ` +
+        `Groups: ${Object.keys(data.groupCounts || {}).length}, ` +
+        `Initials: ${Object.keys(data.initialsCounts || {}).length}`
+      );
+      toast.success('Group and Initials stats regenerated successfully');
+    } catch (err: any) {
+      const errorMsg = `Failed to regenerate group stats: ${err?.message || 'Unknown error'}`;
+      setInitGroupStatsResult(errorMsg);
+      toast.error(errorMsg);
+    } finally {
+      setInitializingGroupStats(false);
+    }
+  };
+
+  // OpenRequestsSection component
+  const OpenRequestsSection = () => (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5 }}
+      className="mt-8"
+      id="open-requests"
+    >
+      <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+        <div className="px-8 py-6 bg-gradient-to-r from-orange-500 to-red-600">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                <Unlock className="h-6 w-6" />
+                Open Requests
+              </h3>
+              <p className="mt-1 text-orange-100 text-sm">
+                Manage coordinator requests to set numbers as open
+              </p>
+            </div>
+            <div className="p-2 bg-white/10 rounded-lg">
+              <AlertOctagon className="h-6 w-6 text-white" />
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6">
+          {openRequestsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500" />
+            </div>
+          ) : openRequests.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              No pending open requests
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {openRequests.map((request) => (
+                <motion.div
+                  key={request.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-gradient-to-r from-orange-50 to-red-50 rounded-xl p-4 border border-orange-100"
+                >
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                    <div className="flex items-center space-x-4">
+                      <div className="h-12 w-12 flex-shrink-0 rounded-xl bg-gradient-to-br from-orange-100 to-red-100 flex items-center justify-center">
+                        <Hash className="h-6 w-6 text-orange-600" />
+                      </div>
+                      <div>
+                        <h4 className="text-lg font-semibold text-gray-900">{request.number}</h4>
+                        <p className="text-sm text-gray-600">
+                          Requested by {request.requestedByName} {formatDistanceToNow(request.requestedAt)} ago
+                        </p>
+                        <div className="flex items-center gap-4 mt-2">
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                            <AlertTriangle className="w-3 h-3 mr-1" />
+                            {liveStrikes[request.numberId] ?? '...'} strikes
+                          </span>
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                            {request.numberStatus}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-3">
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => handleViewLead(request.numberId)}
+                        className="inline-flex items-center px-3 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors"
+                      >
+                        <Eye className="h-4 w-4 mr-1.5" />
+                        View Lead
+                      </motion.button>
+                      
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => handleOpenRequest(request, 'approve')}
+                        className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-200"
+                      >
+                        <Unlock className="h-4 w-4 mr-1.5" />
+                        Approve
+                      </motion.button>
+                      
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => handleOpenRequest(request, 'reject')}
+                        className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200"
+                      >
+                        <Lock className="h-4 w-4 mr-1.5" />
+                        Reject
+                      </motion.button>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-6 sm:py-12 relative overflow-hidden">
-      {/* 3D Static Pattern Background */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {/* 3D Geometric Pattern */}
-        <div className="absolute inset-0 opacity-[0.04]">
-          <div className="absolute top-0 left-0 w-full h-full">
-            {/* Large 3D cubes */}
-            <div className="absolute top-10 left-10 w-32 h-32 transform rotate-45 bg-gradient-to-br from-indigo-400 to-purple-600 rounded-lg shadow-2xl"></div>
-            <div className="absolute top-40 right-20 w-24 h-24 transform -rotate-12 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-lg shadow-xl"></div>
-            <div className="absolute bottom-20 left-1/4 w-28 h-28 transform rotate-30 bg-gradient-to-br from-purple-400 to-pink-600 rounded-lg shadow-2xl"></div>
-            <div className="absolute bottom-40 right-1/3 w-20 h-20 transform -rotate-45 bg-gradient-to-br from-blue-400 to-indigo-600 rounded-lg shadow-lg"></div>
+    <div>
+      <div className="mb-4 sm:mb-8">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4 mb-3 sm:mb-4">
+          <div className="flex-1">
+          <p className="mt-1 sm:mt-2 text-xs sm:text-lg text-gray-600">
+              <br></br>
+            </p>
+            <h1 className="text-lg sm:text-2xl md:text-3xl font-bold text-gray-900">
+              Welcome back, {user?.name}!
+            </h1>
+            <p className="mt-1 sm:mt-2 text-xs sm:text-base md:text-lg text-gray-600">
+              Here's what's happening across all teams today.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-4">
             
-            {/* Medium 3D cubes */}
-            <div className="absolute top-1/3 left-1/2 w-16 h-16 transform rotate-15 bg-gradient-to-br from-indigo-300 to-purple-500 rounded-md shadow-lg"></div>
-            <div className="absolute top-2/3 right-1/4 w-12 h-12 transform -rotate-30 bg-gradient-to-br from-cyan-300 to-blue-500 rounded-md shadow-md"></div>
-            <div className="absolute bottom-1/3 left-1/6 w-14 h-14 transform rotate-60 bg-gradient-to-br from-purple-300 to-pink-500 rounded-md shadow-lg"></div>
-            
-            {/* Small 3D cubes */}
-            <div className="absolute top-1/4 right-1/6 w-8 h-8 transform rotate-45 bg-gradient-to-br from-indigo-200 to-purple-400 rounded shadow"></div>
-            <div className="absolute top-3/4 left-1/3 w-6 h-6 transform -rotate-15 bg-gradient-to-br from-cyan-200 to-blue-400 rounded shadow"></div>
-            <div className="absolute bottom-1/4 right-1/2 w-10 h-10 transform rotate-75 bg-gradient-to-br from-purple-200 to-pink-400 rounded shadow"></div>
-            
-            {/* Floating 3D spheres */}
-            <div className="absolute top-1/6 left-1/3 w-4 h-4 bg-gradient-to-br from-indigo-300 to-purple-500 rounded-full shadow-lg"></div>
-            <div className="absolute top-2/3 right-1/6 w-3 h-3 bg-gradient-to-br from-cyan-300 to-blue-500 rounded-full shadow-md"></div>
-            <div className="absolute bottom-1/6 left-2/3 w-5 h-5 bg-gradient-to-br from-purple-300 to-pink-500 rounded-full shadow-lg"></div>
-            
-            {/* 3D Hexagons */}
-            <div className="absolute top-1/2 left-1/8 w-20 h-20 transform rotate-30">
-              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
+            <div className="flex items-center space-x-1 text-[10px] sm:text-sm text-gray-600">
+              <Calendar className="h-2.5 w-2.5 sm:h-4 sm:w-4 md:h-5 md:w-5" />
+                <input
+                  type="month"
+                  value={format(selectedMonth, 'yyyy-MM')}
+                  onChange={handleMonthInputChange}
+                  className="border rounded px-1.5 py-0.5 sm:px-3 sm:py-2 text-[10px] sm:text-sm focus:ring-1 sm:focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                />
             </div>
-            <div className="absolute bottom-1/4 right-1/8 w-16 h-16 transform -rotate-15">
-              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{ clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)' }}></div>
-            </div>
+            <PayrollButton role="admin" user={user} />
             
-            {/* 3D Triangles */}
-            <div className="absolute top-1/3 right-1/3 w-12 h-12 transform rotate-45">
-              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{ clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)' }}></div>
-            </div>
-            <div className="absolute bottom-1/3 left-1/2 w-10 h-10 transform -rotate-30">
-              <div className="w-full h-full bg-gradient-to-br from-indigo-400 to-purple-600" style={{ clipPath: 'polygon(50% 0%, 0% 100%, 100% 100%)' }}></div>
-            </div>
+            {/* Attendance Button */}
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={() => setAttendanceOpen(true)}
+              className="group relative inline-flex items-center gap-1.5 sm:gap-3 px-2 py-1 sm:px-6 sm:py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded sm:rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+            >
+              <div className="absolute inset-0 bg-gradient-to-r from-green-600 to-emerald-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+              <div className="relative flex items-center gap-1.5 sm:gap-3">
+                <div className="p-0.5 sm:p-1.5 bg-white/20 rounded backdrop-blur-sm">
+                  <UserCheck className="h-2.5 w-2.5 sm:h-4 sm:w-4 md:h-5 md:w-5" />
+                </div>
+                <span className="text-[10px] sm:text-sm font-semibold">Attendance</span>
+              </div>
+            </motion.button>
+
             
-            {/* 3D Diamonds */}
-            <div className="absolute top-1/4 left-3/4 w-14 h-14 transform rotate-45">
-              <div className="w-full h-full bg-gradient-to-br from-cyan-400 to-blue-600" style={{ clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' }}></div>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats Grid */}
+      <div className="grid grid-cols-3 gap-2 sm:gap-4 md:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-6 sm:mb-12">
+        {stats.filter(stat =>
+          stat.name !== 'Lead Logs' &&
+          stat.name !== 'Return numbers' &&
+          stat.name !== 'Add to Deleted Numbers' &&
+          stat.name !== 'Bulk Number Search' &&
+          stat.name !== 'Bulk Deleted Number Search' &&
+          stat.name !== 'Number Lookup' &&
+          stat.name !== 'Number Visibility' &&
+          stat.name !== 'Total Leads' &&
+          stat.name !== 'Total Activated' &&
+          stat.name !== 'Rejected'
+        ).map((stat) => (
+          stat.name === 'Number Visibility' ? (
+            <button
+              key={stat.name}
+              onClick={() => {
+                setNumberVisibilityOpen(true);
+                loadHiddenNumbers();
+              }}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Number Lookup' ? (
+            <button
+              key={stat.name}
+              onClick={() => {
+                setNumberLookupOpen(true);
+                setNumberLookupInput('');
+                setNumberLookupResults([]);
+              }}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Manager WhatsApp' ? (
+            <button
+              key={stat.name}
+              onClick={() => setManagerPhoneModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Plan Management' ? (
+            <button
+              key={stat.name}
+              onClick={() => setPlanManagementModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'DNC Management' ? (
+            <button
+              key={stat.name}
+              onClick={() => setDncManagementOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Bulk DNC Import' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkImportOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Trusted Devices' ? (
+            <button
+              key={stat.name}
+              onClick={() => setTrustedDevicesModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'WhatsApp Settings' ? (
+            <button
+              key={stat.name}
+              onClick={() => setWhatsappSettingsModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Broadcast Poster' ? (
+            <button
+              key={stat.name}
+              onClick={() => setPosterModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Return numbers' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkDeleteModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Add to Deleted Numbers' ? (
+            <button
+              key={stat.name}
+              onClick={() => setAddToDeletedModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+                <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+              </div>
+            </button>
+          ) : stat.name === 'Bulk Number Search' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkNumberSearchModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+                <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+              </div>
+            </button>
+          ) : stat.name === 'Bulk Deleted Number Search' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkDeletedNumberSearchModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Customer Link Tracking' ? (
+            <button
+              key={stat.name}
+              onClick={() => setCustomerLinkTrackingModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : (
+            <Link
+              to={stat.href}
+              key={stat.name}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group ${getGlassmorphismClass(stat.name) || 'bg-white'}`}
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </Link>
+          )
+        ))}
+        
+        {/* Initialize Number Pool Stats Button */}
+        <button
+          onClick={handleInitializeStats}
+          disabled={initializingStats}
+          className="hidden bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-blue-200"
+          type="button"
+        >
+          <div className="p-2 sm:p-4 md:p-6">
+            <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+              <div className="p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 group-hover:scale-110 transition-transform duration-300">
+                <Database className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+              </div>
+              <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                {initializingStats ? 'Initializing...' : 'Regenerate stats'}
+              </div>
             </div>
-            <div className="absolute bottom-1/4 left-1/8 w-18 h-18 transform -rotate-15">
-              <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-600" style={{ clipPath: 'polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)' }}></div>
+            <div className="space-y-1 sm:space-y-2">
+              <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                {initializingStats ? 'Initializing...' : 'Regenerate Stats'}
+              </h3>
+            </div>
+          </div>
+          <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
+        </button>
+
+        {/* Regenerate Group & Initials Stats Button - Hidden */}
+        {false && <button
+          onClick={handleRegenerateGroupStats}
+          disabled={initializingGroupStats}
+          className="bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-green-200"
+          type="button"
+        >
+          <div className="p-2 sm:p-4 md:p-6">
+            <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+              <div className="p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 group-hover:scale-110 transition-transform duration-300">
+                <Database className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+              </div>
+              <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                {initializingGroupStats ? 'Regenerating...' : 'Groups & Initials'}
+              </div>
+            </div>
+            <div className="space-y-1 sm:space-y-2">
+              <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                {initializingGroupStats ? 'Regenerating...' : 'Regenerate Group & Initials Stats'}
+              </h3>
+              {initGroupStatsResult && (
+                <p className="text-xs text-gray-600 mt-1">{initGroupStatsResult}</p>
+              )}
+            </div>
+          </div>
+          <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-green-500 to-emerald-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
+        </button>}
+      </div>
+
+      {/* Team Performance Section */}
+        <div className="mb-8">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-4">
+            {(selectedTeam || selectedAgent) && (
+              <button
+                onClick={handleBack}
+                className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md text-indigo-600 bg-indigo-50 hover:bg-indigo-100"
+              >
+                <ArrowLeft className="h-4 w-4 mr-2" />
+                Back
+              </button>
+            )}
+            <h2 className="text-2xl font-bold text-gray-900">
+              {selectedAgent ? 'Agent Performance' : 
+               selectedTeam ? 'Team Performance' : 
+               ''}
+            </h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-gray-400" />
+              <input
+                type="month"
+                value={format(selectedMonth, 'yyyy-MM')}
+                onChange={handleMonthInputChange}
+                className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+          </div>
+        </div>
+
+        {selectedTeam ? (
+          <div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+              <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl p-4 text-white">
+                <h4 className="text-sm font-medium mb-1">Total Leads</h4>
+                <p className="text-2xl font-bold">{selectedTeam.totalLeads}</p>
+              </div>
+              <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-4 text-white">
+                <h4 className="text-sm font-medium mb-1">Activated</h4>
+                <p className="text-2xl font-bold">
+                  {teamLeads.filter(lead => 
+                    lead.teamId === selectedTeam.teamId && 
+                    (lead.status === 'activated' || lead.status === 'activated_non_verified') &&
+                    lead.updatedAt && 
+                    lead.updatedAt >= startOfMonth(selectedMonth) && 
+                    lead.updatedAt <= endOfMonth(selectedMonth)
+                  ).reduce((sum, lead) => sum + (lead.plans?.length || 0), 0)}
+                </p>
+              </div>
+              <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-4 text-white">
+                <h4 className="text-sm font-medium mb-1">Total Target</h4>
+                <p className="text-2xl font-bold">
+                  {selectedTeam.agents.reduce((sum, agent) => sum + (agent.target || 0), 0)}
+                </p>
+              </div>
+              <div className="bg-gradient-to-br from-indigo-500 to-indigo-600 rounded-xl p-4 text-white">
+                <h4 className="text-sm font-medium mb-1">Agents</h4>
+                <p className="text-2xl font-bold">{selectedTeam.agents.length}</p>
+              </div>
+            </div>
+
+            {/* Agent Performance Table */}
+            <div className="mt-8">
+              <h4 className="text-lg font-semibold text-gray-900 mb-4">Agent Performance</h4>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Agent
+                      </th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Target
+                      </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Activated
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Total Leads
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        6-Month Avg
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Achievement
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                    {selectedTeam.agents.map((agent) => {
+                      const achievement = agent.target > 0 ? (agent.activated / agent.target) * 100 : 0;
+                      const statusColor = achievement >= 100 
+                        ? 'bg-green-100 text-green-800'
+                        : achievement >= 80 
+                          ? 'bg-blue-100 text-blue-800'
+                          : achievement >= 60 
+                            ? 'bg-yellow-100 text-yellow-800'
+                            : 'bg-red-100 text-red-800';
+                      
+                      const statusText = achievement >= 100 
+                        ? 'Exceeded'
+                        : achievement >= 80 
+                          ? 'On Track'
+                          : achievement >= 60 
+                            ? 'At Risk'
+                            : 'Behind';
+
+                      // Calculate 6-month average
+                      const sixMonthsAgo = subMonths(selectedMonth, 5);
+                      const sixMonthActivations = teamLeads
+                        .filter(lead => 
+                          lead.agentId === agent.id && 
+                          (lead.status === 'activated' || lead.status === 'activated_non_verified') &&
+                          lead.updatedAt && 
+                          lead.updatedAt >= startOfMonth(sixMonthsAgo) && 
+                          lead.updatedAt <= endOfMonth(selectedMonth)
+                        )
+                        .reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
+                      
+                      const sixMonthAverage = Math.round(sixMonthActivations / 6);
+
+                      return (
+                        <tr 
+                          key={agent.id}
+                          onClick={() => handleAgentClick(agent, selectedTeam.teamName)}
+                          className="hover:bg-gray-50 cursor-pointer transition-colors duration-150"
+                        >
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="flex items-center">
+                              <div className="flex-shrink-0 h-10 w-10">
+                                <div className="h-10 w-10 rounded-full bg-indigo-100 flex items-center justify-center">
+                                  <span className="text-indigo-600 font-medium">
+                                    {agent.name.split(' ').map((n, index) => <span key={index}>{n[0]}</span>)}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="ml-4">
+                                <div className="text-sm font-medium text-gray-900">{agent.name}</div>
+                                
+                              </div>
+                            </div>
+                      </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900">{agent.target}</div>
+                      </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900">{agent.activated}</div>
+                      </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900">{agent.totalLeads}</div>
+                      </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900">
+                              <span className="font-medium">{sixMonthAverage}</span>
+                              <span className="text-gray-500 text-xs ml-1"></span>
+                            </div>
+                      </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="flex items-center">
+                              <div className="w-full bg-gray-200 rounded-full h-2.5 mr-2">
+                                <div
+                                  className="h-2.5 rounded-full transition-all duration-500"
+                                  style={{
+                                    width: `${Math.min(achievement, 100)}%`,
+                                    backgroundImage: achievement >= 100 
+                                      ? 'linear-gradient(to right, #059669, #10b981)'
+                                      : achievement >= 80 
+                                        ? 'linear-gradient(to right, #3b82f6, #60a5fa)'
+                                        : achievement >= 60 
+                                          ? 'linear-gradient(to right, #d97706, #f59e0b)'
+                                          : 'linear-gradient(to right, #dc2626, #ef4444)'
+                                  }}
+                                />
+                              </div>
+                              <span className="text-sm font-medium text-gray-900">
+                                {achievement.toFixed(1)}%
+                              </span>
+                            </div>
+                      </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusColor}`}>
+                              {statusText}
+                            </span>
+                      </td>
+                    </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
-        
-        {/* Subtle gradient overlay */}
-        <div className="absolute inset-0 bg-gradient-to-br from-transparent via-white/30 to-transparent"></div>
-      </div>
-      
-      <div className="max-w-full mx-auto relative z-10 px-2 sm:px-4">
-        {/* Welcome Section */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="mb-4 sm:mb-6"
-        >
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4">
-            <div className="flex-1">
-              <h1 className="text-xl sm:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
-                Welcome back, <span className="bg-gradient-to-r from-orange-500 to-pink-500 bg-clip-text text-transparent">{user?.name}</span>!
-              </h1>
-              <p className="mt-1 text-xs sm:text-sm text-gray-600">
-              Today's leads are tomorrow's success — take action.
-              </p>
-            </div>
-            <div className="flex flex-row items-center sm:justify-start gap-2 sm:gap-4 w-full sm:w-auto">
-              {/* Mobile Layout: Customer Link (left) | Time (center) | Submit Lead (right) */}
-              <div className="sm:hidden flex items-center justify-between w-full">
-                {/* Customer Link Generator - Left */}
-                <div className="flex-shrink-0">
-                  <AgentLinkGenerator agentId={user.id} agentName={user.name} />
+        ) : (
+          // Team Overview
+          <div className="space-y-6">
+            {/* Group Targets & Activations */}
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold text-gray-900">Group Targets & Activations ({format(selectedMonth, 'MMM yyyy')})</h3>
+                <div className="flex items-center gap-2">
+                  {!editingGroups ? (
+                    <button
+                      type="button"
+                      onClick={() => setEditingGroups(true)}
+                      className="inline-flex items-center px-3 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100"
+                    >
+                      Edit
+                    </button>
+                  ) : (
+                    <>
+                      <label className="hidden sm:inline-flex items-center gap-2 text-sm text-gray-700 mr-2">
+                        <input
+                          type="checkbox"
+                          checked={groupTargets.visibleToCoordinators}
+                          onChange={(e) => setGroupTargets(prev => ({ ...prev, visibleToCoordinators: e.target.checked }))}
+                          className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+                        />
+                        Visible to Coordinators
+                      </label>
+                      <button
+                        onClick={async () => { await saveGroupTargets(); setEditingGroups(false); }}
+                        disabled={savingGroupTargets}
+                        className="inline-flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                      >
+                        {savingGroupTargets ? 'Saving...' : 'Save'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setEditingGroups(false); loadGroupTargetsForMonth(selectedMonth); }}
+                        className="inline-flex items-center px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  )}
                 </div>
-                
-                {/* UAE Time - Center */}
-                <div className="flex items-center flex-shrink-0">
-                  <div className="text-xs sm:text-sm font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600">
-                    {format(uaeNow, 'hh:mm a')}
-                  </div>
-                </div>
-                
-                {/* Submit Lead Button - Right */}
-                <motion.div
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="flex-shrink-0"
-                >
-                  <Link
-                    to="/dashboard/leads/create"
-                    className="inline-flex items-center justify-center px-3 py-2 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 backdrop-blur-sm border border-indigo-100/50 rounded-xl shadow-lg shadow-indigo-500/10 hover:shadow-xl hover:shadow-indigo-500/20 transition-all duration-300 group"
-                  >
-                    <div className="flex items-center">
-                      <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1.5 rounded-lg mr-2 group-hover:scale-110 transition-transform duration-300">
-                        <PlusCircle className="w-3 h-3 text-white" />
-                      </div>
-                      <div className="text-left">
-                        <span className="block text-xs font-semibold text-gray-900">Submit Lead</span>
-                      </div>
-                    </div>
-                  </Link>
-                </motion.div>
               </div>
 
-              {/* Desktop Layout */}
-              <div className="hidden sm:flex items-center gap-4">
-                {/* Time Card */}
-                <motion.div
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="w-auto"
-                >
-                  <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 backdrop-blur-sm border border-indigo-100/50 rounded-xl p-2 sm:p-3">
-                    <div className="flex items-center justify-center sm:justify-start space-x-2">
-                      <div className="p-1.5 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg shadow-lg shadow-indigo-500/20">
-                        <Calendar className="h-3 w-3 sm:h-4 sm:w-4 text-white" />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {Object.keys(groupTargets.groups)
+                  .sort()
+                  .map((key) => {
+                    const label = key.toUpperCase();
+                    const alias = groupAliases[label] || label;
+                    const target = groupTargets.groups[label] ?? 0;
+                    const achieved = groupActivations[label] ?? 0;
+                    const achievement = target > 0 ? Math.min((achieved / target) * 100, 100) : 0;
+                    // Color/icon per group
+                    const palette = {
+                      G1: { card: 'from-indigo-50 to-indigo-100', accent: 'text-indigo-700', bar: 'bg-indigo-500' },
+                      G2: { card: 'from-emerald-50 to-emerald-100', accent: 'text-emerald-700', bar: 'bg-emerald-500' },
+                      G3: { card: 'from-amber-50 to-amber-100', accent: 'text-amber-700', bar: 'bg-amber-500' },
+                      G4: { card: 'from-fuchsia-50 to-fuchsia-100', accent: 'text-fuchsia-700', bar: 'bg-fuchsia-500' },
+                      G5: { card: 'from-cyan-50 to-cyan-100', accent: 'text-cyan-700', bar: 'bg-cyan-500' },
+                    } as any;
+                    const theme = palette[label] || { card: 'from-gray-50 to-gray-100', accent: 'text-gray-700', bar: 'bg-indigo-500', icon: Target };
+                    return (
+                      <div key={label} className={`bg-gradient-to-br ${theme.card} rounded-xl p-4 border border-gray-200 shadow-sm`}> 
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <div className={`p-2 rounded-lg bg-white/70 ${theme.accent}`}>
+                              <Target className="w-4 h-4" />
+                            </div>
+                            <div className={`text-sm font-semibold ${theme.accent}`}>{alias} Activation</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-500">Target vs Achieved</span>
+                            {editingGroups && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const monthId = format(selectedMonth, 'yyyy-MM');
+                                const groupTargetsRef = doc(db, 'groupTargets', monthId);
+                                
+                                setSavingGroupTargets(true);
+                                try {
+                                  // Capture alias name before deletion
+                                  const aliasName = groupAliases[label] || label;
+                                  
+                                  // Delete group from current month's targets and aliases
+                                  const updatedAliases = { ...groupAliases };
+                                  delete updatedAliases[label];
+                                  
+                                  // Build update object with deleteField for both group and alias
+                                  const updateData: any = {
+                                    [`groups.${label}`]: deleteField(),
+                                    [`aliases.${label}`]: deleteField(),
+                                    updatedAt: serverTimestamp()
+                                  };
+                                  
+                                  await updateDoc(groupTargetsRef, updateData);
+                                  
+                                  // Update local state
+                                    setGroupTargets(prev => {
+                                      const copy = { ...prev.groups } as Record<string, number>;
+                                      delete copy[label];
+                                      return { ...prev, groups: copy };
+                                    });
+                                  
+                                  // Update local aliases state
+                                  setGroupAliases(updatedAliases);
+                                  
+                                  toast.success(`Group ${aliasName} and its alias deleted from ${format(selectedMonth, 'MMM yyyy')}`);
+                                } catch (error) {
+                                  console.error('Error deleting group:', error);
+                                  toast.error('Failed to delete group');
+                                } finally {
+                                  setSavingGroupTargets(false);
+                                }
+                              }}
+                              className="p-1 rounded hover:bg-gray-200 text-gray-500 hover:text-gray-700"
+                              title={`Delete ${groupAliases[label] || label}`}
+                            >
+                              <X className="w-4 h-4" />
+                            </button> )}
+                          </div>
+                        </div>
+                        <div className="flex items-end justify-between mb-3">
+                          <div>
+                            <div className="text-2xl font-bold text-gray-900">{achieved}</div>
+                            <div className="text-xs text-gray-600">Activated</div>
+                          </div>
+                          <div>
+                            {editingGroups ? (
+                              <>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={target}
+                                  onChange={(e) => setGroupTargets(prev => ({ ...prev, groups: { ...prev.groups, [label]: Number(e.target.value) } }))}
+                                  className="w-24 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                  placeholder="Target"
+                                />
+                                <div className="text-xs text-gray-500 mt-1 text-right">Target</div>
+                              </>
+                            ) : (
+                              <div className="text-right">
+                                <div className="text-lg font-semibold text-gray-900">{target}</div>
+                                <div className="text-xs text-gray-500">Target</div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2.5">
+                          <div
+                            className={`h-2.5 rounded-full transition-all ${theme.bar}`}
+                            style={{ width: `${achievement}%` }}
+                          />
+                        </div>
+                        <div className="mt-2 flex items-center justify-between text-xs">
+                          <span className="text-gray-600">Achievement</span>
+                          <span className={`px-2 py-0.5 rounded-full font-medium ${achievement >= 100 ? 'bg-green-100 text-green-700' : achievement >= 80 ? 'bg-blue-100 text-blue-700' : achievement >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>{Math.round(achievement)}%</span>
+                        </div>
                       </div>
-                      <div className="text-center sm:text-left">
-                        <p className="text-xs font-semibold text-gray-900">
-                          {format(uaeNow, 'EEEE, MMMM d, yyyy')}
-                        </p>
-                        <p className="text-sm font-semibold text-gray-800">
-                          UAE Time: {format(uaeNow, 'hh:mm a')}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </motion.div>
+                    );
+                })}
+              </div>
 
-                {/* My Performance Button */}
-                <motion.div
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="w-auto min-w-[220px]"
-                >
+              {editingGroups && (
+                <div className="mt-4 space-y-3">
+                  {!showAliasInput ? (
+                    <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={newGroupName}
+                    onChange={(e) => setNewGroupName(e.target.value)}
+                    placeholder="Add group (e.g., G4, G5, VIP)"
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        onKeyPress={(e) => {
+                          if (e.key === 'Enter' && newGroupName.trim()) {
+                            const key = newGroupName.trim().toUpperCase();
+                            if (key) {
+                              setShowAliasInput(true);
+                            }
+                          }
+                        }}
+                  />
                   <button
-                    onClick={() => navigate('/dashboard/performance')}
-                    className="w-full inline-flex items-center justify-center px-4 sm:px-6 py-2 sm:py-2.5 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 backdrop-blur-sm border border-indigo-100/50 rounded-xl shadow-lg shadow-indigo-500/10 hover:shadow-xl hover:shadow-indigo-500/20 transition-all duration-300 group"
-                  >
-                    <div className="flex items-center w-full">
-                      <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1.5 rounded-lg mr-3 group-hover:scale-110 transition-transform duration-300 flex-shrink-0">
-                        <Target className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
-                      </div>
-                      <div className="text-left flex-1 min-w-0">
-                        <div className="text-xs font-semibold text-gray-900 whitespace-nowrap">My Performance</div>
-                        <div className="hidden sm:block text-[10px] text-gray-600 whitespace-nowrap">View detailed metrics</div>
-                      </div>
-                      <div className="ml-3 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-300 flex-shrink-0">
-                        <ArrowRight className="w-3 h-3 text-indigo-600" />
-                      </div>
+                    type="button"
+                    onClick={() => {
+                      const key = newGroupName.trim().toUpperCase();
+                      if (!key) return;
+                          setShowAliasInput(true);
+                        }}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                      >
+                        Next
+                      </button>
                     </div>
+                  ) : (
+                    <div className="space-y-2 p-4 bg-indigo-50 rounded-lg border border-indigo-200">
+                      <div className="text-sm font-semibold text-gray-700">
+                        Group: <span className="text-indigo-700">{newGroupName.trim().toUpperCase()}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={newGroupAlias}
+                          onChange={(e) => setNewGroupAlias(e.target.value)}
+                          placeholder={`Enter alias name (e.g., ${groupAliases['G1'] || 'Connect'})`}
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                          autoFocus
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter' && newGroupAlias.trim()) {
+                              handleAddGroupWithAlias();
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAddGroupWithAlias}
+                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                  >
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAliasInput(false);
+                            setNewGroupAlias('');
+                          }}
+                          className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                        >
+                          Cancel
                   </button>
-                </motion.div>
-
-                {/* Customer Link Generator */}
-                <AgentLinkGenerator agentId={user.id} agentName={user.name} />
-
-                {/* Submit Lead Button */}
-                <motion.div
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="w-auto"
-                >
-                  <Link
-                    to="/dashboard/leads/create"
-                    className="w-full inline-flex items-center justify-center px-3 sm:px-4 py-2 sm:py-2.5 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 backdrop-blur-sm border border-indigo-100/50 rounded-xl shadow-lg shadow-indigo-500/10 hover:shadow-xl hover:shadow-indigo-500/20 transition-all duration-300 group"
-                  >
-                    <div className="flex items-center">
-                      <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1.5 rounded-lg mr-2 group-hover:scale-110 transition-transform duration-300">
-                        <PlusCircle className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
-                      </div>
-                      <div className="text-left">
-                        <span className="block text-xs font-semibold text-gray-900">Submit Lead</span>
-                        <span className="hidden sm:block text-[10px] text-gray-600">Create a new lead</span>
-                      </div>
-                      <div className="ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-300">
-                        <ArrowRight className="w-3 h-3 text-indigo-600" />
                       </div>
                     </div>
-                  </Link>
-                </motion.div>
-              </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {(teamMetrics || []).map((team) => {
+                // Use the pre-calculated teamMetric.activated instead of recalculating
+                const totalAchieved = team.activated || 0;
+                // Use team target if set by admin, otherwise fall back to sum of agent targets
+                const agentTargetSum = (team.agents || []).reduce((sum, agent) => sum + (agent.target || 0), 0);
+                const totalTarget = team.teamTarget !== undefined ? team.teamTarget : agentTargetSum;
+                
+                const averageActivationPerAgent = (team.agents || []).length > 0 
+                  ? (totalAchieved / (team.agents || []).length).toFixed(1) 
+                  : '0';
+
+                const achievementPercentage = totalTarget > 0 ? (totalAchieved / totalTarget) * 100 : 0;
+                const achievementColor = achievementPercentage >= 100 
+                  ? 'from-emerald-500 to-emerald-600'
+                  : achievementPercentage >= 80 
+                    ? 'from-blue-500 to-blue-600'
+                    : achievementPercentage >= 60 
+                      ? 'from-amber-500 to-amber-600'
+                      : 'from-red-500 to-red-600';
+
+                return (
+                  <div 
+                    key={team.teamId || `team-${team.teamName || 'unknown'}`}
+                    className="bg-white rounded-2xl shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden border border-gray-100"
+                  >
+                    <div className="p-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <div>
+                          <h3 className="text-xl font-bold text-gray-900">{team.teamName}</h3>
+                          <p className="text-sm text-gray-500">Managed by {team.managerName}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Users className="w-5 h-5 text-gray-400" />
+                          <span className="text-sm font-medium text-gray-600">{(team.agents || []).length} Agents</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 mb-6">
+                        <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-4 rounded-xl">
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-sm font-medium text-purple-700">This Month</p>
+                            <div className="flex items-center gap-1">
+                              <Calendar className="w-4 h-4 text-purple-600" />
+                              <span className="text-xs font-medium text-purple-600 bg-purple-100 px-2 py-1 rounded-full">
+                                {format(selectedMonth, 'MMM')}
+                              </span>
+                            </div>
+                          </div>
+                          <p className="text-2xl font-bold text-purple-900">{totalAchieved}</p>
+                          <p className="text-xs text-purple-600 mt-1">Activations</p>
+                        </div>
+                        <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-sm font-medium text-green-700">Average Per Agent</p>
+                          </div>
+                          <p className="text-2xl font-bold text-green-900">{averageActivationPerAgent}</p>
+                          <p className="text-xs text-green-600 mt-1">Activations</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div>
+                          <div className="flex justify-between text-sm mb-2">
+                            <span className="text-gray-600">Target Achievement</span>
+                            <span className="font-medium text-gray-900">
+                              {achievementPercentage.toFixed(1)}%
+                            </span>
+                          </div>
+                          <div className="w-full bg-gray-100 rounded-full h-2.5">
+                            <div
+                              className={`bg-gradient-to-r ${achievementColor} h-2.5 rounded-full transition-all duration-500`}
+                              style={{ width: `${Math.min(achievementPercentage, 100)}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-xl">
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-sm font-medium text-blue-700">Team Target</p>
+                              {user?.role === 'admin' && (
+                                <button
+                                  onClick={() => {
+                                    const initialValue = team.teamTarget !== undefined ? team.teamTarget : 0;
+                                    setEditingTeamTarget(team.teamId);
+                                    setTeamTargetValue(initialValue);
+                                  }}
+                                  className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                >
+                                  Edit
+                                </button>
+                              )}
+                            </div>
+                            {editingTeamTarget === team.teamId ? (
+                              <div className="space-y-3">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={teamTargetValue}
+                                  onChange={(e) => setTeamTargetValue(Number(e.target.value))}
+                                  className="w-full px-3 py-2 border border-blue-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                  autoFocus
+                                  onKeyPress={(e) => {
+                                    if (e.key === 'Enter') {
+                                      handleSaveTeamTarget(team.teamId);
+                                    }
+                                    if (e.key === 'Escape') {
+                                      setEditingTeamTarget(null);
+                                    }
+                                  }}
+                                />
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => setEditingTeamTarget(null)}
+                                    className="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => handleSaveTeamTarget(team.teamId)}
+                                    disabled={savingTeamTarget}
+                                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                                  >
+                                    {savingTeamTarget ? 'Saving...' : 'Save'}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-2xl font-bold text-blue-900">
+                                {team.teamTarget !== undefined ? team.teamTarget : 0}
+                              </p>
+                            )}
+                          </div>
+                          <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-sm font-medium text-green-700">Total Achieved</p>
+                            </div>
+                            <p className="text-2xl font-bold text-green-900">{totalAchieved}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => handleTeamClick(team)}
+                        className="mt-6 w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-2 px-4 rounded-xl hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 font-medium text-sm"
+                      >
+                        View Team Details
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </motion.div>
+        )}
+      </div>
 
-        {/* MAR Strip Card */}
-        <div className="mb-4">
-          <div className="flex flex-col sm:flex-row items-center justify-between bg-gradient-to-r from-cyan-100 to-blue-100 border border-cyan-200 rounded-xl px-4 py-3 shadow-md">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <Target className="h-5 w-5 text-cyan-600" />
-                <span className="text-base font-bold text-cyan-700">MAR:</span>
-                  <span className="text-xl font-bold text-cyan-900">{metrics.mar ?? 0}</span>
+      {/* Attendance Modal */}
+      {attendanceOpen && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setAttendanceOpen(false);
+            }
+          }}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full mx-4 relative max-h-[90vh] flex flex-col">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">All Teams Attendance</h2>
+                <p className="text-sm text-gray-500 mt-1">View and manage attendance across all teams</p>
               </div>
-              <div className="flex items-center gap-2 ml-4">
-                <Zap className="h-5 w-5 text-purple-600" />
-                <span className="text-base font-bold text-purple-700">Achieved:</span>
-                <span className="text-xl font-bold text-purple-900">{metrics.activated}</span>
+              <button
+                onClick={() => setAttendanceOpen(false)}
+                className="text-gray-500 hover:text-gray-700 p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                aria-label="Close"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-4">
+              <AttendanceTable 
+                user={user} 
+                role="admin" 
+                month={attendanceMonth} 
+                onMonthChange={setAttendanceMonth} 
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      
+      {selectedAgentDetails && <AgentDetailsModal />}
+      {openRequestsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setOpenRequestsModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            <OpenRequestsSection />
+          </div>
+        </div>
+      )}
+
+      {/* Broadcast Poster Modal */}
+      {posterModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl overflow-hidden border border-gray-100 relative"
+          >
+            {/* Preview overlay on top layer */}
+            {showPosterPreview && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4 py-6">
+                <div className="w-full max-w-2xl bg-white/10 rounded-2xl overflow-hidden border border-white/20 shadow-2xl">
+                  <div className="flex items-center justify-between bg-white/10 px-4 py-3 border-b border-white/20">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <Sparkles className="w-4 h-4 text-amber-200" />
+                      Preview
+                    </div>
+                    <button
+                      onClick={() => setShowPosterPreview(false)}
+                      className="text-white hover:bg-white/20 rounded-lg p-1.5 transition-colors"
+                      aria-label="Close preview"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="bg-gradient-to-br from-rose-800 via-orange-900 to-amber-900 text-white p-6">
+                    <div className="flex flex-col items-center text-center gap-1">
+                      <div className="flex items-center gap-2">
+                        <div className="p-2 bg-white/10 rounded-xl border border-white/10 shadow-lg">
+                          <Sparkles className="w-4 h-4 text-amber-300" />
+                        </div>
+                        <div className="text-amber-300 text-sm uppercase tracking-[0.2em] font-semibold">
+                          Announcement
+                        </div>
+                        <div className="p-2 bg-white/10 rounded-xl border border-white/10 shadow-lg">
+                          <Sparkles className="w-4 h-4 text-amber-300" />
+                        </div>
+                      </div>
+                      <p className="text-xs font-semibold text-amber-200/90">
+                        {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </p>
+                      <div className="w-full max-w-sm h-0.5 bg-amber-200/70 mt-1 mb-2" />
+                      <h2 className="text-2xl font-semibold text-amber-100 drop-shadow">
+                        {posterTitle || 'Announcement Title'}
+                      </h2>
+                    </div>
+                    <div className="mt-5 text-sm text-amber-50/90 leading-relaxed whitespace-pre-line">
+                      {posterMessage || 'Your announcement message will appear here.'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-gradient-to-r from-indigo-600 via-purple-600 to-amber-500 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-white/15 rounded-xl border border-white/10">
+                  <Sparkles className="w-5 h-5 text-amber-200" />
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.25em] text-amber-200/80">Broadcast Poster</p>
+                  <h3 className="text-xl font-semibold text-white">Send Announcement</h3>
+                </div>
+              </div>
+              <button
+                onClick={() => setPosterModalOpen(false)}
+                className="text-white hover:bg-white/20 rounded-lg p-2 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="text-sm font-semibold text-gray-700">Title</label>
+                <input
+                  type="text"
+                  value={posterTitle}
+                  onChange={(e) => setPosterTitle(e.target.value)}
+                  placeholder="Announcement headline"
+                  className="mt-1 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-semibold text-gray-700">Message</label>
+                <textarea
+                  value={posterMessage}
+                  onChange={(e) => setPosterMessage(e.target.value)}
+                  rows={6}
+                  placeholder="Details of the announcement..."
+                  className="mt-1 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 resize-none"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Tip: Each send generates a new poster ID. Users see it once per send until they acknowledge.
+                </p>
+              </div>
+
+              {/* Live Preview (toggle) */}
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-500">This will appear to all users on next refresh until they click “I Acknowledge”.</p>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setPosterModalOpen(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => setShowPosterPreview(!showPosterPreview)}
+                    className="px-4 py-2 text-sm font-medium text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors"
+                  >
+                    {showPosterPreview ? 'Hide Preview' : 'Preview'}
+                  </button>
+                  <motion.button
+                    whileHover={{ scale: isSendingPoster ? 1 : 1.02 }}
+                    whileTap={{ scale: isSendingPoster ? 1 : 0.98 }}
+                    onClick={handleSendBroadcastPoster}
+                    disabled={isSendingPoster}
+                    className="px-5 py-2.5 text-sm font-semibold rounded-lg text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 shadow-lg disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                  >
+                    {isSendingPoster ? 'Sending...' : 'Send to All'}
+                  </motion.button>
+                </div>
               </div>
             </div>
-            <div className="mt-2 sm:mt-0 sm:ml-6 flex-1">
-              {metrics.activated < metrics.mar ? (
-                <motion.div 
-                  initial={{ opacity: 0, scale: 0.8, y: 20 }}
-                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                  transition={{ duration: 0.5, ease: "easeOut" }}
-                  whileHover={{ scale: 1.02, y: -2 }}
-                  className="hidden sm:flex items-start gap-2 text-xs bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg px-3 py-2 shadow-lg relative overflow-hidden"
-                >
-                  {/* Enhanced flashing background effect */}
-                  <motion.div 
-                    animate={{ 
-                      background: [
-                        "linear-gradient(90deg, rgba(239, 68, 68, 0.1) 0%, rgba(251, 146, 60, 0.1) 100%)",
-                        "linear-gradient(90deg, rgba(239, 68, 68, 0.3) 0%, rgba(251, 146, 60, 0.3) 100%)",
-                        "linear-gradient(90deg, rgba(239, 68, 68, 0.1) 0%, rgba(251, 146, 60, 0.1) 100%)"
-                      ]
-                    }}
-                    transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                    className="absolute inset-0 rounded-xl"
-                  />
-                  
-                  {/* Pulsing border effect */}
-                  <motion.div 
-                    animate={{ 
-                      scale: [1, 1.05, 1],
-                      opacity: [0.2, 0.5, 0.2]
-                    }}
-                    transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                    className="absolute inset-0 rounded-xl border-2 border-red-400"
-                  />
-                  
-                  <div className="flex-shrink-0 mt-0.5 relative z-10">
-                    <motion.div 
-                      animate={{ 
-                        scale: [1, 1.2, 1],
-                        rotate: [0, 5, -5, 0]
-                      }}
-                      transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
-                      whileHover={{ scale: 1.3, rotate: 360 }}
-                      className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center shadow-md"
-                    >
-                      <XCircle className="h-4 w-4 text-red-500" />
-                    </motion.div>
-                  </div>
-                  <div className="flex-1 relative z-10">
-                    <motion.div 
-                      animate={{ 
-                        x: [0, -3, 3, 0],
-                        scale: [1, 1.02, 1]
-                      }}
-                      transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-                      className="font-semibold text-red-800 mb-1"
-                    >
-                      You are yet to meet your Minimum Activations Required (MAR) for this month.
-                    </motion.div>
-                    <motion.div 
-                      animate={{ opacity: [0.8, 1, 0.8] }}
-                      transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                      className="text-red-700"
-                    >
-                      To stay with us, kindly achieve a minimum target of <span className="font-bold text-red-900">{metrics.mar}</span>.
-                    </motion.div>
-                  </div>
-                </motion.div>
+          </motion.div>
+        </div>
+      )}
+
+
+      {/* Number Visibility Modal */}
+      {numberVisibilityOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => {
+                setNumberVisibilityOpen(false);
+                setSelectedNumbers(new Set());
+                setCodeFilter('');
+                setShowCodeFilter(false);
+              }}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-3 bg-purple-100 rounded-xl">
+                  <Eye className="h-6 w-6 text-purple-600" />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900">Number Visibility Control</h2>
+                  <p className="text-sm text-gray-500 mt-1">Manage which numbers are visible to freelancers</p>
+                </div>
+              </div>
+
+              {hiddenNumbersLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-500" />
+                </div>
+              ) : hiddenNumbers.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  <Eye className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                  <p className="text-lg font-medium">No hidden numbers</p>
+                  <p className="text-sm">All numbers are currently visible to freelancers</p>
+                </div>
               ) : (
-                <motion.div 
-                  initial={{ opacity: 0, scale: 0.8, y: 20 }}
-                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                  transition={{ duration: 0.5, ease: "easeOut" }}
-                  whileHover={{ scale: 1.02, y: -2 }}
-                  className="hidden sm:flex items-start gap-2 text-xs bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg px-3 py-2 shadow-lg"
-                >
-                  <div className="flex-shrink-0 mt-0.5">
-                    <motion.div 
-                      animate={{ 
-                        scale: [1, 1.1, 1],
-                        rotate: [0, 10, -10, 0]
-                      }}
-                      transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                      whileHover={{ scale: 1.2, rotate: 360 }}
-                      className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center shadow-md"
-                    >
-                      <CheckCircle className="h-4 w-4 text-green-500" />
-                    </motion.div>
-                  </div>
-                  <div className="flex-1">
-                    <motion.div 
-                      animate={{ 
-                        scale: [1, 1.01, 1],
-                        color: ["#166534", "#15803d", "#166534"]
-                      }}
-                      transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-                      className="font-semibold text-green-800 mb-1"
-                    >
-                      🎉 Excellent Work! 🎉
-                    </motion.div>
-                    <motion.div 
-                      animate={{ opacity: [0.9, 1, 0.9] }}
-                      transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
-                      className="text-green-700"
-                    >
-                      You have achieved your Minimum Activations Required (MAR) for this month.
-                    </motion.div>
-                  </div>
-                </motion.div>
+                 <div className="space-y-4">
+                   {/* Selection Controls */}
+                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                     <div className="flex items-center justify-between mb-3">
+                       <h3 className="text-sm font-medium text-blue-900">Bulk Selection</h3>
+                       <div className="flex items-center gap-2">
+                         <span className="text-xs text-blue-700">
+                           {selectedNumbers.size} selected
+                         </span>
+                         <button
+                           onClick={clearSelection}
+                           className="text-xs text-blue-600 hover:text-blue-800"
+                         >
+                           Clear
+                         </button>
+                       </div>
+                     </div>
+                     
+                     <div className="flex flex-wrap gap-2">
+                       <button
+                         onClick={selectAllNumbers}
+                         className="inline-flex items-center px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
+                       >
+                         <CheckSquare2 className="h-3 w-3 mr-1" />
+                         Select All
+                       </button>
+                       
+                       <button
+                         onClick={() => setShowCodeFilter(!showCodeFilter)}
+                         className="inline-flex items-center px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs hover:bg-purple-200 transition-colors"
+                       >
+                         <Hash className="h-3 w-3 mr-1" />
+                         Filter by Code
+                       </button>
+                       
+                       {selectedNumbers.size > 0 && (
+                         <button
+                           onClick={makeSelectedVisible}
+                           className="inline-flex items-center px-2 py-1 bg-green-100 text-green-700 rounded text-xs hover:bg-green-200 transition-colors"
+                         >
+                           <Eye className="h-3 w-3 mr-1" />
+                           Make Selected Visible
+                         </button>
+                       )}
+                       
+                       <button
+                         onClick={makeAllHiddenVisible}
+                         className="inline-flex items-center px-2 py-1 bg-gradient-to-r from-green-500 to-green-600 text-white rounded text-xs hover:from-green-600 hover:to-green-700 transition-all duration-200"
+                       >
+                         Make All Visible
+                       </button>
+                     </div>
+                     
+                     {showCodeFilter && (
+                       <div className="mt-3 flex gap-2">
+                         <input
+                           type="text"
+                           value={codeFilter}
+                           onChange={(e) => setCodeFilter(e.target.value)}
+                           placeholder="Enter code pattern (e.g., 'NEWCRMSTD', 'ETS-1')"
+                           className="flex-1 px-3 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         />
+                         <button
+                           onClick={() => selectByCode(codeFilter)}
+                           className="px-3 py-1.5 bg-purple-500 text-white rounded text-xs hover:bg-purple-600 transition-colors"
+                         >
+                           Select Matching
+                         </button>
+                         <button
+                           onClick={() => {
+                             setCodeFilter('');
+                             setShowCodeFilter(false);
+                           }}
+                           className="px-2 py-1.5 text-gray-500 hover:text-gray-700"
+                         >
+                           <X className="h-4 w-4" />
+                         </button>
+                       </div>
+                     )}
+                   </div>
+
+                   <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                     <div className="flex items-center gap-2">
+                       <AlertTriangle className="h-5 w-5 text-yellow-600" />
+                       <p className="text-sm text-yellow-800">
+                         <strong>{filteredNumbers.length}</strong> numbers are currently hidden from freelancers
+                         {codeFilter && (
+                           <span className="ml-2 text-xs text-yellow-600">
+                             (filtered by "{codeFilter}")
+                           </span>
+                         )}
+                       </p>
+                     </div>
+                   </div>
+                  
+                   <div className="grid gap-4">
+                     {filteredNumbers.map((number) => (
+                       <div key={number.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                         <div className="flex items-center justify-between">
+                           <div className="flex items-center gap-3 flex-1">
+                             <div className="flex-shrink-0">
+                               <button
+                                 onClick={() => toggleNumberSelection(number.id)}
+                                 className="w-5 h-5 rounded border-2 flex items-center justify-center hover:bg-gray-100 transition-colors"
+                               >
+                                 {selectedNumbers.has(number.id) ? (
+                                   <CheckSquare2 className="h-4 w-4 text-blue-600" />
+                                 ) : (
+                                   <Square className="h-4 w-4 text-gray-400" />
+                                 )}
+                               </button>
+                             </div>
+                             <div className="flex-1">
+                               <div className="flex items-center gap-4">
+                                 <div className="text-lg font-semibold text-gray-900">{number.number}</div>
+                                 <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs font-medium rounded-full">
+                                   {number.category}
+                                 </span>
+                                 <span className="px-2 py-1 bg-gray-100 text-gray-800 text-xs font-medium rounded-full">
+                                   {number.code}
+                                 </span>
+                                 <span className="px-2 py-1 bg-green-100 text-green-800 text-xs font-medium rounded-full">
+                                   {number.status}
+                                 </span>
+                               </div>
+                               <div className="mt-2 text-sm text-gray-600">
+                                 Group: {number.group} • Last updated: {format(number.lastStatusChange, 'MMM dd, yyyy HH:mm')}
+                               </div>
+                             </div>
+                           </div>
+                           <button
+                             onClick={() => toggleNumberVisibility(number.id, true)}
+                             className="ml-4 inline-flex items-center px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-200"
+                           >
+                             <Eye className="h-4 w-4 mr-2" />
+                             Make Visible
+                           </button>
+                         </div>
+                       </div>
+                     ))}
+                     
+                     {filteredNumbers.length === 0 && codeFilter && (
+                       <div className="text-center py-8 text-gray-500">
+                         <Hash className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                         <p className="text-lg font-medium">No numbers found</p>
+                         <p className="text-sm">No numbers match the filter "{codeFilter}"</p>
+                         <button
+                           onClick={() => setCodeFilter('')}
+                           className="mt-2 text-sm text-blue-600 hover:text-blue-800"
+                         >
+                           Clear filter
+                         </button>
+                       </div>
+                     )}
+                   </div>
+                </div>
               )}
             </div>
           </div>
         </div>
+      )}
 
-        {/* Stats Grid */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.1 }}
-          className="mb-8 sm:mb-12"
-        >
-          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
-          {stats.map((stat, index) => (
-              <motion.div
-                key={stat.name}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: index * 0.1 }}
-                className="relative"
-              >
-                {/* Single tilted background card effect - gradient colors */}
-                <div className={`absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 ${stat.name === 'Target' ? 'bg-gradient-to-br from-pink-400 to-pink-600' : stat.name === 'Achieved' ? 'bg-gradient-to-br from-emerald-400 to-emerald-600' : stat.name === 'Total Leads' ? 'bg-gradient-to-br from-blue-400 to-blue-600' : stat.name === 'Assigned Leads' ? 'bg-gradient-to-br from-indigo-400 to-indigo-600' : stat.name === 'Pending Verification' ? 'bg-gradient-to-br from-yellow-400 to-yellow-600' : stat.name === 'Verified' ? 'bg-gradient-to-br from-green-400 to-green-600' : 'bg-gradient-to-br from-purple-400 to-purple-600'} opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102`}></div>
-                
-                <Link
-                  to={stat.href}
-                  className="block relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)] hover:shadow-[0_12px_40px_rgba(0,0,0,0.18)] transition-all duration-300 transform hover:-translate-y-1 cursor-pointer group"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
-                  <div className="relative p-3 sm:p-6">
-                    <div className="flex items-center">
-                      <div className={`flex-shrink-0 p-2 sm:p-3.5 rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.1)]`}>
-                        <stat.icon className="h-4 w-4 sm:h-6 sm:w-6 text-white" />
-                      </div>
-                      <div className="ml-2 sm:ml-4 w-0 flex-1">
-                        <dl>
-                          <dt className="text-xs sm:text-sm font-medium text-gray-900 truncate">
-                            {stat.name}
-                          </dt>
-                          <dd className={`text-lg sm:text-2xl lg:text-3xl font-bold ${stat.textColor} mt-1 drop-shadow-sm`}>
-                            {stat.value}
-                          </dd>
-                          <dd className="hidden sm:block text-[10px] sm:text-xs text-gray-500 mt-1 sm:mt-1.5">
-                            {stat.description}
-                          </dd>
-                        </dl>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/0 to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all duration-200 rounded-2xl" />
-                </Link>
-              </motion.div>
-          ))}
-          </div>
-        </motion.div>
-
-        {/* Struck Numbers Button */}
-        <div className="mb-8 sm:mb-12 flex items-center gap-4">
-          <button
-            onClick={() => setShowStruck(true)}
-            className="relative inline-flex items-center px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-600 text-white font-semibold rounded-xl shadow hover:from-amber-600 hover:to-orange-700 transition-all focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={struckLoading}
-          >
-            <span>Struck Numbers</span>
-            <span className="ml-2 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-amber-800 bg-amber-100 rounded-full">
-              {struckLoading ? '...' : struckNumbers.length}
-            </span>
-          </button>
-
-          {/* Strike Limit Info */}
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-gray-600">Strikes remaining today:</span>
-            <span className={clsx(
-              "font-semibold",
-              remainingStrikes > 0 ? "text-green-600" : "text-red-600"
-            )}>
-              {remainingStrikes}/2
-            </span>
-            {lastStrikeTime && remainingStrikes < 2 && (
-              <span className="text-gray-500">
-                (Next strike available {formatDistanceToNow(addHours(lastStrikeTime, 24), { addSuffix: true })})
-              </span>
-            )}
+      {/* Manager WhatsApp Modal */}
+      {managerPhoneModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setManagerPhoneModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <div className="mb-6">
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">WhatsApp Notification Numbers</h2>
+                <p className="text-gray-600">
+                  Manage WhatsApp notification numbers for admins, coordinators, and managers.
+                </p>
+              </div>
+              
+              <AdminManagerPhoneNumbers />
+            </div>
           </div>
         </div>
+      )}
 
-        {/* Struck Numbers Modal */}
-        {showStruck && (
-          <div 
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) {
-                setShowStruck(false);
-              }
-            }}
-          >
-            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full mx-4 relative max-h-[90vh] flex flex-col">
-              <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-                <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Struck Numbers</h2>
-                  <p className="text-sm text-gray-500 mt-1">
-                    Strikes remaining today: {remainingStrikes}/2
-                    {lastStrikeTime && remainingStrikes < 2 && (
-                      <span className="ml-2">
-                        (Next strike available {formatDistanceToNow(addHours(lastStrikeTime, 24), { addSuffix: true })})
-                      </span>
-                    )}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setShowStruck(false)}
-                  className="text-gray-500 hover:text-gray-700 p-2 hover:bg-gray-100 rounded-lg transition-colors"
-                  aria-label="Close"
-                >
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
+      {/* Plan Management Modal */}
+      {planManagementModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setPlanManagementModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <div className="mb-6">
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">Plan Management</h2>
+                <p className="text-gray-600">
+                  Manage plans and categories for lead creation. Create, edit, and organize plans that agents can select when creating leads.
+                </p>
               </div>
-              <div className="overflow-y-auto flex-1 p-4">
-                <StruckNumbers struckNumbers={struckNumbers} loading={struckLoading} />
-              </div>
+              
+              <PlanManagement />
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Recent Leads Section */}
-        {leads.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.2 }}
-            className="mt-8 sm:mt-12 relative"
-          >
-            {/* Tilted background card effect to match stats cards */}
-            <div className="absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 bg-gradient-to-br from-indigo-400 to-purple-600 opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102"></div>
+      {/* DNC Management Modal */}
+      <DNCManagement 
+        isOpen={dncManagementOpen} 
+        onClose={() => setDncManagementOpen(false)} 
+      />
+
+          {/* Bulk DNC Import Modal */}
+          <BulkDNCImport 
+            isOpen={bulkImportOpen} 
+            onClose={() => setBulkImportOpen(false)} 
+          />
+
+      {/* Return Numbers Modal */}
+      {bulkDeleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setBulkDeleteModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
             
-            <div className="relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)] hover:shadow-[0_12px_40px_rgba(0,0,0,0.18)] transition-all duration-300 transform hover:-translate-y-1">
-              {/* Glassmorphism Background */}
-              <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
+            <div className="p-8">
+              <BulkDeleteNumbers />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add to Deleted Numbers Modal */}
+      {addToDeletedModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setAddToDeletedModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <AddToDeletedNumbers />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Number Search Modal */}
+      <BulkNumberSearch 
+        isOpen={bulkNumberSearchModalOpen} 
+        onClose={() => setBulkNumberSearchModalOpen(false)} 
+      />
+
+      {/* Bulk Deleted Number Search Modal */}
+      <BulkDeletedNumberSearch 
+        isOpen={bulkDeletedNumberSearchModalOpen} 
+        onClose={() => setBulkDeletedNumberSearchModalOpen(false)} 
+      />
+
+      {/* Customer Link Tracking Modal */}
+      <CustomerLinkTracking 
+        isOpen={customerLinkTrackingModalOpen} 
+        onClose={() => setCustomerLinkTrackingModalOpen(false)} 
+      />
+
+      {/* Trusted Devices Management Modal */}
+      {trustedDevicesModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setTrustedDevicesModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <TrustedDevicesAdmin />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* WhatsApp Settings Modal */}
+      {whatsappSettingsModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto relative animate-fadeIn">
+            <button
+              onClick={() => setWhatsappSettingsModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 bg-gray-100 rounded-full p-2 shadow z-10"
+              aria-label="Close"
+            >
+              <XCircle className="w-6 h-6" />
+            </button>
+            
+            <div className="p-8">
+              <div className="mb-6">
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">WhatsApp Settings</h2>
+                <p className="text-gray-600">
+                  Configure WhatsApp verification settings for lead creation.
+                </p>
+              </div>
               
-              {/* Enhanced Header with Modern Design - Mobile Optimized */}
-              <div className="relative px-4 sm:px-8 py-4 sm:py-6 bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 overflow-hidden">
-                {/* Background Pattern */}
-                <div className="absolute inset-0 opacity-10">
-                  <div className="absolute top-0 left-0 w-32 h-32 bg-white rounded-full -translate-x-16 -translate-y-16"></div>
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-white rounded-full translate-x-12 -translate-y-12"></div>
-                  <div className="absolute bottom-0 left-0 w-20 h-20 bg-white rounded-full -translate-x-10 translate-y-10"></div>
+              <WhatsAppSettings />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Number Lookup Modal */}
+      {numberLookupOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col animate-fadeIn">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-teal-500 to-teal-600 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <Search className="h-6 w-6 text-white" />
                 </div>
-                
-                <div className="relative flex items-center justify-between">
-                  <div className="flex items-center space-x-3 sm:space-x-4">
-                    <div className="p-2 sm:p-3 bg-white/20 backdrop-blur-sm rounded-xl sm:rounded-2xl shadow-lg">
-                      <Users className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
-                    </div>
-                    <div>
-                      <h2 className="text-lg sm:text-2xl lg:text-3xl font-bold text-white flex items-center">
-                        Recent Leads
-                      </h2>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-center space-x-2 sm:space-x-4">
-                    <Link
-                      to="/dashboard/leads"
-                      className="group inline-flex items-center px-3 sm:px-6 py-2 sm:py-3 bg-white/15 hover:bg-white/25 text-white rounded-lg sm:rounded-xl transition-all duration-300 backdrop-blur-sm border border-white/20 hover:border-white/30 hover:scale-105 shadow-lg hover:shadow-xl"
-                    >
-                      <Eye className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2 group-hover:scale-110 transition-transform" />
-                      <span className="text-xs sm:text-sm font-semibold hidden sm:inline">View All Leads</span>
-                      <span className="text-xs sm:text-sm font-semibold sm:hidden">All</span>
-                      <ArrowRight className="h-3 w-3 sm:h-4 sm:w-4 ml-1 sm:ml-2 group-hover:translate-x-1 transition-transform" />
-                    </Link>
-                    
-                  </div>
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Number Lookup</h2>
+                  <p className="text-sm text-teal-100 mt-1">Search leads by phone numbers</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setNumberLookupOpen(false);
+                  setNumberLookupInput('');
+                  setNumberLookupResults([]);
+                }}
+                className="text-white hover:bg-white/20 rounded-lg p-2 transition-colors"
+                aria-label="Close"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              {/* Input Section */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Paste Numbers (one per line, comma-separated, or space-separated)
+                </label>
+                <textarea
+                  value={numberLookupInput}
+                  onChange={(e) => setNumberLookupInput(e.target.value)}
+                  placeholder="Enter numbers here...&#10;Example:&#10;0501234567&#10;0502345678&#10;0503456789"
+                  className="w-full h-32 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 resize-none font-mono text-sm"
+                  disabled={numberLookupLoading}
+                />
+                <div className="mt-3 flex items-center justify-between">
+                  <p className="text-xs text-gray-500">
+                    {numberLookupInput.split(/[\n,\s]+/).filter(n => n.trim().replace(/\D/g, '').length >= 10).length} valid number(s) detected
+                  </p>
+                  <button
+                    onClick={searchLeadsByNumbers}
+                    disabled={numberLookupLoading || !numberLookupInput.trim()}
+                    className="px-6 py-2 bg-gradient-to-r from-teal-500 to-teal-600 text-white rounded-lg font-medium hover:from-teal-600 hover:to-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2"
+                  >
+                    {numberLookupLoading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Searching...
+                      </>
+                    ) : (
+                      <>
+                        <Search className="w-4 h-4" />
+                        Search Leads
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
 
-              {/* Enhanced Table Headers - Desktop Only */}
-              <div className="hidden sm:block relative px-6 py-5 bg-gradient-to-br from-indigo-50/90 via-purple-50/90 to-pink-50/90 backdrop-blur-sm border-b border-indigo-100/50">
-                <div className="grid grid-cols-12 gap-3">
-                  <div className="col-span-3">
-                    <div className="flex items-center space-x-1">
-                      <div className="p-2 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-lg">
-                        <User2 className="h-4 w-4 text-indigo-600" />
-                      </div>
-                      <span className="text-sm font-bold text-indigo-700 uppercase tracking-wide">Customer Info</span>
-                    </div>
-                  </div>
-                  <div className="col-span-2 -ml-2">
-                    <div className="flex items-center space-x-1">
-                      <div className="p-2 bg-gradient-to-br from-blue-100 to-cyan-100 rounded-lg">
-                        <Hash className="h-4 w-4 text-blue-600" />
-                      </div>
-                      <span className="text-sm font-bold text-blue-700 uppercase tracking-wide">Selected Number</span>
-                    </div>
-                  </div>
-                  <div className="col-span-4">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2 bg-gradient-to-br from-emerald-100 to-green-100 rounded-lg">
-                        <Package className="h-4 w-4 text-emerald-600" />
-                      </div>
-                      <span className="text-sm font-bold text-emerald-700 uppercase tracking-wide">Plan Details</span>
-                    </div>
-                  </div>
-                  <div className="col-span-1 pr-8">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2 bg-gradient-to-br from-amber-100 to-orange-100 rounded-lg">
-                        <Clock className="h-4 w-4 text-amber-600" />
-                      </div>
-                      <span className="text-sm font-bold text-amber-700 uppercase tracking-wide">Status</span>
-                    </div>
-                  </div>
-                  <div className="col-span-2 pl-8">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2 bg-gradient-to-br from-purple-100 to-pink-100 rounded-lg">
-                        <Eye className="h-4 w-4 text-purple-600" />
-                      </div>
-                      <span className="text-sm font-bold text-purple-700 uppercase tracking-wide">Actions</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Leads List */}
-              <div className="relative">
-                  {leads.map((lead, index) => {
-                    
-                    return (
-                      <motion.div
-                        key={lead.id}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.3, delay: index * 0.1 }}
-                        className={clsx(
-                          "group hover:bg-gradient-to-r hover:from-indigo-50/50 hover:to-purple-50/50 transition-all duration-200 relative",
-                          (lead as any).verificationMethod === 'whatsapp' && "bg-gradient-to-r from-emerald-50/50 to-transparent",
-                          // Modern border - only show between items, not on first/last
-                          index < leads.length - 1 && "border-b border-gradient-to-r from-gray-200/60 via-indigo-200/40 to-purple-200/60"
-                        )}
-                        style={{
-                          // Modern gradient border effect - More visible
-                          borderBottom: index < leads.length - 1 ? '2px solid transparent' : 'none',
-                          backgroundImage: index < leads.length - 1 
-                            ? 'linear-gradient(white, white), linear-gradient(90deg, rgba(156, 163, 175, 0.7), rgba(129, 140, 248, 0.6), rgba(196, 181, 253, 0.6), rgba(236, 72, 153, 0.5))'
-                            : 'none',
-                          backgroundOrigin: 'border-box',
-                          backgroundClip: 'padding-box, border-box'
-                        }}
+              {/* Results Section */}
+              {numberLookupResults.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      Found {numberLookupResults.length} Lead(s)
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setShowNumberLookupFilters(!showNumberLookupFilters)}
+                        className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50"
                       >
-                        {/* WhatsApp Indicator */}
-                        {(lead as any).verificationMethod === 'whatsapp' && (
-                          <div className="absolute left-0 top-0 bottom-0 w-1 bg-emerald-500 z-10"></div>
+                        <Filter className="w-4 h-4" />
+                        Filters
+                        {numberLookupFilters.status.length > 0 && (
+                          <span className="ml-1 px-1.5 py-0.5 bg-teal-500 text-white text-xs rounded-full">
+                            {numberLookupFilters.status.length}
+                          </span>
                         )}
-                        <div className="px-6 py-4">
-                        <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
-                          {/* Customer Information */}
-                          <div className="col-span-3 flex items-center">
-                            <div className="flex items-center space-x-2">
-                              <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
-                                <User2 className="h-5 w-5 text-indigo-600" />
-                              </div>
-                              <div>
-                                <h3 className="text-sm font-semibold text-gray-900">
-                                  {lead.customerName || 'Unnamed Customer'}
-                                </h3>
-                                <div className="flex items-center text-s text-gray-500 mt-1">
-                                  <Phone className="h-3 w-3 mr-1.5" />
-                                  {lead.customerNumber}
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const filteredResults = numberLookupResults.filter(lead => {
+                              if (numberLookupFilters.status.length > 0 && !numberLookupFilters.status.includes(lead.status)) return false;
+                              return true;
+                            });
+                            
+                            const XLSX = await import('xlsx');
+                            
+                            // Prepare export data - one row per plan/number
+                            const exportData: any[] = [];
+                            
+                            filteredResults.forEach((lead) => {
+                              const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
+                              
+                              if (plansWithGroup.length === 0) {
+                                // Lead with no plans - single row
+                                exportData.push({
+                                  'Lead Number': lead.leadNumber || 'N/A',
+                                  'Customer Name': lead.customerName || 'N/A',
+                                  'Customer Number': lead.customerNumber || 'N/A',
+                                  'Selected Number': 'N/A',
+                                  'Group': 'N/A',
+                                  'Status': lead.status || 'N/A',
+                                  'Agent': (lead as any).agentName || lead.agentName || 'N/A',
+                                  'Team': (lead as any).teamName || lead.teamName || 'N/A',
+                                  'Created': lead.createdAt ? format(
+                                    (lead.createdAt && typeof (lead.createdAt as any).toDate === 'function') 
+                                      ? (lead.createdAt as any).toDate() 
+                                      : (lead.createdAt instanceof Date ? lead.createdAt : new Date(lead.createdAt)),
+                                    'MMM d, yyyy'
+                                  ) : 'N/A'
+                                });
+                              } else {
+                                // Lead with plans - one row per plan
+                                plansWithGroup.forEach((plan: any) => {
+                                  exportData.push({
+                                    'Lead Number': lead.leadNumber || 'N/A',
+                                    'Customer Name': lead.customerName || 'N/A',
+                                    'Customer Number': lead.customerNumber || 'N/A',
+                                    'Selected Number': plan.number || 'N/A',
+                                    'Group': plan.poolGroup || 'N/A',
+                                    'Status': lead.status || 'N/A',
+                                    'Agent': (lead as any).agentName || lead.agentName || 'N/A',
+                                    'Team': (lead as any).teamName || lead.teamName || 'N/A',
+                                    'Created': lead.createdAt ? format(
+                                      (lead.createdAt && typeof (lead.createdAt as any).toDate === 'function') 
+                                        ? (lead.createdAt as any).toDate() 
+                                        : (lead.createdAt instanceof Date ? lead.createdAt : new Date(lead.createdAt)),
+                                      'MMM d, yyyy'
+                                    ) : 'N/A'
+                                  });
+                                });
+                              }
+                            });
+                            
+                            const ws = XLSX.utils.json_to_sheet(exportData);
+                            const wb = XLSX.utils.book_new();
+                            XLSX.utils.book_append_sheet(wb, ws, 'Leads');
+                            
+                            const dateStr = format(new Date(), 'yyyy-MM-dd');
+                            const filename = `Numbers in leads ${dateStr}.xlsx`;
+                            XLSX.writeFile(wb, filename);
+                            
+                            toast.success('Excel file downloaded successfully!');
+                          } catch (error) {
+                            console.error('Error exporting to Excel:', error);
+                            toast.error('Failed to export to Excel');
+                          }
+                        }}
+                        className="text-sm text-white bg-teal-600 hover:bg-teal-700 flex items-center gap-1 px-3 py-1.5 rounded-lg transition-colors"
+                      >
+                        <Database className="w-4 h-4" />
+                        Export Excel
+                      </button>
+                    <button
+                      onClick={() => {
+                        setNumberLookupResults([]);
+                        setNumberLookupInput('');
+                          setNumberLookupFilters({ status: [] });
+                      }}
+                      className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
+                    >
+                      <X className="w-4 h-4" />
+                      Clear Results
+                    </button>
+                    </div>
+                  </div>
+
+                  {/* Filters Section */}
+                  {showNumberLookupFilters && (
+                    <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Status
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {(() => {
+                            // Get all unique statuses from results
+                            const allStatuses = Array.from(new Set(numberLookupResults.map(lead => lead.status).filter(Boolean)));
+                            // Add common statuses that might not be in results
+                            const commonStatuses = [
+                              'pending_verification',
+                              'verified',
+                              'activated',
+                              'non_verified',
+                              'rejected',
+                              'assigned',
+                              'follow_up',
+                              'activated_non_verified',
+                              'assigned_to_cord',
+                              'pending',
+                              'later',
+                              'reverification'
+                            ];
+                            const allUniqueStatuses = Array.from(new Set([...commonStatuses, ...allStatuses])).sort();
+                            
+                            return allUniqueStatuses.map((status) => {
+                              const isSelected = numberLookupFilters.status.includes(status);
+                              return (
+                                <button
+                                  key={status}
+                                  onClick={() => {
+                                    setNumberLookupFilters(prev => ({
+                                      ...prev,
+                                      status: isSelected
+                                        ? prev.status.filter(s => s !== status)
+                                        : [...prev.status, status]
+                                    }));
+                                  }}
+                                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                                    isSelected
+                                      ? 'bg-teal-500 text-white'
+                                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {status === 'pending_verification' ? 'Pending Verification' :
+                                   status === 'non_verified' ? 'Non Verified' :
+                                   status === 'activated_non_verified' ? 'Activated Non Verified' :
+                                   status === 'assigned_to_cord' ? 'Assigned To Coordinator' :
+                                   status === 'follow_up' ? 'Follow Up' :
+                                   status === 'reverification' ? 'Reverification' :
+                                   status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, ' ')}
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </div>
+                      <div className="mt-4 flex justify-end">
+                        <button
+                          onClick={() => setNumberLookupFilters({ status: [] })}
+                          className="text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5"
+                        >
+                          Clear All Filters
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Filtered Results Count */}
+                  {(() => {
+                    const filteredResults = numberLookupResults.filter(lead => {
+                      if (numberLookupFilters.status.length > 0 && !numberLookupFilters.status.includes(lead.status)) return false;
+                      return true;
+                    });
+                    return filteredResults.length !== numberLookupResults.length ? (
+                      <div className="mb-4 text-sm text-gray-600">
+                        Showing {filteredResults.length} of {numberLookupResults.length} lead(s)
+                      </div>
+                    ) : null;
+                  })()}
+                  
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 border border-gray-200 rounded-lg">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead Number</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer Name</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer Number</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Selected Number(s)</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Group</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Team</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {numberLookupResults.filter(lead => {
+                          if (numberLookupFilters.status.length > 0 && !numberLookupFilters.status.includes(lead.status)) return false;
+                          return true;
+                        }).map((lead) => (
+                          <tr key={lead.id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-indigo-600">
+                              {lead.leadNumber || 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
+                              {lead.customerName || 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                                <div className="font-mono">
+                                <span className={lead.customerNumber ? 'text-indigo-700 font-medium' : 'text-gray-400'}>
+                                  {lead.customerNumber || 'N/A'}
+                                </span>
                                 </div>
-                                <div className="flex items-center text-xs text-gray-500 mt-1">
-                                  <Calendar className="h-3 w-3 mr-1.5" />
-                                  {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
+                                {lead.customerNumbers && lead.customerNumbers.length > 0 && (
+                                  <div className="flex flex-col gap-0.5 mt-1">
+                                    {lead.customerNumbers.map((custNum, idx) => (
+                                      <div key={idx} className="text-xs">
+                                        <span className="text-gray-500">Customer #{idx + 1}: </span>
+                                        <span className="font-mono text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                                          {custNum.number}
+                                        </span>
+                                        {custNum.alternativeNumber && (
+                                          <>
+                                            <span className="text-gray-400 mx-1">|</span>
+                                            <span className="font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">
+                                              Alt: {custNum.alternativeNumber}
+                                            </span>
+                                          </>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              {(() => {
+                                const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
+                                if (plansWithGroup.length > 0) {
+                                  return (
+                                <div className="flex flex-col gap-1">
+                                      {plansWithGroup.map((plan: any, idx: number) => (
+                                    <span key={idx} className="font-mono text-teal-700 bg-teal-50 px-2 py-1 rounded">
+                                      {plan.number || 'N/A'}
+                                    </span>
+                                  ))}
                                 </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Selected Numbers */}
-                            <div className="col-span-2 -ml-2">
-                              <div className="flex flex-col space-y-2">
-                            {(lead.plans && lead.plans.length > 0)
-                              ? lead.plans.map((plan, planIndex) => (
-                                  <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
-                                    <Hash className="h-4 w-4 text-indigo-500" />
-                                    <span className="text-sm font-medium text-gray-700">
-                                      {plan.number || ''}
-                                    </span>
-                                  </div>
-                                ))
-                              : <span className="text-sm font-medium text-gray-700"></span>
-                            }
-                              </div>
-                          </div>
-
-                          {/* Plan Details */}
-                            <div className="col-span-4">
-                              <div className="flex flex-col space-y-2">
-                            {(lead.plans && lead.plans.length > 0)
-                              ? lead.plans.map((plan, planIndex) => (
-                                  <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
-                                    <Package className="h-4 w-4 text-indigo-500" />
-                                    <span className="text-sm font-medium text-gray-700">
-                                      {plan.plan || ''}
-                                    </span>
-                                  </div>
-                                ))
-                              : <span className="text-sm font-medium text-gray-700"></span>
-                            }
-                              </div>
-                          </div>
-
-                          {/* Status */}
-                            <div className="col-span-1 pr-8">
-                            <motion.span
-                              whileHover={{ scale: 1.05 }}
-                              className={clsx(
-                                  "inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium shadow-sm ring-1 ring-opacity-5",
-                                  lead.status === 'verified' ? 'bg-green-100 text-green-800 ring-green-500/20' :
-                                  lead.status === 'rejected' ? 'bg-red-100 text-red-800 ring-red-500/20' :
-                                  lead.status === 'pending_verification' ? 'bg-yellow-100 text-yellow-800 ring-yellow-500/20' :
-                                  lead.status === 'activated_non_verified' ? 'bg-amber-100 text-amber-800 ring-amber-500/20' :
-                                  lead.status === 'follow_up' ? 'bg-orange-100 text-orange-800 ring-orange-500/20' :
-                                  lead.status === 'activated' ? 'bg-blue-100 text-blue-800 ring-blue-500/20' :
-                                  'bg-gray-100 text-gray-800 ring-gray-500/20'
-                              )}
-                            >
-                                {lead.status === 'verified' ? <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'rejected' ? <XCircle className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'pending_verification' ? <Clock className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'activated_non_verified' ? <Clock className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'activated' ? <Zap className="h-3.5 w-3.5 mr-1.5" /> : null}
-                              {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                            </motion.span>
-                          </div>
-
-                          {/* Actions */}
-                            <div className="col-span-2 pl-8">
-                            <motion.div
-                              whileHover={{ scale: 1.02 }}
-                              whileTap={{ scale: 0.98 }}
-                                className="relative z-20"
-                            >
+                                  );
+                                }
+                                return <span className="text-gray-400">No numbers</span>;
+                              })()}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              {(() => {
+                                const plansWithGroup = (lead as any).plansWithGroup || lead.plans || [];
+                                if (plansWithGroup.length > 0) {
+                                  return (
+                                    <div className="flex flex-col gap-1">
+                                      {plansWithGroup.map((plan: any, idx: number) => (
+                                        <span key={idx} className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                                          {plan.poolGroup && plan.poolGroup !== 'N/A' ? plan.poolGroup : 'N/A'}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                }
+                                return <span className="text-gray-400">N/A</span>;
+                              })()}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                                lead.status === 'activated' ? 'bg-green-100 text-green-800' :
+                                lead.status === 'verified' ? 'bg-blue-100 text-blue-800' :
+                                lead.status === 'pending_verification' ? 'bg-yellow-100 text-yellow-800' :
+                                lead.status === 'non_verified' ? 'bg-orange-100 text-orange-800' :
+                                lead.status === 'rejected' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {lead.status === 'activated' ? 'Activated' :
+                                 lead.status === 'verified' ? 'Verified' :
+                                 lead.status === 'pending_verification' ? 'Pending Verification' :
+                                 lead.status === 'non_verified' ? 'Non Verified' :
+                                 lead.status === 'rejected' ? 'Rejected' :
+                                 lead.status || 'N/A'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {(lead as any).agentName || (lead.agentName || 'N/A')}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {(lead as any).teamName || (lead.teamName || 'N/A')}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {lead.createdAt ? format(
+                                (lead.createdAt && typeof (lead.createdAt as any).toDate === 'function') 
+                                  ? (lead.createdAt as any).toDate() 
+                                  : (lead.createdAt instanceof Date ? lead.createdAt : new Date(lead.createdAt)),
+                                'MMM d, yyyy'
+                              ) : 'N/A'}
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm">
                               <Link
                                 to={`/dashboard/leads/${lead.id}`}
-                                  className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
+                                className="text-teal-600 hover:text-teal-800 font-medium flex items-center gap-1"
                               >
-                                <Eye className="h-4 w-4 mr-2" />
-                                View Details
-                                <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
+                                View
+                                <ArrowRight className="w-4 h-4" />
                               </Link>
-                            </motion.div>
-                            </div>
-                          </div>
-
-                          {/* Mobile Layout */}
-                          <div className="sm:hidden">
-                            <div className="flex items-start justify-between">
-                              <div className="flex items-start space-x-3">
-                                <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
-                                  <User2 className="h-5 w-5 text-indigo-600" />
-                                </div>
-                                <div>
-                                  <h3 className="text-sm font-semibold text-gray-900">
-                                    {lead.customerName || 'Unnamed Customer'}
-                                  </h3>
-                                  <div className="flex items-center text-s text-gray-500 mt-1">
-                                    <Phone className="h-3 w-3 mr-1.5" />
-                                    {lead.customerNumber}
-                                  </div>
-                                  <div className="flex items-center text-xs text-gray-500 mt-1">
-                                    <Calendar className="h-3 w-3 mr-1.5" />
-                                    {format(lead.createdAt, 'MMM d, yyyy')}
-                                  </div>
-                                </div>
-                              </div>
-                              <motion.span
-                                whileHover={{ scale: 1.02 }}
-                                className={clsx(
-                                  "inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-medium shadow-sm ring-1 ring-opacity-5",
-                                  lead.status === 'verified' ? 'bg-green-100 text-green-800 ring-green-500/20' :
-                                  lead.status === 'rejected' ? 'bg-red-100 text-red-800 ring-red-500/20' :
-                                  lead.status === 'pending_verification' ? 'bg-yellow-100 text-yellow-800 ring-yellow-500/20' :
-                                  lead.status === 'follow_up' ? 'bg-orange-100 text-orange-800 ring-orange-500/20' :
-                                  lead.status === 'activated' ? 'bg-blue-100 text-blue-800 ring-blue-500/20' :
-                                  'bg-gray-100 text-gray-800 ring-gray-500/20'
-                                )}
-                              >
-                                {lead.status === 'verified' ? <CheckCircle className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'rejected' ? <XCircle className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'pending_verification' ? <Clock className="h-3.5 w-3.5 mr-1.5" /> :
-                                 lead.status === 'activated' ? <Zap className="h-3.5 w-3.5 mr-1.5" /> : null}
-                                {lead.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                              </motion.span>
-                            </div>
-
-                            {/* Plan Details for Mobile */}
-                            <div className="mt-4 space-y-2">
-                              {(lead.plans?.map((plan, planIndex) => (
-                                <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
-                                  <Package className="h-4 w-4 text-indigo-500" />
-                                  <span className="text-sm font-medium text-gray-700">
-                                    {plan.plan || ''}
-                                  </span>
-                                </div>
-                              )))}
-                            </div>
-
-                            {/* Action Button for Mobile */}
-                            <div className="mt-4">
-                              <motion.div
-                                whileHover={{ scale: 1.02 }}
-                                whileTap={{ scale: 0.98 }}
-                                className="relative z-20"
-                              >
-                                <Link
-                                  to={`/dashboard/leads/${lead.id}`}
-                                  className="inline-flex items-center justify-center w-full px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 rounded-lg hover:from-indigo-100 hover:to-purple-100 transition-all duration-200 group ring-1 ring-indigo-100"
-                                >
-                                  <Eye className="h-4 w-4 mr-2" />
-                                  View Details
-                                  <ArrowRight className="h-4 w-4 ml-2 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200" />
-                                </Link>
-                              </motion.div>
-                            </div>
-                          </div>
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </div>
-            </div>
-          </motion.div>
-        )}
-
-        {/* Customer Portal Submissions Section */}
-        {customerSubmissions.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.3 }}
-            className="mt-8 sm:mt-12 relative"
-          >
-            <div className="absolute inset-0 transform rotate-1.5 translate-x-1 translate-y-1 bg-gradient-to-br from-orange-400 to-amber-600 opacity-25 rounded-2xl shadow-[0_3px_15px_rgba(0,0,0,0.08)] scale-102"></div>
-
-            <div className="relative overflow-hidden rounded-2xl bg-white/95 backdrop-blur-xl border border-white/40 shadow-[0_8px_30px_rgba(0,0,0,0.12)]">
-              <div className="absolute inset-0 bg-gradient-to-br from-white/50 to-transparent rounded-2xl" />
-
-              <div className="relative px-4 sm:px-8 py-4 sm:py-6 bg-gradient-to-br from-orange-600 via-amber-600 to-yellow-600 overflow-hidden">
-                <div className="absolute inset-0 opacity-10">
-                  <div className="absolute top-0 left-0 w-32 h-32 bg-white rounded-full -translate-x-16 -translate-y-16"></div>
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-white rounded-full translate-x-12 -translate-y-12"></div>
-                </div>
-
-                <div className="relative flex items-center justify-between">
-                  <div className="flex items-center space-x-3 sm:space-x-4">
-                    <div className="p-2 sm:p-3 bg-white/20 backdrop-blur-sm rounded-xl sm:rounded-2xl shadow-lg">
-                      <ShoppingCart className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
-                    </div>
-                    <div>
-                      <h2 className="text-lg sm:text-2xl lg:text-3xl font-bold text-white">
-                        Customer Portal Submissions
-                      </h2>
-                      <p className="text-sm text-white/90 mt-1">
-                        {customerSubmissions.length} submission{customerSubmissions.length !== 1 ? 's' : ''} from your customer link
-                      </p>
-                    </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
-              </div>
+              )}
 
-              <div className="relative">
-                {customerSubmissions.map((submission, index) => (
-                  <motion.div
-                    key={submission.id}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3, delay: index * 0.05 }}
-                    className={clsx(
-                      "group hover:bg-gradient-to-r hover:from-orange-50/50 hover:to-amber-50/50 transition-all duration-200 relative",
-                      index < customerSubmissions.length - 1 && "border-b border-gray-200"
-                    )}
-                  >
-                    <div className="px-6 py-5">
-                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-2">
-                            <div className="p-2 bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl">
-                              <User2 className="h-5 w-5 text-orange-600" />
-                            </div>
-                            <div>
-                              <h3 className="text-base font-semibold text-gray-900">
-                                {submission.customerName || 'Unnamed Customer'}
-                              </h3>
-                              <div className="flex items-center text-sm text-gray-500 mt-1">
-                                <Phone className="h-3 w-3 mr-1.5" />
-                                {submission.customerPhone}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="ml-12 space-y-2">
-                            <div className="flex items-center text-sm text-gray-600">
-                              <MapPin className="h-3 w-3 mr-1.5 text-gray-400" />
-                              {submission.customerAddress}
-                            </div>
-                            
-                            {submission.plans && submission.plans.length > 0 && (
-                              <div className="mt-3 space-y-2">
-                                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Selected Numbers & Plans:</div>
-                                {submission.plans.map((plan: any, planIndex: number) => (
-                                  <div key={planIndex} className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg">
-                                    <Hash className="h-4 w-4 text-orange-500" />
-                                    <span className="text-sm font-medium text-gray-700">{plan.number}</span>
-                                    <span className="text-xs text-gray-500">•</span>
-                                    <span className="text-sm text-gray-600">{plan.plan}</span>
-                                    {plan.category && (
-                                      <>
-                                        <span className="text-xs text-gray-500">•</span>
-                                        <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full font-semibold">
-                                          {plan.category}
-                                        </span>
-                                      </>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-
-                            <div className="flex flex-wrap gap-2 mt-3 text-xs text-gray-500">
-                              {submission.emirate && (
-                                <span className="bg-gray-100 px-2 py-1 rounded">Emirate: {submission.emirate}</span>
-                              )}
-                              {submission.nationality && (
-                                <span className="bg-gray-100 px-2 py-1 rounded">Nationality: {submission.nationality}</span>
-                              )}
-                              {submission.gender && (
-                                <span className="bg-gray-100 px-2 py-1 rounded">Gender: {submission.gender}</span>
-                              )}
-                              {submission.language && (
-                                <span className="bg-gray-100 px-2 py-1 rounded">Language: {submission.language}</span>
-                              )}
-                              {submission.hasEmirateId && (
-                                <span className="bg-green-100 text-green-700 px-2 py-1 rounded font-semibold">Has Emirates ID</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex flex-col items-end sm:items-end gap-3">
-                          <div className="text-xs text-gray-500 text-right">
-                            {submission.submittedAt && format(submission.submittedAt, 'MMM d, yyyy h:mm a')}
-                          </div>
-                          <span className={clsx(
-                            "px-3 py-1 rounded-full text-xs font-semibold",
-                            submission.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
-                            submission.status === 'reviewed' ? 'bg-blue-100 text-blue-800' :
-                            submission.status === 'lead_submitted' ? 'bg-green-100 text-green-800' :
-                            'bg-green-100 text-green-800'
-                          )}>
-                            {submission.status === 'pending' ? 'Pending Review' :
-                             submission.status === 'reviewed' ? 'Reviewed' :
-                             submission.status === 'lead_submitted' ? 'Lead Submitted' :
-                             'Converted'}
-                          </span>
-                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
-                            {submission.status !== 'lead_submitted' && (
-                              <button
-                                onClick={() => markAsLeadSubmitted(submission.id)}
-                                className="flex items-center justify-center gap-1.5 px-3 py-2 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm"
-                                title="Mark as Lead Submitted"
-                              >
-                                <CheckSquare className="h-3.5 w-3.5" />
-                                <span className="hidden sm:inline">Mark as Submitted</span>
-                                <span className="sm:hidden">Mark Submitted</span>
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleDeleteSubmission(submission.id)}
-                              className="flex items-center justify-center gap-1.5 px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm"
-                              title="Delete Submission"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              Delete
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </motion.div>
-                ))}
-              </div>
+              {numberLookupResults.length === 0 && !numberLookupLoading && numberLookupInput.trim() && (
+                <div className="mt-6 text-center py-12 bg-gray-50 rounded-lg">
+                  <Search className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                  <p className="text-gray-600">No leads found. Try searching with different numbers.</p>
+                </div>
+              )}
             </div>
-          </motion.div>
-        )}
-
-        {/* Payroll and Attendance Dashboard */}
-        <PayrollAndAttendanceDashboard open={payrollOpen} onClose={() => setPayrollOpen(false)} role="agent" user={user} />
-        
-      </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

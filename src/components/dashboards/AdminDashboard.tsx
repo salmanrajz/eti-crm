@@ -56,6 +56,8 @@ import { BulkDeleteNumbers } from '../admin/BulkDeleteNumbers';
 import { AddToDeletedNumbers } from '../admin/AddToDeletedNumbers';
 import { BulkNumberSearch } from '../admin/BulkNumberSearch';
 import { BulkDeletedNumberSearch } from '../admin/BulkDeletedNumberSearch';
+import { BulkActivateNumbers } from '../admin/BulkActivateNumbers';
+import { BulkRestoreNumbers } from '../admin/BulkRestoreNumbers';
 import { CustomerLinkTracking } from '../admin/CustomerLinkTracking';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
@@ -104,7 +106,8 @@ import {
   Trash2,
   Archive,
   Sparkles,
-  RefreshCw as RefreshCwIcon
+  RefreshCw as RefreshCwIcon,
+  RotateCcw
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Line, Bar } from 'react-chartjs-2';
@@ -342,6 +345,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [addToDeletedModalOpen, setAddToDeletedModalOpen] = useState(false);
   const [bulkNumberSearchModalOpen, setBulkNumberSearchModalOpen] = useState(false);
   const [bulkDeletedNumberSearchModalOpen, setBulkDeletedNumberSearchModalOpen] = useState(false);
+  const [bulkActivateModalOpen, setBulkActivateModalOpen] = useState(false);
+  const [bulkRestoreModalOpen, setBulkRestoreModalOpen] = useState(false);
   const [customerLinkTrackingModalOpen, setCustomerLinkTrackingModalOpen] = useState(false);
   // Number lookup states
   const [numberLookupOpen, setNumberLookupOpen] = useState(false);
@@ -394,7 +399,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     loadOpenRequests();
     loadGroupTargetsForMonth(selectedMonth);
     loadGroupAliases();
-  }, [user, selectedMonth]);
+  }, [user]);
 
   // Load existing broadcast poster for editing convenience
   useEffect(() => {
@@ -605,7 +610,87 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     if (openRequests.length > 0) fetchStrikes();
   }, [openRequests]);
 
-  const monthChangeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Helper function to recalculate metrics for a specific month
+  const recalculateMetricsForMonth = useCallback((month: Date, allLeads: Lead[]) => {
+    const currentMonthStart = startOfMonth(month);
+    const currentMonthEnd = endOfMonth(month);
+
+    const getActivatedAt = (lead: any): Date | null => {
+      const raw = lead?.activatedAt || lead?.updatedAt;
+      if (!raw) return null;
+      if (typeof raw.toDate === 'function') {
+        const d = raw.toDate();
+        return isNaN(d.getTime()) ? null : d;
+      }
+      if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+      const d = new Date(raw);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const getVerifiedAt = (lead: any): Date | null => {
+      const raw = lead?.verifiedAt;
+      if (!raw) return null;
+      if (typeof raw.toDate === 'function') {
+        const d = raw.toDate();
+        return isNaN(d.getTime()) ? null : d;
+      }
+      if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+      const d = new Date(raw);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    // Filter leads for current month by activatedAt (fallback updatedAt) - for other metrics
+    const currentMonthLeads = allLeads.filter(lead => {
+      const activatedAt = getActivatedAt(lead);
+      return activatedAt && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
+    });
+
+    // Filter leads verified in current month by verifiedAt
+    const currentMonthVerifiedLeads = allLeads.filter(lead => {
+      const verifiedAt = getVerifiedAt(lead);
+      return verifiedAt && verifiedAt >= currentMonthStart && verifiedAt <= currentMonthEnd;
+    });
+
+    // Historical verified count: any lead that has ever been verified
+    const verifiedCount = allLeads.filter(l => getVerifiedAt(l) !== null).length;
+
+
+
+
+    // Calculate activated leads for current month
+    const currentMonthActivatedLeads = currentMonthLeads.filter(lead =>
+      lead.status === 'activated' || lead.status === 'activated_non_verified'
+    );
+
+    // Calculate all-time activated leads
+    const allTimeActivatedLeads = allLeads.filter(lead =>
+      lead.status === 'activated' || lead.status === 'activated_non_verified'
+    );
+
+    // Count total activations by summing up plans in each activated lead
+    const monthlyActivated = currentMonthActivatedLeads.reduce((count, lead) => {
+      return count + (lead.plans?.length || 0);
+    }, 0);
+
+    const totalActivated = allTimeActivatedLeads.reduce((count, lead) => {
+      return count + (lead.plans?.length || 0);
+    }, 0);
+
+    const currentMetrics = {
+      totalLeads: allLeads.length,
+      pendingVerification: allLeads.filter(l => l.status === 'pending_verification').length,
+      verified: verifiedCount,
+      currentMonthVerified: currentMonthVerifiedLeads.length,
+      rejected: currentMonthLeads.filter(l => l.status === 'rejected').length,
+      activated: monthlyActivated, // Current month
+      totalActivated: totalActivated, // All-time
+      pendingAssignment: allLeads.filter(l => l.status === 'verified').length,
+      assigned: allLeads.filter(l => l.status === 'assigned').length
+    };
+
+
+    setMetrics(currentMetrics);
+  }, []);
 
   const handleMonthChange = (date: Date) => {
     setSelectedMonth(date);
@@ -615,22 +700,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     computeGroupActivations(teamLeads, date);
     // Reload team metrics for the new month
     loadTeamMetricsForMonth(date);
-  };
-
-  const handleMonthInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newDate = new Date(e.target.value);
-
-    // Clear any existing timeout
-    if (monthChangeTimeoutRef.current) {
-      clearTimeout(monthChangeTimeoutRef.current);
-    }
-
-    // Set a new timeout to apply the change after 1 second
-    // This allows users to change both month and year without triggering immediate loads
-    monthChangeTimeoutRef.current = setTimeout(() => {
-      handleMonthChange(newDate);
-      monthChangeTimeoutRef.current = null;
-    }, 1000);
+    // Recalculate main metrics for the new month
+    recalculateMetricsForMonth(date, teamLeads);
   };
 
   // ✅ PERFORMANCE: Load team metrics for specific month with caching
@@ -991,86 +1062,16 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
       })) as Lead[];
 
-      // Filter leads for current month
-      const currentMonthStart = startOfMonth(selectedMonth);
-      const currentMonthEnd = endOfMonth(selectedMonth);
-      const getActivatedAt = (lead: any): Date | null => {
-        const raw = lead?.activatedAt || lead?.updatedAt;
-        if (!raw) return null;
-        if (typeof raw.toDate === 'function') {
-          const d = raw.toDate();
-          return isNaN(d.getTime()) ? null : d;
-        }
-        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
-        const d = new Date(raw);
-        return isNaN(d.getTime()) ? null : d;
-      };
-
-      const getVerifiedAt = (lead: any): Date | null => {
-        const raw = lead?.verifiedAt;
-        if (!raw) return null;
-        if (typeof raw.toDate === 'function') {
-          const d = raw.toDate();
-          return isNaN(d.getTime()) ? null : d;
-        }
-        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
-        const d = new Date(raw);
-        return isNaN(d.getTime()) ? null : d;
-      };
-
-      // Filter leads for current month by activatedAt (fallback updatedAt)
-      const currentMonthLeads = allLeads.filter(lead => {
-        const activatedAt = getActivatedAt(lead);
-        return activatedAt && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
-      });
-        
-      // Current month verified count: leads verified in the current month
-      // Historical verified count: any lead that has ever been verified
-      const verifiedCount = allLeads.filter(l => getVerifiedAt(l) !== null).length;
-
-      // Filter leads verified in current month by verifiedAt
-      const currentMonthVerifiedLeads = allLeads.filter(lead => {
-        const verifiedAt = getVerifiedAt(lead);
-        return verifiedAt && verifiedAt >= currentMonthStart && verifiedAt <= currentMonthEnd;
-      });
-
-      // Calculate activated leads for current month
-      // Properly handle Firestore timestamps by converting them to Date objects
-      const currentMonthActivatedLeads = currentMonthLeads.filter(lead => 
-        lead.status === 'activated' || lead.status === 'activated_non_verified'
-      );
-      
-      // Calculate all-time activated leads
-      const allTimeActivatedLeads = allLeads.filter(lead => 
-        lead.status === 'activated' || lead.status === 'activated_non_verified'
-      );
-      
-      // Count total activations by summing up plans in each activated lead
-      const monthlyActivated = currentMonthActivatedLeads.reduce((count, lead) => {
-        return count + (lead.plans?.length || 0);
-      }, 0);
-      
-      const totalActivated = allTimeActivatedLeads.reduce((count, lead) => {
-        return count + (lead.plans?.length || 0);
-      }, 0);
-      
-      const currentMetrics = {
-        totalLeads: allLeads.length,
-        pendingVerification: allLeads.filter(l => l.status === 'pending_verification').length,
-        verified: verifiedCount,
-        currentMonthVerified: currentMonthVerifiedLeads.length,
-        rejected: currentMonthLeads.filter(l => l.status === 'rejected').length,
-        activated: monthlyActivated, // Current month
-        totalActivated: totalActivated, // All-time
-        pendingAssignment: allLeads.filter(l => l.status === 'verified').length,
-        assigned: allLeads.filter(l => l.status === 'assigned').length
-      };
-
-      setMetrics(currentMetrics);
+      // Calculate metrics for the selected month
+      recalculateMetricsForMonth(selectedMonth, allLeads);
       setTeamLeads(allLeads);
       // Compute group activations for the selected month
       // IMPORTANT: Always compute from allLeads (full dataset) to ensure accuracy
       computeGroupActivations(allLeads, selectedMonth);
+
+      // Month boundaries for team metrics calculation
+      const currentMonthStart = startOfMonth(selectedMonth);
+      const currentMonthEnd = endOfMonth(selectedMonth);
 
       // Optimize: Load teams and users in parallel
       const [teamsSnapshot, usersSnapshot] = await Promise.all([
@@ -1250,7 +1251,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
       // ✅ PERFORMANCE: Cache the data
       if (isMountedRef.current) {
-        setCachedData(ADMIN_CACHE_KEY, currentMetrics);
+        setCachedData(ADMIN_CACHE_KEY, metrics);
         setCachedData(ADMIN_LEADS_CACHE_KEY, allLeads);
         // Use month-specific cache key to match loadTeamMetricsForMonth
         const monthStr = format(selectedMonth, 'yyyy-MM');
@@ -1610,13 +1611,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const memoizedStats = useMemo(() => {
     return [
       {
-        name: 'Total Leads',
-        value: metrics.totalLeads,
-        icon: Users,
-        href: '#leads',
-        color: 'from-blue-500 to-blue-600'
-      },
-      {
         name: 'Pending Verification',
         value: metrics.pendingVerification,
         icon: Clock,
@@ -1643,13 +1637,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
         icon: Zap,
         href: '#activated',
         color: 'from-purple-500 to-purple-600'
-      },
-      {
-        name: 'Total Activated',
-        value: metrics.totalActivated,
-        icon: Zap,
-        href: '#activated',
-        color: 'from-indigo-500 to-indigo-600'
       },
       {
         name: 'Pending Assignment',
@@ -1748,15 +1735,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-pink-600',
     },
     {
-      name: 'Total Leads',
-      description: 'All leads in system',
-      value: metrics.totalLeads,
-      href: '/dashboard/leads',
-      icon: Users,
-      color: 'bg-gradient-to-br from-gray-500 to-gray-600',
-      textColor: 'text-gray-600',
-    },
-    {
       name: 'Pending Verification',
       description: 'Awaiting verification',
       value: metrics.pendingVerification,
@@ -1796,15 +1774,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       icon: Zap,
       color: 'bg-gradient-to-br from-purple-500 to-purple-600',
       textColor: 'text-purple-600',
-    },
-    {
-      name: 'Total Activated',
-      description: 'All-time activations',
-      value: metrics.totalActivated,
-      href: '/dashboard/leads?status=activated',
-      icon: Zap,
-      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
-      textColor: 'text-indigo-600',
     },
     {
       name: 'Rejected',
@@ -1961,6 +1930,24 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-orange-600',
     },
     {
+      name: 'Bulk Activate Numbers',
+      description: 'Activate multiple numbers',
+      value: 'Activate',
+      href: '#bulk-activate',
+      icon: Zap,
+      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
+      textColor: 'text-indigo-600',
+    },
+    {
+      name: 'Bulk Restore Numbers',
+      description: 'Restore numbers from deleted list',
+      value: 'Restore',
+      href: '#bulk-restore',
+      icon: RotateCcw,
+      color: 'bg-gradient-to-br from-green-500 to-green-600',
+      textColor: 'text-green-600',
+    },
+    {
       name: 'Customer Link Tracking',
       description: 'Track link activities',
       value: 'Track',
@@ -1969,7 +1956,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
       textColor: 'text-indigo-600',
     },
-  ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.currentMonthVerified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
+  ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
   // Memoize sorted team metrics to prevent unnecessary re-sorting
   const sortedTeamMetrics = useMemo(() => {
@@ -2484,12 +2471,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             
             <div className="flex items-center space-x-1 text-[10px] sm:text-sm text-gray-600">
               <Calendar className="h-2.5 w-2.5 sm:h-4 sm:w-4 md:h-5 md:w-5" />
-                <input
-                  type="month"
-                  value={format(selectedMonth, 'yyyy-MM')}
-                  onChange={handleMonthInputChange}
-                  className="border rounded px-1.5 py-0.5 sm:px-3 sm:py-2 text-[10px] sm:text-sm focus:ring-1 sm:focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
+              <input
+                type="month"
+                value={format(selectedMonth, 'yyyy-MM')}
+                onChange={(e) => handleMonthChange(new Date(e.target.value))}
+                className="border rounded px-1.5 py-0.5 sm:px-3 sm:py-2 text-[10px] sm:text-sm focus:ring-1 sm:focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
             </div>
             <PayrollButton role="admin" user={user} />
             
@@ -2516,18 +2503,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-3 gap-2 sm:gap-4 md:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-6 sm:mb-12">
-        {stats.filter(stat =>
-          stat.name !== 'Lead Logs' &&
-          stat.name !== 'Return numbers' &&
-          stat.name !== 'Add to Deleted Numbers' &&
-          stat.name !== 'Bulk Number Search' &&
-          stat.name !== 'Bulk Deleted Number Search' &&
-          stat.name !== 'Number Lookup' &&
-          stat.name !== 'Number Visibility' &&
-          stat.name !== 'Total Leads' &&
-          stat.name !== 'Total Activated' &&
-          stat.name !== 'Rejected'
-        ).map((stat) => (
+        {stats.map((stat) => (
           stat.name === 'Number Visibility' ? (
             <button
               key={stat.name}
@@ -2883,6 +2859,60 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
             </button>
+          ) : stat.name === 'Bulk Activate Numbers' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkActivateModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Bulk Restore Numbers' ? (
+            <button
+              key={stat.name}
+              onClick={() => setBulkRestoreModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
+                    {stat.value}
+                  </p>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
           ) : stat.name === 'Customer Link Tracking' ? (
             <button
               key={stat.name}
@@ -2964,8 +2994,8 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
         </button>
 
-        {/* Regenerate Group & Initials Stats Button - Hidden */}
-        {false && <button
+        {/* Regenerate Group & Initials Stats Button */}
+        <button
           onClick={handleRegenerateGroupStats}
           disabled={initializingGroupStats}
           className="bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-green-200"
@@ -2990,7 +3020,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             </div>
           </div>
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-green-500 to-emerald-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
-        </button>}
+        </button>
       </div>
 
       {/* Team Performance Section */}
@@ -3014,12 +3044,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           </div>
           <div className="flex items-center gap-2">
             <Calendar className="w-5 h-5 text-gray-400" />
-              <input
-                type="month"
-                value={format(selectedMonth, 'yyyy-MM')}
-                onChange={handleMonthInputChange}
-                className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-              />
+            <input
+              type="month"
+              value={format(selectedMonth, 'yyyy-MM')}
+              onChange={(e) => handleMonthChange(new Date(e.target.value))}
+              className="border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+            />
           </div>
         </div>
 
@@ -4083,9 +4113,21 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       />
 
       {/* Bulk Deleted Number Search Modal */}
-      <BulkDeletedNumberSearch 
-        isOpen={bulkDeletedNumberSearchModalOpen} 
-        onClose={() => setBulkDeletedNumberSearchModalOpen(false)} 
+      <BulkDeletedNumberSearch
+        isOpen={bulkDeletedNumberSearchModalOpen}
+        onClose={() => setBulkDeletedNumberSearchModalOpen(false)}
+      />
+
+      {/* Bulk Activate Numbers Modal */}
+      <BulkActivateNumbers
+        isOpen={bulkActivateModalOpen}
+        onClose={() => setBulkActivateModalOpen(false)}
+      />
+
+      {/* Bulk Restore Numbers Modal */}
+      <BulkRestoreNumbers
+        isOpen={bulkRestoreModalOpen}
+        onClose={() => setBulkRestoreModalOpen(false)}
       />
 
       {/* Customer Link Tracking Modal */}
@@ -4409,6 +4451,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Selected Number(s)</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Group</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Activated Date</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Team</th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
@@ -4504,6 +4547,19 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                                  lead.status === 'rejected' ? 'Rejected' :
                                  lead.status || 'N/A'}
                               </span>
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                              {(() => {
+                                // For activated leads, show activatedAt, fallback to updatedAt
+                                const activatedDate = (lead as any).activatedAt || lead.updatedAt;
+                                if (activatedDate) {
+                                  const date = (activatedDate && typeof (activatedDate as any).toDate === 'function')
+                                    ? (activatedDate as any).toDate()
+                                    : (activatedDate instanceof Date ? activatedDate : new Date(activatedDate));
+                                  return format(date, 'MMM d, yyyy');
+                                }
+                                return 'N/A';
+                              })()}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
                               {(lead as any).agentName || (lead.agentName || 'N/A')}

@@ -342,8 +342,37 @@ export function NumberLogsDashboard() {
     
     const changes: string[] = [];
     
-    // Fields to completely hide from logs
-    const hiddenFields = ['numberTokens', 'tokensUpdatedAt'];
+    // Fields to completely hide from logs (technical/internal fields)
+    const hiddenFields = [
+      'numberTokens',
+      'tokensUpdatedAt',
+      'last2Digits',
+      'last3Digits',
+      'last4Digits',
+      'last5Digits',
+      'initials',
+      'numberNormalized',
+      'passcode', // Sensitive data
+      'visibleToFreelancers',
+      'createdAt', // Usually not meaningful in change logs
+      'lastStatusChange', // Usually not meaningful in change logs
+      'updatedAt', // Usually not meaningful in change logs
+      'number', // The actual number itself (redundant)
+      'code', // Internal code
+      'reservationCount', // Internal counter
+      'claimCount', // Internal counter
+      'category', // Only show if it's actually changing (filtered below)
+      'group', // Only show if it's actually changing (filtered below)
+    ];
+    
+    // Fields that should show with custom labels
+    const fieldLabels: Record<string, string> = {
+      'leadId': 'Lead Number',
+      'status': 'Status',
+      'reservedBy': 'Reserved By',
+      'claimingAgentId': 'Claiming Agent',
+      'teamVisibility': 'Team Visibility',
+    };
     
     if (oldData && newData) {
       // Get all unique keys from both objects
@@ -356,10 +385,20 @@ export function NumberLogsDashboard() {
         const oldValue = oldData[key];
         const newValue = newData[key];
         
+        // Only show category/group if they're actually changing
+        if ((key === 'category' || key === 'group') && oldValue === newValue) {
+          continue;
+        }
+        
         if (oldValue !== newValue) {
           const formattedOld = await formatDataValueWithUserNames(oldValue, key);
           const formattedNew = await formatDataValueWithUserNames(newValue, key);
-          changes.push(`${key}: ${formattedOld} → ${formattedNew}`);
+          
+          // Skip if both values are empty/null
+          if (formattedOld === 'empty' && formattedNew === 'empty') continue;
+          
+          const displayKey = fieldLabels[key] || key;
+          changes.push(`${displayKey}: ${formattedOld} → ${formattedNew}`);
         }
       }
     } else if (newData) {
@@ -368,7 +407,12 @@ export function NumberLogsDashboard() {
         if (hiddenFields.includes(key)) continue;
         
         const formattedValue = await formatDataValueWithUserNames(newData[key], key);
-        changes.push(`${key}: ${formattedValue}`);
+        
+        // Skip if value is empty
+        if (formattedValue === 'empty') continue;
+        
+        const displayKey = fieldLabels[key] || key;
+        changes.push(`${displayKey}: ${formattedValue}`);
       }
     }
     

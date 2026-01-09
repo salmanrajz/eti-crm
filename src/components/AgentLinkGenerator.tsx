@@ -35,9 +35,10 @@ interface LinkItemProps {
   copiedLinkId: string | null;
   generatingOTPFor: string | null;
   newlyGeneratedOTPFor: string | null;
+  otpValidityHours: number;
 }
 
-function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId, generatingOTPFor, newlyGeneratedOTPFor }: LinkItemProps) {
+function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId, generatingOTPFor, newlyGeneratedOTPFor, otpValidityHours }: LinkItemProps) {
   // Automatically show OTP if it was just generated for this link
   const [showOTP, setShowOTP] = useState(newlyGeneratedOTPFor === link.id);
   const url = `${window.location.origin}/customer/${link.linkId}`;
@@ -59,10 +60,18 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP
               <span className="px-2 py-0.5 bg-gray-200 text-gray-600 text-xs rounded">Inactive</span>
             )}
           </div>
-          <div className="text-xs text-gray-500 mt-1">
-            Groups: {link.allowedGroups.join(', ')} • 
-            Used: {link.usageCount || 0} times • 
-            Created: {format(link.createdAt, 'MMM d, yyyy')}
+          <div className="text-xs text-gray-500 mt-1 space-y-0.5">
+            <div>
+              Groups: {link.allowedGroups.join(', ')}
+            </div>
+            {link.allowedCategories && link.allowedCategories.length > 0 && (
+              <div>
+                Categories: {link.allowedCategories.join(', ')}
+              </div>
+            )}
+            <div>
+              Used: {link.usageCount || 0} times • Created: {format(link.createdAt, 'MMM d, yyyy')}
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2 ml-4">
@@ -146,7 +155,7 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP
                 ? 'bg-emerald-400 text-white cursor-not-allowed'
                 : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm hover:shadow-md'
             }`}
-            title="Generate new OTP (valid for 2 hours)"
+            title={`Generate new OTP (valid for ${otpValidityHours} hours)`}
           >
             {generatingOTPFor === link.id ? (
               <>
@@ -178,6 +187,16 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   const [newlyGeneratedOTPFor, setNewlyGeneratedOTPFor] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false);
 
+  // Available number categories for customer portal (same across groups)
+  const allCategories = [
+    'Standard',
+    'Silver',
+    'Silver Plus',
+    'Gold',
+    'Gold Plus',
+    'Platinum'
+  ] as const;
+
   // Get available groups based on agent's allowedGroups
   const availableGroups = useMemo(() => {
     const allGroups = ['G1', 'G2', 'G3'];
@@ -196,6 +215,15 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     }
     return availableGroups.length > 0 ? [availableGroups[0]] : [];
   });
+
+  // Category selection for the link (what customer can see)
+  const [selectedCategories, setSelectedCategories] = useState<string[]>(() => {
+    // Default: all categories enabled so existing behavior is preserved
+    return [...allCategories];
+  });
+
+  // OTP validity selection (2 hours or 6 hours)
+  const [otpValidityHours, setOtpValidityHours] = useState<number>(2);
 
   // Update selectedGroups when availableGroups changes
   useEffect(() => {
@@ -263,17 +291,23 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       return;
     }
 
+    if (selectedCategories.length === 0) {
+      toast.error('Please select at least one category');
+      return;
+    }
+
     setLoading(true);
     try {
       const linkId = generateLinkId();
       const otp = generateOTP();
-      // Set OTP expiration to 2 hours from now
-      const otpExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      // Set OTP expiration based on selected validity
+      const otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
       const linkData = {
         agentId,
         agentName,
         linkId,
         allowedGroups: selectedGroups,
+        allowedCategories: selectedCategories,
         isActive: true,
         otp,
         otpExpiresAt,
@@ -299,8 +333,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     setGeneratingOTPFor(linkId);
     try {
       const newOTP = generateOTP();
-      // Set OTP expiration to 2 hours from now
-      const otpExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      // Set OTP expiration based on selected validity (use current selection)
+      const otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
       await updateDoc(doc(db, 'agentLinks', linkId), {
         otp: newOTP,
         otpExpiresAt,
@@ -455,6 +489,79 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                   )}
                 </div>
 
+                {/* Category Selection */}
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    Select Number Categories to Show
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {allCategories.map(category => {
+                      const isSelected = selectedCategories.includes(category);
+                      return (
+                        <button
+                          key={category}
+                          type="button"
+                          onClick={() => {
+                            setSelectedCategories(prev =>
+                              prev.includes(category)
+                                ? prev.filter(c => c !== category)
+                                : [...prev, category]
+                            );
+                          }}
+                          className={`px-3 py-2 rounded-xl border text-sm font-medium transition-all ${
+                            isSelected
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-400 shadow-sm'
+                              : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
+                          }`}
+                        >
+                          {category}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Customers will only see numbers from the selected categories within the chosen groups.
+                  </p>
+                </div>
+
+                {/* OTP Validity Selection */}
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    OTP Validity Period
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => setOtpValidityHours(2)}
+                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                        otpValidityHours === 2
+                          ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
+                      }`}
+                    >
+                      <div className="font-bold text-lg">2 Hours</div>
+                      <div className="text-xs mt-1 opacity-90">Standard</div>
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => setOtpValidityHours(6)}
+                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                        otpValidityHours === 6
+                          ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
+                      }`}
+                    >
+                      <div className="font-bold text-lg">6 Hours</div>
+                      <div className="text-xs mt-1 opacity-90">Extended</div>
+                    </motion.button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Choose how long the OTP will remain valid for customer access
+                  </p>
+                </div>
+
                 {/* Existing Links */}
                 {links.length > 0 && (
                   <div>
@@ -471,6 +578,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           copiedLinkId={copiedLinkId}
                           generatingOTPFor={generatingOTPFor}
                           newlyGeneratedOTPFor={newlyGeneratedOTPFor}
+                          otpValidityHours={otpValidityHours}
                         />
                       ))}
                     </div>
