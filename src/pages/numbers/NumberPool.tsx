@@ -438,7 +438,27 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [loading, setLoading] = useState(true);
   const [showPool, setShowPool] = useState(true);
   const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
-  const { user, isAdmin, isCoordinator } = useAuthStore();
+  const { user, isAdmin, isCoordinator, isAgent } = useAuthStore();
+  
+  // ===============================================================================
+  // ROBUST PERMISSION CHECKS - Explicitly excludes agents
+  // ===============================================================================
+  
+  // Robust permission check: Explicitly excludes agents from admin/coordinator features
+  const canEditNumbers = useCallback(() => {
+    // Explicitly check that user is NOT an agent
+    if (!user || isAgent()) {
+      return false;
+    }
+    // Only allow admin or coordinator
+    return isAdmin() || isCoordinator();
+  }, [user, isAdmin, isCoordinator, isAgent]);
+
+  // Helper for UI visibility - memoized for performance
+  const canViewAdminColumns = useMemo(() => {
+    if (!user || isAgent()) return false;
+    return isAdmin() || isCoordinator();
+  }, [user, isAdmin, isCoordinator, isAgent]);
   
   // Track claim hours state for real-time updates
   const [isWithinClaimWindow, setIsWithinClaimWindow] = useState(isWithinClaimHours());
@@ -2103,6 +2123,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   // Edit number functionality
   const openEditModal = (number: NumberPoolType) => {
+    // Double-check permission before opening modal - explicitly exclude agents
+    if (!canEditNumbers()) {
+      toast.error('You do not have permission to edit numbers');
+      return;
+    }
+    
     setEditingNumber(number);
     setEditPoolNumber(number.number || '');
     setEditPoolCategory(number.category || '');
@@ -2139,6 +2165,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   }, [showEditDialog]);
 
   const handleUpdateNumber = async () => {
+    // Explicit permission check at function start - explicitly exclude agents
+    if (!canEditNumbers()) {
+      toast.error('You do not have permission to edit numbers');
+      return;
+    }
+    
     if (!editingNumber || updatingNumber) {
       return;
     }
@@ -2171,7 +2203,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return;
     }
     // Validate passcode for admin/coordinator
-    if ((isAdmin() || isCoordinator()) && !editPoolPasscode.trim()) {
+    if (canEditNumbers() && !editPoolPasscode.trim()) {
       toast.error('Passcode is required');
       return;
     }
@@ -2199,7 +2231,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const deletedNumberDoc = await getDoc(deletedNumberRef);
         
         if (!deletedNumberDoc.exists()) {
-          toast.error('Number not found in deleted numbers');
+          toast.error('Number not found in return numbers');
           return;
         }
 
@@ -2229,11 +2261,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         };
 
         // Add passcode for admin/coordinator
-        if (isAdmin() || isCoordinator()) {
+        if (canEditNumbers()) {
           numberPoolData.passcode = editPoolPasscode.trim();
         }
         // Handle team visibility
-        if (isAdmin() || isCoordinator()) {
+        if (canEditNumbers()) {
           if (editPoolTeamVisibility.trim()) {
             numberPoolData.teamVisibility = editPoolTeamVisibility.trim();
           } else {
@@ -2257,7 +2289,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           'created',
           { status: 'returned' },
           { status: 'open' },
-          `Number restored from deletedNumbers and moved back to numberPool`
+          `Number restored from return numbers and moved back to numberPool`
         );
         
         toast.success('Number restored and moved back to number pool!');
@@ -2311,10 +2343,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           'deleted',
           { status: numberData?.status },
           { status: 'returned' },
-          `Number marked as returned and moved to deletedNumbers`
+          `Number marked as returned and moved to return numbers`
         );
         
-        toast.success('Number returned and moved to deleted numbers!');
+        toast.success('Number returned and moved to return numbers!');
         await refreshNumberData(editingNumber.id);
         setShowEditDialog(false);
         setEditingNumber(null);
@@ -2341,7 +2373,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       };
 
       // If status is being set to 'open', clear all reserved data (for admin or coordinator)
-      if (editPoolStatus === 'open' && (isAdmin() || isCoordinator() || user?.role === 'coordinator')) {
+      if (editPoolStatus === 'open' && canEditNumbers()) {
         numberData.reservedBy = null;
         numberData.reservedAt = null;
         numberData.expiresAt = null;
@@ -2355,11 +2387,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       }
 
       // Add passcode for admin/coordinator
-      if (isAdmin() || isCoordinator()) {
+      if (canEditNumbers()) {
         numberData.passcode = editPoolPasscode.trim();
       }
       // Handle team visibility - set to empty string if cleared, or to the selected team ID
-      if (isAdmin() || isCoordinator()) {
+      if (canEditNumbers()) {
       if (editPoolTeamVisibility.trim()) {
         numberData.teamVisibility = editPoolTeamVisibility.trim();
         } else {
@@ -4926,7 +4958,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   </div>
 
                   {/* Security & Access Card */}
-                  {(isAdmin() || isCoordinator()) && (
+                  {canViewAdminColumns && (
                     <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg p-4 mb-3 border border-blue-200/50">
                       <div className="flex items-center mb-3">
                         <div className="p-1.5 bg-blue-100 rounded-md mr-2">
@@ -4937,7 +4969,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {/* Passcode Field */}
-                        {(isAdmin() || isCoordinator()) && (
+                        {canViewAdminColumns && (
                           <div className="space-y-2">
                             <label className="text-sm font-semibold text-gray-700 flex items-center">
                               <span className="w-1.5 h-1.5 bg-red-500 rounded-full mr-2"></span>
@@ -5048,7 +5080,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           return;
                         }
                         // Validate passcode for admin/coordinator
-                        if ((isAdmin() || isCoordinator()) && !newPoolPasscode.trim()) {
+                        if (canEditNumbers() && !newPoolPasscode.trim()) {
                           toast.error('Passcode is required');
                           return;
                         }
@@ -5093,7 +5125,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           };
 
                           // Add passcode for admin/coordinator
-                          if (isAdmin() || isCoordinator()) {
+                          if (canEditNumbers()) {
                             numberData.passcode = newPoolPasscode.trim();
                           }
                           // Only add team visibility if it has a value
@@ -5368,7 +5400,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   </div>
 
                   {/* Security & Access Card */}
-                  {(isAdmin() || isCoordinator()) && (
+                  {canViewAdminColumns && (
                     <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg p-4 mb-3 border border-blue-200/50">
                       <div className="flex items-center mb-3">
                         <div className="p-1.5 bg-blue-100 rounded-md mr-2">
@@ -5379,7 +5411,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {/* Passcode Field */}
-                        {(isAdmin() || isCoordinator()) && (
+                        {canViewAdminColumns && (
                           <div className="space-y-1.5 sm:space-y-2">
                             <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center">
                               <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-red-500 rounded-full mr-1.5 sm:mr-2"></span>
@@ -5401,7 +5433,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         )}
 
                         {/* Team Visibility Field */}
-                        {(isAdmin() || isCoordinator()) && (
+                        {canViewAdminColumns && (
                           <div className="space-y-1.5 sm:space-y-2">
                             <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center flex-wrap gap-1">
                               <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 bg-green-500 rounded-full"></span>
@@ -5666,7 +5698,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     <SortIcon field="group" />
                   </div>
                 </th>
-                {(isAdmin() || isCoordinator()) && (
+                {canViewAdminColumns && (
                   <>
                     <th 
                       className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-600 transition-colors"
@@ -5697,7 +5729,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     Time Left
                   </div>
                 </th>
-                {(isAdmin() || isCoordinator()) && (
+                {canViewAdminColumns && (
                   <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     <div className="flex items-center">
                       <UserCheck className="h-4 w-4 mr-1" />
@@ -5782,7 +5814,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       <td className="px-6 py-4 whitespace-nowrap">
         <div className="text-sm text-gray-500">{number.group || '-'}</div>
       </td>
-                    {(isAdmin() || isCoordinator()) && (
+                    {canViewAdminColumns && (
                       <>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="text-sm text-gray-500">{number.passcode || '-'}</div>
@@ -5868,7 +5900,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <div className="text-sm text-gray-400">-</div>
         )}
       </td>
-                    {(isAdmin() || isCoordinator()) && (
+                    {canViewAdminColumns && (
         <td className="px-6 py-4 whitespace-nowrap">
           {number.status !== 'open' && (number.reservedBy || number.claimingAgentId || number.originalAgentId || number.leadId) ? (
             <AgentTeamInfo 
@@ -6025,11 +6057,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           )}
           {/* Edit button for coordinators and admins */}
           {/* Admin can edit all numbers; coordinator limited by status */}
-                        {(
-              isAdmin() ||
-              (isCoordinator() &&
-                ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
-            ) && (
+          {/* Explicitly excludes agents - robust permission check */}
+          {canEditNumbers() && (
+            isAdmin() ||
+            (isCoordinator() &&
+              ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
+          ) && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}

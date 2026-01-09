@@ -231,10 +231,14 @@ export function CustomerPortal() {
         new Map(results.map(num => [num.id, num])).values()
       );
 
-      const filtered = uniqueResults.filter(num =>
-        agentLink.allowedGroups.includes(num.group || 'Standard') &&
-        num.status === 'open'
-      );
+      const filtered = uniqueResults.filter(num => {
+        const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
+        const matchesCategory =
+          !agentLink.allowedCategories ||
+          agentLink.allowedCategories.length === 0 ||
+          agentLink.allowedCategories.includes(num.category || 'Standard');
+        return matchesGroup && matchesCategory && num.status === 'open';
+      });
 
       filtered.sort((a, b) => {
         const aMatch = a.number.endsWith(lastDigits) ? 3 :
@@ -324,10 +328,14 @@ export function CustomerPortal() {
             statusFilter: 'open',
           });
           
-          const filtered = result.data.filter(num =>
-            agentLink.allowedGroups.includes(num.group || 'Standard') &&
-            num.status === 'open'
-          );
+          const filtered = result.data.filter(num => {
+            const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
+            const matchesCategory =
+              !agentLink.allowedCategories ||
+              agentLink.allowedCategories.length === 0 ||
+              agentLink.allowedCategories.includes(num.category || 'Standard');
+            return matchesGroup && matchesCategory && num.status === 'open';
+          });
           
           allNumbers.push(...filtered);
         }
@@ -383,10 +391,14 @@ export function CustomerPortal() {
         statusFilter: 'open',
       });
 
-      const filtered = result.data.filter(num =>
-        agentLink.allowedGroups.includes(num.group || 'Standard') &&
-        num.status === 'open'
-      );
+      const filtered = result.data.filter(num => {
+        const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
+        const matchesCategory =
+          !agentLink.allowedCategories ||
+          agentLink.allowedCategories.length === 0 ||
+          agentLink.allowedCategories.includes(num.category || 'Standard');
+        return matchesGroup && matchesCategory && num.status === 'open';
+      });
 
       if (loadMore) {
         setSearchResults(prev => [...prev, ...filtered]);

@@ -41,7 +41,7 @@ interface AuthState {
   setUser: (user: User | null) => void; // Function to update user state
   setLoading: (loading: boolean) => void; // Function to update loading state
   refreshUser: () => Promise<void>;     // Function to refresh user data from Firestore
-
+  
   // Role-based helper methods for conditional rendering and logic
   isAdmin: () => boolean;
   isManager: () => boolean;

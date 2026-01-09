@@ -341,7 +341,7 @@ export const formatActionText = (action: NumberLogAction): string => {
     case 'released':
       return 'Released';
     case 'deleted':
-      return 'Deleted';
+      return 'Return';
     case 'lead_created':
       return 'Lead Created';
     case 'status_changed':

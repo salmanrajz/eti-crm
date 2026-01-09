@@ -538,6 +538,7 @@ export interface AgentLink {
   agentName?: string;
   linkId: string; // Unique identifier for the link (used in URL)
   allowedGroups: string[]; // Groups of numbers to show (e.g., ['G1', 'G2'])
+  allowedCategories?: string[]; // Optional number categories to show (e.g., ['Silver', 'Gold'])
   isActive: boolean;
   otp?: string; // OTP required to access the customer portal
   otpExpiresAt?: Date; // OTP expiration time (2 hours from generation)
