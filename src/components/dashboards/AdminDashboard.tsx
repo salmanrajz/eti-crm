@@ -1794,15 +1794,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-cyan-600',
     },
     {
-      name: 'Lead Logs',
-      description: 'View all lead activity',
-      value: 'View',
-      href: '/dashboard/lead-logs',
-      icon: ClipboardList,
-      color: 'bg-gradient-to-br from-violet-500 to-violet-600',
-      textColor: 'text-violet-600',
-    },
-    {
       name: 'User Session Logs',
       description: 'Track user activities',
       value: 'View',
@@ -1810,24 +1801,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       icon: Activity,
       color: 'bg-gradient-to-br from-blue-500 to-indigo-600',
       textColor: 'text-blue-600',
-    },
-    {
-      name: 'Number Lookup',
-      description: 'Search leads by numbers',
-      value: 'Search',
-      href: '#number-lookup',
-      icon: Search,
-      color: 'bg-gradient-to-br from-teal-500 to-teal-600',
-      textColor: 'text-teal-600',
-    },
-    {
-      name: 'Number Visibility',
-      description: 'Control freelancer access',
-      value: 'Manage',
-      href: '#number-visibility',
-      icon: Eye,
-      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
-      textColor: 'text-purple-600',
     },
     {
       name: 'Manager WhatsApp',
@@ -1857,16 +1830,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       textColor: 'text-red-600',
     },
     {
-      name: 'Bulk DNC Import',
-      description: 'Import large DNC datasets',
-      value: 'Import',
-      href: '#bulk-import',
-      icon: Database,
-      color: 'bg-gradient-to-br from-blue-500 to-blue-600',
-      textColor: 'text-blue-600',
-      isSpecial: true, // Mark as special button
-    },
-    {
       name: 'Trusted Devices',
       description: 'Manage trusted device access',
       value: 'Manage',
@@ -1892,69 +1855,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       icon: Sparkles,
       color: 'bg-gradient-to-br from-amber-500 to-amber-600',
       textColor: 'text-amber-600',
-    },
-    {
-      name: 'Return numbers',
-      description: 'Return multiple numbers',
-      value: 'Delete',
-      href: '#bulk-delete',
-      icon: Trash2,
-      color: 'bg-gradient-to-br from-red-500 to-red-600',
-      textColor: 'text-red-600',
-    },
-    {
-      name: 'Add to Deleted Numbers',
-      description: 'Add to deleted numbers',
-      value: 'Add',
-      href: '#add-to-deleted',
-      icon: Archive,
-      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
-      textColor: 'text-orange-600',
-    },
-    {
-      name: 'Bulk Number Search',
-      description: 'Search number pool',
-      value: 'Search',
-      href: '#bulk-number-search',
-      icon: Search,
-      color: 'bg-gradient-to-br from-purple-500 to-purple-600',
-      textColor: 'text-purple-600',
-    },
-    {
-      name: 'Bulk Deleted Number Search',
-      description: 'Search deleted numbers',
-      value: 'Search',
-      href: '#bulk-deleted-number-search',
-      icon: Archive,
-      color: 'bg-gradient-to-br from-orange-500 to-orange-600',
-      textColor: 'text-orange-600',
-    },
-    {
-      name: 'Bulk Activate Numbers',
-      description: 'Activate multiple numbers',
-      value: 'Activate',
-      href: '#bulk-activate',
-      icon: Zap,
-      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
-      textColor: 'text-indigo-600',
-    },
-    {
-      name: 'Bulk Restore Numbers',
-      description: 'Restore numbers from deleted list',
-      value: 'Restore',
-      href: '#bulk-restore',
-      icon: RotateCcw,
-      color: 'bg-gradient-to-br from-green-500 to-green-600',
-      textColor: 'text-green-600',
-    },
-    {
-      name: 'Customer Link Tracking',
-      description: 'Track link activities',
-      value: 'Track',
-      href: '#customer-link-tracking',
-      icon: BarChart3,
-      color: 'bg-gradient-to-br from-indigo-500 to-indigo-600',
-      textColor: 'text-indigo-600',
     },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
@@ -2504,68 +2404,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       {/* Stats Grid */}
       <div className="grid grid-cols-3 gap-2 sm:gap-4 md:gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-6 sm:mb-12">
         {stats.map((stat) => (
-          stat.name === 'Number Visibility' ? (
-            <button
-              key={stat.name}
-              onClick={() => {
-                setNumberVisibilityOpen(true);
-                loadHiddenNumbers();
-              }}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <div className="flex items-baseline justify-between">
-                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
-                  </div>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Number Lookup' ? (
-            <button
-              key={stat.name}
-              onClick={() => {
-                setNumberLookupOpen(true);
-                setNumberLookupInput('');
-                setNumberLookupResults([]);
-              }}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <div className="flex items-baseline justify-between">
-                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
-                  </div>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Manager WhatsApp' ? (
+          stat.name === 'Manager WhatsApp' ? (
             <button
               key={stat.name}
               onClick={() => setManagerPhoneModalOpen(true)}
@@ -2623,33 +2462,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setDncManagementOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <div className="flex items-baseline justify-between">
-                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
-                  </div>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Bulk DNC Import' ? (
-            <button
-              key={stat.name}
-              onClick={() => setBulkImportOpen(true)}
               className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
@@ -2754,192 +2566,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
               <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
             </button>
-          ) : stat.name === 'Return numbers' ? (
-            <button
-              key={stat.name}
-              onClick={() => setBulkDeleteModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Add to Deleted Numbers' ? (
-            <button
-              key={stat.name}
-              onClick={() => setAddToDeletedModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
-                    {stat.value}
-                  </p>
-                </div>
-                <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-              </div>
-            </button>
-          ) : stat.name === 'Bulk Number Search' ? (
-            <button
-              key={stat.name}
-              onClick={() => setBulkNumberSearchModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
-                    {stat.value}
-                  </p>
-                </div>
-                <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-              </div>
-            </button>
-          ) : stat.name === 'Bulk Deleted Number Search' ? (
-            <button
-              key={stat.name}
-              onClick={() => setBulkDeletedNumberSearchModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
-                    {stat.value}
-                  </p>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Bulk Activate Numbers' ? (
-            <button
-              key={stat.name}
-              onClick={() => setBulkActivateModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
-                    {stat.value}
-                  </p>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Bulk Restore Numbers' ? (
-            <button
-              key={stat.name}
-              onClick={() => setBulkRestoreModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
-                    {stat.value}
-                  </p>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
-          ) : stat.name === 'Customer Link Tracking' ? (
-            <button
-              key={stat.name}
-              onClick={() => setCustomerLinkTrackingModalOpen(true)}
-              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
-              type="button"
-            >
-              <div className="p-2 sm:p-4 md:p-6">
-                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
-                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-                  </div>
-                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                    {stat.description}
-                  </div>
-                </div>
-                <div className="space-y-1 sm:space-y-2">
-                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                    {stat.name}
-                  </h3>
-                  <p className="text-xs sm:text-sm md:text-base font-bold text-gray-600 group-hover:text-gray-800 transition-colors duration-300">
-                    {stat.value}
-                  </p>
-                </div>
-              </div>
-              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
-            </button>
           ) : (
             <Link
               to={stat.href}
@@ -2994,33 +2620,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
         </button>
 
-        {/* Regenerate Group & Initials Stats Button */}
-        <button
-          onClick={handleRegenerateGroupStats}
-          disabled={initializingGroupStats}
-          className="bg-white overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left border-2 border-green-200"
-          type="button"
-        >
-          <div className="p-2 sm:p-4 md:p-6">
-            <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
-              <div className="p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 group-hover:scale-110 transition-transform duration-300">
-                <Database className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
-              </div>
-              <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
-                {initializingGroupStats ? 'Regenerating...' : 'Groups & Initials'}
-              </div>
-            </div>
-            <div className="space-y-1 sm:space-y-2">
-              <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
-                {initializingGroupStats ? 'Regenerating...' : 'Regenerate Group & Initials Stats'}
-              </h3>
-              {initGroupStatsResult && (
-                <p className="text-xs text-gray-600 mt-1">{initGroupStatsResult}</p>
-              )}
-            </div>
-          </div>
-          <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-green-500 to-emerald-600 transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300" />
-        </button>
       </div>
 
       {/* Team Performance Section */}
