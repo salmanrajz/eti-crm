@@ -119,16 +119,12 @@ export function UserManagement() {
   const [selectedUserForGroups, setSelectedUserForGroups] = useState<User | null>(null);
   const [selectedGroups, setSelectedGroups] = useState<VerifierGroups>([]);
   const [selectedCoordinatorTeams, setSelectedCoordinatorTeams] = useState<CoordinatorTeams>([]);
-  const [showManagedTeamsModal, setShowManagedTeamsModal] = useState(false);
-  const [selectedUserForManagedTeams, setSelectedUserForManagedTeams] = useState<User | null>(null);
-  const [selectedManagedTeams, setSelectedManagedTeams] = useState<string[]>([]);
   const [createUserForm, setCreateUserForm] = useState({
     email: '',
     password: '',
     name: '',
     role: 'agent' as UserRole,
     coordinatorType: 'all' as CoordinatorType,
-    managedTeams: [] as string[],
     verifierGroups: [] as VerifierGroups
   });
   const [creatingUser, setCreatingUser] = useState(false);
@@ -428,32 +424,11 @@ export function UserManagement() {
     }
   }
 
-  async function updateManagedTeams(userId: string, managedTeams: string[]) {
-    try {
-      const userRef = doc(db, 'users', userId);
-      await updateDoc(userRef, {
-        managedTeams: managedTeams.length > 0 ? managedTeams : null,
-        updatedAt: new Date()
-      });
-      toast.success('Managed teams updated successfully');
-      loadUsers(); // Refresh the list
-    } catch (error) {
-      console.error('Error updating managed teams:', error);
-      toast.error('Failed to update managed teams');
-    }
-  }
-
   function openVerifierGroupsModal(user: User) {
     setSelectedUserForGroups(user);
     setSelectedGroups(user.verifierGroups || []);
     setSelectedCoordinatorTeams((user as any).coordinatorTeams || []);
     setShowVerifierGroupsModal(true);
-  }
-
-  function openManagedTeamsModal(user: User) {
-    setSelectedUserForManagedTeams(user);
-    setSelectedManagedTeams(user.managedTeams || []);
-    setShowManagedTeamsModal(true);
   }
 
   function openPasswordResetModal(user: User) {
@@ -563,8 +538,7 @@ export function UserManagement() {
         createUserForm.name,
         {
           coordinatorType: createUserForm.coordinatorType,
-          verifierGroups: createUserForm.verifierGroups,
-          managedTeams: createUserForm.managedTeams
+          verifierGroups: createUserForm.verifierGroups
         }
       );
 
@@ -576,7 +550,6 @@ export function UserManagement() {
         name: '',
         role: 'agent',
         coordinatorType: 'all',
-        managedTeams: [],
         verifierGroups: []
       });
       loadUsers(); // Refresh the user list
@@ -767,43 +740,6 @@ export function UserManagement() {
                     </option>
                   ))}
                 </select>
-              </div>
-                )}
-                
-                {createUserForm.role === 'manager' && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-3">
-                      Managed Teams (Multi-Team Manager)
-                    </label>
-                    <div className="space-y-2">
-                      <div className="text-xs text-gray-500 mb-2">
-                        Select teams this manager can manage. Leave empty for single-team manager.
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        {teams.map((team) => (
-                          <div key={team.id} className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
-                            <input
-                              type="checkbox"
-                              id={`managed-team-${team.id}`}
-                              checked={createUserForm.managedTeams.includes(team.id)}
-                              onChange={(e) => {
-                                const checked = e.target.checked;
-                                setCreateUserForm(prev => ({
-                                  ...prev,
-                                  managedTeams: checked
-                                    ? [...prev.managedTeams, team.id]
-                                    : prev.managedTeams.filter(id => id !== team.id)
-                                }));
-                              }}
-                              className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
-                            />
-                            <label htmlFor={`managed-team-${team.id}`} className="ml-3 text-sm font-medium text-gray-700 cursor-pointer">
-                              {team.name}
-                            </label>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
               </div>
                 )}
                 
@@ -1210,11 +1146,6 @@ export function UserManagement() {
                             Verifier Groups
                     </th>
                         )}
-                        {currentUser?.role === 'admin' && (
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Managed Teams
-                    </th>
-                        )}
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Status
                     </th>
@@ -1414,41 +1345,6 @@ export function UserManagement() {
                           </div>
                         ) : (
                                 <span className="text-sm text-gray-400 italic">Not applicable</span>
-                        )}
-                      </td>
-                          )}
-
-                          {/* Managed Teams */}
-                          {currentUser?.role === 'admin' && (
-                            <td className="px-6 py-4 whitespace-nowrap">
-                              {user.role === 'manager' ? (
-                                <div className="flex items-center space-x-2">
-                                  <div className="flex flex-wrap gap-1">
-                                    {user.managedTeams && user.managedTeams.length > 0 ? (
-                                      user.managedTeams.map((teamId: string, index: number) => {
-                                        const team = teams.find(t => t.id === teamId);
-                                        return (
-                                          <span key={index} className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                            {team?.name || teamId}
-                                          </span>
-                                        );
-                                      })
-                                    ) : (
-                                      <span className="text-gray-400 italic text-xs">Single team</span>
-                                    )}
-                                  </div>
-                                  <button
-                                    onClick={() => openManagedTeamsModal(user)}
-                                    className="text-blue-600 hover:text-blue-800 p-1 rounded hover:bg-blue-50 transition-colors"
-                                    title="Edit managed teams"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                    </svg>
-                                  </button>
-                                </div>
-                              ) : (
-                                <span className="text-gray-400 italic text-xs">Not applicable</span>
                         )}
                       </td>
                           )}
@@ -2187,90 +2083,6 @@ export function UserManagement() {
               >
                 Save Changes
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Managed Teams Modal */}
-      {showManagedTeamsModal && selectedUserForManagedTeams && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4">
-            <div className="p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-gray-900">Edit Managed Teams</h3>
-                <button
-                  onClick={() => {
-                    setShowManagedTeamsModal(false);
-                    setSelectedUserForManagedTeams(null);
-                    setSelectedManagedTeams([]);
-                  }}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  <X className="h-6 w-6" />
-                </button>
-              </div>
-
-              <div className="mb-4">
-                <p className="text-sm text-gray-600">
-                  Select teams that <strong>{selectedUserForManagedTeams.name}</strong> can manage.
-                  Leave empty for single-team manager.
-                </p>
-              </div>
-
-              <div className="space-y-3 mb-6">
-                <div className="max-h-56 overflow-y-auto border border-gray-100 rounded-xl p-3 bg-gray-50/50">
-                  {teams.map((team) => (
-                    <div key={team.id} className="flex items-center py-1">
-                      <input
-                        type="checkbox"
-                        id={`managed-team-modal-${team.id}`}
-                        checked={selectedManagedTeams.includes(team.id)}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          setSelectedManagedTeams(prev => {
-                            if (checked) {
-                              return [...prev, team.id];
-                            } else {
-                              return prev.filter(id => id !== team.id);
-                            }
-                          });
-                        }}
-                        className="h-5 w-5 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                      />
-                      <label htmlFor={`managed-team-modal-${team.id}`} className="ml-3 text-sm font-medium text-gray-700 cursor-pointer">
-                        {team.name}
-                      </label>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => {
-                    setShowManagedTeamsModal(false);
-                    setSelectedUserForManagedTeams(null);
-                    setSelectedManagedTeams([]);
-                  }}
-                  className="flex-1 px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={async () => {
-                    if (selectedUserForManagedTeams) {
-                      await updateManagedTeams(selectedUserForManagedTeams.id, selectedManagedTeams);
-                      setShowManagedTeamsModal(false);
-                      setSelectedUserForManagedTeams(null);
-                      setSelectedManagedTeams([]);
-                    }
-                  }}
-                  className="flex-1 px-4 py-2 text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-                >
-                  Save Changes
-                </button>
-              </div>
             </div>
           </div>
         </div>
