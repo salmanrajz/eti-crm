@@ -3623,7 +3623,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const numberRef = doc(db, 'numberPool', numberToClaim.id);
       
       // For numbers with specific statuses (STRIKE functionality)
-      if (['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)) {
+      if (['assigned', 'verified', 'follow_up'].includes(numberToClaim.status)) {
         const now = new Date();
         
         // Get current number data first
@@ -5639,6 +5639,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           transition={{ duration: 0.5, delay: 0.3 }}
           className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100"
         >
+        {loading ? (
+          <div className="flex items-center justify-center h-64">
+            <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+          </div>
+        ) : isSearching && debouncedSearchTerm.trim() ? (
+          <div className="flex items-center justify-center h-64 text-gray-500">
+            <div className="text-center">
+              <Loader2 className="h-8 w-8 animate-spin text-blue-500 mx-auto mb-4" />
+              <p className="text-lg font-medium">Searching in number pool...</p>
+            </div>
+          </div>
+        ) : paginatedNumbers.length === 0 ? (
+          <div className="flex items-center justify-center h-64 text-gray-500">
+            <div className="text-center">
+              <Hash className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+              <p className="text-lg font-medium">No numbers found</p>
+              {(selectedCategory && selectedCategory !== 'all') || selectedInitials ? (
+                <p className="text-sm mt-2">Try adjusting your filters</p>
+              ) : null}
+            </div>
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead>
@@ -5937,8 +5959,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.button>
           )}
           {/* Strike button - Only visible to agents */}
-          {user?.role === 'agent' && (number.status === 'pending_verification' || 
-            number.status === 'assigned' || 
+          {user?.role === 'agent' && (number.status === 'assigned' || 
             number.status === 'verified' || 
             number.status === 'follow_up') && 
                             number.reservedBy !== user?.id && 
@@ -6059,10 +6080,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           {/* Admin can edit all numbers; coordinator limited by status */}
           {/* Explicitly excludes agents - robust permission check */}
           {canEditNumbers() && (
-            isAdmin() ||
+              isAdmin() ||
             (isCoordinator() &&
-              ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
-          ) && (
+                ['rejected', 'pending_verification', 'non_verified', 'follow_up', 'follow_verification', 'open', 'reserved'].includes(number.status))
+            ) && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
@@ -6082,8 +6103,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </tbody>
           </table>
         </div>
+        )}
 
         {/* Enhanced Pagination with Firebase Integration - Mobile Optimized */}
+        {!loading && paginatedNumbers.length > 0 && (
           <div className="px-6 py-4 bg-gradient-to-r from-gray-50 to-gray-100 border-t border-gray-200">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="flex items-center space-x-4">
@@ -6214,6 +6237,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               </div>
             </div>
           </div>
+        )}
 
         {/* Reserve Dialog */}
         {showReserveDialog && numberToReserve && (
@@ -7146,7 +7170,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 <textarea
                   value={pastedNumbers}
                   onChange={(e) => setPastedNumbers(e.target.value)}
-                  placeholder="Paste numbers (any format)&#10;971501234567&#10;971509876543"
+                  placeholder="Paste numbers (any format)&#10;0501234567&#10;0509876543"
                   className="w-full h-24 sm:h-32 md:h-36 px-3 sm:px-4 py-2 sm:py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none font-mono text-xs sm:text-sm"
                   disabled={checkingNumbers}
                 />

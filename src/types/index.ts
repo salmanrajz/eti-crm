@@ -300,6 +300,9 @@ export interface Lead {
   scheduledFor?: Date; // Date when lead should appear in unassigned for coordinator
   leadNumber?: string; // Sequential lead number in format: TEAMNAME-SEQUENCE-MMMYY (e.g., ETS-100-NOV25)
   leadNumberGeneratedAt?: Date; // Timestamp when lead number was generated
+  pendingVerificationAtLocation?: boolean; // True when verifier verified at location - lead proceeds to coordinator but still pending verification
+  verifiedAt?: Date; // Timestamp when lead was verified
+  followUpAt?: Date; // Timestamp when lead status changed to follow_up
 }
 
 export interface ChatMessage {
@@ -547,6 +550,7 @@ export interface AgentLink {
   expiresAt?: Date; // Optional expiration date
   usageCount?: number; // Number of times link was used
   lastUsedAt?: Date;
+  note?: string; // Optional note about who the link is for
 }
 
 export interface DeviceFingerprint {

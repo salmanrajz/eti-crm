@@ -14,7 +14,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, updateDoc, collection, addDoc, query, where, getDocs, limit } from 'firebase/firestore';
+import { doc, updateDoc, collection, addDoc, query, where, getDocs, limit, orderBy, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { AgentLink, NumberPool, Plan, Lead } from '../types';
 import { unifiedSearch } from '../utils/unifiedSearch';
@@ -141,21 +141,70 @@ export function CustomerPortal() {
         return;
       }
 
-      // Increment usage count when link is accessed (track views)
-      // This counts each time someone visits the link, not just submissions
+      // Track link access with IP and location (silently)
       try {
+        // Get IP address and location
+        let ipAddress = 'Unknown';
+        let location = {
+          country: 'Unknown',
+          region: 'Unknown',
+          city: 'Unknown',
+          timezone: 'Unknown',
+          latitude: null as number | null,
+          longitude: null as number | null,
+        };
+
+        try {
+          // Use ipapi.co for IP and location (free tier: 1000 requests/day)
+          // Alternative: ip-api.com (no key required, 45 requests/minute)
+          const ipResponse = await fetch('https://ipapi.co/json/', {
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+            },
+          });
+          
+          if (ipResponse.ok) {
+            const ipData = await ipResponse.json();
+            ipAddress = ipData.ip || 'Unknown';
+            location = {
+              country: ipData.country_name || ipData.country || 'Unknown',
+              region: ipData.region || ipData.region_code || 'Unknown',
+              city: ipData.city || 'Unknown',
+              timezone: ipData.timezone || 'Unknown',
+              latitude: ipData.latitude || null,
+              longitude: ipData.longitude || null,
+            };
+          }
+        } catch (ipError) {
+          // Silent fail - don't block user if IP/location fetch fails
+        }
+
+        // Store access analytics in linkAccessLogs subcollection
+        const linkDocRef = doc(db, 'agentLinks', linkDoc.id);
+        const accessLogData = {
+          accessedAt: serverTimestamp(),
+          ipAddress,
+          location,
+          userAgent: navigator.userAgent || 'Unknown',
+          referrer: document.referrer || 'Direct',
+          linkId: linkId,
+        };
+
+        await addDoc(collection(linkDocRef, 'linkAccessLogs'), accessLogData);
+
+        // Increment usage count when link is accessed (track views)
         const newUsageCount = (linkData.usageCount || 0) + 1;
         await updateDoc(doc(db, 'agentLinks', linkDoc.id), {
           usageCount: newUsageCount,
-          lastUsedAt: new Date(),
-          updatedAt: new Date(),
+          lastUsedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
         });
         // Update local state to reflect the new count
         linkData.usageCount = newUsageCount;
         linkData.lastUsedAt = new Date();
       } catch (error) {
-        console.error('Error updating link usage count:', error);
-        // Don't block the user if this fails
+        // Silent fail - don't block the user if tracking fails
       }
 
       // Check if OTP is required
@@ -190,69 +239,126 @@ export function CustomerPortal() {
 
     setIsSearching(true);
     try {
-      const cleanPhone = phone.replace(/\D/g, '');
-      const lastDigits = cleanPhone.slice(-5);
-      const last4Digits = cleanPhone.slice(-4);
-      const last3Digits = cleanPhone.slice(-3);
+      const searchDigits = phone.replace(/\D/g, '');
+      if (searchDigits.length < 3 || searchDigits.length > 5) {
+        toast.error('Please enter 3 to 5 digits');
+        return;
+      }
+
+      // Extract 3-digit tokens from the search digits for efficient Firebase querying
+      // Use sliding window to get all possible 3-digit tokens
+      const tokens: string[] = [];
+      if (searchDigits.length >= 3) {
+        for (let i = 0; i <= searchDigits.length - 3; i++) {
+          tokens.push(searchDigits.substring(i, i + 3));
+        }
+      }
+
+      // Use the last token (usually less common, better for query performance)
+      // For "12345", tokens would be: ["123", "234", "345"] - use "345" (less common)
+      const searchToken = tokens.length > 0 ? tokens[tokens.length - 1] : searchDigits.slice(-3);
 
       const results: NumberPool[] = [];
+      const seenIds = new Set<string>();
 
-      if (lastDigits.length >= 5) {
-        const result5 = await unifiedSearch.search(lastDigits, {
-          category: 'all',
-          limit: 20,
-          endsWith: true,
-          statusFilter: 'open',
+      // Query Firestore using array-contains on numberTokens for fast search
+      try {
+        const q = query(
+          collection(db, 'numberPool'),
+          where('status', '==', 'open'),
+          where('numberTokens', 'array-contains', searchToken),
+          orderBy('number'),
+          limit(500) // Fetch more to account for filtering
+        );
+
+        const snapshot = await getDocs(q);
+
+        snapshot.docs.forEach(doc => {
+          const numData = {
+            id: doc.id,
+            ...doc.data(),
+            createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
+            updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt,
+          } as NumberPool;
+
+          // Check if number contains the entered digits anywhere (substring match)
+          const numberDigits = (numData.number || '').replace(/\D/g, '');
+          if (numberDigits.includes(searchDigits) && !seenIds.has(numData.id)) {
+            seenIds.add(numData.id);
+            results.push(numData);
+      }
         });
-        results.push(...result5.data);
+      } catch (error: any) {
+        console.error('Token query error:', error);
+        // Fallback: try with other tokens if first one fails
+        if (tokens.length > 1) {
+          try {
+            const fallbackToken = tokens[0]; // Try first token
+            const q = query(
+              collection(db, 'numberPool'),
+              where('status', '==', 'open'),
+              where('numberTokens', 'array-contains', fallbackToken),
+              orderBy('number'),
+              limit(500)
+            );
+            const snapshot = await getDocs(q);
+            snapshot.docs.forEach(doc => {
+              const numData = {
+                id: doc.id,
+                ...doc.data(),
+                createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
+                updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt,
+              } as NumberPool;
+              const numberDigits = (numData.number || '').replace(/\D/g, '');
+              if (numberDigits.includes(searchDigits) && !seenIds.has(numData.id)) {
+                seenIds.add(numData.id);
+                results.push(numData);
+              }
+            });
+          } catch (fallbackError) {
+            console.error('Fallback token query error:', fallbackError);
+          }
+        }
       }
 
-      if (last4Digits.length >= 4) {
-        const result4 = await unifiedSearch.search(last4Digits, {
-          category: 'all',
-          limit: 20,
-          endsWith: true,
-          statusFilter: 'open',
-        });
-        results.push(...result4.data);
-      }
-
-      if (last3Digits.length >= 3) {
-        const result3 = await unifiedSearch.search(last3Digits, {
-          category: 'all',
-          limit: 20,
-          endsWith: true,
-          statusFilter: 'open',
-        });
-        results.push(...result3.data);
-      }
-
-      const uniqueResults = Array.from(
-        new Map(results.map(num => [num.id, num])).values()
-      );
-
-      const filtered = uniqueResults.filter(num => {
+      // Filter by allowed groups and categories
+      const filtered = results.filter(num => {
         const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
         const matchesCategory =
           !agentLink.allowedCategories ||
           agentLink.allowedCategories.length === 0 ||
           agentLink.allowedCategories.includes(num.category || 'Standard');
-        return matchesGroup && matchesCategory && num.status === 'open';
+        
+        // Double-check: number must contain the search digits
+        const numberDigits = (num.number || '').replace(/\D/g, '');
+        const containsDigits = numberDigits.includes(searchDigits);
+        
+        return matchesGroup && matchesCategory && num.status === 'open' && containsDigits;
       });
 
+      // Sort by relevance: numbers that contain digits at different positions
       filtered.sort((a, b) => {
-        const aMatch = a.number.endsWith(lastDigits) ? 3 :
-                      a.number.endsWith(last4Digits) ? 2 :
-                      a.number.endsWith(last3Digits) ? 1 : 0;
-        const bMatch = b.number.endsWith(lastDigits) ? 3 :
-                      b.number.endsWith(last4Digits) ? 2 :
-                      b.number.endsWith(last3Digits) ? 1 : 0;
-        return bMatch - aMatch;
+        const aNumber = (a.number || '').replace(/\D/g, '');
+        const bNumber = (b.number || '').replace(/\D/g, '');
+        
+        // Priority: starts with > ends with > contains anywhere
+        const aStarts = aNumber.startsWith(searchDigits) ? 3 : 
+                       aNumber.endsWith(searchDigits) ? 2 : 
+                       aNumber.includes(searchDigits) ? 1 : 0;
+        const bStarts = bNumber.startsWith(searchDigits) ? 3 : 
+                       bNumber.endsWith(searchDigits) ? 2 : 
+                       bNumber.includes(searchDigits) ? 1 : 0;
+        
+        if (aStarts !== bStarts) return bStarts - aStarts;
+        
+        // If same priority, sort by number naturally
+        return aNumber.localeCompare(bNumber);
       });
 
-      setSimilarNumbers(filtered.slice(0, 20));
+      setSimilarNumbers(filtered.slice(0, 50));
     } catch (error) {
       console.error('Error finding similar numbers:', error);
+      toast.error('Error searching for numbers');
     } finally {
       setIsSearching(false);
     }
@@ -445,12 +551,17 @@ export function CustomerPortal() {
   }, [searchTerm, handleSearch]);
 
   const handlePhoneSubmit = async () => {
-    if (!enteredPhone.trim() || enteredPhone.replace(/\D/g, '').length < 10) {
-      toast.error('Please enter a valid phone number (05X XXX XXXX)');
+    const cleanPhone = enteredPhone.replace(/\D/g, '');
+    if (!cleanPhone || cleanPhone.length < 3) {
+      toast.error('Please enter at least 3 digits');
       return;
     }
 
-    const cleanPhone = enteredPhone.replace(/\D/g, '');
+    if (cleanPhone.length > 5) {
+      toast.error('Please enter maximum 5 digits');
+      return;
+    }
+
     setFormData(prev => ({ ...prev, customerPhone: cleanPhone }));
 
     await findSimilarNumbers(cleanPhone);
@@ -805,7 +916,7 @@ export function CustomerPortal() {
       return;
     }
 
-    // Check if OTP is expired
+    // Check if OTP is expired (skip if otpExpiresAt is null, meaning forever)
     if (agentLink.otpExpiresAt) {
       const now = new Date();
       const expiresAt = new Date(agentLink.otpExpiresAt);
@@ -1192,12 +1303,11 @@ export function CustomerPortal() {
                           transition={{ delay: 0.4, type: "spring" }}
                           className="text-center mb-4 sm:mb-6 lg:mb-8"
                         >
-                          <h2 className="text-3xl sm:text-4xl md:text-5xl font-black text-gray-900 mb-3 bg-gradient-to-r from-gray-900 via-gray-800 to-gray-900 bg-clip-text text-transparent">
-                            Enter Your Number
+                          <h2 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 mb-3 leading-tight">
+                            Enter Your Preferred Digits
+                            <br />
+                            to Find Matching Numbers
                           </h2>
-                          <p className="text-gray-600 text-base sm:text-lg font-medium max-w-md mx-auto leading-relaxed px-2">
-                            We'll find the perfect number matches for you
-                          </p>
                         </motion.div>
 
                         {/* Enhanced Phone Input Section */}
@@ -1207,84 +1317,45 @@ export function CustomerPortal() {
                           transition={{ delay: 0.5, type: "spring" }}
                           className="mb-4 sm:mb-6 lg:mb-8"
                         >
-                          <div className="flex justify-center items-center gap-1 sm:gap-1.5 flex-nowrap w-full px-2 sm:px-4">
-                            {Array.from({ length: 10 }).map((_, index) => {
-                              const formatLabels = ['0', '5', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X'];
-                              return (
-                                <motion.div
-                                  key={index}
-                                  initial={{ opacity: 0, scale: 0.5, y: 20 }}
-                                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                                  transition={{ 
-                                    delay: 0.6 + index * 0.05, 
-                                    type: "spring", 
-                                    stiffness: 300,
-                                    damping: 20
-                                  }}
-                                  className="relative flex-shrink-0"
-                                >
+                           <div className="flex justify-center items-center w-full px-4 sm:px-8">
+                             <div className="relative w-full max-w-lg">
+                               {/* Enhanced border container with shadow */}
                                   <div className="relative">
+                                 {/* Outer glow effect */}
+                                 <div className="absolute -inset-0.5 bg-gradient-to-r from-orange-400 via-amber-400 to-orange-400 rounded-2xl blur opacity-75 group-hover:opacity-100 transition duration-300"></div>
+                                 
+                                 {/* Input with prominent border */}
                                     <input
-                                      id={`digit-${index}`}
                                       type="tel"
                                       inputMode="numeric"
                                       pattern="[0-9]*"
-                                      maxLength={1}
-                                      value={enteredPhone[index] || ''}
+                                   maxLength={5}
+                                   value={enteredPhone}
                                       onChange={(e) => {
-                                        const val = e.target.value.replace(/\D/g, '');
-                                        if (!val && e.target.value) return;
-
-                                        const newPhone = enteredPhone.split('');
-                                        newPhone[index] = val;
-                                        const newPhoneStr = newPhone.join('').slice(0, 10);
-                                        setEnteredPhone(newPhoneStr);
-
-                                        if (val && index < 9) {
-                                          setTimeout(() => {
-                                            const nextInput = document.getElementById(`digit-${index + 1}`);
-                                            nextInput?.focus();
-                                          }, 50);
-                                        }
-                                      }}
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Backspace' && !enteredPhone[index] && index > 0) {
-                                          const prevInput = document.getElementById(`digit-${index - 1}`);
-                                          prevInput?.focus();
-
-                                          const newPhone = enteredPhone.split('');
-                                          newPhone[index - 1] = '';
-                                          setEnteredPhone(newPhone.join(''));
-                                        }
+                                     const val = e.target.value.replace(/\D/g, '').slice(0, 5);
+                                     setEnteredPhone(val);
                                       }}
                                       onFocus={(e) => {
                                         e.target.select();
                                       }}
-                                      className={clsx(
-                                        "w-7 h-11 sm:w-8 sm:h-14 md:w-10 md:h-18 text-center text-base sm:text-lg md:text-xl font-black rounded-xl outline-none transition-all duration-300 relative border-2 touch-manipulation",
-                                        enteredPhone[index]
-                                          ? "bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-500/40 border-orange-400"
-                                          : "bg-white border-gray-300 focus:border-orange-500 focus:bg-orange-50 focus:shadow-lg text-transparent"
-                                      )}
-                                    />
-                                    {!enteredPhone[index] && (
-                                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                        <span className="text-base sm:text-lg md:text-xl font-black text-gray-300 select-none">
-                                          {formatLabels[index]}
-                                        </span>
-                                      </div>
-                                    )}
-                                    {enteredPhone[index] && (
+                                   placeholder="Enter 3-5 digits"
+                                   className="relative w-full px-6 py-5 sm:py-6 text-center text-3xl sm:text-4xl md:text-5xl font-black rounded-2xl border-4 border-orange-400 focus:border-orange-500 focus:bg-gradient-to-br focus:from-orange-50 focus:to-amber-50 focus:shadow-2xl focus:shadow-orange-500/40 outline-none transition-all duration-300 bg-white text-gray-900 placeholder-gray-400 touch-manipulation shadow-lg"
+                                   style={{
+                                     boxShadow: '0 4px 20px rgba(249, 115, 22, 0.2), inset 0 2px 4px rgba(255, 255, 255, 0.9)'
+                                   }}
+                                 />
+                                 
+                                 {enteredPhone.length > 0 && (
                                       <motion.div
-                                        initial={{ scale: 0 }}
-                                        animate={{ scale: 1 }}
-                                        className="absolute inset-0 bg-gradient-to-br from-white/30 to-transparent rounded-xl pointer-events-none"
-                                      />
+                                     initial={{ scale: 0, rotate: -180 }}
+                                     animate={{ scale: 1, rotate: 0 }}
+                                     className="absolute -top-3 -right-3 bg-gradient-to-br from-orange-500 to-amber-500 text-white rounded-full w-10 h-10 sm:w-12 sm:h-12 flex items-center justify-center text-base sm:text-lg font-bold shadow-xl border-2 border-white z-10"
+                                   >
+                                     {enteredPhone.length}
+                                   </motion.div>
                                     )}
                                   </div>
-                                </motion.div>
-                              );
-                            })}
+                             </div>
                           </div>
                         </motion.div>
 
@@ -1299,7 +1370,7 @@ export function CustomerPortal() {
                             whileHover={{ scale: 1.05 }}
                             whileTap={{ scale: 0.95 }}
                             onClick={handlePhoneSubmit}
-                            disabled={enteredPhone.length < 10 || isSearching}
+                            disabled={enteredPhone.length < 3 || enteredPhone.length > 5 || isSearching}
                             className="relative group touch-manipulation"
                           >
                             {/* Button content with gradient background only on text area */}

@@ -96,8 +96,10 @@ class NumberPoolManager {
       this.state.selectedGroup !== (group || null) ||
       this.state.selectedInitials !== (initials || null) ||
       this.state.pageSize !== pageSize ||
-      (now - this.state.lastLoadTime) > CACHE_DURATION ||
-      this.state.numbers.length === 0
+      (now - this.state.lastLoadTime) > CACHE_DURATION
+      // Removed: this.state.numbers.length === 0
+      // This was causing infinite reinitialization when filters returned no results
+      // Empty results are a valid state and should not trigger reload
     );
   }
 
@@ -348,14 +350,19 @@ class NumberPoolManager {
       // Filter by role first
       let filteredNumbers = this.filterNumbersByRole(result.data, userRole);
       
+      // If no numbers match after filtering, stop pagination and show empty state
+      const hasResults = filteredNumbers.length > 0;
+      const effectiveTotalPages = hasResults ? this.pagination.getTotalPages() : 0;
+      const effectiveTotalItems = hasResults ? this.pagination.getTotalItems() : 0;
+      
       this.updateState({
         numbers: filteredNumbers,
         currentPage: 1,
         pageSize,
-        totalPages: this.pagination.getTotalPages(),
-        totalItems: this.pagination.getTotalItems(),
-        hasNextPage: result.hasNextPage,
-        hasPreviousPage: result.hasPreviousPage,
+        totalPages: effectiveTotalPages,
+        totalItems: effectiveTotalItems,
+        hasNextPage: hasResults && result.hasNextPage,
+        hasPreviousPage: false, // Always false for page 1
         selectedCategory: category,
         selectedGroup: group || null,
         selectedInitials: initials || null,
@@ -449,10 +456,13 @@ class NumberPoolManager {
       const result = await this.pagination.nextPage();
       const filteredNumbers = this.filterNumbersByRole(result.data, this.getCurrentUserRole());
       
+      // If no numbers match after filtering, stop pagination
+      const hasResults = filteredNumbers.length > 0;
+      
       this.updateState({
         numbers: filteredNumbers,
         currentPage: this.pagination.getCurrentPage(),
-        hasNextPage: result.hasNextPage,
+        hasNextPage: hasResults && result.hasNextPage,
         hasPreviousPage: result.hasPreviousPage,
         lastLoadTime: Date.now(),
         isLoading: false
@@ -494,10 +504,13 @@ class NumberPoolManager {
         });
       }
       
+      // If no numbers match after filtering, stop pagination
+      const hasResults = filteredNumbers.length > 0;
+      
       this.updateState({
         numbers: filteredNumbers,
         currentPage: this.pagination.getCurrentPage(),
-        hasNextPage: result.hasNextPage,
+        hasNextPage: hasResults && result.hasNextPage,
         hasPreviousPage: result.hasPreviousPage,
         lastLoadTime: Date.now(),
         isLoading: false

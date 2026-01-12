@@ -84,34 +84,10 @@ export async function sendChatMessageWhatsAppNotification(
 ): Promise<void> {
 
   try {
-    // Fetch the latest lead data to ensure we have the most up-to-date status
-    // This is important when status changes happen before the notification is sent
-    // Also critical for leadNumber which might not be immediately available for new leads
-    let latestLead = lead;
-    let leadNumberRetry = 0;
-    const maxRetries = 5; // Increased retries for new leads
-
-    // Extended retry logic for new leads - leadNumber generation might be asynchronous
-    // This addresses the issue where new lead notifications show "N/A" instead of proper lead number
-    while (leadNumberRetry < maxRetries && (!latestLead.leadNumber || latestLead.leadNumber === latestLead.id)) {
-    try {
-      const leadRef = doc(db, 'leads', lead.id);
-      const leadDoc = await getDoc(leadRef);
-      if (leadDoc.exists()) {
-        latestLead = { id: leadDoc.id, ...leadDoc.data() } as Lead;
-      }
-
-        // For new leads, use longer delays as leadNumber generation might be asynchronous
-        if ((!latestLead.leadNumber || latestLead.leadNumber === latestLead.id) && leadNumberRetry < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second for new leads
-        }
-    } catch (error) {
-        console.error('Error fetching latest lead data for new lead:', error);
-      // Continue with the provided lead if fetch fails
-        break;
-      }
-      leadNumberRetry++;
-    }
+    // Use the provided lead directly - caller is responsible for ensuring it's up-to-date
+    // This removes retry delays that were causing performance issues
+    // For new leads, caller should handle leadNumber generation retries if needed
+    const latestLead = lead;
 
     // Fetch manager's phone numbers (if manager exists)
     let managerPhoneNumbers: string[] = [];
