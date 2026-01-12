@@ -991,6 +991,20 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
               : new Date(activatedAtRaw);
         return activatedAt >= monthStart && activatedAt <= monthEnd;
       });
+    } else if (currentStatus === 'yesterday') {
+      // Handle yesterday filter - same logic as in main useEffect
+      const now = new Date();
+      const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
+      const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
+      const yesterdayExcludedStatuses = ['pending_verification', 'activated', 'non_verified', 'follow_verification', 'rejected', 'verified', 'follow_up', 'later'];
+      
+      nextLeads = filteredCoordinatorLeads.filter(lead => {
+        const ts = (lead.updatedAt || lead.createdAt);
+        return ts &&
+          ts >= yesterdayStart &&
+          ts <= yesterdayEnd &&
+          !yesterdayExcludedStatuses.includes(lead.status);
+      });
     } else {
       nextLeads = filteredCoordinatorLeads.filter(lead => lead.status === currentStatus);
     }
