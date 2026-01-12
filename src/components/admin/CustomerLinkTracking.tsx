@@ -50,11 +50,12 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { collection, query, getDocs, orderBy, where, doc, getDoc, deleteDoc } from 'firebase/firestore';
+import { collection, query, getDocs, orderBy, where, doc, getDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { AgentLink } from '../../types';
 import { toast } from 'react-hot-toast';
 import { motion } from 'framer-motion';
+import { useAuthStore } from '../../store/authStore';
 import { 
   Link2, 
   Users, 
@@ -73,7 +74,11 @@ import {
   Filter,
   Search,
   X,
-  Trash2
+  Trash2,
+  Globe,
+  MapPin,
+  Edit,
+  Infinity
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -94,9 +99,27 @@ interface LinkStats {
   averageUsagePerLink: number;
 }
 
+interface LinkAccessLog {
+  id: string;
+  accessedAt: Date;
+  ipAddress: string;
+  location: {
+    country: string;
+    region: string;
+    city: string;
+    timezone: string;
+    latitude: number | null;
+    longitude: number | null;
+  };
+  userAgent: string;
+  referrer: string;
+  linkId: string;
+}
+
 interface LinkWithDetails extends AgentLink {
   submissionsCount: number;
   submissions: any[];
+  accessLogs?: LinkAccessLog[];
   agentDetails?: {
     name: string;
     teamName?: string;
@@ -104,6 +127,9 @@ interface LinkWithDetails extends AgentLink {
 }
 
 export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingProps) {
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === 'admin';
+  
   const [links, setLinks] = useState<LinkWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -123,6 +149,11 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'inactive'>('all');
   const [sortBy, setSortBy] = useState<'createdAt' | 'usageCount' | 'lastUsedAt' | 'agentName'>('createdAt');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [showEditOTP, setShowEditOTP] = useState(false);
+  const [editingOTPValidity, setEditingOTPValidity] = useState<number | null>(2);
+  const [editingCustomDate, setEditingCustomDate] = useState<string>('');
+  const [useEditingCustomDate, setUseEditingCustomDate] = useState(false);
+  const [updatingOTP, setUpdatingOTP] = useState(false);
 
   // Load all links and submissions (optimized with batch queries)
   const loadData = async () => {
@@ -212,13 +243,45 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
       
       await Promise.all(teamPromises);
       
-      // Step 6: Build links data with all information
+      // Step 6: Load access logs for all links
+      const accessLogsPromises = linksSnapshot.docs.map(async (linkDoc) => {
+        try {
+          const accessLogsSnapshot = await getDocs(
+            query(
+              collection(db, 'agentLinks', linkDoc.id, 'linkAccessLogs'),
+              orderBy('accessedAt', 'desc')
+            )
+          );
+          return {
+            linkId: linkDoc.id,
+            logs: accessLogsSnapshot.docs.map(logDoc => ({
+              id: logDoc.id,
+              ...logDoc.data(),
+              accessedAt: logDoc.data().accessedAt?.toDate ? logDoc.data().accessedAt.toDate() : logDoc.data().accessedAt,
+            })) as LinkAccessLog[]
+          };
+        } catch (error) {
+          console.error(`Error loading access logs for link ${linkDoc.id}:`, error);
+          return { linkId: linkDoc.id, logs: [] };
+        }
+      });
+      
+      const accessLogsResults = await Promise.all(accessLogsPromises);
+      const accessLogsByLinkId = new Map<string, LinkAccessLog[]>();
+      accessLogsResults.forEach(result => {
+        accessLogsByLinkId.set(result.linkId, result.logs);
+      });
+      
+      // Step 7: Build links data with all information
       const linksData: LinkWithDetails[] = linksSnapshot.docs.map(linkDoc => {
         const linkData = linkDoc.data();
         const linkId = linkData.linkId;
         
         // Get submissions for this link
         const submissions = submissionsByLinkId.get(linkId) || [];
+        
+        // Get access logs for this link
+        const accessLogs = accessLogsByLinkId.get(linkDoc.id) || [];
         
         // Get agent details
         let agentDetails: { name: string; teamName?: string } | undefined;
@@ -244,6 +307,7 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
           allowedGroups: Array.isArray(linkData.allowedGroups) ? linkData.allowedGroups : [],
           submissionsCount: submissions.length,
           submissions,
+          accessLogs,
           agentDetails
         } as LinkWithDetails;
       });
@@ -289,6 +353,71 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
       loadData();
     }
   }, [isOpen]);
+
+  // Update OTP validity handler (admin only)
+  const handleUpdateOTPValidity = async (linkId: string, validity: number | null, customDate?: string, useCustom?: boolean) => {
+    if (!isAdmin) {
+      toast.error('Only admins can update OTP validity');
+      return;
+    }
+
+    setUpdatingOTP(true);
+    try {
+      let otpExpiresAt: Date | null = null;
+      
+      if (useCustom && customDate) {
+        // Use custom date selected by admin
+        const selectedDate = new Date(customDate);
+        selectedDate.setHours(23, 59, 59, 999);
+        otpExpiresAt = selectedDate;
+      } else if (validity && typeof validity === 'number') {
+        // Use hours (2 or 6 hours)
+        otpExpiresAt = new Date(Date.now() + validity * 60 * 60 * 1000);
+      }
+      
+      await updateDoc(doc(db, 'agentLinks', linkId), {
+        otpExpiresAt: otpExpiresAt || null,
+        updatedAt: new Date(),
+      });
+
+      // Update local state
+      setLinks(prevLinks =>
+        prevLinks.map(link =>
+          link.id === linkId
+            ? {
+                ...link,
+                otpExpiresAt: otpExpiresAt || null,
+                updatedAt: new Date(),
+              }
+            : link
+        )
+      );
+
+      // Update selectedLink if it's the one being edited
+      if (selectedLink && selectedLink.id === linkId) {
+        setSelectedLink({
+          ...selectedLink,
+          otpExpiresAt: otpExpiresAt || null,
+          updatedAt: new Date(),
+        });
+      }
+
+      const successMessage = useCustom && customDate 
+        ? `OTP validity updated to ${new Date(customDate).toLocaleDateString()}`
+        : validity 
+          ? `OTP validity updated to ${validity} hours`
+          : 'OTP validity updated';
+      toast.success(successMessage);
+      setShowEditOTP(false);
+      setUseEditingCustomDate(false);
+      setEditingCustomDate('');
+    } catch (error) {
+      console.error('Error updating OTP validity:', error);
+      toast.error('Failed to update OTP validity');
+    } finally {
+      setUpdatingOTP(false);
+    }
+  };
 
   // Delete link handler
   const handleDeleteLink = async (link: LinkWithDetails) => {
@@ -670,7 +799,7 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
                           {link.otp ? (
                             <div className="flex items-center gap-1">
                               <Key className="h-4 w-4 text-emerald-600" />
-                              {link.otpExpiresAt && (
+                              {link.otpExpiresAt ? (
                                 <span className="text-xs text-gray-500">
                                   {new Date() > link.otpExpiresAt ? (
                                     <span className="text-red-600">Expired</span>
@@ -678,6 +807,8 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
                                     <span className="text-green-600">Valid</span>
                                   )}
                                 </span>
+                              ) : (
+                                <span className="text-xs text-gray-500 font-medium">No expiration</span>
                               )}
                             </div>
                           ) : (
@@ -788,7 +919,34 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
                     <p className="text-sm text-gray-900">{selectedLink.usageCount || 0}</p>
                   </div>
                   <div>
-                    <label className="text-sm font-medium text-gray-700">OTP Status</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-sm font-medium text-gray-700">OTP Status</label>
+                      {isAdmin && selectedLink.otp && (
+                        <button
+                          onClick={() => {
+                            // Initialize editing value based on current expiration
+                            if (!selectedLink.otpExpiresAt) {
+                              // No expiration - default to custom date mode
+                              setUseEditingCustomDate(true);
+                              setEditingOTPValidity(null);
+                              setEditingCustomDate('');
+                            } else {
+                              // Has expiration - pre-fill with current expiration date
+                              const currentExpiry = new Date(selectedLink.otpExpiresAt);
+                              setEditingCustomDate(currentExpiry.toISOString().split('T')[0]);
+                              setUseEditingCustomDate(true);
+                              setEditingOTPValidity(null);
+                            }
+                            setShowEditOTP(true);
+                          }}
+                          className="text-xs text-indigo-600 hover:text-indigo-800 font-medium flex items-center gap-1 transition-colors"
+                          title="Edit OTP Validity (Admin Only)"
+                        >
+                          <Edit className="h-3 w-3" />
+                          Edit
+                        </button>
+                      )}
+                    </div>
                     <p className="text-sm text-gray-900">
                       {selectedLink.otp ? (
                         selectedLink.otpExpiresAt ? (
@@ -798,16 +956,81 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
                             <span className="text-green-600">Valid until {format(selectedLink.otpExpiresAt, 'MMM d, HH:mm')}</span>
                           )
                         ) : (
-                          <span className="text-gray-600">No expiration</span>
+                          <span className="text-gray-600 font-medium">No expiration set</span>
                         )
                       ) : (
                         <span className="text-gray-400">No OTP</span>
                       )}
                     </p>
                   </div>
+                  {selectedLink.note && (
+                    <div className="col-span-2">
+                      <label className="text-sm font-medium text-gray-700">Note</label>
+                      <p className="text-sm text-gray-900 bg-indigo-50 px-3 py-2 rounded-lg border border-indigo-200">
+                        {selectedLink.note}
+                      </p>
+                    </div>
+                  )}
                 </div>
 
-                <div className="border-t border-gray-200 pt-6">
+                {/* Access Logs Section */}
+                <div className="border-t border-gray-200 pt-6 mt-6">
+                  <h4 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                    <Globe className="h-5 w-5 text-indigo-600" />
+                    Access Logs ({selectedLink.accessLogs?.length || 0})
+                  </h4>
+                  {(selectedLink.accessLogs && selectedLink.accessLogs.length > 0) ? (
+                    <div className="space-y-3 max-h-96 overflow-y-auto">
+                      {selectedLink.accessLogs.map((log) => (
+                        <div key={log.id} className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-lg p-4 border border-indigo-200">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                              <label className="text-xs font-medium text-gray-600 flex items-center gap-1">
+                                <Clock className="h-3 w-3" />
+                                Accessed At
+                              </label>
+                              <p className="text-sm text-gray-900 font-medium">
+                                {log.accessedAt ? format(log.accessedAt, 'MMM d, yyyy HH:mm:ss') : 'N/A'}
+                              </p>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-600">IP Address</label>
+                              <p className="text-sm text-gray-900 font-mono">{log.ipAddress || 'Unknown'}</p>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-600 flex items-center gap-1">
+                                <MapPin className="h-3 w-3" />
+                                Location
+                              </label>
+                              <p className="text-sm text-gray-900">
+                                {log.location?.city && log.location.city !== 'Unknown' ? `${log.location.city}, ` : ''}
+                                {log.location?.region && log.location.region !== 'Unknown' ? `${log.location.region}, ` : ''}
+                                {log.location?.country || 'Unknown'}
+                                {log.location?.latitude && log.location?.longitude && (
+                                  <span className="text-xs text-gray-500 ml-1">
+                                    ({log.location.latitude.toFixed(4)}, {log.location.longitude.toFixed(4)})
+                                  </span>
+                                )}
+                              </p>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium text-gray-600">Timezone</label>
+                              <p className="text-sm text-gray-900">{log.location?.timezone || 'Unknown'}</p>
+                            </div>
+                            <div className="md:col-span-2">
+                              <label className="text-xs font-medium text-gray-600">Referrer</label>
+                              <p className="text-xs text-gray-600 break-all">{log.referrer || 'Direct'}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-gray-500 text-sm">No access logs yet</p>
+                  )}
+                </div>
+
+                <div className="border-t border-gray-200 pt-6 mt-6">
                   <h4 className="text-lg font-semibold text-gray-900 mb-4">Submissions ({selectedLink.submissionsCount || 0})</h4>
                   {(selectedLink.submissions || []).length > 0 ? (
                     <div className="space-y-3">
@@ -852,6 +1075,175 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
                     <p className="text-gray-500 text-sm">No submissions yet</p>
                   )}
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Edit OTP Validity Modal (Admin Only) */}
+        {showEditOTP && selectedLink && isAdmin && selectedLink.otp && (
+          <div className="fixed inset-0 z-70 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 m-4"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+                  <Key className="h-5 w-5 text-indigo-600" />
+                  Edit OTP Validity
+                </h3>
+                <button
+                  onClick={() => setShowEditOTP(false)}
+                  disabled={updatingOTP}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  <X className="h-5 w-5 text-gray-500" />
+                </button>
+              </div>
+
+              <div className="space-y-4 mb-6">
+                <p className="text-sm text-gray-600">
+                  Change OTP validity for link: <span className="font-mono font-medium">{selectedLink.linkId || 'N/A'}</span>
+                </p>
+                
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    Select OTP Validity Period
+                  </label>
+                  <div className="grid grid-cols-3 gap-3">
+                    <motion.button
+                      whileHover={{ scale: editingOTPValidity !== 2 ? 1.02 : 1 }}
+                      whileTap={{ scale: editingOTPValidity !== 2 ? 0.98 : 1 }}
+                      onClick={() => {
+                        setEditingOTPValidity(2);
+                        setUseEditingCustomDate(false);
+                      }}
+                      disabled={updatingOTP}
+                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                        editingOTPValidity === 2 && !useEditingCustomDate
+                          ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      <div className="font-bold text-lg">2 Hours</div>
+                      <div className="text-xs mt-1 opacity-90">Standard</div>
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: editingOTPValidity !== 6 ? 1.02 : 1 }}
+                      whileTap={{ scale: editingOTPValidity !== 6 ? 0.98 : 1 }}
+                      onClick={() => {
+                        setEditingOTPValidity(6);
+                        setUseEditingCustomDate(false);
+                      }}
+                      disabled={updatingOTP}
+                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                        editingOTPValidity === 6 && !useEditingCustomDate
+                          ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      <div className="font-bold text-lg">6 Hours</div>
+                      <div className="text-xs mt-1 opacity-90">Extended</div>
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: !useEditingCustomDate ? 1.02 : 1 }}
+                      whileTap={{ scale: !useEditingCustomDate ? 0.98 : 1 }}
+                      onClick={() => {
+                        setUseEditingCustomDate(true);
+                        setEditingOTPValidity(null);
+                      }}
+                      disabled={updatingOTP}
+                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                        useEditingCustomDate
+                          ? 'bg-gradient-to-br from-purple-500 to-pink-600 text-white border-purple-600 shadow-lg'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-purple-300'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      <div className="font-bold text-lg">Custom Date</div>
+                      <div className="text-xs mt-1 opacity-90">Select Date</div>
+                    </motion.button>
+                  </div>
+                  {useEditingCustomDate && (
+                    <div className="mt-3">
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">
+                        Select Expiration Date <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={editingCustomDate}
+                        onChange={(e) => setEditingCustomDate(e.target.value)}
+                        min={new Date().toISOString().split('T')[0]}
+                        className="w-full px-4 py-2 bg-white border-2 border-purple-200 rounded-xl focus:border-purple-400 focus:ring-2 focus:ring-purple-100 transition-all text-gray-900"
+                        required={useEditingCustomDate}
+                        disabled={updatingOTP}
+                      />
+                      {editingCustomDate && (
+                        <p className="text-xs text-purple-600 mt-1">
+                          OTP will expire on: {new Date(editingCustomDate).toLocaleDateString('en-US', { 
+                            weekday: 'long', 
+                            year: 'numeric', 
+                            month: 'long', 
+                            day: 'numeric' 
+                          })}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <p className="text-xs text-blue-800">
+                    <strong>Current Status:</strong>{' '}
+                    {selectedLink.otpExpiresAt ? (
+                      new Date() > selectedLink.otpExpiresAt ? (
+                        <span className="text-red-600">Expired</span>
+                      ) : (
+                        <span>Valid until {format(selectedLink.otpExpiresAt, 'MMM d, yyyy HH:mm')}</span>
+                      )
+                    ) : (
+                      <span className="text-purple-600 font-medium">No expiration set</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={() => {
+                    setShowEditOTP(false);
+                    setUseEditingCustomDate(false);
+                    setEditingCustomDate('');
+                    setEditingOTPValidity(2);
+                  }}
+                  disabled={updatingOTP}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (useEditingCustomDate && !editingCustomDate) {
+                      toast.error('Please select an expiration date');
+                      return;
+                    }
+                    selectedLink && handleUpdateOTPValidity(selectedLink.id, editingOTPValidity, editingCustomDate, useEditingCustomDate);
+                  }}
+                  disabled={updatingOTP || !selectedLink?.otp || (useEditingCustomDate && !editingCustomDate)}
+                  className="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2"
+                >
+                  {updatingOTP ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      Updating...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="h-4 w-4" />
+                      Update OTP Validity
+                    </>
+                  )}
+                </button>
               </div>
             </motion.div>
           </div>

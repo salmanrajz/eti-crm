@@ -80,7 +80,8 @@ import {
   Check,
   CheckCheck,
   Calendar,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Loader2
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'react-hot-toast';
@@ -256,6 +257,7 @@ export function LeadList() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [firebaseSearchResults, setFirebaseSearchResults] = useState<Lead[]>([]);
   const [isSearchingFirebase, setIsSearchingFirebase] = useState(false);
+  const [isSearchPending, setIsSearchPending] = useState(false);
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
@@ -1426,11 +1428,13 @@ export function LeadList() {
       constraints.push(orderBy('createdAt', 'desc'));
 
       // Fetch all leads with pagination to ensure we get ALL matching leads
+      // Optimized: Process documents and filtering in parallel chunks for better performance
       let allDocs: QueryDocumentSnapshot<DocumentData>[] = [];
       let lastDocSnapshot: QueryDocumentSnapshot<DocumentData> | null = null;
       const BATCH_SIZE = 1000; // Firestore can handle up to several thousand per query
       let hasMore = true;
 
+      // Fetch first batch immediately
       while (hasMore) {
         let batchConstraints = [...constraints];
         if (lastDocSnapshot) {
@@ -1453,8 +1457,17 @@ export function LeadList() {
         }
       }
 
-      let searchResults = allDocs
-        .map(doc => {
+      // Process document transformation in parallel chunks for better performance
+      const CHUNK_SIZE = 500; // Process 500 documents at a time in parallel
+      const chunks: QueryDocumentSnapshot<DocumentData>[][] = [];
+      for (let i = 0; i < allDocs.length; i += CHUNK_SIZE) {
+        chunks.push(allDocs.slice(i, i + CHUNK_SIZE));
+      }
+
+      // Process chunks in parallel
+      const processedChunks = await Promise.all(
+        chunks.map(async (chunk) => {
+          return chunk.map(doc => {
           const data = doc.data();
           return {
             id: doc.id,
@@ -1464,10 +1477,24 @@ export function LeadList() {
             assignedToCordAt: data.assignedToCordAt?.toDate ? data.assignedToCordAt.toDate() : data.assignedToCordAt,
             assignedAt: data.assignedAt?.toDate ? data.assignedAt.toDate() : data.assignedAt
           };
+          });
         })
-        .filter((lead: any) => {
+      );
+
+      // Flatten processed chunks
+      const processedDocs = processedChunks.flat();
+
+      // Filter in parallel chunks
+      const filterChunks: any[][] = [];
+      for (let i = 0; i < processedDocs.length; i += CHUNK_SIZE) {
+        filterChunks.push(processedDocs.slice(i, i + CHUNK_SIZE));
+      }
+
+      const filteredChunks = await Promise.all(
+        filterChunks.map(async (chunk) => {
           const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
           
+          return chunk.filter((lead: any) => {
           // Check SR numbers (legacy single value, array, or in plans)
           const srNumberMatch = 
             lead.srNumber?.toString?.().toLowerCase().includes(normalizedSearch) ||
@@ -1499,7 +1526,12 @@ export function LeadList() {
               (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
             ))
           );
-        }) as Lead[];
+          });
+        })
+      );
+
+      // Flatten filtered chunks
+      let searchResults = filteredChunks.flat() as any[] as Lead[];
 
       // Apply role-based filtering (same as filteredLeads)
       if (user?.role === 'freelancer' && user?.id) {
@@ -1545,6 +1577,7 @@ export function LeadList() {
       setFirebaseSearchResults([]);
     } finally {
       setIsSearchingFirebase(false);
+      setIsSearchPending(false);
     }
   }, [user, isVerifier, isManager, processLeadsWithInfo, isLeadInCoordinatorScope]);
 
@@ -1711,18 +1744,28 @@ export function LeadList() {
 
   // Search Firebase when search term changes to ensure all matching leads are found
   useEffect(() => {
+    if (!searchTerm.trim()) {
+      setIsSearchPending(false);
+      setFirebaseSearchResults([]);
+      setIsSearchingFirebase(false);
+      return;
+    }
+
+    // Show searching indicator immediately when user types
+    setIsSearchPending(true);
+
     const debounceTimer = setTimeout(() => {
       if (searchTerm.trim()) {
         // Always search Firebase when there's a search term to get ALL matching leads
         // This ensures we find all leads with the same number, not just those in the loaded set
+        // isSearchingFirebase will be set to true in searchFirebase function
           searchFirebase(searchTerm);
-      } else {
-        // Clear Firebase search results when search is cleared
-        setFirebaseSearchResults([]);
       }
     }, 500); // Debounce Firebase search
 
-    return () => clearTimeout(debounceTimer);
+    return () => {
+      clearTimeout(debounceTimer);
+    };
   }, [searchTerm, searchFirebase]);
 
   // Add sorting function
@@ -2371,8 +2414,14 @@ export function LeadList() {
           {/* Table Headers - Desktop Only */}
           <div className="hidden sm:block relative px-6 py-5 bg-gradient-to-br from-indigo-50/90 via-purple-50/90 to-pink-50/90 backdrop-blur-sm border-b border-indigo-100/50">
             <div className="grid grid-cols-12 gap-3">
-              <div className="col-span-3">
-                <div className="flex items-center space-x-3">
+              <div className="col-span-3 relative">
+                {/* Serial Number Header - Absolute positioned at extreme left edge with 2mm padding, vertically centered */}
+                <div className="absolute -left-[calc(1.5rem-2mm)] top-1/2 -translate-y-1/2">
+                  <div className="p-1.5 bg-gradient-to-br from-red-100 to-red-200 rounded-lg">
+                    <Hash className="h-3 w-3 text-red-600" />
+                  </div>
+                </div>
+                <div className="flex items-center space-x-3 ml-8">
                   <div className="p-2 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-lg">
                     <User2 className="h-4 w-4 text-indigo-600" />
             </div>
@@ -2416,6 +2465,18 @@ export function LeadList() {
 
         {/* Leads List */}
           <div className="relative">
+          {/* Searching Indicator */}
+          {(isSearchingFirebase || isSearchPending) && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="flex items-center justify-center py-4 px-6 bg-gradient-to-r from-indigo-50 to-purple-50 border-b border-indigo-200/50"
+            >
+              <Loader2 className="h-4 w-4 mr-2 animate-spin text-indigo-600" />
+              <span className="text-sm font-medium text-indigo-700">Searching leads...</span>
+            </motion.div>
+          )}
           <AnimatePresence>
             {currentLeads.map((lead, index) => (
               <motion.div
@@ -2445,38 +2506,44 @@ export function LeadList() {
                   {/* Desktop Layout */}
                   <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
                     {/* Customer Information */}
-                    <div className="col-span-3 flex flex-col">
-                      {lead.leadNumber && (
-                        <div className="mb-1.5">
-                          <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50">
-                            <Tag className="h-3 w-3 mr-1" />
-                            {lead.leadNumber}
-                          </span>
-                        </div>
-                      )}
-                      <div className="flex items-center space-x-2">
-                        <div className="p-2.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-sm">
-                          <User2 className="h-5 w-5 text-indigo-600" />
+                    <div className="col-span-3 flex flex-col relative">
+                      {/* Serial Number - Absolute positioned at extreme left edge with 2mm padding, vertically centered */}
+                      <span className="absolute -left-[calc(1.5rem-2mm)] top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-6 h-6 rounded-md text-[10px] font-bold bg-red-500/20 text-red-600 border border-red-300/50">
+                        {startIndex + index + 1}
+                      </span>
+                      <div className="ml-7 flex flex-col gap-1">
+                        {/* Lead Number */}
+                        {lead.leadNumber && (
+                          <div className="flex items-center">
+                            <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50">
+                              <Tag className="h-3 w-3 mr-1" />
+                              {lead.leadNumber}
+                            </span>
                       </div>
-                        <div className="flex-1">
+                        )}
+                        {/* Customer Name */}
+                        <div className="flex items-center">
                           <h3 className="text-sm font-semibold text-gray-900">
                           {lead.customerName || 'Unnamed Customer'}
                         </h3>
-                          {isManager() && (lead as any).agentName && (
-                            <div className="flex items-center text-xs text-gray-600 mt-1 font-medium">
-                              <User2 className="h-3 w-3 mr-1.5" />
-                              Agent: {(lead as any).agentName}
                             </div>
-                          )}
-                          <div className="flex items-center text-xs text-gray-500 mt-1">
+                        {/* Phone Number */}
+                        <div className="flex items-center text-xs text-gray-500">
                             <Phone className="h-3 w-3 mr-1.5" />
                           <span className="font-bold">{lead.customerNumber}</span>
                         </div>
-                          <div className="flex items-center text-xs text-gray-500 mt-1">
+                        {/* Date with Icon */}
+                        <div className="flex items-center text-xs text-gray-500">
                             <Calendar className="h-3 w-3 mr-1.5" />
                             {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
                           </div>
-                        </div>
+                        {/* Agent Name (for managers) */}
+                        {isManager() && (lead as any).agentName && (
+                          <div className="flex items-center text-xs text-gray-600 mt-1 font-medium">
+                            <User2 className="h-3 w-3 mr-1.5" />
+                            Agent: {(lead as any).agentName}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -2534,6 +2601,17 @@ export function LeadList() {
                             ))
                           : <span className="text-sm font-medium text-gray-700"></span>
                         }
+                        {/* Pending Verification at Location Indicator */}
+                        {((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && lead.status !== 'rejected' && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200 mt-1"
+                          >
+                            <Clock className="h-3 w-3 mr-1.5" />
+                            Pending Verification at Location
+                          </motion.div>
+                        )}
                       </div>
                     </div>
 
@@ -2688,33 +2766,40 @@ export function LeadList() {
                   </div>
 
                   {/* Mobile Layout */}
-                  <div className="sm:hidden space-y-2">
+                  <div className="sm:hidden space-y-2 relative">
                     {/* Header Section - Customer Name & Status */}
                     <div className="flex items-start justify-between gap-2 pb-2 border-b border-gray-200">
-                      <div className="flex-1 min-w-0">
-                        {lead.leadNumber && (
-                          <div className="mb-1.5">
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50">
-                              <Tag className="h-2.5 w-2.5 mr-0.5" />
-                              {lead.leadNumber}
-                            </span>
-                              </div>
-                            )}
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <div className="p-1.5 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-md">
-                            <User2 className="h-3.5 w-3.5 text-indigo-600" />
-                            </div>
-                          <h3 className="text-sm font-bold text-gray-900 truncate">
+                      <div className="flex-1 min-w-0 relative">
+                        {/* Serial Number - Absolute positioned at extreme left edge with 2mm padding, vertically centered */}
+                        <span className="absolute -left-[calc(1.5rem-2mm)] top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-5 h-5 rounded-md text-[9px] font-bold bg-red-500/20 text-red-600 border border-red-300/50">
+                          {startIndex + index + 1}
+                        </span>
+                        <div className="ml-6 flex flex-col gap-1">
+                          {/* Lead Number */}
+                          {lead.leadNumber && (
+                            <div className="flex items-center">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-gradient-to-br from-indigo-500/20 via-indigo-400/20 to-purple-500/20 text-indigo-700 border border-indigo-300/50">
+                                <Tag className="h-2.5 w-2.5 mr-0.5" />
+                                {lead.leadNumber}
+                              </span>
+                      </div>
+                          )}
+                          {/* Customer Name */}
+                          <div className="flex items-center">
+                            <h3 className="text-sm font-bold text-gray-900 truncate">
                               {lead.customerName || 'Unnamed Customer'}
                             </h3>
+                            </div>
+                          {/* Phone Number */}
+                          <div className="flex items-center text-[11px] text-gray-600">
+                            <Phone className="h-3 w-3 mr-1 flex-shrink-0" />
+                            <span className="truncate font-bold">{lead.customerNumber}</span>
                               </div>
-                        <div className="flex items-center text-[11px] text-gray-600 mb-0.5">
-                          <Phone className="h-3 w-3 mr-1 flex-shrink-0" />
-                          <span className="truncate font-bold">{lead.customerNumber}</span>
-                              </div>
-                        <div className="flex items-center text-[11px] text-gray-500">
-                          <Calendar className="h-3 w-3 mr-1 flex-shrink-0" />
-                          <span>{format(lead.createdAt, 'MMM d, yyyy')} at {format(lead.createdAt, 'h:mm a')}</span>
+                          {/* Date with Icon */}
+                          <div className="flex items-center text-[11px] text-gray-500">
+                            <Calendar className="h-3 w-3 mr-1 flex-shrink-0" />
+                            <span>{format(lead.createdAt, 'MMM d, yyyy')} at {format(lead.createdAt, 'h:mm a')}</span>
+                            </div>
                             </div>
                           </div>
                           {/* Status Badge */}
@@ -2729,6 +2814,17 @@ export function LeadList() {
                               {getStatusIcon(lead.status)}
                           <span className="ml-0.5">{getStatusDisplayText(lead.status)}</span>
                             </motion.span>
+                            {/* Pending Verification at Location Indicator */}
+                            {((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && lead.status !== 'rejected' && (
+                              <motion.span
+                                initial={{ opacity: 0, scale: 0.9 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-amber-100 text-amber-700 border border-amber-200"
+                              >
+                                <Clock className="h-2 w-2 mr-0.5" />
+                                Pending Verification at Location
+                              </motion.span>
+                            )}
                               {/* Strikes Count */}
                               {leadStrikes[lead.id] > 0 && (
                                 <motion.div
@@ -2854,6 +2950,25 @@ export function LeadList() {
                         </motion.div>
                         );
                       })}
+                      {/* Pending Verification at Location Indicator */}
+                      {((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && lead.status !== 'rejected' && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="flex items-start gap-2 pt-1.5 border-t border-indigo-100/50"
+                        >
+                          <div className="p-1 bg-white rounded-md shadow-sm flex-shrink-0">
+                            <Clock className="h-3.5 w-3.5 text-amber-600" />
+                      </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[9px] font-medium text-gray-500 mb-0.5">Verification Status</p>
+                            <p className="inline-flex items-center px-2 py-1 rounded-md text-[10px] font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                              <Clock className="h-2.5 w-2.5 mr-1" />
+                              Pending Verification at Location
+                            </p>
+                          </div>
+                        </motion.div>
+                      )}
                     </div>
 
                     {/* Action Buttons - All in One Row */}

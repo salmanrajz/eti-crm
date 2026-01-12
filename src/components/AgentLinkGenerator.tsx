@@ -35,10 +35,12 @@ interface LinkItemProps {
   copiedLinkId: string | null;
   generatingOTPFor: string | null;
   newlyGeneratedOTPFor: string | null;
-  otpValidityHours: number;
+  otpValidityHours: number | null;
+  useCustomDate?: boolean;
+  customExpiryDate?: string;
 }
 
-function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId, generatingOTPFor, newlyGeneratedOTPFor, otpValidityHours }: LinkItemProps) {
+function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP, copiedLinkId, generatingOTPFor, newlyGeneratedOTPFor, otpValidityHours, useCustomDate, customExpiryDate }: LinkItemProps) {
   // Automatically show OTP if it was just generated for this link
   const [showOTP, setShowOTP] = useState(newlyGeneratedOTPFor === link.id);
   const url = `${window.location.origin}/customer/${link.linkId}`;
@@ -61,6 +63,11 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP
             )}
           </div>
           <div className="text-xs text-gray-500 mt-1 space-y-0.5">
+            {link.note && (
+              <div className="text-sm font-medium text-indigo-700 bg-indigo-50 px-2 py-1 rounded mb-1">
+                📝 {link.note}
+              </div>
+            )}
             <div>
               Groups: {link.allowedGroups.join(', ')}
             </div>
@@ -155,7 +162,13 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP
                 ? 'bg-emerald-400 text-white cursor-not-allowed'
                 : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm hover:shadow-md'
             }`}
-            title={`Generate new OTP (valid for ${otpValidityHours} hours)`}
+            title={
+              useCustomDate && customExpiryDate 
+                ? `Generate new OTP (valid until ${new Date(customExpiryDate).toLocaleDateString()})` 
+                : otpValidityHours 
+                  ? `Generate new OTP (valid for ${otpValidityHours} hours)` 
+                  : 'Generate new OTP'
+            }
           >
             {generatingOTPFor === link.id ? (
               <>
@@ -222,8 +235,13 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     return [...allCategories];
   });
 
-  // OTP validity selection (2 hours or 6 hours)
-  const [otpValidityHours, setOtpValidityHours] = useState<number>(2);
+  // OTP validity selection (2 hours, 6 hours, or custom date for admins)
+  const [otpValidityHours, setOtpValidityHours] = useState<number | null>(2);
+  const [customExpiryDate, setCustomExpiryDate] = useState<string>('');
+  const [useCustomDate, setUseCustomDate] = useState(false);
+  
+  // Note field for tracking who the link is for
+  const [linkNote, setLinkNote] = useState<string>('');
 
   // Update selectedGroups when availableGroups changes
   useEffect(() => {
@@ -296,12 +314,28 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       return;
     }
 
+    if (useCustomDate && !customExpiryDate) {
+      toast.error('Please select an expiration date');
+      return;
+    }
+
     setLoading(true);
     try {
       const linkId = generateLinkId();
       const otp = generateOTP();
       // Set OTP expiration based on selected validity
-      const otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+      let otpExpiresAt: Date | null = null;
+      if (useCustomDate && customExpiryDate) {
+        // Use custom date selected by admin
+        const selectedDate = new Date(customExpiryDate);
+        // Set to end of day (23:59:59)
+        selectedDate.setHours(23, 59, 59, 999);
+        otpExpiresAt = selectedDate;
+      } else if (otpValidityHours && typeof otpValidityHours === 'number') {
+        // Use hours (2 or 6 hours)
+        otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+      }
+      
       const linkData = {
         agentId,
         agentName,
@@ -310,15 +344,17 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         allowedCategories: selectedCategories,
         isActive: true,
         otp,
-        otpExpiresAt,
+        otpExpiresAt: otpExpiresAt || null,
         createdAt: new Date(),
         updatedAt: new Date(),
         usageCount: 0,
+        note: linkNote.trim() || undefined,
       };
 
       await addDoc(collection(db, 'agentLinks'), linkData);
       setGeneratedOTP(otp);
       setNewLinkId(linkId);
+      setLinkNote(''); // Reset note after generating
       toast.success('Link generated successfully!');
       loadLinks();
     } catch (error) {
@@ -333,11 +369,21 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     setGeneratingOTPFor(linkId);
     try {
       const newOTP = generateOTP();
-      // Set OTP expiration based on selected validity (use current selection)
-      const otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+      // Set OTP expiration based on selected validity
+      let otpExpiresAt: Date | null = null;
+      if (useCustomDate && customExpiryDate) {
+        // Use custom date selected by admin
+        const selectedDate = new Date(customExpiryDate);
+        selectedDate.setHours(23, 59, 59, 999);
+        otpExpiresAt = selectedDate;
+      } else if (otpValidityHours && typeof otpValidityHours === 'number') {
+        // Use hours (2 or 6 hours)
+        otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+      }
+      
       await updateDoc(doc(db, 'agentLinks', linkId), {
         otp: newOTP,
-        otpExpiresAt,
+        otpExpiresAt: otpExpiresAt || null,
         updatedAt: new Date(),
       });
       toast.success('New OTP generated successfully!');
@@ -440,7 +486,13 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                     <p className="text-emerald-50 mt-1">Share this link with customers to let them select numbers and plans</p>
                   </div>
                   <button
-                    onClick={() => setShowDialog(false)}
+                    onClick={() => {
+                      setShowDialog(false);
+                      setLinkNote(''); // Reset note when closing
+                      setUseCustomDate(false); // Reset custom date
+                      setCustomExpiryDate(''); // Reset custom date value
+                      setOtpValidityHours(2); // Reset to default
+                    }}
                     className="p-2 hover:bg-white/20 rounded-lg transition-colors"
                   >
                     <X className="w-5 h-5 text-white" />
@@ -529,13 +581,16 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                   <label className="block text-sm font-semibold text-gray-700 mb-3">
                     OTP Validity Period
                   </label>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className={`grid gap-3 ${user?.role === 'admin' ? 'grid-cols-3' : 'grid-cols-2'}`}>
                     <motion.button
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => setOtpValidityHours(2)}
+                      onClick={() => {
+                        setOtpValidityHours(2);
+                        setUseCustomDate(false);
+                      }}
                       className={`px-4 py-3 rounded-xl border-2 transition-all ${
-                        otpValidityHours === 2
+                        otpValidityHours === 2 && !useCustomDate
                           ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
                           : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
                       }`}
@@ -546,9 +601,12 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                     <motion.button
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => setOtpValidityHours(6)}
+                      onClick={() => {
+                        setOtpValidityHours(6);
+                        setUseCustomDate(false);
+                      }}
                       className={`px-4 py-3 rounded-xl border-2 transition-all ${
-                        otpValidityHours === 6
+                        otpValidityHours === 6 && !useCustomDate
                           ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
                           : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
                       }`}
@@ -556,9 +614,73 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                       <div className="font-bold text-lg">6 Hours</div>
                       <div className="text-xs mt-1 opacity-90">Extended</div>
                     </motion.button>
+                    {user?.role === 'admin' && (
+                      <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => {
+                          setUseCustomDate(true);
+                          setOtpValidityHours(null);
+                        }}
+                        className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                          useCustomDate
+                            ? 'bg-gradient-to-br from-purple-500 to-pink-600 text-white border-purple-600 shadow-lg'
+                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-purple-300'
+                        }`}
+                      >
+                        <div className="font-bold text-lg">Custom Date</div>
+                        <div className="text-xs mt-1 opacity-90">Admin Only</div>
+                      </motion.button>
+                    )}
                   </div>
+                  {user?.role === 'admin' && useCustomDate && (
+                    <div className="mt-3">
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">
+                        Select Expiration Date <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={customExpiryDate}
+                        onChange={(e) => {
+                          setCustomExpiryDate(e.target.value);
+                        }}
+                        min={new Date().toISOString().split('T')[0]}
+                        className="w-full px-4 py-2 bg-white border-2 border-purple-200 rounded-xl focus:border-purple-400 focus:ring-2 focus:ring-purple-100 transition-all text-gray-900"
+                        required={useCustomDate}
+                      />
+                      {customExpiryDate && (
+                        <p className="text-xs text-purple-600 mt-1">
+                          OTP will expire on: {new Date(customExpiryDate).toLocaleDateString('en-US', { 
+                            weekday: 'long', 
+                            year: 'numeric', 
+                            month: 'long', 
+                            day: 'numeric' 
+                          })}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   <p className="text-xs text-gray-500 mt-2">
                     Choose how long the OTP will remain valid for customer access
+                    {user?.role === 'admin' && ' (Admins can select a custom expiration date)'}
+                  </p>
+                </div>
+
+                {/* Note Field */}
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    Note (Optional)
+                  </label>
+                  <textarea
+                    value={linkNote}
+                    onChange={(e) => setLinkNote(e.target.value)}
+                    placeholder="e.g., Link for Mohammad - Dubai customer"
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                    rows={3}
+                    maxLength={200}
+                  />
+                  <p className="text-xs text-gray-500 mt-2">
+                    Add a note to track who this link is for (e.g., customer name, company, etc.)
                   </p>
                 </div>
 
@@ -579,6 +701,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           generatingOTPFor={generatingOTPFor}
                           newlyGeneratedOTPFor={newlyGeneratedOTPFor}
                           otpValidityHours={otpValidityHours}
+                          useCustomDate={useCustomDate}
+                          customExpiryDate={customExpiryDate}
                         />
                       ))}
                     </div>
@@ -653,6 +777,10 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                       onClick={() => {
                         setGeneratedOTP(null);
                         setNewLinkId(null);
+                        setLinkNote(''); // Reset note
+                        setUseCustomDate(false); // Reset custom date
+                        setCustomExpiryDate(''); // Reset custom date value
+                        setOtpValidityHours(2); // Reset to default
                         setShowDialog(false);
                       }}
                       className="w-full px-4 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-xl hover:from-emerald-600 hover:to-teal-700 transition-all font-medium shadow-lg"
@@ -666,7 +794,13 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                 {!generatedOTP && (
                   <div className="flex gap-3 pt-4 border-t">
                     <button
-                      onClick={() => setShowDialog(false)}
+                      onClick={() => {
+                        setShowDialog(false);
+                        setLinkNote(''); // Reset note when closing
+                        setUseCustomDate(false); // Reset custom date
+                        setCustomExpiryDate(''); // Reset custom date value
+                        setOtpValidityHours(2); // Reset to default
+                      }}
                       className="flex-1 px-4 py-3 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 transition-colors font-medium"
                     >
                       Cancel

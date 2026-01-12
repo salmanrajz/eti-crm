@@ -1246,6 +1246,11 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         updatedAt: new Date()
       };
 
+      // Preserve pendingVerificationAtLocation flag if it exists
+      if ((selectedLead as any).pendingVerificationAtLocation) {
+        updates.pendingVerificationAtLocation = true;
+      }
+
       // If group was changed in the assign dialog, persist to plans
       if ((actionType === 'assign' || actionType === 'activate') && assignGroup) {
         updates.plans = (selectedLead.plans || []).map((p: any, idx: number) =>
@@ -1313,6 +1318,7 @@ export function CoordinatorDashboard({ user }: CoordinatorDashboardProps) {
         // When marking as follow_up, reset managerAssigned to false so manager can see it in unassigned section
         if (actionType === 'followup') {
           updates.managerAssigned = false;
+          (updates as any).followUpAt = serverTimestamp();
         }
       }
 

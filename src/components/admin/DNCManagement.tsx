@@ -22,6 +22,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
   const [showSuccessMessage, setShowSuccessMessage] = useState(false);
   const [addedNumber, setAddedNumber] = useState('');
   const [duplicateMessage, setDuplicateMessage] = useState('');
+  const [validationError, setValidationError] = useState('');
 
   // Date range export states
   const [exportStartDate, setExportStartDate] = useState('');
@@ -172,8 +173,25 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
     setShowSuccessMessage(false);
     setAddedNumber('');
     setDuplicateMessage('');
+    setValidationError('');
 
-    const numberToAdd = newNumber.trim();
+    const numberToAdd = newNumber.trim().replace(/[^\d]/g, ''); // Remove all non-digits
+    
+    // Validate: Number must start with 05 and be exactly 10 digits
+    if (!numberToAdd.startsWith('05')) {
+      const errorMsg = 'Phone number must start with 05';
+      setValidationError(errorMsg);
+      toast.error(errorMsg);
+      return;
+    }
+    
+    if (numberToAdd.length !== 10) {
+      const errorMsg = 'Phone number must be exactly 10 digits long';
+      setValidationError(errorMsg);
+      toast.error(errorMsg);
+      return;
+    }
+
     setIsAdding(true);
     try {
       // First check if number already exists in DNC
@@ -453,14 +471,28 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                   type="text"
                   value={newNumber}
                   onChange={(e) => {
-                    setNewNumber(e.target.value);
+                    // Only allow digits and auto-format as user types
+                    const value = e.target.value.replace(/[^\d]/g, '');
+                    setNewNumber(value);
+                    // Clear errors when user starts typing
                     if (duplicateMessage) {
                       setDuplicateMessage('');
                     }
+                    if (validationError) {
+                      setValidationError('');
+                    }
                   }}
-                  placeholder="+971501234567"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  placeholder="05XXXXXXXX"
+                  maxLength={10}
+                  className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 ${
+                    validationError ? 'border-red-500 bg-red-50' : 'border-gray-300'
+                  }`}
                 />
+                {validationError && (
+                  <p className="text-xs text-red-600 mt-1 font-medium">
+                    {validationError}
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">

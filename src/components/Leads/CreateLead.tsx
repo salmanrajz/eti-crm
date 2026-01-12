@@ -1055,7 +1055,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     setLoading(true);
     
     try {
-      // Check if forced group is enabled
+      // Check if forced group is enabled - parallelize config calls
       const forcedGroupEnabled = await getForcedGroupEnabled();
       const forcedGroup = forcedGroupEnabled ? await getForcedGroup() : null;
 
@@ -1068,11 +1068,13 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       // If there are multiple groups, route to coordinator
       const hasDifferentGroups = groups.length > 1;
 
-      // Find appropriate verifier based on group
+      // Find appropriate verifier based on group (non-blocking - don't wait for it)
       let assignedVerifierId: string | null = null;
       if (!hasDifferentGroups && groups.length === 1) {
-        // Find verifier for this specific group
+        // Find verifier for this specific group (run in parallel, don't block lead creation)
         const targetGroup = (forcedGroup || groups[0])?.toLowerCase(); // Normalize to lowercase
+        // Start verifier lookup but don't await it - we'll use it if ready, otherwise continue
+        const verifierPromise = (async () => {
         try {
           const verifiersQuery = query(
             collection(db, 'users'),
@@ -1104,9 +1106,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             return verifierGroups.includes('all') || verifierGroups.length === 0;
           });
 
-          assignedVerifierId = specificVerifier?.id || allGroupVerifier?.id || null;
+            return specificVerifier?.id || allGroupVerifier?.id || null;
         } catch (error) {
-          // Continue without assigning verifier
+            return null;
+          }
+        })();
+        
+        // Try to get verifier quickly, but don't wait more than 500ms
+        try {
+          assignedVerifierId = await Promise.race([
+            verifierPromise,
+            new Promise<string | null>(resolve => setTimeout(() => resolve(null), 500))
+          ]);
+        } catch (error) {
+          // Continue without verifier assignment
         }
       }
 
@@ -1223,19 +1236,17 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       } else {
         const docRef = await addDoc(collection(db, 'leads'), cleanedLeadData);
         
-        // Log lead creation
-        try {
-          await logLeadAction(
-            docRef.id,
-            finalLeadData.leadNumber || docRef.id,
-            'created',
-            undefined,
-            { ...finalLeadData, id: docRef.id },
-            `Lead created with ${finalLeadData.plans?.length || 0} plan(s)`
-          );
-        } catch (error) {
+        // Log lead creation (non-blocking - fire and forget)
+        logLeadAction(
+          docRef.id,
+          finalLeadData.leadNumber || docRef.id,
+          'created',
+          undefined,
+          { ...finalLeadData, id: docRef.id },
+          `Lead created with ${finalLeadData.plans?.length || 0} plan(s)`
+        ).catch(error => {
           console.error('Error logging lead creation:', error);
-        }
+        });
         
         // Clear the form draft from localStorage on successful creation
         try {
@@ -1260,13 +1271,17 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           // Only update numberPool for real numbers; skip virtual entries for MNP/P2P
           const realPlans = plans.filter(p => !p.numberId?.startsWith('virtual-'));
           
-          const updatePromises = realPlans.map(async (plan) => {
+          // Batch read all number documents first (parallel)
+          const numberDocsPromises = realPlans.map(plan => 
+            getDoc(doc(db, 'numberPool', plan.numberId))
+          );
+          const numberDocs = await Promise.all(numberDocsPromises);
+          
+          // Batch update all numbers (parallel)
+          const updatePromises = realPlans.map(async (plan, index) => {
             try {
-              
               const numberRef = doc(db, 'numberPool', plan.numberId);
-              
-              // Get old data for logging
-              const numberDoc = await getDoc(numberRef);
+              const numberDoc = numberDocs[index];
               const oldData = numberDoc.exists() ? numberDoc.data() : null;
               
               await updateDoc(numberRef, {
@@ -1276,26 +1291,30 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                 reservedBy: selectedAgentId || user?.id || null
               });
               
-              // Log the lead creation action
-              await logNumberAction(
+              // Log the lead creation action (non-blocking - fire and forget)
+              logNumberAction(
                 plan.numberId,
                 plan.number,
                 'lead_created',
                 oldData,
                 { status: 'pending_verification', leadId: docRef.id },
                 `Lead created with plan: ${plan.plan}`
-              );
+              ).catch(err => {
+                console.error(`Error logging number action for ${plan.numberId}:`, err);
+              });
               
             } catch (err) {
-              
+              console.error(`Error updating number ${plan.numberId}:`, err);
             }
           });
           
           await Promise.all(updatePromises);
         }
 
-        // Add initial remarks as a chat message if remarks exist
+        // Add initial remarks as a chat message if remarks exist (non-blocking)
         if (formData.remarks && formData.remarks.trim() !== '') {
+          // Fire and forget - don't block lead creation
+          (async () => {
           try {
             await addDoc(collection(db, 'chatMessages'), {
               leadId: docRef.id,
@@ -1305,12 +1324,35 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               createdAt: new Date()
             });
             
-            // Send WhatsApp notification for the initial chat message
+              // Send WhatsApp notification for the initial chat message (non-blocking)
             try {
               // Fetch the created lead to get full lead data for notification
-              const leadDoc = await getDoc(doc(db, 'leads', docRef.id));
+              // Retry logic to wait for lead number generation (Firestore trigger runs asynchronously)
+              let leadData: Lead | null = null;
+              let retryCount = 0;
+              const maxRetries = 5;
+              const leadRef = doc(db, 'leads', docRef.id);
+              
+              while (retryCount < maxRetries) {
+                const leadDoc = await getDoc(leadRef);
               if (leadDoc.exists()) {
-                const leadData = { id: leadDoc.id, ...leadDoc.data() } as Lead;
+                  const fetchedData = { id: leadDoc.id, ...leadDoc.data() } as Lead;
+                  leadData = fetchedData;
+                  
+                  // If lead number exists and is not just the ID, we have the generated number
+                  if (fetchedData.leadNumber && fetchedData.leadNumber !== fetchedData.id) {
+                    break; // Lead number is ready
+                  }
+                }
+                
+                // Wait before retrying (lead number generation might be in progress)
+                if (retryCount < maxRetries - 1) {
+                  await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms
+                }
+                retryCount++;
+              }
+              
+              if (leadData) {
                 const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
                 await sendChatMessageWhatsAppNotification(
                   leadData,
@@ -1320,12 +1362,11 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               }
             } catch (notificationError) {
               console.error('Error sending WhatsApp notification for initial message:', notificationError);
-              // Don't fail lead creation if notification fails
             }
           } catch (chatError) {
             console.error('Error creating initial chat message:', chatError);
-            // Don't fail lead creation if chat message fails
           }
+          })();
         }
 
         // Show success popup

@@ -228,11 +228,13 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const pageEndRef = useRef<HTMLDivElement>(null);
   const hasScrolledOnMountRef = useRef(false);
   const whatsappMessagesRef = useRef<HTMLDivElement>(null);
-  const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'non_verified' | null>(null);
+  const [verifyAction, setVerifyAction] = useState<'verify' | 'reject' | 'non_verified' | 'verify_at_location' | null>(null);
   const [verificationNote, setVerificationNote] = useState('Verified');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showNonVerifyDialog, setShowNonVerifyDialog] = useState(false);
   const [nonVerifyNote, setNonVerifyNote] = useState('Non Verified');
+  const [showVerifyAtLocationDialog, setShowVerifyAtLocationDialog] = useState(false);
+  const [verifyAtLocationNote, setVerifyAtLocationNote] = useState('Please Verify at location');
   const [uploadInProgress, setUploadInProgress] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -247,6 +249,8 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
   const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
   const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
+  const [editError, setEditError] = useState<{ reason: string; number: string } | null>(null);
+  const [isValidatingEdit, setIsValidatingEdit] = useState(false);
   const [etisalatLeadId, setEtisalatLeadId] = useState('');
   const [etisalatLeadIds, setEtisalatLeadIds] = useState<string[]>([]); // Array for multiple numbers
   const [selectedEmirate, setSelectedEmirate] = useState('');
@@ -1229,7 +1233,7 @@ Language: ${lead.language || 'N/A'}`;
     };
   };
 
-  const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified', noteOverride?: string) => {
+  const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified' | 'verify_at_location', noteOverride?: string) => {
     setIsVerifyActionProcessing(true);
     try {
       const actionToUse = actionOverride || verifyAction;
@@ -1247,6 +1251,7 @@ Language: ${lead.language || 'N/A'}`;
         return;
       }
       
+      // Only require media upload for regular 'verify', not for 'verify_at_location'
       if (actionToUse === 'verify' && !uploadComplete) {
         toast.error('Please upload verification media before verifying');
         setIsVerifyActionProcessing(false);
@@ -1258,9 +1263,13 @@ Language: ${lead.language || 'N/A'}`;
       // Use noteOverride if provided, otherwise use verificationNote
       const noteToUse = noteOverride !== undefined ? noteOverride : verificationNote;
       
+      // Handle verify_at_location - set status to assigned_to_cord and flag as pending verification
+      const isVerifyAtLocation = actionToUse === 'verify_at_location';
+      
       // Handle activated_non_verified status - convert to activated when verified
       let leadStatus = actionToUse === 'verify' ? 
                       (lead.status === 'activated_non_verified' ? 'activated' : 'verified') 
+                      : isVerifyAtLocation ? 'assigned_to_cord'
                       : actionToUse === 'reject' ? 'rejected'
                       : 'non_verified';
       
@@ -1269,10 +1278,10 @@ Language: ${lead.language || 'N/A'}`;
       // Ensure plan statuses stay aligned with lead status on verification
       const updatedPlans = (lead.plans || []).map((p: any) => ({
         ...p,
-        status: leadStatus
+        status: isVerifyAtLocation ? 'assigned_to_cord' : leadStatus
       }));
 
-      await updateDoc(leadRef, {
+      const updateData: any = {
         status: leadStatus,
         verifierId: user?.id,
         verifiedBy: user?.id, // ✅ Add this field for dashboard metrics
@@ -1280,31 +1289,44 @@ Language: ${lead.language || 'N/A'}`;
         verificationMedia: verificationMedia,
         plans: updatedPlans,
         updatedAt: serverTimestamp(),
-        ...(leadStatus === 'verified' || leadStatus === 'activated' ? { verifiedAt: serverTimestamp() } : {})
-      });
-      
-      // Log lead verification action
-      try {
-        const action: 'verified' | 'rejected' | 'non_verified' = 
-          leadStatus === 'verified' || leadStatus === 'activated' ? 'verified' :
-          leadStatus === 'rejected' ? 'rejected' :
-          'non_verified';
-        
-        await logLeadAction(
-          lead.id,
-          lead.leadNumber || lead.id,
-          action,
-          { status: lead.status },
-          { status: leadStatus, verifierId: user?.id, verificationNotes: noteToUse },
-          noteToUse || `Lead ${action} by ${user?.name || 'Unknown'}`
-        );
-      } catch (error) {
-        console.error('Error logging lead verification action:', error);
-      }
+        ...(leadStatus === 'verified' || leadStatus === 'activated' ? { verifiedAt: serverTimestamp() } : {}),
+        // Set pendingVerificationAtLocation flag when verify_at_location is selected
+        ...(isVerifyAtLocation ? { 
+          pendingVerificationAtLocation: true,
+          assignedToCordAt: serverTimestamp() // Track when assigned to coordinator
+        } : {})
+      };
 
-      // Increment verifier counters if lead is verified or activated
+      await updateDoc(leadRef, updateData);
+
+      // Fetch the updated lead to ensure we have the latest status for notifications
+      const updatedLeadDoc = await getDoc(leadRef);
+      const updatedLead = updatedLeadDoc.exists() 
+        ? { id: updatedLeadDoc.id, ...updatedLeadDoc.data() } as Lead
+        : { ...lead, status: leadStatus } as Lead; // Use new status if fetch fails
+      
+      // Log lead verification action (non-blocking - fire and forget)
+      const action: 'verified' | 'rejected' | 'non_verified' = 
+        leadStatus === 'verified' || leadStatus === 'activated' ? 'verified' :
+        leadStatus === 'rejected' ? 'rejected' :
+        'non_verified';
+      
+      logLeadAction(
+        lead.id,
+        lead.leadNumber || lead.id,
+        action,
+        { status: lead.status },
+        { status: leadStatus, verifierId: user?.id, verificationNotes: noteToUse },
+        noteToUse || `Lead ${action} by ${user?.name || 'Unknown'}`
+      ).catch(error => {
+        console.error('Error logging lead verification action:', error);
+      });
+
+      // Increment verifier counters if lead is verified or activated (non-blocking)
       if ((leadStatus === 'verified' || leadStatus === 'activated') && user?.id) {
-        await incrementVerifierCounters(user.id);
+        incrementVerifierCounters(user.id).catch(error => {
+          console.error('Error incrementing verifier counters:', error);
+        });
       }
 
       // Update all numbers in the lead's plans
@@ -1492,6 +1514,22 @@ Language: ${lead.language || 'N/A'}`;
                 `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName3}`
               );
             }
+          } else if (leadStatus === 'assigned_to_cord' && isVerifyAtLocation) {
+            // For verify_at_location, set number status to assigned_to_cord
+            await updateDoc(numberRef, {
+              status: 'assigned_to_cord',
+              lastStatusChange: serverTimestamp(),
+              leadId: lead.id
+            });
+
+            await logNumberAction(
+              plan.numberId,
+              plan.number || '',
+              'status_changed',
+              { status: numberData?.status },
+              { status: 'assigned_to_cord', leadId: lead.id },
+              `Verifier ${user?.name || 'Unknown'} verified at location, assigned to coordinator`
+            );
           } else if (leadStatus === 'verified' || leadStatus === 'activated') {
             // For verified/activated leads, clear ALL claim data
             const updateData: any = {
@@ -1543,13 +1581,17 @@ Language: ${lead.language || 'N/A'}`;
       // Use lead.agentId directly - it's always preserved and never modified when verifiers edit leads
       const agentId = lead.agentId;
 
-      // Send notification to the agent
+      // Prepare all non-blocking operations to run in parallel after critical operations
+      const nonBlockingOperations: Promise<void>[] = [];
+
+      // Send notification to the agent (non-blocking)
       if (agentId) {
         const statusMessage = leadStatus === 'verified' ? 'Lead Verified' : 
                             leadStatus === 'rejected' ? 'Lead Rejected' : 
                             'Lead Marked as Non Verified';
         
-        await addDoc(collection(db, 'notifications'), {
+        nonBlockingOperations.push(
+          addDoc(collection(db, 'notifications'), {
           userId: agentId,
           type: 'lead_verification',
           title: statusMessage,
@@ -1561,9 +1603,8 @@ Language: ${lead.language || 'N/A'}`;
           data: {
             leadId: lead.id
           }
-        });
-
-        // Send WhatsApp notification to agent if they have a phone number
+          }).then(async () => {
+            // Send WhatsApp notification to agent if they have a phone number (non-blocking)
         try {
           const agentRef = doc(db, 'users', agentId);
           const agentDoc = await getDoc(agentRef);
@@ -1572,8 +1613,6 @@ Language: ${lead.language || 'N/A'}`;
             const agentPhone = agentData.phoneNumber || agentData.phoneNumbers?.[0];
             
             if (agentPhone) {
-              // WhatsApp credentials are now fetched from Firebase via whatsappRouter.ts
-              // The sendWhatsAppTemplateByGroup function handles credentials automatically
               try {
                 const { sendWhatsAppTemplateByGroup, getPartnerLabel } = await import('../../utils/whatsappRouter');
                 const group = lead.plans?.[0]?.group || undefined;
@@ -1589,41 +1628,47 @@ Language: ${lead.language || 'N/A'}`;
                     { type: 'text', text: user?.name || 'N/A' },
                     { type: 'text', text: `${window.location.origin}/dashboard/leads/${lead.id}` }
                   ],
-                  // Optional: override template if agent notification template differs
-                  // templateOverride: { templateName: 'leadstatus', languageCode: 'en' }
                 });
               } catch (e) {
+                    // Silently fail - WhatsApp notification is not critical
               }
             }
           }
         } catch (error) {
-          //console.error('Error sending WhatsApp notification to agent:', error);
-          // Continue with the rest of the function even if WhatsApp fails
+              // Silently fail - notification is not critical
         }
+          }).catch(error => {
+            console.error('Error sending notification to agent:', error);
+          })
+        );
       }
 
-      // Add verification note as a chat message if it exists
-      // Use noteToUse (which includes noteOverride if provided) for chat message
+      // Add verification note as a chat message if it exists (non-blocking)
       if (noteToUse && noteToUse.trim() !== '') {
-        try {
-          await addDoc(collection(db, 'chatMessages'), {
+        nonBlockingOperations.push(
+          addDoc(collection(db, 'chatMessages'), {
             leadId: lead.id,
             userId: user?.id || '',
             userRole: user?.role || 'verifier',
             message: noteToUse.trim(),
             createdAt: new Date()
-          });
-
-          // Send WhatsApp notification to manager after message is added to chat
+          }).then(async () => {
+            // Send WhatsApp notification to manager after message is added to chat (non-blocking)
           const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
-          await sendChatMessageWhatsAppNotification(lead, noteToUse.trim(), user?.name || 'Unknown');
-        } catch (chatError) {
-          console.error('Error creating verification chat message:', chatError);
-          // Don't fail verification action if chat message fails
-        }
+            await sendChatMessageWhatsAppNotification(updatedLead, noteToUse.trim(), user?.name || 'Unknown');
+          }).catch(error => {
+            console.error('Error creating verification chat message:', error);
+          })
+        );
       }
 
+      // Show success immediately - don't wait for non-blocking operations
       toast.success(`Lead ${actionToUse === 'verify' ? 'verified' : actionToUse === 'reject' ? 'rejected' : 'updated'} successfully`);
+      
+      // Run non-blocking operations in background (don't await)
+      Promise.all(nonBlockingOperations).catch(error => {
+        console.error('Error in non-blocking operations:', error);
+      });
       setVerificationNote('Verified');
       setVerifyAction(null);
       navigate('/dashboard');
@@ -1656,28 +1701,32 @@ Language: ${lead.language || 'N/A'}`;
       }
 
       await updateDoc(leadRef, updatePayload);
+      
+      // Fetch the updated lead to ensure we have the latest status for notifications
+      const updatedLeadDoc = await getDoc(leadRef);
+      const updatedLead = updatedLeadDoc.exists() 
+        ? { id: updatedLeadDoc.id, ...updatedLeadDoc.data() } as Lead
+        : { ...lead, status: 'assigned_to_cord', managerAssigned: true } as Lead; // Use new status if fetch fails
 
       // Note: Coordinators will see this lead in their unassigned list via filtering
       // No need to send notification as coordinators check for verified leads with managerAssigned: true
 
-      // Add manager note as a chat message if it exists
+      // Add manager note as a chat message if it exists (non-blocking)
       if (managerNote && managerNote.trim() !== '') {
-        try {
-          await addDoc(collection(db, 'chatMessages'), {
+        addDoc(collection(db, 'chatMessages'), {
             leadId: lead.id,
             userId: user?.id || '',
             userRole: user?.role || 'manager',
             message: managerNote.trim(),
             createdAt: new Date()
-          });
-          
-          // Send WhatsApp notification for the chat message
+        }).then(async () => {
+          // Send WhatsApp notification for the chat message (non-blocking)
+          // Use updatedLead to ensure we have the latest status
           const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
-          await sendChatMessageWhatsAppNotification(lead, managerNote.trim(), user?.name || 'Unknown');
-        } catch (chatError) {
-          console.error('Error creating manager chat message:', chatError);
-          // Don't fail manager action if chat message fails
-        }
+          await sendChatMessageWhatsAppNotification(updatedLead, managerNote.trim(), user?.name || 'Unknown');
+        }).catch(error => {
+          console.error('Error creating manager chat message:', error);
+        });
       }
 
       toast.success('Lead assigned to coordinator successfully');
@@ -2358,6 +2407,11 @@ Language: ${lead.language || 'N/A'}`;
       updatedAt: new Date()
     };
 
+    // Preserve pendingVerificationAtLocation flag if it exists
+    if ((lead as any).pendingVerificationAtLocation) {
+      (updateData as any).pendingVerificationAtLocation = true;
+    }
+
     // Status changes:
     // - 'assign' always moves lead to 'assigned'
     // - 'activate' moves to activated / activated_non_verified
@@ -2378,6 +2432,10 @@ Language: ${lead.language || 'N/A'}`;
       updateData.status = hasChanges ? 'activated_non_verified' : 'activated';
     } else if (coordinatorAction === 'activate_non_verified') {
       updateData.status = 'activated_non_verified';
+      // Clear pendingVerificationAtLocation flag when activating with pending verification
+      if ((lead as any).pendingVerificationAtLocation) {
+        (updateData as any).pendingVerificationAtLocation = false;
+      }
     } else if (coordinatorAction === 'reverification') {
       updateData.status = 'reverification';
     } else if (coordinatorAction === 'later') {
@@ -2386,6 +2444,7 @@ Language: ${lead.language || 'N/A'}`;
       updateData.status = 'rejected';
     } else if (coordinatorAction === 'followup') {
       updateData.status = 'follow_up';
+      (updateData as any).followUpAt = serverTimestamp();
     } else if (coordinatorAction === 'reassign' && lead.status === 'later') {
       // When reassigning a 'later' lead, move it back to 'assigned'
       // BUT don't reset assignedAt - keep the original first assignment timestamp
@@ -2650,25 +2709,30 @@ Language: ${lead.language || 'N/A'}`;
 
       await updateDoc(leadRef, updateData);
       
-      // Log coordinator action
-      try {
-        let action: 'assigned' | 'activated' | 'reassigned' | 'rejected' | 'status_changed' = 'status_changed';
-        if (coordinatorAction === 'assign') action = 'assigned';
-        else if (coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified') action = 'activated';
-        else if (coordinatorAction === 'reassign') action = 'reassigned';
-        else if (coordinatorAction === 'reject') action = 'rejected';
-        
-        await logLeadAction(
-          lead.id,
-          lead.leadNumber || lead.id,
-          action,
-          { status: lead.status },
-          { status: updateData.status, coordinatorId: user?.id, coordinatorNotes: coordinatorNote },
-          coordinatorNote || `Coordinator ${user?.name || 'Unknown'} performed ${coordinatorAction}`
-        );
-      } catch (error) {
+      // Fetch the updated lead to ensure we have the latest status for notifications
+      const updatedLeadDoc = await getDoc(leadRef);
+      const updatedLead = updatedLeadDoc.exists() 
+        ? { id: updatedLeadDoc.id, ...updatedLeadDoc.data() } as Lead
+        : { ...lead, ...updateData } as Lead; // Use new status if fetch fails
+      
+      // Log coordinator action (non-blocking - fire and forget)
+      const action: 'assigned' | 'activated' | 'reassigned' | 'rejected' | 'status_changed' = 
+        coordinatorAction === 'assign' ? 'assigned' :
+        coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified' ? 'activated' :
+        coordinatorAction === 'reassign' ? 'reassigned' :
+        coordinatorAction === 'reject' ? 'rejected' :
+        'status_changed';
+      
+      logLeadAction(
+        lead.id,
+        lead.leadNumber || lead.id,
+        action,
+        { status: lead.status },
+        { status: updateData.status, coordinatorId: user?.id, coordinatorNotes: coordinatorNote },
+        coordinatorNote || `Coordinator ${user?.name || 'Unknown'} performed ${coordinatorAction}`
+      ).catch(error => {
         console.error('Error logging coordinator action:', error);
-      }
+      });
 
       // Handle number pool updates for multiple numbers activation
       const plansCountForUpdate = lead.plans?.length || 0;
@@ -3058,28 +3122,39 @@ Language: ${lead.language || 'N/A'}`;
         );
       }
 
-        await Promise.all(notificationPromises);
+      // Run notifications in background (non-blocking)
+      Promise.all(notificationPromises).catch(error => {
+        console.error('Error in notification operations:', error);
+      });
+
+      // Prepare non-blocking operations for chat messages and WhatsApp
+      const nonBlockingOperations: Promise<void>[] = [];
 
       // For assignment, show formatted message instead of navigating away
-      // Add coordinator note as a chat message if it exists
+      // Add coordinator note as a chat message if it exists (non-blocking)
       if (coordinatorNote && coordinatorNote.trim() !== '') {
-        try {
-          await addDoc(collection(db, 'chatMessages'), {
+        nonBlockingOperations.push(
+          addDoc(collection(db, 'chatMessages'), {
             leadId: lead.id,
             userId: user?.id || '',
             userRole: user?.role || 'coordinator',
             message: coordinatorNote.trim(),
             createdAt: new Date()
-          });
-
-          // Send WhatsApp notification to manager after message is added to chat
+          }).then(async () => {
+            // Send WhatsApp notification to manager after message is added to chat (non-blocking)
+            // Use updatedLead to ensure we have the latest status
           const { sendChatMessageWhatsAppNotification } = await import('../../utils/chatNotifications');
-          await sendChatMessageWhatsAppNotification(lead, coordinatorNote.trim(), user?.name || 'Unknown');
-        } catch (chatError) {
-          console.error('Error creating coordinator chat message:', chatError);
-          // Don't fail coordinator action if chat message fails
-        }
+            await sendChatMessageWhatsAppNotification(updatedLead, coordinatorNote.trim(), user?.name || 'Unknown');
+          }).catch(error => {
+            console.error('Error creating coordinator chat message:', error);
+          })
+        );
       }
+
+      // Run non-blocking operations in background (don't await)
+      Promise.all(nonBlockingOperations).catch(error => {
+        console.error('Error in non-blocking operations:', error);
+      });
 
       if (coordinatorAction === 'assign' || coordinatorAction === 'reassign') {
         const plansCount = lead.plans?.length || 0;
@@ -3128,6 +3203,85 @@ Language: ${lead.language || 'N/A'}`;
     navigate(`/leads/${lead.id}`);
   };
 
+  // Handler for Edit & Resubmit - validates numbers before opening edit modal
+  const handleEditWithValidation = async () => {
+    if (!user) return;
+    
+    setIsValidatingEdit(true);
+    try {
+      // Check if user can edit/resubmit this lead
+      const canEditResubmit = 
+        (user.role === 'agent' && user.id === lead.agentId && (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
+        (isManager() && user.managedTeams && user.managedTeams.includes(lead.teamId || '') && (lead.status === 'non_verified' || lead.status === 'follow_verification'));
+
+      if (!canEditResubmit) {
+        // If not edit/resubmit scenario, just open edit modal directly
+        onEdit();
+        return;
+      }
+
+      // Get all numbers attached to this lead
+      const plans = (lead.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+      
+      if (plans.length === 0) {
+        // No numbers to validate, proceed with edit
+        onEdit();
+        return;
+      }
+
+      // Validate that all numbers are either open or reserved by this agent
+      const numberChecks = await Promise.all(
+        plans.map(async (p: any) => {
+          try {
+            const numberRef = doc(db, 'numberPool', p.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) {
+              return { numberId: p.numberId, valid: false, reason: 'Number not found', number: p.number || p.numberId };
+            }
+            const numberData = numberDoc.data();
+            const numberStatus = numberData?.status;
+            const reservedBy = numberData?.reservedBy;
+            
+            // Number is valid if it's open OR reserved by this agent (or lead's agent for managers)
+            const isValid = numberStatus === 'open' || reservedBy === user.id || reservedBy === lead.agentId;
+            
+            if (!isValid) {
+              const reason = numberStatus === 'reserved' 
+                ? 'Number is reserved by another agent'
+                : `Number status is ${numberStatus}`;
+              return { numberId: p.numberId, valid: false, reason, number: numberData?.number || p.number || p.numberId };
+            }
+            
+            return { numberId: p.numberId, valid: true };
+          } catch (error) {
+            console.error(`Error checking number ${p.numberId}:`, error);
+            return { numberId: p.numberId, valid: false, reason: 'Error checking number status', number: p.number || p.numberId };
+          }
+        })
+      );
+      
+      // Check if any numbers are invalid
+      const invalidNumbers = numberChecks.filter((check: any) => !check.valid);
+      if (invalidNumbers.length > 0) {
+        const invalidNumber = invalidNumbers[0];
+        const numberDisplay = invalidNumber.number || invalidNumber.numberId || 'Unknown';
+        setEditError({
+          reason: invalidNumber.reason || 'Number not available',
+          number: numberDisplay || 'Unknown'
+        });
+        return;
+      }
+      
+      // All numbers are valid, proceed with edit
+      onEdit();
+    } catch (error) {
+      console.error('Error validating numbers for edit:', error);
+      toast.error('Error validating numbers. Please try again.');
+    } finally {
+      setIsValidatingEdit(false);
+    }
+  };
+
   // Handler for agent self-reject
   const handleAgentReject = async () => {
     if (!user || user.id !== lead.agentId) return;
@@ -3139,9 +3293,17 @@ Language: ${lead.language || 'N/A'}`;
         updatedAt: new Date(),
         rejectionReason: 'Rejected by agent',
       });
+      let hasStrikeReservations = false;
       if (lead.plans && lead.plans.length > 0) {
-        const reservePromises = lead.plans.filter(p => p.numberId && !p.numberId.startsWith('virtual-')).map(async plan => {
+        const reserveResults = await Promise.all(
+          lead.plans.filter(p => p.numberId && !p.numberId.startsWith('virtual-')).map(async plan => {
           const numberRef = doc(db, 'numberPool', plan.numberId);
+            
+            // First, read the current number data
+            const numberDoc = await getDoc(numberRef);
+            
+            if (!numberDoc.exists()) {
+              // Number doesn't exist, default to rejecting agent
           await updateDoc(numberRef, {
             status: 'reserved',
             reservedBy: user.id,
@@ -3151,12 +3313,111 @@ Language: ${lead.language || 'N/A'}`;
             claimingStartedAt: null,
             claimingExpiresAt: null,
             claimQueue: [],
-            leadId: lead.id
-          });
+                leadId: null
+              });
+              return false;
+            }
+            
+            const numberData = numberDoc.data();
+            const claims = numberData?.claims || [];
+            
+            // Find the most recent pending claim (strike) from another agent
+            const pendingClaims = claims.filter((claim: any) => 
+              claim.status === 'pending' && claim.userId !== user.id
+            );
+            
+            let reservedByAgentId = user.id; // Default to rejecting agent
+            let hasStrike = false;
+            let updatedClaims = claims;
+            
+            if (pendingClaims.length > 0) {
+              // Sort by claimedAt (most recent first) and get the first one
+              const sortedClaims = pendingClaims.sort((a: any, b: any) => {
+                const aTime = a.claimedAt?.toDate?.() || new Date(a.claimedAt || 0);
+                const bTime = b.claimedAt?.toDate?.() || new Date(b.claimedAt || 0);
+                return bTime.getTime() - aTime.getTime();
         });
-        await Promise.all(reservePromises);
+              
+              // Reserve for the agent who made the strike
+              reservedByAgentId = sortedClaims[0].userId;
+              hasStrike = true;
+              
+              // Update the claim status from 'pending' to 'completed' for the strike agent
+              updatedClaims = claims.map((claim: any) => {
+                if (claim.userId === reservedByAgentId && claim.status === 'pending') {
+                  return { ...claim, status: 'completed' };
+                }
+                return claim;
+              });
+            }
+            
+            // Update number with reservation - IMPORTANT: set status to 'reserved', not 'open'
+            const updateData: any = {
+              status: 'reserved', // Must be 'reserved', not 'open'
+              reservedBy: reservedByAgentId,
+              reservedAt: serverTimestamp(),
+              lastStatusChange: serverTimestamp(),
+              claimingAgentId: null,
+              claimingStartedAt: null,
+              claimingExpiresAt: null,
+              claimQueue: [],
+              claims: updatedClaims
+            };
+            
+            // Only clear leadId if number is being reserved for strike agent
+            // If reserved for rejecting agent, keep leadId to track association
+            if (hasStrike) {
+              updateData.leadId = null; // Clear leadId when reserved for strike agent
+            } else {
+              updateData.leadId = lead.id; // Keep leadId when reserved for rejecting agent
+            }
+            
+            await updateDoc(numberRef, updateData);
+            
+            // Log the number action for audit trail
+            try {
+              await logNumberAction(
+                plan.numberId,
+                plan.number || plan.numberId,
+                'reserved',
+                { status: numberData?.status, reservedBy: numberData?.reservedBy },
+                { status: 'reserved', reservedBy: reservedByAgentId },
+                hasStrike 
+                  ? `Number reserved for strike agent ${reservedByAgentId} after lead rejection`
+                  : `Number reserved for rejecting agent ${reservedByAgentId} after lead rejection`
+              );
+            } catch (logError) {
+              console.error('Error logging number action:', logError);
       }
+            
+            return hasStrike;
+          })
+        );
+        
+        // Check if any numbers were reserved for strike agents
+        hasStrikeReservations = reserveResults.some(result => result === true);
+      }
+      
+      // Add chat message indicating who rejected the lead
+      try {
+        await addDoc(collection(db, 'chatMessages'), {
+          leadId: lead.id,
+          userId: user.id,
+          userRole: user.role,
+          message: `Lead rejected by ${user.name || user.email || 'agent'}`,
+          createdAt: serverTimestamp(),
+          readBy: [user.id]
+        });
+      } catch (chatError) {
+        console.error('Error adding rejection chat message:', chatError);
+        // Don't fail the rejection if chat message fails
+      }
+      
+      if (hasStrikeReservations) {
+        toast.success('Lead rejected. Number(s) reserved for agent(s) who struck the number.');
+      } else {
       toast.success('Lead rejected and number(s) reserved for you.');
+      }
       setLocalStatus('rejected');
       setShowRejectDialog(false);
     } catch (error) {
@@ -3184,36 +3445,9 @@ Language: ${lead.language || 'N/A'}`;
       </div>
 
       <div className="space-y-4 sm:space-y-6 relative z-0">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div
-          className="flex items-center gap-2 cursor-pointer group"
-          onClick={() => navigate('/dashboard')}
-          role="button"
-          tabIndex={0}
-          onKeyDown={e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              navigate('/dashboard');
-            }
-          }}
-        >
-          <span className="p-1 text-gray-400 group-hover:text-gray-500">
-            <ChevronLeft className="w-4 h-4" />
-          </span>
-          <h1 className="text-sm font-medium text-gray-900 group-hover:underline">
-            Back to Dashboard
-          </h1>
-        </div>
-      </div>
-
       {/* Restored header and action bar */}
-      <div className="px-2 sm:px-0 py-2 border-b border-gray-200 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-        <div>
-          <h2 className="text-lg sm:text-xl font-semibold text-gray-900">Lead Details</h2>
-          <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            View and manage lead information
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2 sm:gap-3">
+      <div className="px-2 sm:px-0 py-2 border-b border-gray-200 flex flex-col sm:flex-row sm:justify-end sm:items-center gap-4">
+        <div className="flex flex-wrap gap-2 sm:gap-3 justify-end">
           {(canManagerAssign || canAgentAssignToCoordinator) && (
             <button
               onClick={() => setShowManagerAssignDialog(true)}
@@ -3291,6 +3525,8 @@ Language: ${lead.language || 'N/A'}`;
               ) : null}
               {lead.status === 'assigned' && (
                 <>
+                  {/* Hide Activate button if pendingVerificationAtLocation is true */}
+                  {!((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && (
                   <button
                     onClick={() => {
                       setCoordinatorAction('activate');
@@ -3301,6 +3537,7 @@ Language: ${lead.language || 'N/A'}`;
                     <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Activate
                   </button>
+                  )}
                   <button
                     onClick={() => {
                       setCoordinatorAction('activate_non_verified');
@@ -3346,6 +3583,8 @@ Language: ${lead.language || 'N/A'}`;
               )}
               {lead.status === 'later' && (
                 <>
+                  {/* Hide Activate button if pendingVerificationAtLocation is true */}
+                  {!((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && (
                   <button
                     onClick={() => {
                       setCoordinatorAction('activate');
@@ -3356,6 +3595,7 @@ Language: ${lead.language || 'N/A'}`;
                     <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Activate
                   </button>
+                  )}
                   <button
                     onClick={() => {
                       setCoordinatorAction('activate_non_verified');
@@ -3537,14 +3777,44 @@ Language: ${lead.language || 'N/A'}`;
           )}
           {canEdit && (
             <button
-              onClick={onEdit}
-              className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              onClick={handleEditWithValidation}
+              disabled={isValidatingEdit}
+              className={`inline-flex items-center px-3 sm:px-4 py-2 border border-transparent text-xs sm:text-sm font-medium rounded-md shadow-sm text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${
+                isValidatingEdit 
+                  ? 'bg-indigo-400 cursor-not-allowed' 
+                  : 'bg-indigo-600 hover:bg-indigo-700'
+              }`}
             >
+              {isValidatingEdit ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                  </svg>
+                  Validating...
+                </>
+              ) : (
+                <>
               {user?.role === 'agent' &&
               user.id === lead.agentId &&
               (lead.status === 'non_verified' || lead.status === 'follow_verification')
                 ? 'Edit & Resubmit'
                 : 'Edit Lead'}
+                </>
+              )}
+            </button>
+          )}
+          {canVerify && (
+            <button
+              onClick={() => {
+                setShowVerifyAtLocationDialog(true);
+                setIsVerifyActionProcessing(false); // Reset processing state when opening dialog
+              }}
+              disabled={isVerifyActionProcessing}
+              className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              <MapPin className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+              Verify at Location
             </button>
           )}
           {((user?.role === 'agent' && user.id === lead.agentId) ||
@@ -3570,7 +3840,7 @@ Language: ${lead.language || 'N/A'}`;
           )}
           {((user?.role === 'agent' && user?.id === lead.agentId) ||
             (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
-            !['pending_verification', 'activated', 'rejected'].includes(localStatus) && (
+            !['pending_verification', 'activated', 'rejected', 'non_verified'].includes(localStatus) && (
             <button
               onClick={() => setShowRejectDialog(true)}
               disabled={rejecting}
@@ -4001,12 +4271,12 @@ Language: ${lead.language || 'N/A'}`;
       {showCoordinatorDialog && createPortal(
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-1 sm:p-4"
              style={{
-               paddingTop: 'max(0.25rem, env(safe-area-inset-top))',
-               paddingBottom: 'max(0.25rem, env(safe-area-inset-bottom))',
+               paddingTop: 'max(0.5rem, env(safe-area-inset-top))',
+               paddingBottom: isActivationDialog ? 'max(2rem, calc(1.5rem + env(safe-area-inset-bottom)))' : 'max(0.5rem, env(safe-area-inset-bottom))',
                zIndex: 999999,
                position: 'fixed'
              }}>
-          <div className="bg-white rounded-xl sm:rounded-2xl shadow-2xl border border-gray-100 max-w-6xl w-full mx-1 sm:mx-4 max-h-[calc(100vh-0.5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] sm:max-h-[calc(100vh-2rem)] overflow-hidden flex flex-col"
+          <div className={`bg-white rounded-xl sm:rounded-2xl shadow-2xl border border-gray-100 max-w-6xl w-full mx-1 sm:mx-4 overflow-hidden flex flex-col ${isActivationDialog ? 'max-h-[85vh] sm:max-h-[88vh]' : 'max-h-[calc(100vh-1rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] sm:max-h-[calc(100vh-2rem)]'}`}
                style={{ zIndex: 1000000 }}>
             {/* Header */}
             <div className={`px-3 py-2.5 sm:px-6 sm:py-4 ${
@@ -4033,7 +4303,7 @@ Language: ${lead.language || 'N/A'}`;
                   <h3 className="text-sm sm:text-base lg:text-lg font-semibold text-white">
                     {coordinatorAction === 'assign' ? 'Assign Lead' :
                      coordinatorAction === 'reassign' ? 'Reassign Lead' :
-                     isActivationDialog ? 'Activate Lead (Pending Verification)' : 
+                     isActivationDialog ? 'Activate Lead' : 
                      coordinatorAction === 'reverification' ? 'Send for Reverification' :
                      coordinatorAction === 'later' ? 'Mark for Later' : 
                      coordinatorAction === 'reject' ? 'Reject Lead' : 'Mark for Follow-up'}
@@ -4041,7 +4311,7 @@ Language: ${lead.language || 'N/A'}`;
                   <p className="text-indigo-100 text-[10px] sm:text-xs lg:text-sm">
                     {coordinatorAction === 'assign' ? 'Assign this lead to Etisalat system' :
                      coordinatorAction === 'reassign' ? 'Update Etisalat Lead ID and assignment details' :
-                     isActivationDialog ? 'Activate the lead; status stays Pending Verification until verifier approves' :
+                     isActivationDialog ? 'Complete activation process for this lead' :
                      coordinatorAction === 'reverification' ? 'Send this lead back to verification review' :
                      coordinatorAction === 'later' ? 'Mark this lead for later action' :
                      coordinatorAction === 'reject' ? 'Reject this lead and set number status to open' :
@@ -4989,7 +5259,8 @@ Language: ${lead.language || 'N/A'}`;
             </div>
 
             {/* Footer Actions */}
-            <div className="bg-gray-50 px-3 py-2.5 sm:px-6 sm:py-4 border-t border-gray-100">
+            <div className={`bg-gray-50 px-3 py-2.5 sm:px-6 sm:py-4 border-t border-gray-100 ${isActivationDialog ? 'mb-0' : ''}`}
+                 style={isActivationDialog ? { paddingBottom: 'max(1rem, calc(0.75rem + env(safe-area-inset-bottom)))' } : {}}>
               <div className="flex flex-col sm:flex-row justify-end gap-1.5 sm:gap-3">
                 <button
                   onClick={() => {
@@ -5580,19 +5851,27 @@ Language: ${lead.language || 'N/A'}`;
           description="Current status and timestamps"
         >
           <div className="col-span-1 lg:col-span-2">
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-2 flex-wrap">
               <div className={clsx(
                 'px-2.5 py-1 rounded-full text-xs font-medium',
                 lead.status === 'verified' ? 'bg-green-100 text-green-800' :
                 lead.status === 'rejected' ? 'bg-red-100 text-red-800' :
                 lead.status === 'non_verified' ? 'bg-yellow-100 text-yellow-800' :
                 lead.status === 'assigned' ? 'bg-blue-100 text-blue-800' :
+                lead.status === 'assigned_to_cord' ? 'bg-blue-100 text-blue-800' :
                 lead.status === 'pending_coordinator' ? 'bg-blue-100 text-blue-800' :
                 lead.status === 'split' ? 'bg-purple-100 text-purple-800' :
                 'bg-gray-100 text-gray-800'
               )}>
                 {getStatusDisplayText(lead.status)}
               </div>
+              {/* Pending Verification at Location Indicator */}
+              {((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && lead.status !== 'rejected' && (
+                <div className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200">
+                  <Clock className="h-3 w-3 mr-1.5" />
+                  Pending Verification at Location
+                </div>
+              )}
             </div>
           </div>
           <FormInput
@@ -5716,6 +5995,23 @@ Language: ${lead.language || 'N/A'}`;
           </FormSection>
         )}
 
+        {lead.rejectionReason && (
+          <FormSection
+            icon={XCircle}
+            title="Rejection Reason"
+            description="Reason why this lead was rejected"
+          >
+            <div className="col-span-1 lg:col-span-2">
+              <textarea
+                rows={4}
+                className="block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm bg-red-50 border-red-200"
+                value={lead.rejectionReason}
+                readOnly
+              />
+            </div>
+          </FormSection>
+        )}
+
         {/* Add a div at the end of the page for scrolling */}
         <div ref={pageEndRef} />
       </div>
@@ -5822,6 +6118,87 @@ Language: ${lead.language || 'N/A'}`;
                   className="px-4 py-2 text-sm font-medium text-white bg-yellow-600 rounded-lg hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {isVerifyActionProcessing ? 'Processing...' : 'Confirm Non-Verify'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Verify at Location Dialog */}
+      {showVerifyAtLocationDialog && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-gray-100 max-w-2xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-500 to-blue-600">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <MapPin className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">
+                    Verify at Location
+                  </h3>
+                  <p className="text-blue-100 text-sm">
+                    Mark this lead for verification at location. Add a note if needed.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Form Content */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Verification Notes */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-gray-900">
+                  Verification Notes (Optional)
+                </label>
+                <div className="relative">
+                  <textarea
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-blue-300 focus:ring-2 focus:ring-blue-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
+                    rows={4}
+                    value={verifyAtLocationNote}
+                    onChange={(e) => setVerifyAtLocationNote(e.target.value)}
+                    placeholder="Add any additional notes or comments..."
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Actions */}
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-100">
+              <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3">
+                <button
+                  onClick={() => {
+                    setShowVerifyAtLocationDialog(false);
+                    setVerifyAtLocationNote('Please Verify at location');
+                    setIsVerifyActionProcessing(false); // Reset processing state when canceling
+                  }}
+                  disabled={isVerifyActionProcessing}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    const noteToSend = verifyAtLocationNote || 'Please Verify at location';
+                    setVerificationNote(noteToSend);
+                    // Don't close dialog immediately - wait for action to complete
+                    try {
+                      // Pass the note directly to avoid async state update issue
+                      await handleVerificationAction('verify_at_location', noteToSend);
+                      // Close dialog only after successful completion
+                      setShowVerifyAtLocationDialog(false);
+                      setVerifyAtLocationNote('Please Verify at location');
+                    } catch (error) {
+                      // Keep dialog open on error so user can see the error message
+                      // The error is already handled in handleVerificationAction
+                    }
+                  }}
+                  disabled={isVerifyActionProcessing}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isVerifyActionProcessing ? 'Processing...' : 'Confirm Verify at Location'}
                 </button>
               </div>
             </div>
@@ -6138,6 +6515,39 @@ Language: ${lead.language || 'N/A'}`;
           </Dialog.Panel>
         </div>
       </Dialog>
+
+      {/* Edit Error Modal - Same format as Resubmit Error */}
+      {editError && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 sm:p-8 max-w-md w-full mx-4 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex-shrink-0 w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
+                <AlertCircle className="w-6 h-6 text-red-600" />
+              </div>
+              <h3 className="text-xl font-semibold text-gray-900">Cannot Resubmit Lead</h3>
+            </div>
+            <div className="mb-6">
+              <p className="text-gray-700 mb-2">
+                <span className="font-medium">Reason:</span> {editError.reason}
+              </p>
+              <p className="text-gray-700">
+                <span className="font-medium">Number:</span> {editError.number}
+              </p>
+              <p className="text-sm text-gray-500 mt-3">
+                The number attached to this lead is not available for resubmission. Please ensure the number is either open or reserved by you.
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setEditError(null)}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

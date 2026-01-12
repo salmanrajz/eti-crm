@@ -358,6 +358,7 @@ export function LeadDetails() {
           hasEmirateId: leadData.hasEmirateId || false,
           advancePayment: leadData.advancePayment || false,
           language: leadData.language || '',
+          pendingVerificationAtLocation: leadData.pendingVerificationAtLocation || false,
           sharedWith: leadData.sharedWith || [],
           latitude: leadData.latitude || 0,
           longitude: leadData.longitude || 0,
@@ -403,11 +404,19 @@ export function LeadDetails() {
       );
       
       const querySnapshot = await getDocs(messagesQuery);
-      const messagesData = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate()
-      })) as ChatMessage[];
+      const messagesData = querySnapshot.docs.map(doc => {
+        const data = doc.data();
+        const createdAt = data.createdAt?.toDate?.() || data.createdAt || new Date();
+        // Ensure createdAt is a valid Date object
+        const validDate = createdAt instanceof Date && !isNaN(createdAt.getTime()) 
+          ? createdAt 
+          : new Date();
+        return {
+          id: doc.id,
+          ...data,
+          createdAt: validDate
+        };
+      }) as ChatMessage[];
       
       setMessages(messagesData);
       
@@ -456,11 +465,19 @@ export function LeadDetails() {
     );
 
     return onSnapshot(q, async (snapshot) => {
-      const messagesData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate()
-      })) as ChatMessage[];
+      const messagesData = snapshot.docs.map(doc => {
+        const data = doc.data();
+        const createdAt = data.createdAt?.toDate?.() || data.createdAt || new Date();
+        // Ensure createdAt is a valid Date object
+        const validDate = createdAt instanceof Date && !isNaN(createdAt.getTime()) 
+          ? createdAt 
+          : new Date();
+        return {
+          id: doc.id,
+          ...data,
+          createdAt: validDate
+        };
+      }) as ChatMessage[];
       
       setMessages(() => {
         // Don't auto-scroll when new messages arrive - only scroll on initial load
@@ -1669,17 +1686,24 @@ export function LeadDetails() {
       <div className="w-full max-w-6xl mx-auto">
         <div className="mb-4 px-2 sm:px-0">
           <div className="flex items-center justify-between">
-            <div>
+            <button
+              onClick={() => navigate('/dashboard/leads')}
+              className="inline-flex items-center px-2 py-1 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+              <ArrowLeft className="h-3 w-3 mr-1" />
+              Back to Leads
+            </button>
+            <div className="flex-1 text-center mx-4 hidden sm:block">
               <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Lead Details</h1>
               <p className="mt-1 sm:mt-2 text-sm sm:text-base text-gray-600">View and manage lead information</p>
             </div>
-        <button
-          onClick={() => navigate('/dashboard/leads')}
-          className="inline-flex items-center text-sm text-gray-500 hover:text-gray-700"
-        >
-          <ArrowLeft className="h-4 w-4 mr-1" />
-          Back to Leads
-        </button>
+            <button
+              onClick={() => navigate('/dashboard')}
+              className="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
+            >
+              <ArrowLeft className="h-3 w-3 mr-1" />
+              Back to Dashboard
+            </button>
           </div>
       </div>
 
@@ -1924,7 +1948,9 @@ export function LeadDetails() {
                           />
                           <div className="flex items-center gap-2 mt-1">
                             <span className="text-xs text-gray-500">
-                              {format(message.createdAt, 'MMM d, h:mm a')}
+                              {message.createdAt && message.createdAt instanceof Date && !isNaN(message.createdAt.getTime()) 
+                                ? format(message.createdAt, 'MMM d, h:mm a')
+                                : 'Just now'}
                             </span>
                             {message.id.startsWith('temp-') && (
                               <span className="text-xs text-orange-500 font-medium animate-pulse whitespace-nowrap">Sending...</span>
@@ -2006,7 +2032,9 @@ export function LeadDetails() {
                         )}
                         <div className="flex items-center gap-2 mt-1">
                           <span className="text-xs opacity-75">
-                        {format(message.createdAt, 'MMM d, h:mm a')}
+                            {message.createdAt && message.createdAt instanceof Date && !isNaN(message.createdAt.getTime()) 
+                              ? format(message.createdAt, 'MMM d, h:mm a')
+                              : 'Just now'}
                           </span>
                           {message.id.startsWith('temp-') && message.mediaUrl && (message.mediaType === 'image' || message.mediaType === 'video' || message.mediaType === 'file' || message.mediaType === 'pdf') && (
                             <span className="text-xs text-orange-500 font-medium animate-pulse">Sending...</span>
