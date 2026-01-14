@@ -94,20 +94,21 @@ export const BroadcastPoster: React.FC = () => {
             transition={{ duration: 0.5, ease: 'easeOut' }}
           >
             {/* Premium rust-inspired gradient poster (inverted & dimmed) */}
-            <div className="relative overflow-hidden rounded-3xl shadow-2xl border border-white/15 bg-gradient-to-br from-rose-800/90 via-orange-900/90 to-amber-900/90 text-white p-8 backdrop-blur-lg">
+            <div className="relative flex flex-col overflow-hidden rounded-3xl shadow-2xl border border-white/15 bg-gradient-to-br from-rose-800/90 via-orange-900/90 to-amber-900/90 text-white backdrop-blur-lg max-h-[90vh]">
               {/* Glass overlay */}
               <div className="absolute inset-0 bg-white/5 backdrop-blur-sm pointer-events-none" />
               {/* Dimmed sparkle overlay */}
               <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_left,_rgba(255,219,182,0.08),_transparent_40%)]" />
               <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_bottom_right,_rgba(255,191,160,0.06),_transparent_45%)]" />
 
-              <div className="relative z-10">
+              {/* Header - Fixed */}
+              <div className="relative z-10 flex-shrink-0 p-8 pb-4">
                 <button
                   onClick={() => {
                     setVisible(false);
                     setDismissedThisSession(true); // hide for this session only
                   }}
-                  className="absolute top-0 right-0 p-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/10 transition-colors"
+                  className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 border border-white/10 transition-colors z-20"
                   aria-label="Dismiss poster"
                 >
                   <X className="w-5 h-5 text-white" />
@@ -132,11 +133,15 @@ export const BroadcastPoster: React.FC = () => {
                 </div>
               </div>
 
-              <div className="mt-6 text-sm text-gray-100 leading-relaxed whitespace-pre-line relative z-10">
-                {message}
+              {/* Scrollable Content Area */}
+              <div className="flex-1 overflow-y-auto px-8 py-4 relative z-10">
+                <div className="text-sm text-gray-100 leading-relaxed whitespace-pre-line">
+                  {message}
+                </div>
               </div>
 
-              <div className="mt-8 flex justify-end relative z-10">
+              {/* Footer with Button - Fixed */}
+              <div className="flex-shrink-0 px-8 pb-8 pt-4 flex justify-end relative z-10 border-t border-white/10">
                 <motion.button
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.97 }}
