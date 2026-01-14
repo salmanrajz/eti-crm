@@ -92,7 +92,6 @@ export function NumberLogsDashboard() {
       if (raw) {
         const cached = JSON.parse(raw) as { logs: NumberLog[] };
         if (Array.isArray(cached.logs) && cached.logs.length > 0) {
-          console.log('NumberLogsDashboard: Loaded', cached.logs.length, 'logs from cache');
           setLogs(cached.logs);
           setLoading(false);
         }
@@ -119,7 +118,6 @@ export function NumberLogsDashboard() {
       const unsub = onSnapshot(q, async (snap) => {
         try {
           const live: NumberLog[] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-          console.log('NumberLogsDashboard: Loaded', live.length, 'logs from Firestore');
           setLogs(live);
 
           // Cache only recent logs to avoid quota exceeded error
@@ -127,7 +125,6 @@ export function NumberLogsDashboard() {
             // Only cache the most recent 200 logs to save space
             const recentLogs = live.slice(0, 200);
             localStorage.setItem(CACHE_KEY, JSON.stringify({ logs: recentLogs }));
-            console.log('NumberLogsDashboard: Cached', recentLogs.length, 'recent logs');
           } catch (cacheError) {
             console.warn('NumberLogsDashboard: Failed to cache logs (storage quota exceeded), continuing without cache');
             // Try to clear old cache entries if possible
@@ -187,24 +184,6 @@ export function NumberLogsDashboard() {
           }
           return true;
         });
-
-        console.log('NumberLogsDashboard: Base logs:', base.length, 'Filtered logs:', filtered.length);
-        if (filters.startDate || filters.endDate) {
-          console.log('NumberLogsDashboard: Date filters - Start:', filters.startDate, 'End:', filters.endDate);
-          console.log('NumberLogsDashboard: Sample log timestamps:', base.slice(0, 3).map(log => {
-            const t = log.timestamp?.toDate ? log.timestamp.toDate() : new Date(log.timestamp);
-            return { original: log.timestamp, parsed: t, iso: t.toISOString() };
-          }));
-
-          // Debug: Check if any logs fall within the date range
-          const inRange = base.filter(log => {
-            const t = log.timestamp?.toDate ? log.timestamp.toDate() : new Date(log.timestamp);
-            const startOk = !filters.startDate || t >= filters.startDate;
-            const endOk = !filters.endDate || t <= filters.endDate;
-            return startOk && endOk;
-          });
-          console.log('NumberLogsDashboard: Logs in date range:', inRange.length);
-        }
 
         // Group by number
         const groupedMap = new Map<string, NumberLog[]>();
@@ -269,14 +248,12 @@ export function NumberLogsDashboard() {
   // Debug function to show all logs temporarily
   const showAllLogs = () => {
     setFilters({});
-    console.log('NumberLogsDashboard: Showing all logs, filters cleared');
   };
 
   // Clear cache function
   const clearCache = () => {
     try {
       localStorage.removeItem(CACHE_KEY);
-      console.log('NumberLogsDashboard: Cache cleared');
       toast.success('Cache cleared successfully');
     } catch (error) {
       console.error('NumberLogsDashboard: Failed to clear cache', error);
@@ -294,7 +271,6 @@ export function NumberLogsDashboard() {
       startDate,
       endDate
     });
-    console.log('NumberLogsDashboard: Loading logs from last 30 days');
   };
 
   const toggleNumberExpansion = (number: string) => {
