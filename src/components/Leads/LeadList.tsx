@@ -451,16 +451,25 @@ export function LeadList() {
       const numberIdArray = Array.from(numberToLeadsMap.keys());
       const BATCH_SIZE = 10;
       
+      // ✅ PERFORMANCE: Fetch all batches in parallel instead of sequentially
+      const batchPromises = [];
       for (let i = 0; i < numberIdArray.length; i += BATCH_SIZE) {
         const batch = numberIdArray.slice(i, i + BATCH_SIZE);
-        try {
-          const numbersQuery = query(
-            collection(db, 'numberPool'),
-            where('__name__', 'in', batch)
-          );
-          const numbersSnapshot = await getDocs(numbersQuery);
-          
-          numbersSnapshot.forEach(numberDoc => {
+        const batchQuery = query(
+          collection(db, 'numberPool'),
+          where('__name__', 'in', batch)
+        );
+        batchPromises.push(getDocs(batchQuery));
+      }
+      
+      // ✅ PARALLEL: Fetch all batches simultaneously with error handling
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      // Process all results (including failed batches - they'll be skipped)
+      batchResults.forEach((result) => {
+        if (result.status === 'fulfilled') {
+          const numbersSnapshot = result.value;
+          numbersSnapshot.docs.forEach((numberDoc: any) => {
             const numberData = numberDoc.data();
             const claims = numberData.claims || [];
             const pendingClaims = claims.filter((claim: any) => claim.status === 'pending');
@@ -472,10 +481,11 @@ export function LeadList() {
               strikesMap[leadId] = (strikesMap[leadId] || 0) + strikesCount;
             });
           });
-        } catch (error) {
-          console.error('Error fetching strikes for batch:', error);
+        } else {
+          // Log error but continue processing other batches
+          console.error('Error fetching strikes batch:', result.reason);
         }
-      }
+      });
 
       setLeadStrikes(strikesMap);
     } catch (error) {
@@ -529,13 +539,6 @@ export function LeadList() {
     loadLeads(true); // true = initial load
   }, [user, cacheKey]);
 
-
-  // Fetch strikes count for leads when leads change
-  useEffect(() => {
-    if (leads.length > 0) {
-      fetchLeadStrikes(leads);
-    }
-  }, [leads, fetchLeadStrikes]);
 
   // Reset to first page when filters change
   useEffect(() => {
@@ -2002,6 +2005,20 @@ export function LeadList() {
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
   const currentLeads = sortedAndFilteredLeads.slice(startIndex, endIndex);
+
+  // Fetch strikes count only for currently visible leads (current page)
+  const currentLeadsIdsString = useMemo(() => {
+    return currentLeads.map(l => l.id).sort().join(',');
+  }, [currentLeads]);
+
+  useEffect(() => {
+    if (currentLeads.length > 0) {
+      // Only fetch strikes for leads shown on the current page
+      fetchLeadStrikes(currentLeads);
+    } else {
+      setLeadStrikes({});
+    }
+  }, [currentLeadsIdsString, fetchLeadStrikes, currentLeads.length]);
 
   const handlePageChange = useCallback((page: number) => {
     setCurrentPage(page);
