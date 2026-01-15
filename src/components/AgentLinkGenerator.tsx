@@ -194,11 +194,11 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   const [links, setLinks] = useState<AgentLink[]>([]);
   const [loading, setLoading] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
-  const [generatedOTP, setGeneratedOTP] = useState<string | null>(null);
-  const [newLinkId, setNewLinkId] = useState<string | null>(null);
   const [generatingOTPFor, setGeneratingOTPFor] = useState<string | null>(null);
   const [newlyGeneratedOTPFor, setNewlyGeneratedOTPFor] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false);
+  const [duplicateLink, setDuplicateLink] = useState<AgentLink | null>(null);
+  const [newlyGeneratedLinkId, setNewlyGeneratedLinkId] = useState<string | null>(null);
 
   // Available number categories for customer portal (same across groups)
   const allCategories = [
@@ -319,6 +319,56 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       return;
     }
 
+    // Check if a link with the same parameters already exists
+    const existingLink = links.find(link => {
+      // Compare groups (order doesn't matter)
+      const linkGroups = [...(link.allowedGroups || [])].sort().join(',');
+      const selectedGroupsSorted = [...selectedGroups].sort().join(',');
+      
+      // Compare categories (order doesn't matter)
+      const linkCategories = [...(link.allowedCategories || [])].sort().join(',');
+      const selectedCategoriesSorted = [...selectedCategories].sort().join(',');
+      
+      // Groups and categories must match
+      if (linkGroups !== selectedGroupsSorted || linkCategories !== selectedCategoriesSorted) {
+        return false;
+      }
+      
+      // Compare OTP validity periods by calculating the duration
+      // Get the selected OTP validity hours
+      let selectedOtpHours: number | null = null;
+      if (useCustomDate && customExpiryDate) {
+        // For custom date, calculate hours from now to the custom date
+        const customDate = new Date(customExpiryDate);
+        customDate.setHours(23, 59, 59, 999);
+        const hoursUntilCustom = Math.round((customDate.getTime() - Date.now()) / (1000 * 60 * 60));
+        selectedOtpHours = hoursUntilCustom;
+      } else if (otpValidityHours && typeof otpValidityHours === 'number') {
+        selectedOtpHours = otpValidityHours;
+      }
+      
+      // Calculate the existing link's OTP validity hours
+      let existingOtpHours: number | null = null;
+      if (link.otpExpiresAt) {
+        const expiresAt = new Date(link.otpExpiresAt);
+        const createdAt = link.createdAt ? new Date(link.createdAt) : new Date();
+        existingOtpHours = Math.round((expiresAt.getTime() - createdAt.getTime()) / (1000 * 60 * 60));
+      }
+      
+      // If OTP validity is different, allow new link
+      if (selectedOtpHours !== existingOtpHours) {
+        return false;
+      }
+      
+      // All parameters match - this is a duplicate
+      return true;
+    });
+
+    if (existingLink) {
+      setDuplicateLink(existingLink);
+      return;
+    }
+
     setLoading(true);
     try {
       const linkId = generateLinkId();
@@ -332,11 +382,19 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         selectedDate.setHours(23, 59, 59, 999);
         otpExpiresAt = selectedDate;
       } else if (otpValidityHours && typeof otpValidityHours === 'number') {
-        // Use hours (2 or 6 hours)
-        otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+        // Use hours (2, 6 hours, or 30 days = 720 hours)
+        if (otpValidityHours === 30 * 24) {
+          // 1 month = 30 days, set to end of day
+          const expiryDate = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+          expiryDate.setHours(23, 59, 59, 999);
+          otpExpiresAt = expiryDate;
+        } else {
+          // 2 or 6 hours
+          otpExpiresAt = new Date(Date.now() + otpValidityHours * 60 * 60 * 1000);
+        }
       }
       
-      const linkData = {
+      const linkData: any = {
         agentId,
         agentName,
         linkId,
@@ -348,15 +406,32 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         createdAt: new Date(),
         updatedAt: new Date(),
         usageCount: 0,
-        note: linkNote.trim() || undefined,
       };
+      
+      // Only add note if it's not empty
+      if (linkNote.trim()) {
+        linkData.note = linkNote.trim();
+      }
 
-      await addDoc(collection(db, 'agentLinks'), linkData);
-      setGeneratedOTP(otp);
-      setNewLinkId(linkId);
+      const docRef = await addDoc(collection(db, 'agentLinks'), linkData);
       setLinkNote(''); // Reset note after generating
-      toast.success('Link generated successfully!');
-      loadLinks();
+      setUseCustomDate(false); // Reset custom date
+      setCustomExpiryDate(''); // Reset custom date value
+      setOtpValidityHours(2); // Reset to default
+      setNewlyGeneratedLinkId(docRef.id); // Store the new link ID for success popup
+      await loadLinks();
+      // Scroll to the newly generated link after a short delay
+      setTimeout(() => {
+        const linkElement = document.getElementById(`link-${docRef.id}`);
+        if (linkElement) {
+          linkElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          // Highlight the link briefly
+          linkElement.classList.add('ring-2', 'ring-emerald-500', 'ring-offset-2', 'rounded-lg');
+          setTimeout(() => {
+            linkElement.classList.remove('ring-2', 'ring-emerald-500', 'ring-offset-2');
+          }, 3000);
+        }
+      }, 200);
     } catch (error) {
       console.error('Error generating link:', error);
       toast.error('Failed to generate link');
@@ -471,19 +546,19 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       {isMounted && typeof document !== 'undefined' && createPortal(
       <AnimatePresence>
         {showDialog && (
-            <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" style={{ zIndex: 10000 }}>
+            <div className="fixed inset-0 z-[10000] flex items-center justify-center p-2 sm:p-4 bg-black/50 backdrop-blur-sm" style={{ zIndex: 10000 }}>
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto relative"
+                className="bg-white rounded-xl sm:rounded-2xl shadow-2xl max-w-2xl w-full max-h-[95vh] sm:max-h-[90vh] overflow-y-auto relative"
                 style={{ zIndex: 10001 }}
             >
-              <div className="sticky top-0 bg-gradient-to-r from-emerald-500 to-teal-600 p-6 rounded-t-2xl">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-2xl font-bold text-white">Generate Customer Portal Link</h2>
-                    <p className="text-emerald-50 mt-1">Share this link with customers to let them select numbers and plans</p>
+              <div className="sticky top-0 bg-gradient-to-r from-emerald-500 to-teal-600 p-3 sm:p-4 md:p-6 rounded-t-xl sm:rounded-t-2xl">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-base sm:text-lg md:text-xl lg:text-2xl font-bold text-white">Generate Customer Portal Link</h2>
+                    <p className="text-emerald-50 mt-0.5 sm:mt-1 text-xs sm:text-sm hidden sm:block">Share this link with customers to let them select numbers and plans</p>
                   </div>
                   <button
                     onClick={() => {
@@ -493,48 +568,65 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                       setCustomExpiryDate(''); // Reset custom date value
                       setOtpValidityHours(2); // Reset to default
                     }}
-                    className="p-2 hover:bg-white/20 rounded-lg transition-colors"
+                    className="p-1.5 sm:p-2 hover:bg-white/20 rounded-lg transition-colors flex-shrink-0"
                   >
-                    <X className="w-5 h-5 text-white" />
+                    <X className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
                   </button>
                 </div>
               </div>
 
-              <div className="p-6 space-y-6">
+              <div className="p-3 sm:p-4 md:p-6 space-y-3 sm:space-y-4 md:space-y-6">
+                {/* Warning Banner */}
+                <div className="bg-amber-50 border-2 border-amber-300 rounded-lg sm:rounded-xl p-2.5 sm:p-3 md:p-4">
+                  <div className="flex items-start gap-2 sm:gap-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5 text-amber-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h4 className="text-xs sm:text-sm font-bold text-amber-900 mb-0.5 sm:mb-1">Security Warning</h4>
+                      <p className="text-xs sm:text-sm text-amber-800 leading-tight">
+                        <strong>Share this link only with trusted customers.</strong> This link provides access to number selection and lead submission. Keep it confidential and do not share publicly.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Group Selection */}
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2 sm:mb-3">
                     Select Number Groups to Show
                   </label>
                   {availableGroups.length === 0 ? (
-                    <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-                      <p className="text-sm text-yellow-700">
+                    <div className="p-2.5 sm:p-3 md:p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                      <p className="text-xs sm:text-sm text-yellow-700">
                         No groups available. Please contact your administrator to assign group access.
                       </p>
                     </div>
                   ) : (
                     <>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 sm:gap-3">
                         {availableGroups.map(group => (
                           <motion.button
                             key={group}
                             whileHover={{ scale: 1.05 }}
                             whileTap={{ scale: 0.95 }}
                             onClick={() => toggleGroup(group)}
-                            className={`p-4 rounded-xl border-2 transition-all ${
+                            className={`p-2.5 sm:p-3 md:p-4 rounded-lg sm:rounded-xl border-2 transition-all ${
                               selectedGroups.includes(group)
                                 ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
                                 : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
                             }`}
                           >
-                            <div className="font-bold text-lg">{group}</div>
+                            <div className="font-bold text-base sm:text-lg">{group}</div>
                             {selectedGroups.includes(group) && (
-                              <Check className="w-5 h-5 mt-1 mx-auto" />
+                              <Check className="w-4 h-4 sm:w-5 sm:h-5 mt-0.5 sm:mt-1 mx-auto" />
                             )}
                           </motion.button>
                         ))}
                       </div>
-                      <p className="text-xs text-gray-500 mt-2">
+                      <p className="text-[10px] sm:text-xs text-gray-500 mt-1.5 sm:mt-2">
                         Only numbers from selected groups will be visible to customers
                       </p>
                     </>
@@ -543,10 +635,10 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
 
                 {/* Category Selection */}
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2 sm:mb-3">
                     Select Number Categories to Show
                   </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
                     {allCategories.map(category => {
                       const isSelected = selectedCategories.includes(category);
                       return (
@@ -560,7 +652,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                                 : [...prev, category]
                             );
                           }}
-                          className={`px-3 py-2 rounded-xl border text-sm font-medium transition-all ${
+                          className={`px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg sm:rounded-xl border text-xs sm:text-sm font-medium transition-all ${
                             isSelected
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-400 shadow-sm'
                               : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
@@ -571,17 +663,17 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                       );
                     })}
                   </div>
-                  <p className="text-xs text-gray-500 mt-2">
+                  <p className="text-[10px] sm:text-xs text-gray-500 mt-1.5 sm:mt-2">
                     Customers will only see numbers from the selected categories within the chosen groups.
                   </p>
                 </div>
 
                 {/* OTP Validity Selection */}
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2 sm:mb-3">
                     OTP Validity Period
                   </label>
-                  <div className={`grid gap-3 ${user?.role === 'admin' ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                  <div className={`grid gap-2 sm:gap-3 ${user?.role === 'admin' ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'}`}>
                     <motion.button
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
@@ -589,14 +681,14 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                         setOtpValidityHours(2);
                         setUseCustomDate(false);
                       }}
-                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                      className={`px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 md:py-3 rounded-lg sm:rounded-xl border-2 transition-all ${
                         otpValidityHours === 2 && !useCustomDate
                           ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
                           : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
                       }`}
                     >
-                      <div className="font-bold text-lg">2 Hours</div>
-                      <div className="text-xs mt-1 opacity-90">Standard</div>
+                      <div className="font-bold text-sm sm:text-base md:text-lg">2 Hours</div>
+                      <div className="text-[10px] sm:text-xs mt-0.5 sm:mt-1 opacity-90">Standard</div>
                     </motion.button>
                     <motion.button
                       whileHover={{ scale: 1.02 }}
@@ -605,14 +697,30 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                         setOtpValidityHours(6);
                         setUseCustomDate(false);
                       }}
-                      className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                      className={`px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 md:py-3 rounded-lg sm:rounded-xl border-2 transition-all ${
                         otpValidityHours === 6 && !useCustomDate
                           ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-lg'
                           : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-emerald-300'
                       }`}
                     >
-                      <div className="font-bold text-lg">6 Hours</div>
-                      <div className="text-xs mt-1 opacity-90">Extended</div>
+                      <div className="font-bold text-sm sm:text-base md:text-lg">6 Hours</div>
+                      <div className="text-[10px] sm:text-xs mt-0.5 sm:mt-1 opacity-90">Extended</div>
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        setOtpValidityHours(30 * 24); // 30 days = 720 hours
+                        setUseCustomDate(false);
+                      }}
+                      className={`px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 md:py-3 rounded-lg sm:rounded-xl border-2 transition-all ${
+                        otpValidityHours === 30 * 24 && !useCustomDate
+                          ? 'bg-gradient-to-br from-amber-500 to-orange-600 text-white border-amber-600 shadow-lg'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-amber-300'
+                      }`}
+                    >
+                      <div className="font-bold text-sm sm:text-base md:text-lg">1 Month</div>
+                      <div className="text-[10px] sm:text-xs mt-0.5 sm:mt-1 opacity-90">Long-term</div>
                     </motion.button>
                     {user?.role === 'admin' && (
                       <motion.button
@@ -622,20 +730,20 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           setUseCustomDate(true);
                           setOtpValidityHours(null);
                         }}
-                        className={`px-4 py-3 rounded-xl border-2 transition-all ${
+                        className={`px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 md:py-3 rounded-lg sm:rounded-xl border-2 transition-all ${
                           useCustomDate
                             ? 'bg-gradient-to-br from-purple-500 to-pink-600 text-white border-purple-600 shadow-lg'
                             : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-purple-300'
                         }`}
                       >
-                        <div className="font-bold text-lg">Custom Date</div>
-                        <div className="text-xs mt-1 opacity-90">Admin Only</div>
+                        <div className="font-bold text-sm sm:text-base md:text-lg">Custom Date</div>
+                        <div className="text-[10px] sm:text-xs mt-0.5 sm:mt-1 opacity-90">Admin Only</div>
                       </motion.button>
                     )}
                   </div>
                   {user?.role === 'admin' && useCustomDate && (
-                    <div className="mt-3">
-                      <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    <div className="mt-2 sm:mt-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-1.5 sm:mb-2">
                         Select Expiration Date <span className="text-red-500">*</span>
                       </label>
                       <input
@@ -645,11 +753,11 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           setCustomExpiryDate(e.target.value);
                         }}
                         min={new Date().toISOString().split('T')[0]}
-                        className="w-full px-4 py-2 bg-white border-2 border-purple-200 rounded-xl focus:border-purple-400 focus:ring-2 focus:ring-purple-100 transition-all text-gray-900"
+                        className="w-full px-2.5 sm:px-3 md:px-4 py-1.5 sm:py-2 bg-white border-2 border-purple-200 rounded-lg sm:rounded-xl focus:border-purple-400 focus:ring-2 focus:ring-purple-100 transition-all text-xs sm:text-sm text-gray-900"
                         required={useCustomDate}
                       />
                       {customExpiryDate && (
-                        <p className="text-xs text-purple-600 mt-1">
+                        <p className="text-[10px] sm:text-xs text-purple-600 mt-1">
                           OTP will expire on: {new Date(customExpiryDate).toLocaleDateString('en-US', { 
                             weekday: 'long', 
                             year: 'numeric', 
@@ -660,39 +768,77 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                       )}
                     </div>
                   )}
-                  <p className="text-xs text-gray-500 mt-2">
+                  {otpValidityHours === 30 * 24 && !useCustomDate && (
+                    <div className="mt-2 sm:mt-3 bg-amber-50 border-2 border-amber-300 rounded-lg sm:rounded-xl p-2 sm:p-2.5 md:p-3">
+                      <div className="flex items-start gap-1.5 sm:gap-2">
+                        <svg className="w-4 h-4 sm:w-5 sm:h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                        </svg>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs sm:text-sm font-semibold text-amber-900 mb-0.5 sm:mb-1">Warning: Long-term OTP</p>
+                          <p className="text-[10px] sm:text-xs text-amber-800 leading-tight">
+                            This OTP will remain valid for 1 month. <strong>Only share with trusted customers.</strong> Ensure you have proper security measures in place.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[10px] sm:text-xs text-gray-500 mt-1.5 sm:mt-2">
                     Choose how long the OTP will remain valid for customer access
-                    {user?.role === 'admin' && ' (Admins can select a custom expiration date)'}
+                    {user?.role === 'admin' && <span className="hidden sm:inline"> (Admins can select a custom expiration date)</span>}
                   </p>
                 </div>
 
                 {/* Note Field */}
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2 sm:mb-3">
                     Note (Optional)
                   </label>
                   <textarea
                     value={linkNote}
                     onChange={(e) => setLinkNote(e.target.value)}
                     placeholder="e.g., Link for Mohammad - Dubai customer"
-                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100 focus:bg-white transition-all duration-200 text-gray-900 placeholder-gray-500 resize-none"
-                    rows={3}
+                    className="w-full px-2.5 sm:px-3 md:px-4 py-2 sm:py-2.5 md:py-3 bg-gray-50 border border-gray-200 rounded-lg sm:rounded-xl focus:border-emerald-300 focus:ring-2 focus:ring-emerald-100 focus:bg-white transition-all duration-200 text-xs sm:text-sm text-gray-900 placeholder-gray-500 resize-none"
+                    rows={2}
                     maxLength={200}
                   />
-                  <p className="text-xs text-gray-500 mt-2">
+                  <p className="text-[10px] sm:text-xs text-gray-500 mt-1.5 sm:mt-2">
                     Add a note to track who this link is for (e.g., customer name, company, etc.)
                   </p>
                 </div>
 
+                {/* Generate Button */}
+                <div className="flex gap-2 sm:gap-3 pt-3 sm:pt-4 border-t">
+                    <button
+                      onClick={() => {
+                        setShowDialog(false);
+                        setLinkNote(''); // Reset note when closing
+                        setUseCustomDate(false); // Reset custom date
+                        setCustomExpiryDate(''); // Reset custom date value
+                        setOtpValidityHours(2); // Reset to default
+                      }}
+                      className="flex-1 px-3 sm:px-4 py-2 sm:py-2.5 md:py-3 bg-gray-100 text-gray-700 rounded-lg sm:rounded-xl hover:bg-gray-200 transition-colors text-xs sm:text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleGenerateLink}
+                      disabled={loading || selectedGroups.length === 0}
+                      className="flex-1 px-3 sm:px-4 py-2 sm:py-2.5 md:py-3 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-lg sm:rounded-xl hover:from-emerald-600 hover:to-teal-700 transition-all text-xs sm:text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                    >
+                      {loading ? 'Generating...' : links.length > 0 ? 'Generate New Link' : 'Generate Link'}
+                    </button>
+                </div>
+
                 {/* Existing Links */}
                 {links.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Your Links</h3>
+                  <div className="pt-3 sm:pt-4 border-t">
+                    <h3 className="text-xs sm:text-sm font-semibold text-gray-700 mb-2 sm:mb-3">Your Links</h3>
                     <div className="space-y-2 max-h-60 overflow-y-auto">
                       {links.map(link => (
-                        <LinkItem
-                          key={link.id}
-                          link={link}
+                        <div key={link.id} id={`link-${link.id}`} className="transition-all duration-300">
+                          <LinkItem
+                            link={link}
                           onCopyLink={copyToClipboard}
                           onToggleActive={toggleLinkActive}
                           onDelete={handleDeleteLink}
@@ -704,114 +850,9 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                           useCustomDate={useCustomDate}
                           customExpiryDate={customExpiryDate}
                         />
+                        </div>
                       ))}
                     </div>
-                  </div>
-                )}
-
-                {/* Generated Link & OTP Display */}
-                {generatedOTP && newLinkId && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-xl border-2 border-emerald-200 p-6 space-y-4"
-                  >
-                    <div className="flex items-center gap-2 mb-4">
-                      <div className="w-10 h-10 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-xl flex items-center justify-center">
-                        <Check className="w-5 h-5 text-white" />
-                      </div>
-                      <h3 className="text-lg font-bold text-gray-900">Link Generated Successfully!</h3>
-                    </div>
-                    
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
-                          Portal Link
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 bg-white px-4 py-3 rounded-lg border border-emerald-200 text-sm font-mono text-gray-800 break-all">
-                            {`${window.location.origin}/customer/${newLinkId}`}
-                          </code>
-                          <button
-                            onClick={() => {
-                              const url = `${window.location.origin}/customer/${newLinkId}`;
-                              navigator.clipboard.writeText(url);
-                              toast.success('Link copied!');
-                            }}
-                            className="p-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors"
-                            title="Copy link"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
-                          Access OTP (Share with Customer)
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 bg-white px-4 py-3 rounded-lg border-2 border-emerald-300">
-                            <span className="text-2xl font-black text-emerald-600 tracking-wider font-mono">
-                              {generatedOTP}
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(generatedOTP);
-                              toast.success('OTP copied!');
-                            }}
-                            className="p-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors"
-                            title="Copy OTP"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <p className="text-xs text-gray-500 mt-2">
-                          ⚠️ Important: Share this OTP with your customer. They will need it to access the portal.
-                        </p>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => {
-                        setGeneratedOTP(null);
-                        setNewLinkId(null);
-                        setLinkNote(''); // Reset note
-                        setUseCustomDate(false); // Reset custom date
-                        setCustomExpiryDate(''); // Reset custom date value
-                        setOtpValidityHours(2); // Reset to default
-                        setShowDialog(false);
-                      }}
-                      className="w-full px-4 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-xl hover:from-emerald-600 hover:to-teal-700 transition-all font-medium shadow-lg"
-                    >
-                      Done
-                    </button>
-                  </motion.div>
-                )}
-
-                {/* Generate Button */}
-                {!generatedOTP && (
-                  <div className="flex gap-3 pt-4 border-t">
-                    <button
-                      onClick={() => {
-                        setShowDialog(false);
-                        setLinkNote(''); // Reset note when closing
-                        setUseCustomDate(false); // Reset custom date
-                        setCustomExpiryDate(''); // Reset custom date value
-                        setOtpValidityHours(2); // Reset to default
-                      }}
-                      className="flex-1 px-4 py-3 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 transition-colors font-medium"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleGenerateLink}
-                      disabled={loading || selectedGroups.length === 0}
-                      className="flex-1 px-4 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-xl hover:from-emerald-600 hover:to-teal-700 transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
-                    >
-                      {loading ? 'Generating...' : 'Generate Link'}
-                    </button>
                   </div>
                 )}
               </div>
@@ -821,7 +862,211 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         </AnimatePresence>,
         document.body
       )}
+
+      {/* Duplicate Link Modal */}
+      {isMounted && typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {duplicateLink && (
+            <div className="fixed inset-0 z-[10002] flex items-center justify-center p-2 sm:p-4 bg-black/50 backdrop-blur-sm" style={{ zIndex: 10002 }}>
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-xl sm:rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto relative"
+                style={{ zIndex: 10003 }}
+              >
+                <div className="sticky top-0 bg-gradient-to-r from-amber-500 to-orange-600 p-3 sm:p-4 md:p-6 rounded-t-xl sm:rounded-t-2xl">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <h2 className="text-base sm:text-lg md:text-xl font-bold text-white">Link Already Exists</h2>
+                      <p className="text-amber-50 mt-0.5 sm:mt-1 text-xs sm:text-sm">You already have a link with these parameters</p>
+                    </div>
+                    <button
+                      onClick={() => setDuplicateLink(null)}
+                      className="p-1.5 sm:p-2 hover:bg-white/20 rounded-lg transition-colors flex-shrink-0"
+                    >
+                      <X className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 sm:p-4 md:p-6 space-y-3 sm:space-y-4">
+                  <div className="bg-gray-50 rounded-lg sm:rounded-xl p-3 sm:p-4 space-y-2 sm:space-y-3">
+                    <div>
+                      <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                        Portal Link
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200 text-xs sm:text-sm font-mono text-gray-800 break-all">
+                          {`${window.location.origin}/customer/${duplicateLink.linkId}`}
+                        </code>
+                        <button
+                          onClick={() => {
+                            const url = `${window.location.origin}/customer/${duplicateLink.linkId}`;
+                            navigator.clipboard.writeText(url);
+                            toast.success('Link copied!');
+                          }}
+                          className="p-1.5 sm:p-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors flex-shrink-0"
+                          title="Copy link"
+                        >
+                          <Copy className="w-3 h-3 sm:w-4 sm:h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                        Groups
+                      </label>
+                      <p className="text-xs sm:text-sm text-gray-900 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200">
+                        {duplicateLink.allowedGroups.join(', ')}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                        Categories
+                      </label>
+                      <p className="text-xs sm:text-sm text-gray-900 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200">
+                        {duplicateLink.allowedCategories && duplicateLink.allowedCategories.length > 0
+                          ? duplicateLink.allowedCategories.join(', ')
+                          : 'All categories'}
+                      </p>
+                    </div>
+
+                    {duplicateLink.note && (
+                      <div>
+                        <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                          Note
+                        </label>
+                        <p className="text-xs sm:text-sm text-gray-900 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200">
+                          {duplicateLink.note}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2 sm:gap-3">
+                      <div>
+                        <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                          Used
+                        </label>
+                        <p className="text-xs sm:text-sm text-gray-900 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200">
+                          {duplicateLink.usageCount || 0} times
+                        </p>
+                      </div>
+                      <div>
+                        <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                          Created
+                        </label>
+                        <p className="text-xs sm:text-sm text-gray-900 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200">
+                          {format(duplicateLink.createdAt, 'MMM d, yyyy')}
+                        </p>
+                      </div>
+                    </div>
+
+                    {duplicateLink.otpExpiresAt && (
+                      <div>
+                        <label className="text-xs sm:text-sm font-semibold text-gray-600 uppercase tracking-wide mb-1 block">
+                          OTP Expires
+                        </label>
+                        <p className="text-xs sm:text-sm text-gray-900 bg-white px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 rounded-lg border border-gray-200">
+                          {format(duplicateLink.otpExpiresAt, 'MMM d, yyyy h:mm a')}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 pt-2">
+                      <div className={`px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg text-xs sm:text-sm font-medium ${
+                        duplicateLink.isActive
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-gray-100 text-gray-700'
+                      }`}>
+                        {duplicateLink.isActive ? 'Active' : 'Inactive'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 sm:gap-3 pt-2 border-t">
+                    <button
+                      onClick={() => {
+                        const url = `${window.location.origin}/customer/${duplicateLink.linkId}`;
+                        navigator.clipboard.writeText(url);
+                        toast.success('Link copied!');
+                      }}
+                      className="flex-1 px-3 sm:px-4 py-2 sm:py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg sm:rounded-xl transition-colors text-xs sm:text-sm font-medium"
+                    >
+                      Copy Link
+                    </button>
+                    <button
+                      onClick={() => setDuplicateLink(null)}
+                      className="flex-1 px-3 sm:px-4 py-2 sm:py-2.5 bg-gray-100 text-gray-700 rounded-lg sm:rounded-xl hover:bg-gray-200 transition-colors text-xs sm:text-sm font-medium"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+
+      {/* Success Modal */}
+      {isMounted && typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {newlyGeneratedLinkId && (
+            <div className="fixed inset-0 z-[10004] flex items-center justify-center p-2 sm:p-4 bg-black/50 backdrop-blur-sm" style={{ zIndex: 10004 }}>
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-xl sm:rounded-2xl shadow-2xl max-w-lg w-full relative"
+                style={{ zIndex: 10005 }}
+              >
+                <div className="bg-gradient-to-r from-emerald-500 to-teal-600 p-3 sm:p-4 md:p-6 rounded-t-xl sm:rounded-t-2xl">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <div className="w-8 h-8 sm:w-10 sm:h-10 bg-white/20 rounded-lg sm:rounded-xl flex items-center justify-center">
+                        <Check className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
+                      </div>
+                      <div>
+                        <h2 className="text-base sm:text-lg md:text-xl font-bold text-white">Link Generated Successfully!</h2>
+                        <p className="text-emerald-50 mt-0.5 text-xs sm:text-sm">Your new link has been created</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setNewlyGeneratedLinkId(null)}
+                      className="p-1.5 sm:p-2 hover:bg-white/20 rounded-lg transition-colors flex-shrink-0"
+                    >
+                      <X className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 sm:p-4 md:p-6">
+                  <div className="bg-emerald-50 border-2 border-emerald-200 rounded-lg sm:rounded-xl p-3 sm:p-4 text-center">
+                    <p className="text-xs sm:text-sm text-emerald-800 mb-2">
+                      Your link has been added to the "Your Links" section below.
+                    </p>
+                    <p className="text-[10px] sm:text-xs text-emerald-700">
+                      Scroll down to view and manage your link.
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={() => setNewlyGeneratedLinkId(null)}
+                    className="w-full mt-3 sm:mt-4 px-3 sm:px-4 py-2 sm:py-2.5 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-lg sm:rounded-xl hover:from-emerald-600 hover:to-teal-700 transition-all text-xs sm:text-sm font-medium shadow-lg"
+                  >
+                    Got it
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
     </>
   );
 }
-
