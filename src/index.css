@@ -375,6 +375,13 @@
   }
 }
 
+/* Mobile bottom nav - prevents expansion/shrinking on scroll (iOS Safari fix) */
+.mobile-bottom-nav {
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
 /* Hide scrollbar utility for mobile pagination */
 .scrollbar-hide {
   -ms-overflow-style: none;

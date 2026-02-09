@@ -2,7 +2,7 @@ import axios from 'axios';
 import { checkDNCNumber as checkFirebaseDNC, logWhatsAppCheck } from './dncService';
 import { getWhatsAppApiEndpoint } from './configService';
 import { db } from '../lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, getDoc, doc } from 'firebase/firestore';
 
 /**
  * DNC (Do Not Call) Check Utility
@@ -133,6 +133,9 @@ export async function checkDNCNumber(number: string, userId?: string, debugMode:
   // Get the configured WhatsApp API endpoint from Firebase
   const configuredEndpoint = await getWhatsAppApiEndpoint();
   
+  // Check if this is a Baileys API endpoint (requires sessionId)
+  const isBaileysAPI = configuredEndpoint.includes('54.167.70.142:3001');
+  
   // If the configured endpoint matches our proxy target, use the proxy to avoid CORS
   // Otherwise, use the configured endpoint directly
   let endpointToUse = configuredEndpoint;
@@ -142,21 +145,56 @@ export async function checkDNCNumber(number: string, userId?: string, debugMode:
     endpointToUse = '/api/whatsapp';
   }
   
+  // For Baileys API, ensure we use the correct endpoint path
+  if (isBaileysAPI && !endpointToUse.includes('/api/check-number')) {
+    // Extract base URL and add the check-number path
+    const baseUrl = endpointToUse.replace(/\/$/, ''); // Remove trailing slash
+    endpointToUse = `${baseUrl}/api/check-number`;
+  }
+  
   const endpoints = [endpointToUse];
   
   try {
     
     for (const endpoint of endpoints) {
       try {
+        // Prepare request payload based on API type
+        let requestPayload: any;
+        if (isBaileysAPI) {
+          // Baileys API format: { sessionId, phoneNumber }
+          // Get sessionId from Firebase config, fallback to default
+          let sessionId = '8646'; // Default sessionId
+          try {
+            const configDoc = await getDoc(doc(db, 'config', 'app'));
+            if (configDoc.exists()) {
+              const configData = configDoc.data();
+              if (configData.whatsappSessionId) {
+                sessionId = configData.whatsappSessionId;
+              }
+            }
+          } catch (error) {
+            console.warn('Failed to fetch sessionId from config, using default:', error);
+          }
+          
+          requestPayload = {
+            sessionId: sessionId,
+            phoneNumber: whatsappApiNumber
+          };
+        } else {
+          // Legacy API format: { number }
+          requestPayload = { number: whatsappApiNumber };
+        }
+        
         if (debugMode) {
           console.log('🌐 [DNC DEBUG] Attempting to call endpoint:', endpoint);
-          console.log('🌐 [DNC DEBUG] Request payload:', { number: whatsappApiNumber });
+          console.log('🌐 [DNC DEBUG] API Type:', isBaileysAPI ? 'Baileys' : 'Legacy');
+          console.log('🌐 [DNC DEBUG] Request payload:', requestPayload);
         }
         
         const startTime = Date.now();
         const response = await axios.post<DNCResponse>(
           endpoint,
-          { number: whatsappApiNumber },
+          requestPayload,
           {
             headers: {
               'Content-Type': 'application/json',
@@ -177,9 +215,31 @@ export async function checkDNCNumber(number: string, userId?: string, debugMode:
 
         const { data } = response;
 
-        if (data.exists === true && data.jid) {
+        // Handle Baileys API response format (might be different from legacy API)
+        let exists = false;
+        let jid: string | undefined;
+        
+        if (isBaileysAPI) {
+          // Baileys API returns: { "number": "919906686458", "status": "exists" }
+          if (data.status === 'exists' || data.exists === true || data.isValid === true || data.onWhatsApp === true) {
+            exists = true;
+            // Construct JID from the number in response or use the phoneNumber we sent
+            const responseNumber = data.number || whatsappApiNumber;
+            // Ensure number has + prefix and add @s.whatsapp.net suffix
+            const cleanResponseNumber = responseNumber.replace(/^\+?/, ''); // Remove existing + if any
+            jid = `+${cleanResponseNumber}@s.whatsapp.net`;
+          }
+        } else {
+          // Legacy API format
+          if (data.exists === true && data.jid) {
+            exists = true;
+            jid = data.jid;
+          }
+        }
+
+        if (exists && jid) {
           // Remove '@s.whatsapp.net' suffix to get the formatted number
-          const formattedNumber = data.jid.replace(/@s\.whatsapp\.net$/, '');
+          const formattedNumber = jid.replace(/@s\.whatsapp\.net$/, '');
           
           const result = {
             number: cleanNumber, // Always return the original input format
@@ -198,7 +258,7 @@ export async function checkDNCNumber(number: string, userId?: string, debugMode:
               number: cleanNumber,
               checkedBy: userId,
               result: 'exists',
-              whatsappJid: data.jid,
+              whatsappJid: jid,
               isDNC: isInDNCDatabase,
               inNumberPool: isInNumberPool,
               apiEndpoint: endpoint,

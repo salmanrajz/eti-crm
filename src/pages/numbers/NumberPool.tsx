@@ -277,7 +277,7 @@ const CLAIM_TIMEOUT = 15 * 60 * 1000; // 15 minutes in milliseconds
  * Maximum number of concurrent reservations per user
  */
 const MAX_RESERVATIONS = 3;
-const MAX_CLAIMS_PER_24H = 3;
+const MAX_CLAIMS_PER_24H = 10;
 const getTodayUaeDateString = () => {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Dubai',
@@ -536,6 +536,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showReserveDialog, setShowReserveDialog] = useState(false);
   const [numberToReserve, setNumberToReserve] = useState<NumberPoolType | null>(null);
   const [showReserveLimitDialog, setShowReserveLimitDialog] = useState(false);
+  const [showReservationLimitClaimDialog, setShowReservationLimitClaimDialog] = useState(false);
   const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
   const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
   const [showReserveConflictDialog, setShowReserveConflictDialog] = useState(false);
@@ -810,11 +811,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   // Debounced search term for performance optimization
-  // Debounce search input to 400ms to reduce redundant queries
-  const debouncedSearchTerm = useDebounce(searchTerm, 400);
+  // Debounce search input to 800ms to allow users to complete typing
+  const debouncedSearchTerm = useDebounce(searchTerm, 800);
 
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
+  
+  // Track the search term currently being processed to prevent race conditions
+  const currentSearchTermRef = useRef<string>('');
 
   const toggleExportField = (key: string) => {
     setSelectedExportFields(prev =>
@@ -1491,65 +1495,188 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   }, [isAdmin, user?.role]);
 
   const performSearch = useCallback(async (loadMore: boolean = false) => {
+    // Capture the search term at the start of this search operation
+    const termAtStart = debouncedSearchTerm.trim();
+    
+    const lastSearchTerm = (fullSearchResultsRef.current as any)?.lastSearchTerm;
+    const hasResultsForThisTerm = lastSearchTerm === termAtStart && fullSearchResultsRef.current.length > 0;
+    
+    // OPTIMIZATION: Try in-memory filtering if we have existing results and new term is more specific
+    if (!loadMore && termAtStart !== '' && fullSearchResultsRef.current.length > 0) {
+      const lastSearchTerm = (fullSearchResultsRef.current as any)?.lastSearchTerm;
+      const originalUnfilteredResults = (fullSearchResultsRef.current as any)?.originalUnfilteredResults || fullSearchResultsRef.current;
+      
+      // Check if new search term contains the previous search term (more specific search)
+      
+      if (lastSearchTerm && termAtStart.includes(lastSearchTerm) && originalUnfilteredResults.length > 0) {
+        // Parse search terms (handle multi-term searches like "999 0" or "050 14JANSILG1" or "999 silver")
+        const searchTerms = termAtStart.split(/\s+/).filter(t => t.length > 0);
+        
+        // Filter existing results in memory - order-independent matching
+        // Supports searching in: number, code, category, group, status
+        // All terms must be present, but can be in any order
+        let filteredResults = originalUnfilteredResults.filter((num: NumberPoolType) => {
+          const numberStr = (num.number || '').toLowerCase();
+          const codeStr = (num.code || '').toLowerCase();
+          const categoryStr = (num.category || '').toLowerCase();
+          const groupStr = (num.group || '').toLowerCase();
+          const statusStr = (num.status || '').toLowerCase();
+          
+          // Combine all searchable fields for searching
+          // Use a space separator to ensure we can distinguish between fields
+          // Searches in: number, code, category, group, status
+          const combinedStr = (numberStr + ' ' + codeStr + ' ' + categoryStr + ' ' + groupStr + ' ' + statusStr).toLowerCase();
+          
+          // Check if ALL search terms are present (order-independent)
+          // Each term must appear somewhere in the combined string, but order doesn't matter
+          for (const term of searchTerms) {
+            const termLower = term.toLowerCase();
+            
+            // Check if this term appears anywhere in the combined string
+            if (!combinedStr.includes(termLower)) {
+              return false; // Term not found
+            }
+          }
+          
+          return true; // All terms found (in any order)
+        });
+        
+        // Apply visibility filter
+        filteredResults = filterByVisibility(filteredResults);
+        
+        // Apply category filter in memory (only if we searched 'all' categories)
+        const searchCategory = (selectedCategory && selectedCategory !== 'all') ? selectedCategory : 'all';
+        if (searchCategory === 'all' && selectedCategory && selectedCategory !== 'all') {
+          filteredResults = filteredResults.filter((n: NumberPoolType) => n.category === selectedCategory);
+        }
+        
+        // Apply group filter
+        if (selectedGroup) {
+          filteredResults = filteredResults.filter((n: NumberPoolType) => n.group === selectedGroup);
+        }
+        
+        // Apply initials filter
+        if (selectedInitials) {
+          filteredResults = filteredResults.filter((n: NumberPoolType) => (n.number || '').startsWith(selectedInitials));
+        }
+        
+        // If we got good results from in-memory filtering, use them
+        if (filteredResults.length > 0 || searchTerms.length > 0) {
+          // Mark this search term as being processed
+          currentSearchTermRef.current = termAtStart;
+          
+          // Store results
+          fullSearchResultsRef.current = filteredResults;
+          (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults; // Keep original for future filtering
+          (fullSearchResultsRef.current as any).lastSearchTerm = termAtStart;
+          (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+          (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
+          (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
+          (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+          
+          // Paginate results
+          const pageForNewSearch = 1;
+          const startIndex = (pageForNewSearch - 1) * pageSize;
+          const endIndex = startIndex + pageSize;
+          const paginatedResults = filteredResults.slice(startIndex, endIndex);
+          
+          const calculatedTotalPages = Math.ceil(filteredResults.length / pageSize);
+          const calculatedHasNextPage = endIndex < filteredResults.length;
+          
+          setSearchResults(paginatedResults);
+          setSearchTotalPages(calculatedTotalPages);
+          setSearchTotalItems(filteredResults.length);
+          setSearchHasNextPage(calculatedHasNextPage);
+          setSearchHasPreviousPage(false);
+          setSearchCurrentPage(1);
+          setSearchLastDoc(null);
+          setSearchHasMore(false);
+          setIsSearching(false);
+          
+          return; // Skip API call, use in-memory results
+        }
+      }
+    }
+    
+    // Skip duplicate search only if we already have results for this exact term
+    // We don't check "search in progress" because:
+    // 1. Debouncing already prevents rapid calls
+    // 2. Race condition protection handles stale results
+    // 3. Multiple searches for the same term are harmless (race condition protection will handle it)
+    if (!loadMore && hasResultsForThisTerm && termAtStart !== '') {
+      return; // Already have results for this term, skip
+    }
+    
+    // Mark this search term as being processed
+    if (!loadMore) {
+      currentSearchTermRef.current = termAtStart;
+    }
+    
     if (loadMore) {
       setIsLoadingMore(true);
     } else {
       setIsSearching(true);
-      // Reset results when starting new search
-      setSearchResults([]);
-      fullSearchResultsRef.current = [];
+      // Don't clear results immediately - wait until we have new results ready
+      // This prevents showing zero results while user is editing the search term
       setSearchLastDoc(null);
       setSearchHasMore(false);
     }
-    
-      const termAtStart = debouncedSearchTerm;
       
       try {
         // Use unified search for consistent results
       // Fetch a larger first batch to reduce extra roundtrips while keeping pagination client-side
-        const searchLimit = 1000;
+      const searchLimit = 2000;
+      
+      // If category filter is set, search within that category for maximum results
+      // Otherwise, search all categories
+      const searchCategory = (selectedCategory && selectedCategory !== 'all') ? selectedCategory : 'all';
         
-        // Always search with 'all' category to get full results for in-memory filtering
-        // This allows us to filter by category in memory later without re-searching
         const result = await unifiedSearch.search(debouncedSearchTerm, {
-          category: 'all', // Always search all categories for in-memory filtering
+        category: searchCategory, // Search within selected category if filter is set
           limit: searchLimit,
         startAfter: loadMore ? searchLastDoc : null,
           includeStale: false,
           endsWith: endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         });
         
-        // Also search deletedNumbers collection if admin or coordinator (search all categories)
+      // Also search deletedNumbers collection if admin or coordinator
+      // Use selected category if filter is set, otherwise search all
         const deletedResults = await searchDeletedNumbers(
           debouncedSearchTerm, 
-          'all', // Always search all categories
-          endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
-        );
+        searchCategory,
+        endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
+      );
 
-        // Also search activatedNumbers collection if admin or coordinator (search all categories)
-        const activatedResults = await searchActivatedNumbers(
-          debouncedSearchTerm,
-          'all', // Always search all categories
+      // Also search activatedNumbers collection if admin or coordinator
+      // Use selected category if filter is set, otherwise search all
+      const activatedResults = await searchActivatedNumbers(
+        debouncedSearchTerm,
+        searchCategory,
           endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
         );
         
         // Avoid race conditions: only apply if term hasn't changed
-        if (termAtStart === debouncedSearchTerm) {
+      // Check both the trimmed version and the original to handle whitespace differences
+      const currentTerm = debouncedSearchTerm.trim();
+      
+      // Only process results if this search is still relevant (term hasn't changed)
+      if (termAtStart === currentTerm && termAtStart !== '') {
           let filteredResults = filterByVisibility(result.data);
           
           // Add deleted numbers to results (they already have status 'returned')
           filteredResults = [...filteredResults, ...deletedResults];
 
-          // Add activated numbers to results (they already have status 'activated')
-          filteredResults = [...filteredResults, ...activatedResults];
-          
-          // Store the original unfiltered results for in-memory filtering
-          const originalUnfilteredResults = [...filteredResults];
-          
-          // Apply category filter in memory
-          if (selectedCategory && selectedCategory !== 'all') {
-            filteredResults = filteredResults.filter(n => n.category === selectedCategory);
-          }
+        // Add activated numbers to results (they already have status 'activated')
+        filteredResults = [...filteredResults, ...activatedResults];
+        
+        // Store the original unfiltered results for in-memory filtering
+        const originalUnfilteredResults = [...filteredResults];
+        
+        // Apply category filter in memory (only if we searched 'all' categories)
+        // If we already searched within a specific category, skip this filter
+        if (searchCategory === 'all' && selectedCategory && selectedCategory !== 'all') {
+          filteredResults = filteredResults.filter(n => n.category === selectedCategory);
+        }
           
           // Apply group filter
           if (selectedGroup) {
@@ -1568,7 +1695,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           
           // Re-apply all filters to combined results
           let combinedFiltered = [...combinedOriginalResults];
-          if (selectedCategory && selectedCategory !== 'all') {
+          // Apply category filter only if we searched 'all' categories
+          if (searchCategory === 'all' && selectedCategory && selectedCategory !== 'all') {
             combinedFiltered = combinedFiltered.filter(n => n.category === selectedCategory);
           }
           if (selectedGroup) {
@@ -1582,7 +1710,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           // Store original unfiltered results for future in-memory filtering
           (fullSearchResultsRef.current as any).originalUnfilteredResults = combinedOriginalResults;
           // Preserve search metadata for pagination checks
-          (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+          (fullSearchResultsRef.current as any).lastSearchTerm = currentTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
           (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
@@ -1605,10 +1733,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           }, 0);
         } else {
           // New search - replace results
+          // Double-check term hasn't changed before applying results
+          const finalCheckTerm = debouncedSearchTerm.trim();
+          const currentRefTerm = currentSearchTermRef.current;
+          
+          // Only apply results if:
+          // 1. The term hasn't changed (termAtStart === finalCheckTerm)
+          // 2. The ref still matches this term (termAtStart === currentRefTerm)
+          // This prevents stale searches from overwriting newer results
+          if (termAtStart === finalCheckTerm && termAtStart === currentRefTerm && termAtStart !== '') {
           fullSearchResultsRef.current = filteredResults;
-          // Store original unfiltered results for future in-memory filtering
-          (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
-          (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+            // Store original unfiltered results for future in-memory filtering
+            (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
+            (fullSearchResultsRef.current as any).lastSearchTerm = finalCheckTerm;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
           (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
@@ -1631,21 +1768,48 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           
           // Ensure we're on page 1 for new searches
           setSearchCurrentPage(1);
-        }
         
         // Store cursor and hasMore for "Load More" button
         setSearchLastDoc(result.lastDoc);
         setSearchHasMore(result.hasMore);
-          
-          // Search complete - results ready for display
+          }
+          // If term changed during search, don't apply results - keep showing previous results
+        }
+      } else {
+        // Search term changed during async operation - don't apply stale results
+        // The new search will handle updating results when it completes
+        // Don't clear existing results here to avoid showing empty state
+        // Clear the ref so a new search for the changed term can proceed
+        if (termAtStart !== debouncedSearchTerm.trim()) {
+          currentSearchTermRef.current = '';
+        }
         }
       } catch (error) {
         console.error('Search error:', error);
+        // Only show error if this search term is still current
+        if (termAtStart === debouncedSearchTerm.trim()) {
         toast.error('Search failed');
+        }
+        // Clear the ref on error so user can retry
+        currentSearchTermRef.current = '';
       } finally {
-        if (termAtStart === debouncedSearchTerm) {
+        // Only clear loading state if this search term is still current
+        const finalTerm = debouncedSearchTerm.trim();
+        if (termAtStart === finalTerm || termAtStart === '') {
           setIsSearching(false);
         setIsLoadingMore(false);
+          // Keep ref set to current term if search completed successfully
+          if (termAtStart === finalTerm && finalTerm !== '') {
+            // Ref already set, keep it
+          } else {
+            // Clear ref if search was cancelled or term is empty
+            currentSearchTermRef.current = '';
+          }
+        } else {
+          // Term changed during search - clear loading state and ref
+          setIsSearching(false);
+          setIsLoadingMore(false);
+          currentSearchTermRef.current = '';
         }
       }
   }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers]);
@@ -2642,7 +2806,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const numberIds = new Set<string>();
       leadsSnapshot.forEach(doc => {
         const data = doc.data();
-        if (Array.isArray(data.plans)) {
+        const leadStatus = data.status;
+        
+        // Only include numbers from ACTIVE leads (not rejected, non_verified, etc.)
+        // Active lead statuses: verified, activated, activated_non_verified, assigned_to_cord, pending_verification, follow_up
+        const activeLeadStatuses = ['verified', 'activated', 'activated_non_verified', 'assigned_to_cord', 'pending_verification', 'follow_up', 'assigned'];
+        
+        if (activeLeadStatuses.includes(leadStatus) && Array.isArray(data.plans)) {
           data.plans.forEach((plan: any) => {
             if (plan.numberId) numberIds.add(plan.numberId);
           });
@@ -4101,7 +4271,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const generatePageNumbers = () => {
     const pages = [];
     const maxVisiblePages = 5; // Reduced from 7 to 5 for better performance
-    const isSearchMode = debouncedSearchTerm.trim();
     
     if (displayPagination.totalPages <= maxVisiblePages) {
       // Show all pages if total pages is small
@@ -4139,8 +4308,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         pages.push(i);
       }
       
-      // Add ellipsis and last page if needed (only in browse mode, not search mode)
-      if (endPage < displayPagination.totalPages && !isSearchMode) {
+      // Add ellipsis and last page if needed (show in both browse and search mode)
+      if (endPage < displayPagination.totalPages) {
         if (endPage < displayPagination.totalPages - 1) {
           pages.push('...');
         }
@@ -4795,7 +4964,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </div>
                   </div>
                   <div className="text-[11px] text-gray-800 leading-snug bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-100 rounded-md px-3 py-2">
-                    <div>• Max 3 claims per day</div>
+                    <div>• Max 10 claims per day</div>
                     <div>• Per-number queue cap: 3</div>
                     <div>• Claim window: 8 AM–10:30 PM (UAE time)</div>
                   </div>
@@ -5998,13 +6167,23 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               Striked
             </motion.span>
           )}
-          {/* Claim button - Only visible to agents and only between 8 AM - 10:30 PM UAE time */}
+          {/* Claim button or reservation-limit warning - Only visible to agents */}
           {user?.role === 'agent' && number.status === 'reserved' && 
                            number.reservedBy !== user?.id && 
-                           number.claimingAgentId !== user?.id &&
-                           isWithinClaimWindow &&
+                           number.claimingAgentId !== user?.id && (
+            reservedNumbers.length >= MAX_RESERVATIONS ? (
+              /* Triangle icon when agent has 3 reserved - can't claim until they release one */
+              <button
+                type="button"
+                onClick={() => setShowReservationLimitClaimDialog(true)}
+                className="inline-flex items-center justify-center p-2 rounded-lg bg-amber-50 text-amber-600 ring-1 ring-amber-200 hover:bg-amber-100 transition-colors cursor-pointer relative z-20"
+                title="You have already three numbers reserved, can't reserve more. Please release a number first in order to claim."
+              >
+                <AlertTriangle className="h-5 w-5" />
+              </button>
+            ) : isWithinClaimWindow &&
                            (number.claimQueue?.length || 0) < 3 &&
-                           !userClaimLimitReached && (
+                           !userClaimLimitReached ? (
             <motion.button
                               whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
                               whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
@@ -6035,6 +6214,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 ? 'Claimed' 
                 : 'Claim'}
             </motion.button>
+          ) : null
           )}
                           {number.status === 'reserved' && number.reservedBy === user?.id && (
             <motion.button
@@ -6184,28 +6364,24 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   whileTap={{ scale: 0.95 }}
                   onClick={debouncedSearchTerm.trim() ? goToNextSearchPage : goToNextPage}
                   disabled={!displayPagination.hasNextPage || loading}
-                  className={`inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0 ${
-                    debouncedSearchTerm.trim() ? 'rounded-r-lg' : ''
-                  }`}
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
                   title="Next Page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </motion.button>
 
-                {/* Last Page Button - Only show in browse mode, not in search mode */}
-                {!debouncedSearchTerm.trim() && (
+                {/* Last Page Button - Show for both browse and search mode */}
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
-                    onClick={() => goToPage(displayPagination.totalPages)}
+                  onClick={() => debouncedSearchTerm.trim() ? goToSearchPage(displayPagination.totalPages) : goToPage(displayPagination.totalPages)}
                   disabled={displayPagination.currentPage === displayPagination.totalPages || loading}
-                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
                   title="Last Page"
                 >
                   <ChevronRight className="h-4 w-4" />
                   <ChevronRight className="h-4 w-4 -ml-1" />
                 </motion.button>
-                )}
 
                 {/* Load More Button - Only show on last page when searching and more results available */}
                 {debouncedSearchTerm.trim() && 
@@ -6324,7 +6500,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </span>
                   </div>
                   <div className="mt-2 text-[11px] text-gray-800 leading-snug bg-gradient-to-r from-indigo-50 via-purple-50 to-blue-50 border border-indigo-100 rounded-md px-3 py-2">
-                    <div>• Max 3 claims per day</div>
+                    <div>• Max 10 claims per day</div>
                     <div>• Per-number queue cap: 3</div>
                     <div>• Claim window: 8 AM–10:30 PM (UAE time)</div>
                   </div>
@@ -6557,6 +6733,35 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 <button
                   onClick={() => setShowReserveLimitDialog(false)}
                   className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reservation Limit - Can't Claim Dialog (shown when clicking triangle on reserved numbers) */}
+        {showReservationLimitClaimDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-lg w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-4 rounded-full bg-amber-100">
+                  <AlertTriangle className="h-10 w-10 text-amber-600" />
+                </div>
+              </div>
+              <h3 className="text-2xl font-semibold text-gray-900 text-center mb-4">
+                Reservation Limit Reached
+              </h3>
+              <p className="text-lg text-gray-600 text-center mb-8 leading-relaxed">
+                You have already three numbers reserved. You can&apos;t reserve more.
+                <br /><br />
+                Please release a number first in order to claim.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setShowReservationLimitClaimDialog(false)}
+                  className="px-6 py-3 text-base font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors"
                 >
                   OK
                 </button>

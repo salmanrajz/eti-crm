@@ -45,6 +45,7 @@ import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 export interface AppConfig {
   id?: string;                           // Document ID in Firestore
   whatsappApiEndpoint: string;          // WhatsApp Business API endpoint URL
+  whatsappSessionId?: string;           // Baileys WhatsApp session ID (for Baileys API)
   whatsappVerificationEnabled: boolean; // Verification feature toggle
   updatedBy: string;                    // User who last updated the configuration
   updatedAt: Date;                      // Timestamp of last configuration update

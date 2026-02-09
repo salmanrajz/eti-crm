@@ -12,11 +12,12 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { doc, updateDoc, collection, addDoc, query, where, getDocs, limit, orderBy, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { AgentLink, NumberPool, Plan, Lead } from '../types';
+import { SmartPagination } from '../utils/smartPagination';
 import { unifiedSearch } from '../utils/unifiedSearch';
 import { getPlans } from '../utils/planService';
 import { toast } from 'react-hot-toast';
@@ -41,6 +42,7 @@ import {
 } from 'lucide-react';
 import { countryList } from '../utils/countries';
 import clsx from 'clsx';
+import { useDebounce } from '../hooks/useDebounce';
 
 const uaeEmirates = [
   'Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'
@@ -65,7 +67,19 @@ export function CustomerPortal() {
   const [otpVerified, setOtpVerified] = useState(false);
   const [enteredOTP, setEnteredOTP] = useState('');
   const [otpError, setOtpError] = useState('');
-  const [step, setStep] = useState<'phone' | 'search' | 'plans' | 'details' | 'success'>('phone');
+  const [step, setStep] = useState<'phone' | 'pool' | 'search' | 'plans' | 'details' | 'success'>('phone');
+
+  // Trusted customers: pool numbers (same SmartPagination as NumberPool)
+  const [poolNumbers, setPoolNumbers] = useState<NumberPool[]>([]);
+  const [poolLoading, setPoolLoading] = useState(false);
+  const [poolPage, setPoolPage] = useState(1);
+  const [poolPageSize, setPoolPageSize] = useState(20);
+  const [poolTotalPages, setPoolTotalPages] = useState(1);
+  const [poolTotalItems, setPoolTotalItems] = useState(0);
+  const poolPaginationRef = useRef<SmartPagination<NumberPool> | null>(null);
+  const [poolSearchTerm, setPoolSearchTerm] = useState('');
+  const [poolSearchResults, setPoolSearchResults] = useState<NumberPool[]>([]);
+  const [poolSearching, setPoolSearching] = useState(false);
 
   const [enteredPhone, setEnteredPhone] = useState('');
   const [similarNumbers, setSimilarNumbers] = useState<NumberPool[]>([]);
@@ -103,6 +117,130 @@ export function CustomerPortal() {
     hasEmirateId: false,
     advancePayment: false,
   });
+
+  // Trusted customers: after OTP, go directly to pool (skip phone step)
+  useEffect(() => {
+    if (otpVerified && agentLink?.trustedCustomers) {
+      setStep('pool');
+    }
+  }, [otpVerified, agentLink?.trustedCustomers]);
+
+  // Pool filters key - recreate SmartPagination when this changes
+  const poolFiltersKey = agentLink
+    ? `${agentLink.allowedGroups?.join(',')}|${(agentLink.allowedCategories?.length ? agentLink.allowedCategories : ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum']).join(',')}|${poolPageSize}`
+    : '';
+
+  // Load pool numbers using SmartPagination (same as NumberPool)
+  const loadPoolNumbers = useCallback(async (page: number = 1) => {
+    if (!agentLink) return;
+    setPoolLoading(true);
+    try {
+      const groups = agentLink.allowedGroups.slice(0, 10);
+      const rawCategories = (agentLink.allowedCategories && agentLink.allowedCategories.length > 0)
+        ? agentLink.allowedCategories
+        : ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'Platinum'];
+      // Normalize to DB format: "Silver Plus" -> "Silver plus", "Gold Plus" -> "Gold plus"
+      const categories = rawCategories.map(normalizeCategoryForQuery);
+
+      // Create SmartPagination instance (same as NumberPool) - recreate when filtersKey changes
+      if (!poolPaginationRef.current) {
+        const filters: Array<{ field: string; operator: '==' | 'in'; value: unknown }> = [
+          { field: 'status', operator: '==', value: 'open' },
+          { field: 'group', operator: 'in', value: groups },
+        ];
+        if (categories.length > 0) {
+          filters.push({ field: 'category', operator: 'in', value: categories.slice(0, 10) });
+        }
+        poolPaginationRef.current = new SmartPagination<NumberPool>('numberPool', {
+          pageSize: poolPageSize,
+          orderBy: 'number',
+          orderDirection: 'asc',
+          filters,
+        });
+      }
+
+      const result = await poolPaginationRef.current.loadPage(page);
+
+      const pageData = result.data.map(d => ({
+        ...d,
+        createdAt: (d.createdAt as any)?.toDate?.() || d.createdAt,
+      })) as NumberPool[];
+
+      setPoolNumbers(pageData);
+      setPoolTotalItems(poolPaginationRef.current.getTotalItems());
+      setPoolTotalPages(poolPaginationRef.current.getTotalPages());
+    } catch (err: any) {
+      console.error('Pool load error:', err);
+      toast.error('Failed to load numbers');
+      setPoolNumbers([]);
+      setPoolTotalItems(0);
+      setPoolTotalPages(1);
+    } finally {
+      setPoolLoading(false);
+    }
+  }, [agentLink, poolPageSize]);
+
+  // Recreate pagination when filters or page size change
+  useEffect(() => {
+    poolPaginationRef.current = null;
+  }, [poolFiltersKey]);
+
+  useEffect(() => {
+    if (step === 'pool' && agentLink?.trustedCustomers) {
+      loadPoolNumbers(poolPage);
+    }
+  }, [step, poolPage, agentLink?.trustedCustomers, loadPoolNumbers]);
+
+  // Pool search: when user types in search bar, search across allowed groups/categories
+  const debouncedPoolSearch = useDebounce(poolSearchTerm, 300);
+  useEffect(() => {
+    if (step !== 'pool' || !agentLink?.trustedCustomers) return;
+    if (!debouncedPoolSearch.trim()) {
+      setPoolSearchResults([]);
+      setPoolSearching(false);
+      return;
+    }
+    const runPoolSearch = async () => {
+      setPoolSearching(true);
+      try {
+        let allResults: NumberPool[] = [];
+        if (agentLink.allowedCategories && agentLink.allowedCategories.length > 0) {
+          const categoryPromises = agentLink.allowedCategories.map(async (cat) => {
+            const normalized = normalizeCategoryForQuery(cat);
+            const result = await unifiedSearch.search(debouncedPoolSearch, {
+              category: normalized,
+              limit: 500,
+              statusFilter: 'open',
+            });
+            return result;
+          });
+          const categoryResults = await Promise.all(categoryPromises);
+          categoryResults.forEach((r) => allResults.push(...r.data));
+          const uniqueMap = new Map<string, NumberPool>();
+          allResults.forEach((n) => uniqueMap.set(n.id, n));
+          allResults = Array.from(uniqueMap.values());
+        } else {
+          const result = await unifiedSearch.search(debouncedPoolSearch, {
+            category: 'all',
+            limit: 500,
+            statusFilter: 'open',
+          });
+          allResults = result.data;
+        }
+        const filtered = allResults.filter((n) =>
+          agentLink.allowedGroups.includes(n.group || 'Standard') && n.status === 'open'
+        );
+        setPoolSearchResults(filtered);
+      } catch (err) {
+        console.error('Pool search error:', err);
+        toast.error('Search failed');
+        setPoolSearchResults([]);
+      } finally {
+        setPoolSearching(false);
+      }
+    };
+    runPoolSearch();
+  }, [debouncedPoolSearch, step, agentLink]);
 
   // Check for existing OTP session on mount
   useEffect(() => {
@@ -189,9 +327,9 @@ export function CustomerPortal() {
         };
 
         try {
-          // Use ipapi.co for IP and location (free tier: 1000 requests/day)
-          // Alternative: ip-api.com (no key required, 45 requests/minute)
-          const ipResponse = await fetch('https://ipapi.co/json/', {
+          // Use ip-api.com for IP and location (CORS-friendly, no key required, 45 requests/minute)
+          // This service supports CORS and works from any origin
+          const ipResponse = await fetch('http://ip-api.com/json/?fields=status,message,country,regionName,city,timezone,lat,lon,query', {
             method: 'GET',
             headers: {
               'Accept': 'application/json',
@@ -200,18 +338,21 @@ export function CustomerPortal() {
           
           if (ipResponse.ok) {
             const ipData = await ipResponse.json();
-            ipAddress = ipData.ip || 'Unknown';
-            location = {
-              country: ipData.country_name || ipData.country || 'Unknown',
-              region: ipData.region || ipData.region_code || 'Unknown',
-              city: ipData.city || 'Unknown',
-              timezone: ipData.timezone || 'Unknown',
-              latitude: ipData.latitude || null,
-              longitude: ipData.longitude || null,
-            };
+            if (ipData.status === 'success') {
+              ipAddress = ipData.query || 'Unknown';
+              location = {
+                country: ipData.country || 'Unknown',
+                region: ipData.regionName || 'Unknown',
+                city: ipData.city || 'Unknown',
+                timezone: ipData.timezone || 'Unknown',
+                latitude: ipData.lat || null,
+                longitude: ipData.lon || null,
+              };
+            }
           }
         } catch (ipError) {
           // Silent fail - don't block user if IP/location fetch fails
+          // CORS errors or network issues won't prevent the portal from loading
         }
 
         // Store access analytics in linkAccessLogs subcollection
@@ -290,6 +431,19 @@ export function CustomerPortal() {
     }
   };
 
+  // Helper function to normalize category names for Firestore queries
+  // Database uses "Silver plus" (lowercase p), but links might have "Silver Plus" (uppercase P)
+  // Normalize to database format: "Silver plus", "Gold plus"
+  const normalizeCategoryForQuery = (category: string): string => {
+    const normalized = category.trim();
+    const lower = normalized.toLowerCase();
+    // Map to database format (lowercase 'p' in "plus")
+    if (lower === 'silver plus' || lower === 'silverplus') return 'Silver plus';
+    if (lower === 'gold plus' || lower === 'goldplus') return 'Gold plus';
+    // For other categories, preserve original case (Standard, Silver, Gold, Platinum)
+    return normalized;
+  };
+
   const findSimilarNumbers = useCallback(async (phone: string) => {
     if (!phone.trim() || !agentLink) return;
 
@@ -327,7 +481,7 @@ export function CustomerPortal() {
           where('status', '==', 'open'),
           where('numberTokens', 'array-contains', searchToken),
           orderBy('number'),
-          limit(500) // Fetch more to account for filtering
+          limit(5000) // Fetch more to show all matching results
         );
 
         const snapshot = await getDocs(q);
@@ -359,7 +513,7 @@ export function CustomerPortal() {
               where('status', '==', 'open'),
               where('numberTokens', 'array-contains', fallbackToken),
               orderBy('number'),
-              limit(500)
+              limit(5000) // Fetch more to show all matching results
             );
             const snapshot = await getDocs(q);
             snapshot.docs.forEach(doc => {
@@ -374,7 +528,7 @@ export function CustomerPortal() {
               if (numberDigits.includes(searchDigits) && !seenIds.has(numData.id)) {
                 seenIds.add(numData.id);
                 results.push(numData);
-              }
+      }
             });
           } catch (fallbackError) {
             console.error('Fallback token query error:', fallbackError);
@@ -382,13 +536,14 @@ export function CustomerPortal() {
         }
       }
 
-      // Filter by allowed groups and categories
+      // Filter by allowed groups and categories (case-insensitive matching)
       const filtered = results.filter(num => {
         const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
+        const numCategory = (num.category || 'Standard').toLowerCase();
         const matchesCategory =
           !agentLink.allowedCategories ||
           agentLink.allowedCategories.length === 0 ||
-          agentLink.allowedCategories.includes(num.category || 'Standard');
+          agentLink.allowedCategories.some(cat => cat.toLowerCase() === numCategory);
         
         // Double-check: number must contain the search digits
         const numberDigits = (num.number || '').replace(/\D/g, '');
@@ -461,7 +616,7 @@ export function CustomerPortal() {
                   collection(db, 'numberPool'),
                   where('status', '==', 'open'),
                   orderBy('number'),
-                  limit(1000) // Fetch more for 2-digit search since we filter in memory
+                  limit(5000) // Fetch more to show all matching results
                 );
               } else {
                 // For 3+ digit patterns, use token search
@@ -470,10 +625,10 @@ export function CustomerPortal() {
                   where('status', '==', 'open'),
                   where('numberTokens', 'array-contains', partialToken),
                   orderBy('number'),
-                  limit(500)
+                  limit(5000) // Fetch more to show all matching results
                 );
-              }
-              
+      }
+
               const partialSnapshot = await getDocs(partialQ);
               
               partialSnapshot.docs.forEach(doc => {
@@ -492,13 +647,14 @@ export function CustomerPortal() {
                 }
               });
               
-              // Filter by allowed groups and categories with strict validation
+              // Filter by allowed groups and categories with strict validation (case-insensitive matching)
               const partialFiltered = partialResults.filter(num => {
                 const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
+                const numCategory = (num.category || 'Standard').toLowerCase();
                 const matchesCategory =
                   !agentLink.allowedCategories ||
                   agentLink.allowedCategories.length === 0 ||
-                  agentLink.allowedCategories.includes(num.category || 'Standard');
+                  agentLink.allowedCategories.some(cat => cat.toLowerCase() === numCategory);
                 
                 // Strict check: number must contain the partial digits
                 const numberDigits = (num.number || '').replace(/\D/g, '');
@@ -550,7 +706,7 @@ export function CustomerPortal() {
           if (validatedPartialResults.length > 0) {
             setFallbackMessage(partialMessage);
             setFallbackPattern(partialDigits);
-            setSimilarNumbers(validatedPartialResults.slice(0, 50));
+            setSimilarNumbers(validatedPartialResults); // Show all partial results
           } else {
             setSimilarNumbers([]);
             setIsShowingFallback(false);
@@ -575,12 +731,12 @@ export function CustomerPortal() {
           }
           
           return true;
-        });
-        
-        // Set results (no pagination for similar numbers)
-        setSimilarNumbers(validatedFiltered.slice(0, 50));
-        setSimilarHasMore(validatedFiltered.length >= 50);
-        setSimilarLastDoc(snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null);
+      });
+
+        // Set all results (no limit for recommended numbers)
+        setSimilarNumbers(validatedFiltered);
+        setSimilarHasMore(false); // No pagination for similar numbers
+        setSimilarLastDoc(null); // No pagination for similar numbers
       }
     } catch (error) {
       console.error('Error finding similar numbers:', error);
@@ -654,19 +810,37 @@ export function CustomerPortal() {
       
       for (const strategy of searchStrategies) {
         if (strategy.term.length >= 2) {
+          let strategyResults: NumberPool[] = [];
+          
+          // If link has category filters, search within those categories
+          if (agentLink.allowedCategories && agentLink.allowedCategories.length > 0) {
+            // Search each allowed category separately (normalize category names)
+            const categoryPromises = agentLink.allowedCategories.map(async (category) => {
+              const normalizedCategory = normalizeCategoryForQuery(category);
+              const result = await unifiedSearch.search(strategy.term, {
+                category: normalizedCategory,
+                limit: strategy.limit,
+                statusFilter: 'open',
+              });
+              return result.data;
+            });
+            
+            const categoryResultsArrays = await Promise.all(categoryPromises);
+            strategyResults = categoryResultsArrays.flat();
+          } else {
+            // No category filter, search all categories
           const result = await unifiedSearch.search(strategy.term, {
             category: 'all',
             limit: strategy.limit,
             statusFilter: 'open',
           });
+            strategyResults = result.data;
+          }
           
-          const filtered = result.data.filter(num => {
+          // Filter by allowed groups (category already filtered if categories were specified)
+          const filtered = strategyResults.filter(num => {
             const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
-            const matchesCategory =
-              !agentLink.allowedCategories ||
-              agentLink.allowedCategories.length === 0 ||
-              agentLink.allowedCategories.includes(num.category || 'Standard');
-            return matchesGroup && matchesCategory && num.status === 'open';
+            return matchesGroup && num.status === 'open';
           });
           
           allNumbers.push(...filtered);
@@ -716,24 +890,65 @@ export function CustomerPortal() {
     }
 
     try {
+      // If link has category filters, search within those categories for maximum results
+      // Otherwise, search all categories
+      let allResults: NumberPool[] = [];
+      let hasMore = false;
+      let lastDoc: any = null;
+      
+      if (agentLink.allowedCategories && agentLink.allowedCategories.length > 0) {
+        // Search each allowed category separately to get maximum results (normalize category names)
+        const categoryPromises = agentLink.allowedCategories.map(async (category) => {
+          const normalizedCategory = normalizeCategoryForQuery(category);
+          const result = await unifiedSearch.search(searchTerm, {
+            category: normalizedCategory,
+            limit: 5000,
+            startAfter: loadMore ? cursorDoc : null,
+            statusFilter: 'open',
+          });
+          return result;
+        });
+        
+        const categoryResults = await Promise.all(categoryPromises);
+        
+        // Combine results from all categories
+        categoryResults.forEach(result => {
+          allResults.push(...result.data);
+          if (result.hasMore) hasMore = true;
+          if (result.lastDoc) lastDoc = result.lastDoc; // Use last doc from last category
+        });
+        
+        // Remove duplicates
+        const uniqueMap = new Map<string, NumberPool>();
+        allResults.forEach(num => {
+          if (!uniqueMap.has(num.id)) {
+            uniqueMap.set(num.id, num);
+          }
+        });
+        allResults = Array.from(uniqueMap.values());
+      } else {
+        // No category filter, search all categories
       const result = await unifiedSearch.search(searchTerm, {
         category: 'all',
-        limit: 50,
+          limit: 5000,
         startAfter: loadMore ? cursorDoc : null,
         statusFilter: 'open',
       });
+        allResults = result.data;
+        hasMore = result.hasMore || false;
+        lastDoc = result.lastDoc || null;
+      }
 
-      const filtered = result.data.filter(num => {
+      // Filter by allowed groups (category already filtered if categories were specified)
+      const filtered = allResults.filter(num => {
         const matchesGroup = agentLink.allowedGroups.includes(num.group || 'Standard');
-        const matchesCategory =
-          !agentLink.allowedCategories ||
-          agentLink.allowedCategories.length === 0 ||
-          agentLink.allowedCategories.includes(num.category || 'Standard');
-        return matchesGroup && matchesCategory && num.status === 'open';
+        return matchesGroup && num.status === 'open';
       });
 
       if (loadMore) {
         setSearchResults(prev => [...prev, ...filtered]);
+        setSearchHasMore(hasMore);
+        setSearchLastDoc(lastDoc);
       } else {
         // If no exact results, find most matching numbers
         if (filtered.length === 0) {
@@ -745,8 +960,8 @@ export function CustomerPortal() {
         } else {
           setSearchResults(filtered);
           setShowingMostMatching(false);
-          setSearchHasMore(result.hasMore || false);
-          setSearchLastDoc(result.lastDoc || null);
+          setSearchHasMore(hasMore);
+          setSearchLastDoc(lastDoc);
         }
       }
     } catch (error) {
@@ -1429,6 +1644,23 @@ export function CustomerPortal() {
         .pb-safe-bottom {
           padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
         }
+        .bottom-nav-fixed {
+          position: fixed;
+          bottom: 0;
+          left: 0;
+          right: 0;
+          z-index: 50;
+          padding: 1rem;
+          padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+          transform: translateZ(0);
+          -webkit-transform: translateZ(0);
+          backface-visibility: hidden;
+          -webkit-backface-visibility: hidden;
+          max-height: 45vh;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        }
         .touch-manipulation {
           touch-action: manipulation;
           -webkit-tap-highlight-color: transparent;
@@ -1457,12 +1689,12 @@ export function CustomerPortal() {
         >
           <div className="px-4 py-3 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              {step !== 'phone' && step !== 'success' && (
+              {step !== 'phone' && step !== 'pool' && step !== 'success' && (
                 <motion.button
                   whileTap={{ scale: 0.9 }}
                   onClick={() => {
-                    if (step === 'search') setStep('phone');
-                    if (step === 'plans') setStep('search');
+                    if (step === 'search') setStep(agentLink?.trustedCustomers ? 'pool' : 'phone');
+                    if (step === 'plans') setStep(agentLink?.trustedCustomers ? 'pool' : 'search');
                     if (step === 'details') setStep('plans');
                   }}
                         className="w-12 h-12 -ml-2 flex items-center justify-center rounded-full active:bg-gray-100 touch-manipulation min-w-[48px] min-h-[48px]"
@@ -1725,6 +1957,181 @@ export function CustomerPortal() {
                     </div>
                   </div>
                 </motion.div>
+              </motion.div>
+            )}
+
+            {step === 'pool' && agentLink?.trustedCustomers && (
+              <motion.div
+                key="pool"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="space-y-3 sm:space-y-4 pb-16 sm:pb-20"
+              >
+                <div className="pt-4 sm:pt-6 mb-3 sm:mb-4">
+                  <h3 className="text-lg sm:text-xl lg:text-2xl font-black text-gray-900 uppercase tracking-wide flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 sm:w-6 sm:h-6 text-orange-600" />
+                    Available Numbers
+                  </h3>
+                </div>
+
+                {/* Search bar */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by number or code..."
+                    value={poolSearchTerm}
+                    onChange={(e) => setPoolSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-orange-500 focus:border-orange-500 bg-white"
+                  />
+                  {poolSearchTerm && (
+                    <button
+                      onClick={() => setPoolSearchTerm('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  )}
+                </div>
+
+                {poolLoading || poolSearching ? (
+                  <div className="flex justify-center py-12">
+                    <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+                  </div>
+                ) : (() => {
+                  const displayNumbers = poolSearchTerm.trim() ? poolSearchResults : poolNumbers;
+                  return displayNumbers.length === 0 ? (
+                    <div className="text-center py-12 text-gray-500">
+                      <Phone className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+                      <p className="font-medium">
+                        {poolSearchTerm.trim() ? 'No numbers matching your search' : 'No numbers available'}
+                      </p>
+                    </div>
+                  ) : (
+                  <>
+                  <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm bg-white">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
+                        <tr>
+                          <th className="px-4 sm:px-6 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Number</th>
+                          <th className="px-4 sm:px-6 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Category</th>
+                          <th className="px-4 sm:px-6 py-3 text-center text-xs font-bold text-gray-700 uppercase tracking-wider">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {displayNumbers.map((num, i) => {
+                          const isSelected = selectedNumbers.some(n => n.numberId === num.number);
+                          const categoryColors = num.category ? getCategoryColor(num.category) : null;
+                          return (
+                            <motion.tr
+                              key={num.id}
+                              initial={{ opacity: 0, x: -20 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ delay: i * 0.03 }}
+                              className={clsx(
+                                "hover:bg-gray-50 transition-colors",
+                                isSelected && "bg-orange-50 border-l-4 border-orange-500"
+                              )}
+                            >
+                              <td className="px-4 sm:px-6 py-4 whitespace-nowrap">
+                                <span className="text-base sm:text-lg font-mono font-bold text-gray-900">{num.number}</span>
+                              </td>
+                              <td className="px-4 sm:px-6 py-4 whitespace-nowrap">
+                                {num.category && categoryColors && (
+                                  <span
+                                    className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider"
+                                    style={{
+                                      background: categoryColors.bg,
+                                      color: categoryColors.text,
+                                      border: `1px solid ${categoryColors.border}`,
+                                    }}
+                                  >
+                                    {num.category}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 sm:px-6 py-4 whitespace-nowrap text-center">
+                                <motion.button
+                                  whileHover={{ scale: 1.05 }}
+                                  whileTap={{ scale: 0.95 }}
+                                  onClick={() => handleSelectNumber(num)}
+                                  className={clsx(
+                                    "inline-flex items-center px-4 py-2 rounded-lg text-sm font-semibold transition-all",
+                                    isSelected
+                                      ? "bg-orange-600 text-white shadow-lg"
+                                      : "bg-gradient-to-r from-orange-500 to-amber-500 text-white hover:from-orange-600 hover:to-amber-600 shadow-md"
+                                  )}
+                                >
+                                  {isSelected ? (
+                                    <>
+                                      <Check className="w-4 h-4 mr-2" />
+                                      Selected
+                                    </>
+                                  ) : (
+                                    <>
+                                      Select
+                                      <ArrowRight className="w-4 h-4 ml-2" />
+                                    </>
+                                  )}
+                                </motion.button>
+                              </td>
+                            </motion.tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                {/* Page navigation - at bottom */}
+                {!poolSearchTerm.trim() && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-gray-50 border border-gray-200">
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm font-medium text-gray-700">
+                        Page {poolPage} of {poolTotalPages || 1}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={poolPageSize}
+                        onChange={(e) => {
+                          setPoolPageSize(Number(e.target.value));
+                          setPoolPage(1);
+                        }}
+                        className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
+                      >
+                        <option value={10}>10 per page</option>
+                        <option value={20}>20 per page</option>
+                        <option value={40}>40 per page</option>
+                        <option value={80}>80 per page</option>
+                      </select>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => setPoolPage(p => Math.max(1, p - 1))}
+                          disabled={poolPage <= 1 || poolLoading}
+                          className="px-3 py-1.5 text-sm font-medium rounded-lg bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Prev
+                        </button>
+                        <button
+                          onClick={() => setPoolPage(p => Math.min(poolTotalPages, p + 1))}
+                          disabled={poolPage >= poolTotalPages || poolLoading}
+                          className="px-3 py-1.5 text-sm font-medium rounded-lg bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {poolSearchTerm.trim() && poolSearchResults.length > 0 && (
+                  <p className="text-sm text-gray-500 text-center">
+                    {poolSearchResults.length} result{poolSearchResults.length !== 1 ? 's' : ''} found
+                  </p>
+                )}
+                  </>
+                  );
+                })()}
               </motion.div>
             )}
 
@@ -2046,68 +2453,33 @@ export function CustomerPortal() {
                         </motion.button>
                       </div>
                     )}
-
-                    {/* Search Bar at Bottom */}
-                    <div className="mt-6 sm:mt-8">
-                      {/* Search Heading */}
-                      <div className="pt-4 sm:pt-6 mb-3 sm:mb-4">
-                        <h3 className="text-lg sm:text-xl lg:text-2xl font-black text-gray-900 uppercase tracking-wide flex items-center gap-2">
-                          <Sparkles className="w-5 h-5 sm:w-6 sm:h-6 text-orange-600" />
-                          Search Numbers
-                        </h3>
-                      </div>
-
-                      <div className="rounded-2xl p-[2px] relative" style={{
-                        background: 'linear-gradient(135deg, rgba(249, 115, 22, 0.5), rgba(251, 191, 36, 0.5), rgba(249, 115, 22, 0.5))',
-                        boxShadow: '0 4px 16px 0 rgba(249, 115, 22, 0.15)'
-                      }}>
-                        <div className="rounded-2xl p-2 sm:p-3 relative overflow-hidden" style={{
-                          background: 'rgba(249, 250, 251, 0.6)',
-                          backdropFilter: 'blur(20px) saturate(180%)',
-                          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-                          boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.6)'
-                        }}>
-                          <div className="absolute inset-0 bg-gradient-to-br from-white/50 via-transparent to-transparent pointer-events-none" />
-                          <div className="absolute inset-0 rounded-2xl border border-white/60 pointer-events-none" />
-                        
-                          <div className="relative">
-                            <Search className="absolute left-2.5 sm:left-3 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 text-orange-500 z-10" />
-                            <input
-                              type="text"
-                              value={searchTerm}
-                              onChange={(e) => setSearchTerm(e.target.value)}
-                              placeholder="Search for Any other number of your choice."
-                              className="w-full pl-10 sm:pl-12 pr-3 sm:pr-4 py-3 sm:py-4 rounded-xl sm:rounded-2xl text-gray-900 placeholder:text-gray-400 focus:outline-none font-medium text-sm sm:text-base touch-manipulation relative z-10" style={{
-                                background: 'rgba(255, 255, 255, 0.8)',
-                                backdropFilter: 'blur(10px) saturate(180%)',
-                                WebkitBackdropFilter: 'blur(10px) saturate(180%)',
-                                border: '2px solid rgba(249, 115, 22, 0.3)',
-                                boxShadow: '0 2px 8px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.9)',
-                                fontSize: '16px' // Prevent iOS zoom
-                              }}
-                              onFocus={(e) => {
-                                e.target.style.border = '2px solid rgba(249, 115, 22, 0.6)';
-                                e.target.style.boxShadow = '0 4px 12px 0 rgba(249, 115, 22, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.9)';
-                              }}
-                              onBlur={(e) => {
-                                e.target.style.border = '2px solid rgba(249, 115, 22, 0.3)';
-                                e.target.style.boxShadow = '0 2px 8px 0 rgba(249, 115, 22, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.9)';
-                              }}
-                            />
-                            {isSearching && (
-                              <motion.div
-                                animate={{ rotate: 360 }}
-                                transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                                className="absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 z-20"
-                              >
-                                <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 text-orange-500" />
-                              </motion.div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
                   </div>
+                )}
+
+                {/* No Results Message */}
+                {searchTerm.trim() && !isSearching && searchResults.length === 0 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex flex-col items-center justify-center py-12 sm:py-16 px-4"
+                  >
+                    <div className="flex flex-col items-center text-center max-w-md">
+                      <div className="p-4 rounded-full bg-gray-100 mb-4">
+                        <Search className="w-8 h-8 sm:w-10 sm:h-10 text-gray-400" />
+                      </div>
+                      <h3 className="text-lg sm:text-xl font-bold text-gray-900 mb-2">
+                        No Numbers Found
+                      </h3>
+                      <p className="text-sm sm:text-base text-gray-600 mb-1">
+                        No numbers matching "<span className="font-semibold text-gray-900">{searchTerm}</span>" were found in the available categories.
+                      </p>
+                      {agentLink?.allowedCategories && agentLink.allowedCategories.length > 0 && (
+                        <p className="text-xs sm:text-sm text-gray-500 mt-2">
+                          Available categories: {agentLink.allowedCategories.join(', ')}
+                        </p>
+                      )}
+                    </div>
+                  </motion.div>
                 )}
               </motion.div>
             )}
@@ -2487,7 +2859,7 @@ export function CustomerPortal() {
         </div>
 
         <AnimatePresence>
-          {step === 'search' && selectedNumbers.length > 0 && (
+          {(step === 'search' || step === 'pool') && selectedNumbers.length > 0 && (
             <motion.div
               initial={{ y: 100, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}

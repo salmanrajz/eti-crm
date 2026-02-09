@@ -545,6 +545,7 @@ export interface AgentLink {
   isActive: boolean;
   otp?: string; // OTP required to access the customer portal
   otpExpiresAt?: Date; // OTP expiration time (2 hours from generation)
+  trustedCustomers?: boolean; // If true, after OTP show open numbers directly (paginated, like Number Pool)
   createdAt: Date;
   updatedAt: Date;
   expiresAt?: Date; // Optional expiration date
