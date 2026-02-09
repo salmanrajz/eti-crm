@@ -2,15 +2,16 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, X } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, deleteDoc, doc, setDoc, getDoc } from 'firebase/firestore';
 import { useAuthStore } from '../store/authStore';
+
+type BroadcastSource = 'global' | 'targeted';
 
 /**
  * BroadcastPoster
- * Premium curtain-style announcement for all users.
- * - Admin sets the poster content in Firestore at `config/broadcastPoster`
- * - All users see it on next refresh if not yet acknowledged
- * - Once acknowledged, it hides for that user until admin sends again
+ * Premium curtain-style announcements.
+ * - GLOBAL: Admin sets at config/broadcastPoster - all users see it until acknowledged
+ * - TARGETED: Admin sends to selected users only - each user sees only broadcasts sent to them
  */
 export const BroadcastPoster: React.FC = () => {
   const { user } = useAuthStore();
@@ -18,61 +19,87 @@ export const BroadcastPoster: React.FC = () => {
   const [title, setTitle] = useState<string>('');
   const [message, setMessage] = useState<string>('');
   const [posterId, setPosterId] = useState<string>('');
+  const [source, setSource] = useState<BroadcastSource>('global');
   const [dismissedThisSession, setDismissedThisSession] = useState(false);
+  const [targetedRefresh, setTargetedRefresh] = useState(0);
 
-  // Collection paths
   const posterDocRef = doc(db, 'config', 'broadcastPoster');
   const ackDocRef = user ? doc(db, 'users', user.id, 'meta', 'broadcastAck') : null;
+  const broadcastsRef = user ? collection(db, 'users', user.id, 'broadcasts') : null;
+  const broadcastsQuery = broadcastsRef ? query(broadcastsRef, orderBy('createdAt', 'desc')) : null;
 
-  const checkAckAndShow = useCallback(
+  const checkGlobalAndShow = useCallback(
     async (incomingId: string, incomingTitle: string, incomingMessage: string) => {
-      if (!user || !ackDocRef) {
-        setVisible(false);
-        return;
-      }
-
+      if (!user || !ackDocRef || dismissedThisSession) return false;
       const ackSnap = await getDoc(ackDocRef);
       const ackData = ackSnap.exists() ? ackSnap.data() : {};
-      const acknowledgedId = ackData?.posterId;
-
-      if (acknowledgedId === incomingId) {
-        setVisible(false);
-        return;
-      }
-
-      // Show new poster unless user dismissed this session
-      if (!dismissedThisSession) {
-        setPosterId(incomingId);
-        setTitle(incomingTitle);
-        setMessage(incomingMessage);
-        setVisible(true);
-      }
+      if (ackData?.posterId === incomingId) return false;
+      setPosterId(incomingId);
+      setTitle(incomingTitle);
+      setMessage(incomingMessage);
+      setSource('global');
+      setVisible(true);
+      return true;
     },
     [ackDocRef, user, dismissedThisSession]
   );
 
-  // Listen for poster updates
+  // 1. Listen to GLOBAL broadcast (config/broadcastPoster) - always available
   useEffect(() => {
     const unsub = onSnapshot(posterDocRef, (snap) => {
       const data = snap.data();
-      if (!data || !data.posterId || !data.title || !data.message) {
-        setVisible(false);
-        return;
-      }
-      checkAckAndShow(data.posterId, data.title, data.message);
+      if (!data?.posterId || !data?.title || !data?.message) return;
+      checkGlobalAndShow(data.posterId, data.title, data.message);
     });
-
     return () => unsub();
-  }, [posterDocRef, checkAckAndShow]);
+  }, [posterDocRef, checkGlobalAndShow]);
+
+  // 2. Listen to TARGETED broadcasts - show only when no unacked global
+  useEffect(() => {
+    if (!user || !broadcastsQuery || dismissedThisSession) return;
+    const unsub = onSnapshot(broadcastsQuery, async (snap) => {
+      const docs = snap.docs;
+      if (docs.length === 0) return;
+      // Don't show targeted if there's an unacked global
+      if (ackDocRef) {
+        const posterSnap = await getDoc(posterDocRef);
+        const posterData = posterSnap.data();
+        if (posterData?.posterId) {
+          const ackSnap = await getDoc(ackDocRef);
+          const ackData = ackSnap.exists() ? ackSnap.data() : {};
+          if (ackData?.posterId !== posterData.posterId) return; // Global is active, skip targeted
+        }
+      }
+      const latest = docs[0];
+      const data = latest.data();
+      if (data?.title != null && data?.message != null) {
+        setPosterId(latest.id);
+        setTitle(data.title);
+        setMessage(data.message);
+        setSource('targeted');
+        setVisible(true);
+      }
+    });
+    return () => unsub();
+  }, [user?.id, broadcastsQuery, dismissedThisSession, ackDocRef, targetedRefresh]);
 
   const handleAcknowledge = async () => {
-    if (!user || !ackDocRef || !posterId) {
+    if (!user || !posterId) {
       setVisible(false);
       return;
     }
-
-    await setDoc(ackDocRef, { posterId, acknowledgedAt: new Date() }, { merge: true });
+    const wasGlobal = source === 'global';
+    try {
+      if (wasGlobal && ackDocRef) {
+        await setDoc(ackDocRef, { posterId, acknowledgedAt: new Date() }, { merge: true });
+      } else if (source === 'targeted') {
+        await deleteDoc(doc(db, 'users', user.id, 'broadcasts', posterId));
+      }
+    } catch {
+      // Fallback: just hide
+    }
     setVisible(false);
+    if (wasGlobal) setTargetedRefresh((t) => t + 1); // Re-check targeted after ack global
   };
 
   return (

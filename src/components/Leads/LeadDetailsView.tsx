@@ -3241,13 +3241,19 @@ Language: ${lead.language || 'N/A'}`;
             const numberData = numberDoc.data();
             const numberStatus = numberData?.status;
             const reservedBy = numberData?.reservedBy;
+            const numberLeadId = numberData?.leadId;
             
-            // Number is valid if it's open OR reserved by this agent (or lead's agent for managers)
-            const isValid = numberStatus === 'open' || reservedBy === user.id || reservedBy === lead.agentId;
+            // Number is valid only if: open, OR reserved by this agent, OR attached to this lead with resubmittable status (non_verified/follow_verification)
+            const isOpen = numberStatus === 'open';
+            const isReservedByAgent = numberStatus === 'reserved' && (reservedBy === user.id || reservedBy === lead.agentId);
+            const isOnThisLeadResubmittable = numberLeadId === lead.id && ['non_verified', 'follow_verification'].includes(numberStatus);
+            const isValid = isOpen || isReservedByAgent || isOnThisLeadResubmittable;
             
             if (!isValid) {
               const reason = numberStatus === 'reserved' 
                 ? 'Number is reserved by another agent'
+                : numberStatus === 'follow_up' || numberStatus === 'verified' || numberStatus === 'assigned' || numberStatus === 'activated'
+                ? `Number is in use (status: ${numberStatus}). It must be open or reserved by you to resubmit.`
                 : `Number status is ${numberStatus}`;
               return { numberId: p.numberId, valid: false, reason, number: numberData?.number || p.number || p.numberId };
             }

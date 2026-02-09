@@ -1167,7 +1167,7 @@ export function DashboardLayout() {
         "transition-all duration-200 ease-in-out",
         // Only apply margin on desktop (md and up), not on mobile
         isSidebarOpen ? "md:ml-64" : "md:ml-0",
-        "px-2 sm:px-4 md:px-6 lg:px-8 pb-20 md:pb-0"
+        "px-2 sm:px-4 md:px-6 lg:px-8 pb-24 md:pb-0"
       )}>
         <div className="min-h-screen w-full max-w-7xl mx-auto flex flex-col">
           <div className="flex-1">
@@ -1194,41 +1194,33 @@ export function DashboardLayout() {
         </div>
       </div>
 
-      {/* Mobile Navigation Bar - Premium Redesign */}
-      <div 
-        className="md:hidden fixed bottom-0 left-0 right-0 z-50" 
+      {/* Mobile Navigation Bar - App-style fixed bottom nav (stable on scroll) */}
+      <nav 
+        className="mobile-bottom-nav md:hidden fixed bottom-0 left-0 right-0 z-50 touch-manipulation flex flex-col"
         style={{ 
           paddingBottom: 'env(safe-area-inset-bottom, 0px)',
-          height: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
-          minHeight: '4rem',
-          maxHeight: 'calc(4rem + env(safe-area-inset-bottom, 0px))',
-          transform: 'translateZ(0)',
-          willChange: 'transform',
-          backfaceVisibility: 'hidden'
+          height: 'calc(5.75rem + env(safe-area-inset-bottom, 0px))',
+          minHeight: '5.75rem',
+          maxHeight: 'calc(5.75rem + env(safe-area-inset-bottom, 0px))',
+          contain: 'layout style',
+          isolation: 'isolate'
         }}
+        aria-label="Main navigation"
       >
-        {/* Enhanced glass morphism background with gradient */}
+        {/* Glass morphism background - fixed height, no expansion */}
         <div 
           className="absolute inset-0 bg-gradient-to-t from-white via-white/95 to-white/90 backdrop-blur-2xl border-t border-gray-200/60 shadow-[0_-4px_24px_rgba(0,0,0,0.08)]"
-          style={{
-            height: '100%',
-            minHeight: '4rem',
-            maxHeight: '100%'
-          }}
-        >
-        </div>
+          style={{ height: '100%' }}
+          aria-hidden
+        />
         
-        {/* Subtle top glow effect - positioned slightly above to prevent clipping */}
-        <div className="absolute -top-px left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-indigo-200/50 to-transparent" />
+        {/* Subtle top glow */}
+        <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-indigo-200/50 to-transparent pointer-events-none" aria-hidden />
         
+        {/* Nav items container - fixed 4rem bar, anchored to bottom */}
         <div 
-          className="relative flex items-center justify-around px-2.5" 
-          style={{ 
-            height: '4rem',
-            minHeight: '4rem',
-            maxHeight: '4rem',
-            paddingBottom: 'calc(0.375rem + env(safe-area-inset-bottom, 0px))'
-          }}
+          className="relative flex items-center justify-around px-2.5 shrink-0 mt-auto"
+          style={{ height: '4rem', minHeight: '4rem', maxHeight: '4rem' }}
         >
           {/* Dashboard Button */}
           <Link
@@ -1434,7 +1426,7 @@ export function DashboardLayout() {
             </div>
           </Link>
         </div>
-      </div>
+      </nav>
 
       {/* Logout Confirmation Dialog */}
       <Transition appear show={isLogoutDialogOpen} as={Fragment}>

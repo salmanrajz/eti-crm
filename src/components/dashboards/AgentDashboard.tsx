@@ -76,7 +76,7 @@ import {
 import { toast } from 'react-hot-toast';
 import { clsx } from 'clsx';
 import { motion } from 'framer-motion';
-import { StruckNumbers, useStruckNumbers, useStrikeLimit } from './StruckNumbers';
+import { StruckNumbers, useStruckNumbers, useStrikeLimit, MAX_CLAIMS_PER_24H } from './StruckNumbers';
 import PayrollAndAttendanceDashboard from '../PayrollAndAttendanceDashboard';
 import { dashboardPerf } from '../../utils/performance';
 // ✅ ENHANCED: Import enhanced cache system
@@ -1060,16 +1060,16 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
 
           {/* Strike Limit Info */}
           <div className="flex items-center gap-2 text-sm">
-            <span className="text-gray-600">Strikes remaining today:</span>
+            <span className="text-gray-600">Claims remaining today:</span>
             <span className={clsx(
               "font-semibold",
               remainingStrikes > 0 ? "text-green-600" : "text-red-600"
             )}>
-              {remainingStrikes}/2
+              {remainingStrikes}/{MAX_CLAIMS_PER_24H}
             </span>
-            {lastStrikeTime && remainingStrikes < 2 && (
+            {lastStrikeTime && remainingStrikes < MAX_CLAIMS_PER_24H && (
               <span className="text-gray-500">
-                (Next strike available {formatDistanceToNow(addHours(lastStrikeTime, 24), { addSuffix: true })})
+                (Resets at UAE midnight)
               </span>
             )}
           </div>
@@ -1090,10 +1090,10 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
                 <div>
                   <h2 className="text-xl font-semibold text-gray-900">Struck Numbers</h2>
                   <p className="text-sm text-gray-500 mt-1">
-                    Strikes remaining today: {remainingStrikes}/2
-                    {lastStrikeTime && remainingStrikes < 2 && (
+                    Claims remaining today: {remainingStrikes}/{MAX_CLAIMS_PER_24H}
+                    {remainingStrikes < MAX_CLAIMS_PER_24H && (
                       <span className="ml-2">
-                        (Next strike available {formatDistanceToNow(addHours(lastStrikeTime, 24), { addSuffix: true })})
+                        (Resets at UAE midnight)
                       </span>
                     )}
                   </p>

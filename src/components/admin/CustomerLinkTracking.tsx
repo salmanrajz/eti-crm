@@ -920,7 +920,7 @@ export function CustomerLinkTracking({ isOpen, onClose }: CustomerLinkTrackingPr
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-sm font-medium text-gray-700">OTP Status</label>
+                    <label className="text-sm font-medium text-gray-700">OTP Status</label>
                       {isAdmin && selectedLink.otp && (
                         <button
                           onClick={() => {

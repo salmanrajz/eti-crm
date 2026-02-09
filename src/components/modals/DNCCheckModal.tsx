@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Phone, CheckCircle, XCircle, AlertCircle, AlertTriangle, Loader2, Copy, Check, MessageCircle, MessageSquare, Shield } from 'lucide-react';
+import { X, Phone, CheckCircle, XCircle, AlertCircle, AlertTriangle, Loader2, Copy, Check, MessageCircle, MessageSquare, Shield, Download } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { checkDNCNumber, checkMultipleDNCNumbers, DNCResult } from '../../utils/dncCheck';
 import { useAuthStore } from '../../store/authStore';
@@ -137,6 +137,35 @@ export function DNCCheckModal({ isOpen, onClose, defaultTab = 'single' }: DNCChe
     setResults([]);
     setPhoneNumber('');
     setMultipleNumbers('');
+  };
+
+  const downloadExcel = async () => {
+    if (results.length === 0) return;
+    try {
+      const XLSX = await import('xlsx');
+      const exportData = results.map((r) => ({
+        Number: r.number,
+        'WhatsApp ID': r.formattedNumber || '',
+        'WhatsApp Status': r.exists
+          ? 'Exists'
+          : r.error
+            ? 'Error'
+            : 'Not Found',
+        'DNC Status': r.isDNC ? 'In DNC - DO NOT CALL' : 'Not in DNC - Safe to call',
+        'Number Pool': r.inNumberPool ? 'Available' : 'Not Found',
+        Notes: r.error || r.numberPoolWarning || '',
+      }));
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Lookup Results');
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const filename = `WhatsApp_Number_Lookup_${dateStr}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      toast.success('Results downloaded');
+    } catch (err) {
+      console.error('Excel download error:', err);
+      toast.error('Failed to download');
+    }
   };
 
   if (!isOpen) return null;
@@ -282,12 +311,21 @@ export function DNCCheckModal({ isOpen, onClose, defaultTab = 'single' }: DNCChe
               <div className="mt-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-lg font-semibold text-gray-900">Results</h3>
-                  <button
-                    onClick={clearResults}
-                    className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-                  >
-                    Clear Results
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={downloadExcel}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded-lg transition-colors"
+                    >
+                      <Download className="h-4 w-4" />
+                      Download Excel
+                    </button>
+                    <button
+                      onClick={clearResults}
+                      className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
+                    >
+                      Clear Results
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-3 max-h-60 overflow-y-auto">

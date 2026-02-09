@@ -74,7 +74,19 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { format, subHours } from 'date-fns';
+import { format } from 'date-fns';
+
+/** Max claims/strikes per 24h (UAE midnight reset) - shared with NumberPool */
+export const MAX_CLAIMS_PER_24H = 10;
+const getTodayUaeDateString = () => {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dubai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  return formatter.format(new Date());
+};
 import { clsx } from 'clsx';
 import { toast } from 'react-hot-toast';
 
@@ -565,7 +577,7 @@ const NumberCard = ({ number, index }: { number: NumberPoolType; index: number }
 
 export function useStrikeLimit(userId: string): StrikeLimit {
   const [strikeLimit, setStrikeLimit] = useState<StrikeLimit>({
-    remainingStrikes: 2,
+    remainingStrikes: MAX_CLAIMS_PER_24H,
     lastStrikeTime: null,
     canStrike: true
   });
@@ -577,38 +589,18 @@ export function useStrikeLimit(userId: string): StrikeLimit {
 
   async function checkStrikeLimit() {
     try {
-      // Get all claims made by this agent in the last 24 hours
-      const twentyFourHoursAgo = Timestamp.fromDate(subHours(new Date(), 24));
-      
-      const claimsQuery = query(
-        collection(db, 'numberPool'),
-        where('claims', '!=', null)
-      );
-      
-      const numbersSnapshot = await getDocs(claimsQuery);
-      let strikeCount = 0;
-      let lastStrikeTime: Date | null = null;
+      // Use same userClaimStats as NumberPool - unified counter for both strikes AND reserved claims
+      const today = getTodayUaeDateString();
+      const ref = doc(db, 'userClaimStats', userId);
+      const snap = await getDoc(ref);
+      const data = snap.exists() ? snap.data() : {};
+      const storedDate = typeof (data as any).date === 'string' ? (data as any).date : '';
+      const count = storedDate === today ? (typeof (data as any).count === 'number' ? (data as any).count : 0) : 0;
+      const remainingStrikes = Math.max(0, MAX_CLAIMS_PER_24H - count);
 
-      numbersSnapshot.docs.forEach(doc => {
-        const data = doc.data();
-        const claims = data.claims || [];
-        
-        claims.forEach((claim: any) => {
-          if (claim.userId === userId && claim.claimedAt?.toDate() > twentyFourHoursAgo.toDate()) {
-            strikeCount++;
-            const claimTime = claim.claimedAt.toDate();
-            if (!lastStrikeTime || claimTime > lastStrikeTime) {
-              lastStrikeTime = claimTime;
-            }
-          }
-        });
-      });
-
-      const remainingStrikes = Math.max(0, 2 - strikeCount);
-      
       setStrikeLimit({
         remainingStrikes,
-        lastStrikeTime,
+        lastStrikeTime: null, // Reset at UAE midnight, not rolling 24h
         canStrike: remainingStrikes > 0
       });
     } catch (error) {

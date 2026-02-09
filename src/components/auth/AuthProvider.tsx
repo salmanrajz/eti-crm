@@ -59,9 +59,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // Add timeout to detect Firebase initialization failure
+    // Don't reload if user is already authenticated (prevents reloads after idle periods)
     let authInitialized = false;
+    const currentUser = auth.currentUser; // Check if user is already authenticated
+    
     const timeout = setTimeout(() => {
       if (!authInitialized) {
+        // If user is already authenticated, don't reload - just wait longer
+        // This prevents page refresh when user performs action after idle period
+        if (currentUser) {
+          // User is authenticated but onAuthStateChanged hasn't fired yet
+          // This can happen after idle periods - just set loading to false, don't reload
+          setLoading(false);
+          return;
+        }
+        
+        // Only reload if there's no existing auth state (fresh page load scenario)
         // Set a flag in sessionStorage to track reload attempts
         const reloadCount = parseInt(sessionStorage.getItem('firebaseInitReloadCount') || '0');
         
@@ -76,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setLoading(false);
         }
       }
-    }, 3000); // 3 second timeout
+    }, 5000); // Increased to 5 seconds to give more time after idle periods
     
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       authInitialized = true;

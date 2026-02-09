@@ -17,7 +17,7 @@ import { db } from '../lib/firebase';
 import { AgentLink } from '../types';
 import { toast } from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Link2, Copy, Trash2, Check, X, Settings, ExternalLink, Key, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Link2, Copy, Trash2, Check, X, Settings, ExternalLink, Key, Eye, EyeOff, Loader2, Shield } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuthStore } from '../store/authStore';
 
@@ -74,6 +74,12 @@ function LinkItem({ link, onCopyLink, onToggleActive, onDelete, onGenerateNewOTP
             {link.allowedCategories && link.allowedCategories.length > 0 && (
               <div>
                 Categories: {link.allowedCategories.join(', ')}
+              </div>
+            )}
+            {link.trustedCustomers && (
+              <div className="flex items-center gap-1">
+                <Shield className="w-3 h-3 text-emerald-600" />
+                <span className="text-emerald-700 font-medium">Trusted Customers</span>
               </div>
             )}
             <div>
@@ -242,6 +248,8 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
   
   // Note field for tracking who the link is for
   const [linkNote, setLinkNote] = useState<string>('');
+  // Trusted customers: after OTP, show open numbers directly
+  const [trustedCustomers, setTrustedCustomers] = useState(false);
 
   // Update selectedGroups when availableGroups changes
   useEffect(() => {
@@ -329,6 +337,11 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       const linkCategories = [...(link.allowedCategories || [])].sort().join(',');
       const selectedCategoriesSorted = [...selectedCategories].sort().join(',');
       
+      // Compare trusted customers
+      if ((link.trustedCustomers || false) !== trustedCustomers) {
+        return false;
+      }
+      
       // Groups and categories must match
       if (linkGroups !== selectedGroupsSorted || linkCategories !== selectedCategoriesSorted) {
         return false;
@@ -403,6 +416,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         isActive: true,
         otp,
         otpExpiresAt: otpExpiresAt || null,
+        trustedCustomers: trustedCustomers,
         createdAt: new Date(),
         updatedAt: new Date(),
         usageCount: 0,
@@ -419,6 +433,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
       setCustomExpiryDate(''); // Reset custom date value
       setOtpValidityHours(2); // Reset to default
       setNewlyGeneratedLinkId(docRef.id); // Store the new link ID for success popup
+      setTrustedCustomers(false); // Reset after generating
       await loadLinks();
       // Scroll to the newly generated link after a short delay
       setTimeout(() => {
@@ -567,6 +582,7 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                       setUseCustomDate(false); // Reset custom date
                       setCustomExpiryDate(''); // Reset custom date value
                       setOtpValidityHours(2); // Reset to default
+                      setTrustedCustomers(false); // Reset trusted customers
                     }}
                     className="p-1.5 sm:p-2 hover:bg-white/20 rounded-lg transition-colors flex-shrink-0"
                   >
@@ -787,6 +803,26 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
                     Choose how long the OTP will remain valid for customer access
                     {user?.role === 'admin' && <span className="hidden sm:inline"> (Admins can select a custom expiration date)</span>}
                   </p>
+                </div>
+
+                {/* Trusted Customers Checkbox */}
+                <div className="flex items-start gap-3 p-3 sm:p-4 rounded-xl border-2 border-emerald-100 bg-emerald-50/50">
+                  <input
+                    type="checkbox"
+                    id="trustedCustomers"
+                    checked={trustedCustomers}
+                    onChange={(e) => setTrustedCustomers(e.target.checked)}
+                    className="mt-1 w-4 h-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <label htmlFor="trustedCustomers" className="flex-1 cursor-pointer">
+                    <div className="flex items-center gap-2 font-semibold text-gray-800">
+                      <Shield className="w-4 h-4 text-emerald-600" />
+                      Trusted Customers
+                    </div>
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      After OTP, show open numbers directly.
+                    </p>
+                  </label>
                 </div>
 
                 {/* Note Field */}
@@ -1070,3 +1106,4 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     </>
   );
 }
+

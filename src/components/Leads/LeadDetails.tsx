@@ -218,6 +218,7 @@ export function LeadDetails() {
   const [recordingElapsed, setRecordingElapsed] = useState<number>(0);
   const [fileSizeError, setFileSizeError] = useState<string | null>(null);
   const [userDetails, setUserDetails] = useState<Record<string, { name: string }>>({});
+  const [previewFile, setPreviewFile] = useState<{ file: File; type: ChatMessage['mediaType']; previewUrl: string } | null>(null);
   const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
   const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
 
@@ -236,7 +237,7 @@ export function LeadDetails() {
     return () => unsubscribe();
   }, [id]);
 
-  // Cleanup recording on unmount
+  // Cleanup recording and preview on unmount
   useEffect(() => {
     return () => {
       if (animationFrameRef.current) {
@@ -250,6 +251,10 @@ export function LeadDetails() {
       }
       if (recordingStreamRef.current) {
         recordingStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+      // Cleanup preview URL
+      if (previewFile?.previewUrl) {
+        URL.revokeObjectURL(previewFile.previewUrl);
       }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
@@ -412,7 +417,7 @@ export function LeadDetails() {
           ? createdAt 
           : new Date();
         return {
-          id: doc.id,
+        id: doc.id,
           ...data,
           createdAt: validDate
         };
@@ -473,7 +478,7 @@ export function LeadDetails() {
           ? createdAt 
           : new Date();
         return {
-          id: doc.id,
+        id: doc.id,
           ...data,
           createdAt: validDate
         };
@@ -650,21 +655,32 @@ export function LeadDetails() {
 
   async function sendMessage(e: React.FormEvent) {
     e.preventDefault();
-    if (!newMessage.trim() || !user || !id || sendingMessage) return;
+    if ((!newMessage.trim() && !previewFile) || !user || !id || sendingMessage) return;
     
     // Prevent sending messages for rejected or activated leads
     if (lead?.status === 'rejected') {
       toast.error('Cannot send messages to rejected leads');
       return;
     }
-    if (lead?.status === 'activated') {
+    if (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') {
       toast.error('Cannot send messages to activated leads');
       return;
     }
 
     const messageToSend = newMessage.trim();
     setNewMessage('');
-    await addChatEntry({ messageText: messageToSend });
+    
+    // If there's a preview file, upload it first
+    if (previewFile) {
+      const { file, type } = previewFile;
+      removePreview(); // Clear preview immediately
+      await handleMediaFileUpload(file, type);
+    }
+    
+    // Send text message if there's text
+    if (messageToSend) {
+      await addChatEntry({ messageText: messageToSend });
+    }
     
     // Auto-scroll to bottom after sending
     setTimeout(() => {
@@ -1012,7 +1028,7 @@ export function LeadDetails() {
     }
   }
 
-  const handleMediaSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMediaSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !id) return;
     
@@ -1036,8 +1052,11 @@ export function LeadDetails() {
       return;
     }
     
-    // Clear any previous error
+    // Clear any previous error and preview
     setFileSizeError(null);
+    if (previewFile?.previewUrl) {
+      URL.revokeObjectURL(previewFile.previewUrl);
+    }
     
     const isPdf = file.type === 'application/pdf';
     const mediaType: ChatMessage['mediaType'] =
@@ -1045,10 +1064,21 @@ export function LeadDetails() {
       file.type.startsWith('video') ? 'video' :
       file.type.startsWith('audio') ? 'audio' :
       isPdf ? 'pdf' : 'file';
-    await handleMediaFileUpload(file, mediaType);
+    
+    // Create preview URL
+    const previewUrl = URL.createObjectURL(file);
+    setPreviewFile({ file, type: mediaType, previewUrl });
+    
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
+  };
+
+  const removePreview = () => {
+    if (previewFile?.previewUrl) {
+      URL.revokeObjectURL(previewFile.previewUrl);
+    }
+    setPreviewFile(null);
   };
 
   const cancelRecording = () => {
@@ -1566,6 +1596,9 @@ export function LeadDetails() {
         toast.error('Cannot update verified lead');
         return;
       }
+      // Capture old data for logging (before update)
+      const oldDataForLog = { ...leadData };
+      
       const updateData = {
         ...pendingVerifierUpdates,
         // Preserve current status for activated_non_verified so it does NOT revert to pending_verification on edit
@@ -1576,7 +1609,91 @@ export function LeadDetails() {
         updatedAt: new Date(),
         updatedBy: user.id
       };
+      
       await updateDoc(leadRef, updateData);
+      
+      // Fetch updated lead data for logging
+      const updatedLeadDoc = await getDoc(leadRef);
+      const newDataForLog = updatedLeadDoc.exists() ? updatedLeadDoc.data() : { ...leadData, ...updateData };
+      
+      // Build detailed change list for logging
+      const changedFields: string[] = [];
+      const changeDetails: string[] = [];
+      
+      // Helper function to format values for display
+      const formatValue = (val: any): string => {
+        if (val === null) return 'null';
+        if (val === undefined) return 'undefined';
+        if (typeof val === 'object') {
+          if (Array.isArray(val)) {
+            return `[${val.length} item${val.length !== 1 ? 's' : ''}]`;
+          }
+          // For objects, show a summary
+          const keys = Object.keys(val);
+          if (keys.length === 0) return '{}';
+          return `{${keys.length} field${keys.length !== 1 ? 's' : ''}}`;
+        }
+        const str = String(val);
+        // Truncate very long strings
+        return str.length > 50 ? str.substring(0, 47) + '...' : str;
+      };
+      
+      // Compare all fields that were updated
+      const fieldsToCheck = new Set([
+        ...Object.keys(updateData),
+        ...Object.keys(oldDataForLog)
+      ]);
+      
+      fieldsToCheck.forEach(key => {
+        // Skip system fields that change automatically
+        if (key === 'updatedAt' || key === 'updatedBy') return;
+        
+        const oldValue = oldDataForLog[key];
+        const newValue = newDataForLog[key];
+        
+        // Check if value actually changed
+        let isEqual = false;
+        
+        if (oldValue === newValue) {
+          isEqual = true;
+        } else if (oldValue === null || oldValue === undefined || newValue === null || newValue === undefined) {
+          isEqual = false; // One is null/undefined and the other isn't
+        } else if (typeof oldValue === 'object' && typeof newValue === 'object') {
+          // Deep comparison for objects/arrays
+          try {
+            isEqual = JSON.stringify(oldValue) === JSON.stringify(newValue);
+          } catch {
+            // If JSON.stringify fails, consider them different
+            isEqual = false;
+          }
+        } else {
+          isEqual = false;
+        }
+        
+        if (!isEqual) {
+          changedFields.push(key);
+          changeDetails.push(`${key}: "${formatValue(oldValue)}" → "${formatValue(newValue)}"`);
+        }
+      });
+      
+      // Log verifier changes with complete old and new data
+      try {
+        const detailsText = changedFields.length > 0
+          ? `Verifier ${user.name || user.email} updated lead. Changed fields: ${changedFields.join(', ')}. Changes: ${changeDetails.join('; ')}`
+          : `Verifier ${user.name || user.email} updated lead`;
+        
+        await logLeadAction(
+          id,
+          leadData.leadNumber || id,
+          'updated',
+          oldDataForLog,
+          newDataForLog,
+          detailsText
+        );
+      } catch (logError) {
+        console.error('Error logging verifier lead update:', logError);
+        // Don't fail the update if logging fails
+      }
       if (pendingVerifierUpdates.plans && user.role === 'verifier') {
         const originalPlans = (leadData.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
         const newPlans = pendingVerifierUpdates.plans.filter(p => !p.numberId?.startsWith('virtual-'));
@@ -1697,13 +1814,13 @@ export function LeadDetails() {
               <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Lead Details</h1>
               <p className="mt-1 sm:mt-2 text-sm sm:text-base text-gray-600">View and manage lead information</p>
             </div>
-            <button
+        <button
               onClick={() => navigate('/dashboard')}
               className="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-            >
+        >
               <ArrowLeft className="h-3 w-3 mr-1" />
               Back to Dashboard
-            </button>
+        </button>
           </div>
       </div>
 
@@ -1743,13 +1860,19 @@ export function LeadDetails() {
                           const numberData = numberDoc.data();
                           const numberStatus = numberData?.status;
                           const reservedBy = numberData?.reservedBy;
+                          const numberLeadId = numberData?.leadId;
                           
-                          // Number is valid if it's open OR reserved by this agent (or lead's agent for managers)
-                          const isValid = numberStatus === 'open' || reservedBy === user.id || reservedBy === data.agentId;
+                          // Number is valid only if: open, OR reserved by this agent, OR attached to this lead with resubmittable status (non_verified/follow_verification)
+                          const isOpen = numberStatus === 'open';
+                          const isReservedByAgent = numberStatus === 'reserved' && (reservedBy === user.id || reservedBy === data.agentId);
+                          const isOnThisLeadResubmittable = numberLeadId === id && ['non_verified', 'follow_verification'].includes(numberStatus);
+                          const isValid = isOpen || isReservedByAgent || isOnThisLeadResubmittable;
                           
                           if (!isValid) {
                             const reason = numberStatus === 'reserved' 
                               ? 'Number is reserved by another agent'
+                              : numberStatus === 'follow_up' || numberStatus === 'verified' || numberStatus === 'assigned' || numberStatus === 'activated'
+                              ? `Number is in use (status: ${numberStatus}). It must be open or reserved by you to resubmit.`
                               : `Number status is ${numberStatus}`;
                             return { numberId: p.numberId, valid: false, reason, number: numberData?.number || p.numberId };
                           }
@@ -2048,128 +2171,222 @@ export function LeadDetails() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* File Size Error Banner */}
+            {/* File Size Error Banner - Mobile optimized */}
             {fileSizeError && (
-              <div className="border-t border-red-200 bg-red-50 px-3 sm:px-4 py-2.5 flex items-center justify-between gap-3 animate-in slide-in-from-top">
-                <div className="flex items-center gap-2 flex-1 min-w-0">
-                  <AlertCircle className="h-5 w-5 text-red-600 flex-shrink-0" />
-                  <p className="text-sm text-red-800 font-medium flex-1">{fileSizeError}</p>
+              <div className="border-t border-red-200 bg-red-50 px-3 sm:px-4 py-3 sm:py-2.5 flex items-start sm:items-center justify-between gap-2 sm:gap-3 animate-in slide-in-from-top">
+                <div className="flex items-start gap-2 flex-1 min-w-0">
+                  <AlertCircle className="h-5 w-5 text-red-600 flex-shrink-0 mt-0.5 sm:mt-0" />
+                  <p className="text-sm sm:text-sm text-red-800 font-medium flex-1 leading-relaxed break-words">{fileSizeError}</p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setFileSizeError(null)}
-                  className="flex-shrink-0 p-1 rounded-full hover:bg-red-100 transition-colors"
+                  className="flex-shrink-0 p-2 sm:p-1 rounded-full hover:bg-red-100 active:bg-red-200 transition-colors touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[32px] sm:min-h-[32px] flex items-center justify-center"
                   aria-label="Dismiss error"
                 >
-                  <X className="h-4 w-4 text-red-600" />
+                  <X className="h-5 w-5 sm:h-4 sm:w-4 text-red-600" />
                 </button>
               </div>
             )}
 
-            <div className="border-t border-gray-200 px-3 sm:px-4 py-3 sm:py-4">
-              <form onSubmit={sendMessage} className="flex flex-wrap items-center gap-2">
-                <div className="relative flex-1 min-w-[200px]">
-                  <textarea
-                    rows={1}
-                    className="w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-base disabled:bg-gray-100 disabled:cursor-not-allowed resize-none py-1.5 px-3 min-h-[2.5rem] max-h-[4rem]"
-                    placeholder={
-                      lead?.status === 'rejected' 
-                        ? 'Cannot send messages to rejected leads' 
-                        : lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin'
-                        ? 'Cannot send messages to activated leads'
-                        : 'Type a message...💡 You can send audio notes, images, PDFs, and files (max 3MB)'
-                    }
-                  value={newMessage}
-                  onChange={(e) => setNewMessage(e.target.value)}
-                    disabled={lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') || sendingMessage || uploadingMedia}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey && !sendingMessage && !uploadingMedia && newMessage.trim()) {
-                        e.preventDefault();
-                        sendMessage(e);
-                      }
-                    }}
-                  />
-                </div>
-                <button
-                  type="button"
-                  disabled={uploadingMedia || sendingMessage || recording || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex items-center px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-                  title="Attach file"
-                >
-                  <Paperclip className="h-4 w-4" />
-                </button>
-                {!recording && (
+            {/* Media Preview - Show before sending */}
+            {previewFile && (
+              <div className="border-t border-gray-200 bg-gray-50 px-3 sm:px-4 py-3 sm:py-4">
+                <div className="flex items-start gap-3">
+                  {/* Preview content */}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-gray-500 font-medium mb-2">Preview attachment</div>
+                    {previewFile.type === 'image' && (
+                      <div className="relative inline-block max-w-full rounded-lg overflow-hidden border border-gray-300 bg-white shadow-sm">
+                        <img
+                          src={previewFile.previewUrl}
+                          alt="Preview"
+                          className="max-h-48 sm:max-h-64 w-auto object-contain rounded-lg"
+                        />
+                      </div>
+                    )}
+                    {previewFile.type === 'video' && (
+                      <div className="relative inline-block max-w-full rounded-lg overflow-hidden border border-gray-300 bg-black shadow-sm">
+                        <video
+                          src={previewFile.previewUrl}
+                          controls
+                          className="max-h-48 sm:max-h-64 w-auto object-contain rounded-lg"
+                        />
+                      </div>
+                    )}
+                    {previewFile.type === 'audio' && (
+                      <div className="bg-white rounded-lg border border-gray-300 p-3 shadow-sm max-w-md">
+                        <audio src={previewFile.previewUrl} controls className="w-full" />
+                      </div>
+                    )}
+                    {(previewFile.type === 'file' || previewFile.type === 'pdf') && (
+                      <div className="bg-white rounded-lg border border-gray-300 p-4 shadow-sm inline-flex items-center gap-3">
+                        <div className="p-2 bg-red-100 rounded-lg">
+                          <Paperclip className="h-5 w-5 text-red-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-gray-900 truncate">{previewFile.file.name}</div>
+                          <div className="text-xs text-gray-500">
+                            {((previewFile.file.size / 1024) / 1024).toFixed(2)} MB
+                            {previewFile.type === 'pdf' && ' • PDF'}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    <div className="text-xs text-gray-600 mt-2 break-words">{previewFile.file.name}</div>
+                  </div>
+                  {/* Remove button */}
                   <button
                     type="button"
-                    disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      startRecording();
-                    }}
-                    className="inline-flex items-center px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-                    title="Record voice note"
+                    onClick={removePreview}
+                    className="flex-shrink-0 p-2 rounded-lg hover:bg-gray-200 active:bg-gray-300 transition-colors touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center"
+                    title="Remove preview"
+                    aria-label="Remove preview"
                   >
-                    <Mic className="h-4 w-4" />
+                    <X className="h-5 w-5 sm:h-4 sm:w-4 text-gray-600" />
                   </button>
-                )}
+                </div>
+              </div>
+            )}
+
+            <div className="border-t border-gray-200 bg-white">
+              {/* Mobile-optimized chat input */}
+              <form onSubmit={sendMessage} className="flex flex-col gap-2 p-2 sm:p-3 sm:gap-2">
+                {/* Recording UI - Full width on mobile */}
                 {recording && (
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <div className="flex flex-col gap-1 flex-1 min-w-0">
+                  <div className="flex items-center gap-2 w-full bg-red-50 rounded-lg p-2 sm:p-3 border border-red-200">
+                    <div className="flex flex-col gap-1.5 flex-1 min-w-0">
                       <canvas
                         ref={waveformCanvasRef}
                         width={600}
                         height={100}
-                        className="h-10 w-full"
+                        className="h-12 sm:h-10 w-full rounded"
                       />
-                      <span className="text-xs text-red-500 font-semibold text-center">
-                        Recording... {Math.floor(recordingElapsed / 1000)}s
-                      </span>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs sm:text-sm text-red-600 font-semibold flex items-center gap-1.5">
+                          <div className="h-2 w-2 bg-red-600 rounded-full animate-pulse"></div>
+                          Recording... {Math.floor(recordingElapsed / 1000)}s
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            cancelRecording();
+                          }}
+                          className="inline-flex items-center justify-center px-3 py-1.5 sm:px-2 sm:py-1 rounded-lg border border-red-300 bg-red-100 text-red-700 hover:bg-red-200 active:bg-red-300 transition-colors touch-manipulation min-h-[44px] sm:min-h-[36px]"
+                          title="Cancel recording"
+                        >
+                          <Trash2 className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
+                          <span className="ml-1.5 sm:hidden text-xs font-medium">Cancel</span>
+                        </button>
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        cancelRecording();
-                      }}
-                      className="inline-flex items-center px-2 py-1 rounded-lg border border-red-300 bg-red-50 text-red-600 hover:bg-red-100 transition-colors flex-shrink-0"
-                      title="Delete recording"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
                   </div>
                 )}
-                <button
-                  type="submit"
+
+                {/* Input and action buttons row */}
+                <div className="flex items-end gap-2">
+                  {/* Text input - optimized for mobile */}
+                  <div className="relative flex-1 min-w-0">
+                    <textarea
+                      rows={1}
+                      className="w-full rounded-xl border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 text-base sm:text-sm disabled:bg-gray-100 disabled:cursor-not-allowed resize-none py-2.5 sm:py-2 px-3 sm:px-3 min-h-[44px] sm:min-h-[38px] max-h-[120px] sm:max-h-[100px] leading-relaxed touch-manipulation"
+                      placeholder={
+                        lead?.status === 'rejected' 
+                          ? 'Cannot send messages to rejected leads' 
+                          : lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin'
+                          ? 'Cannot send messages to activated leads'
+                          : 'Type a message...'
+                      }
+                      value={newMessage}
+                      onChange={(e) => {
+                        setNewMessage(e.target.value);
+                        // Auto-resize textarea
+                        e.target.style.height = 'auto';
+                        e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
+                      }}
+                      disabled={lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') || sendingMessage || uploadingMedia || recording}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey && !sendingMessage && !uploadingMedia && !recording && newMessage.trim()) {
+                          e.preventDefault();
+                          sendMessage(e);
+                        }
+                      }}
+                    />
+                    {/* Mobile hint text */}
+                    {!newMessage && !recording && (
+                      <div className="absolute bottom-1 right-2 text-xs text-gray-400 pointer-events-none hidden sm:block">
+                        💡 Audio, images, PDFs (max 3MB)
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Action buttons - optimized touch targets for mobile */}
+                  {!recording && (
+                    <>
+                      {/* Attach file button - larger on mobile */}
+                      <button
+                        type="button"
+                        disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
+                        onClick={() => fileInputRef.current?.click()}
+                        className="inline-flex items-center justify-center px-3.5 py-3 sm:px-3 sm:py-2 rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[40px] sm:min-h-[40px] shadow-sm"
+                        title="Attach file (images, videos, PDFs)"
+                      >
+                        <Paperclip className="h-5 w-5 sm:h-4 sm:w-4" />
+                      </button>
+
+                      {/* Voice note button - larger on mobile */}
+                      <button
+                        type="button"
+                        disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          startRecording();
+                        }}
+                        className="inline-flex items-center justify-center px-3.5 py-3 sm:px-3 sm:py-2 rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[40px] sm:min-h-[40px] shadow-sm"
+                        title="Record voice note"
+                      >
+                        <Mic className="h-5 w-5 sm:h-4 sm:w-4" />
+                      </button>
+                    </>
+                  )}
+
+                  {/* Send button - larger and more prominent on mobile */}
+                  <button
+                    type="submit"
                   disabled={
                     lead?.status === 'rejected' ||
-                    lead?.status === 'activated' ||
+                    (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') ||
                     sendingMessage ||
                     uploadingMedia ||
-                    (!newMessage.trim() && !recording)
+                    (!newMessage.trim() && !recording && !previewFile)
                   }
-                  onClick={(e) => {
-                    if (recording) {
-                      e.preventDefault();
-                      stopRecording();
-                    }
-                  }}
-                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-lg shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
-                  {uploadingMedia || sendingMessage ? (
-                    <span className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Sending...
-                    </span>
-                  ) : recording ? (
-                    <span className="flex items-center gap-2">
-                      <Square className="h-4 w-4" />
-                      Stop & Send
-                    </span>
-                  ) : (
-                  <Send className="h-4 w-4" />
-                  )}
-                </button>
+                    onClick={(e) => {
+                      if (recording) {
+                        e.preventDefault();
+                        stopRecording();
+                      }
+                    }}
+                    className="inline-flex items-center justify-center px-4 py-3 sm:px-4 sm:py-2 border border-transparent text-sm font-medium rounded-xl shadow-md text-white bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[40px] sm:min-h-[40px]"
+                  >
+                    {uploadingMedia || sendingMessage ? (
+                      <span className="flex items-center gap-2">
+                        <Loader2 className="h-5 w-5 sm:h-4 sm:w-4 animate-spin" />
+                        <span className="hidden sm:inline">Sending...</span>
+                      </span>
+                    ) : recording ? (
+                      <span className="flex items-center gap-2">
+                        <Square className="h-5 w-5 sm:h-4 sm:w-4" />
+                        <span className="hidden sm:inline">Stop & Send</span>
+                        <span className="sm:hidden">Stop</span>
+                      </span>
+                    ) : (
+                      <Send className="h-5 w-5 sm:h-4 sm:w-4" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Hidden file input */}
                 <input
                   ref={fileInputRef}
                   type="file"

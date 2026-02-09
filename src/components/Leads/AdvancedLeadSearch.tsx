@@ -405,20 +405,27 @@ export function AdvancedLeadSearch({
         }
 
         // Activated Date Range filter (in-memory since we can only have one range query in Firestore)
+        if (searchFilters.activatedDateRange.from || searchFilters.activatedDateRange.to) {
+          const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
+          if (!activatedAtRaw) return false;
+          
+          // Handle Firestore timestamp conversion
+          const leadActivatedAt = typeof activatedAtRaw.toDate === 'function'
+            ? activatedAtRaw.toDate()
+            : activatedAtRaw instanceof Date
+              ? activatedAtRaw
+              : new Date(activatedAtRaw);
+          
         if (searchFilters.activatedDateRange.from) {
-          const activationDate = (lead as any).activationDate;
-          if (!activationDate) return false;
-          const leadActivationDate = new Date(activationDate);
           const fromDate = new Date(searchFilters.activatedDateRange.from);
-          if (leadActivationDate < fromDate) return false;
+            fromDate.setHours(0, 0, 0, 0);
+            if (leadActivatedAt < fromDate) return false;
         }
         if (searchFilters.activatedDateRange.to) {
-          const activationDate = (lead as any).activationDate;
-          if (!activationDate) return false;
-          const leadActivationDate = new Date(activationDate);
           const toDate = new Date(searchFilters.activatedDateRange.to);
           toDate.setHours(23, 59, 59, 999);
-          if (leadActivationDate > toDate) return false;
+            if (leadActivatedAt > toDate) return false;
+          }
         }
 
         // Follow-up Date Range filter
@@ -559,19 +566,27 @@ export function AdvancedLeadSearch({
         const toDate = new Date(filters.createdDateRange.to);
         if (createdDate > toDate) return false;
       }
+      if (filters.activatedDateRange.from || filters.activatedDateRange.to) {
+        const activatedAtRaw: any = (lead as any).activatedAt || lead.updatedAt;
+        if (!activatedAtRaw) return false;
+        
+        // Handle Firestore timestamp conversion
+        const leadActivatedAt = typeof activatedAtRaw.toDate === 'function'
+          ? activatedAtRaw.toDate()
+          : activatedAtRaw instanceof Date
+            ? activatedAtRaw
+            : new Date(activatedAtRaw);
+        
       if (filters.activatedDateRange.from) {
-        const activationDate = (lead as any).activationDate;
-        if (!activationDate) return false;
-        const leadActivationDate = new Date(activationDate);
         const fromDate = new Date(filters.activatedDateRange.from);
-        if (leadActivationDate < fromDate) return false;
+          fromDate.setHours(0, 0, 0, 0);
+          if (leadActivatedAt < fromDate) return false;
       }
       if (filters.activatedDateRange.to) {
-        const activationDate = (lead as any).activationDate;
-        if (!activationDate) return false;
-        const leadActivationDate = new Date(activationDate);
         const toDate = new Date(filters.activatedDateRange.to);
-        if (leadActivationDate > toDate) return false;
+          toDate.setHours(23, 59, 59, 999);
+          if (leadActivatedAt > toDate) return false;
+        }
       }
 
       return true;
@@ -1150,7 +1165,15 @@ export function AdvancedLeadSearch({
                       <tbody className="bg-white divide-y divide-gray-200">
                         {filteredLeads.map((lead) => {
                           const anyLead = lead as any;
-                          const activationDate = anyLead.activationDate;
+                          // Get activatedAt with fallback to updatedAt, handle Firestore timestamp
+                          const activatedAtRaw = anyLead.activatedAt || lead.updatedAt;
+                          const activationDate = activatedAtRaw
+                            ? (typeof activatedAtRaw.toDate === 'function'
+                                ? activatedAtRaw.toDate()
+                                : activatedAtRaw instanceof Date
+                                  ? activatedAtRaw
+                                  : new Date(activatedAtRaw))
+                            : null;
                           const srNumber = anyLead.srNumber || anyLead.srNo || anyLead.sr;
 
                           return (

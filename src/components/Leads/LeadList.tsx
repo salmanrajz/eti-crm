@@ -49,7 +49,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { collection, query, where, getDocs, orderBy, deleteDoc, doc, limit, startAfter, QueryDocumentSnapshot, DocumentData, onSnapshot, documentId, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
-import { Lead, CoordinatorType, VerifierGroups } from '../../types';
+import { Lead, CoordinatorType, VerifierGroups, NumberPoolType } from '../../types';
 import { Link, useSearchParams } from 'react-router-dom';
 import { format, formatDistanceToNow, formatDistance, differenceInHours, differenceInMinutes } from 'date-fns';
 import { 
@@ -81,7 +81,11 @@ import {
   CheckCheck,
   Calendar,
   ArrowRightLeft,
-  Loader2
+  Loader2,
+  Users,
+  UserCheck,
+  Timer,
+  RefreshCw
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'react-hot-toast';
@@ -96,6 +100,7 @@ import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppC
 import { checkConversation } from '../../utils/whatsappRouter';
 import { normalizeTimestamp, formatTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 import { logLeadAction } from '../../utils/leadLogging';
+import { getUserDetails } from '../../utils/dncService';
 
 // ✅ PERFORMANCE: Optimized load sizes for faster initial loading
 const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
@@ -248,6 +253,347 @@ const isLeadInCoordinatorScope = (
   }
 };
 
+// Struck Numbers Modal Component for Admin
+interface StruckNumbersModalProps {
+  lead: Lead;
+  onClose: () => void;
+}
+
+function StruckNumbersModal({ lead, onClose }: StruckNumbersModalProps) {
+  const [struckNumbers, setStruckNumbers] = useState<NumberPoolType[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [strikersInfo, setStrikersInfo] = useState<Record<string, Array<{userId: string; name: string; teamName: string; claimedAt: Date}>>>({});
+  const [leadOwnerInfo, setLeadOwnerInfo] = useState<{name: string; teamName: string} | null>(null);
+  const [loadingStrikers, setLoadingStrikers] = useState<Record<string, boolean>>({});
+  const [expandedNumbers, setExpandedNumbers] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    async function loadStruckNumbers() {
+      if (!lead.plans || lead.plans.length === 0) {
+        setStruckNumbers([]);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      try {
+        // Get all numberIds from lead plans
+        const numberIds = lead.plans
+          .map(plan => plan.numberId)
+          .filter((id): id is string => !!id);
+
+        if (numberIds.length === 0) {
+          setStruckNumbers([]);
+          setLoading(false);
+          return;
+        }
+
+        // Fetch numbers in batches (Firestore 'in' limit is 10)
+        const BATCH_SIZE = 10;
+        const batchPromises = [];
+        for (let i = 0; i < numberIds.length; i += BATCH_SIZE) {
+          const batch = numberIds.slice(i, i + BATCH_SIZE);
+          const batchQuery = query(
+            collection(db, 'numberPool'),
+            where('__name__', 'in', batch)
+          );
+          batchPromises.push(getDocs(batchQuery));
+        }
+
+        const batchResults = await Promise.allSettled(batchPromises);
+        const numbers: NumberPoolType[] = [];
+
+        batchResults.forEach((result) => {
+          if (result.status === 'fulfilled') {
+            const numbersSnapshot = result.value;
+            numbersSnapshot.docs.forEach((numberDoc) => {
+              const data = numberDoc.data();
+              const claims = data.claims || [];
+              const pendingClaims = claims.filter((claim: any) => claim.status === 'pending');
+              
+              // Only include numbers with pending claims (struck)
+              if (pendingClaims.length > 0) {
+                numbers.push({
+                  id: numberDoc.id,
+                  ...data,
+                  lastStatusChange: data.lastStatusChange?.toDate(),
+                  claims: (data.claims || []).map((claim: any) => ({
+                    ...claim,
+                    claimedAt: claim.claimedAt?.toDate ? claim.claimedAt.toDate() : (claim.claimedAt instanceof Date ? claim.claimedAt : new Date())
+                  }))
+                } as NumberPoolType);
+              }
+            });
+          }
+        });
+
+        setStruckNumbers(numbers);
+      } catch (error) {
+        console.error('Error loading struck numbers:', error);
+        toast.error('Failed to load struck numbers');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadStruckNumbers();
+  }, [lead]);
+
+  // Fetch lead owner information
+  useEffect(() => {
+    async function fetchLeadOwner() {
+      if (!lead.agentId) {
+        setLeadOwnerInfo(null);
+        return;
+      }
+
+      try {
+        const userDetails = await getUserDetails([lead.agentId]);
+        const ownerDetails = userDetails[lead.agentId];
+        if (ownerDetails) {
+          setLeadOwnerInfo({
+            name: ownerDetails.name,
+            teamName: ownerDetails.teamName
+          });
+        } else {
+          setLeadOwnerInfo(null);
+        }
+      } catch (error) {
+        console.error('Error fetching lead owner:', error);
+        setLeadOwnerInfo(null);
+      }
+    }
+
+    fetchLeadOwner();
+  }, [lead.agentId]);
+
+  // Fetch strikers information for a number
+  const fetchStrikersForNumber = async (numberId: string, number: NumberPoolType) => {
+    if (strikersInfo[numberId] || loadingStrikers[numberId]) return;
+
+    setLoadingStrikers(prev => ({ ...prev, [numberId]: true }));
+    try {
+      const pendingClaimUserIds = (number.claims || [])
+        .filter((claim: any) => claim.status === 'pending')
+        .map((claim: any) => claim.userId)
+        .filter((id: string) => id);
+
+      if (pendingClaimUserIds.length === 0) {
+        setStrikersInfo(prev => ({ ...prev, [numberId]: [] }));
+        return;
+      }
+
+      const userDetails = await getUserDetails([...new Set(pendingClaimUserIds)]);
+      const strikers = (number.claims || [])
+        .filter((claim: any) => claim.status === 'pending' && claim.userId)
+        .map((claim: any) => {
+          const details = userDetails[claim.userId] || { name: 'Unknown User', teamName: 'No Team' };
+          return {
+            userId: claim.userId,
+            name: details.name,
+            teamName: details.teamName,
+            claimedAt: claim.claimedAt?.toDate ? claim.claimedAt.toDate() : (claim.claimedAt instanceof Date ? claim.claimedAt : new Date())
+          };
+        })
+        .sort((a, b) => b.claimedAt.getTime() - a.claimedAt.getTime());
+
+      setStrikersInfo(prev => ({ ...prev, [numberId]: strikers }));
+    } catch (error) {
+      console.error('Error fetching strikers info:', error);
+      setStrikersInfo(prev => ({ ...prev, [numberId]: [] }));
+    } finally {
+      setLoadingStrikers(prev => ({ ...prev, [numberId]: false }));
+    }
+  };
+
+  const toggleNumberExpansion = (numberId: string, number: NumberPoolType) => {
+    const newExpanded = new Set(expandedNumbers);
+    if (newExpanded.has(numberId)) {
+      newExpanded.delete(numberId);
+    } else {
+      newExpanded.add(numberId);
+      fetchStrikersForNumber(numberId, number);
+    }
+    setExpandedNumbers(newExpanded);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between p-6 border-b border-gray-200">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-900">Struck Numbers</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              Lead: {lead.customerName} ({lead.leadNumber})
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+          >
+            <X className="h-5 w-5 text-gray-600" />
+          </button>
+        </div>
+
+        {/* Lead Owner Info */}
+        {leadOwnerInfo && (
+          <div className="px-6 py-4 bg-gradient-to-br from-blue-50 to-indigo-50 border-b border-blue-100">
+            <div className="flex items-center gap-2 mb-2">
+              <UserCheck className="w-4 h-4 text-blue-600" />
+              <span className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Lead Owner</span>
+            </div>
+            <div className="text-sm font-semibold text-blue-900">{leadOwnerInfo.name}</div>
+            <div className="text-xs text-blue-700">{leadOwnerInfo.teamName}</div>
+          </div>
+        )}
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+              <span className="ml-3 text-gray-600">Loading struck numbers...</span>
+            </div>
+          ) : struckNumbers.length === 0 ? (
+            <div className="text-center py-12">
+              <AlertCircle className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+              <p className="text-gray-600">No struck numbers found for this lead</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {struckNumbers.map((number) => {
+                const pendingClaims = (number.claims || []).filter((claim: any) => claim.status === 'pending').length;
+                const lastClaimTime = (number.claims || [])[(number.claims || []).length - 1]?.claimedAt;
+                const isExpanded = expandedNumbers.has(number.id);
+                const strikers = strikersInfo[number.id] || [];
+                const isLoadingStrikers = loadingStrikers[number.id];
+
+                return (
+                  <motion.div
+                    key={number.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="bg-gradient-to-br from-red-50 to-orange-50 rounded-xl p-5 border border-red-100 shadow-sm"
+                  >
+                    {/* Number Header */}
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 bg-gradient-to-br from-red-100 to-orange-100 rounded-lg">
+                          <Hash className="w-5 h-5 text-red-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-lg font-bold text-gray-900">{number.number}</h3>
+                          <p className="text-sm text-gray-600">{number.category}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Metrics */}
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      <div className="bg-white/60 rounded-lg p-3 border border-red-100">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Users className="w-4 h-4 text-red-600" />
+                          <span className="text-xs font-semibold text-red-600">Strikes</span>
+                        </div>
+                        <div className="text-xl font-bold text-red-700">{pendingClaims}</div>
+                      </div>
+                      <div className="bg-white/60 rounded-lg p-3 border border-orange-100">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Timer className="w-4 h-4 text-orange-600" />
+                          <span className="text-xs font-semibold text-orange-600">Last Claim</span>
+                        </div>
+                        <div className="text-xs font-bold text-orange-700">
+                          {lastClaimTime ? format(lastClaimTime, 'd MMM, h:mm a') : 'N/A'}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Strikers List */}
+                    {pendingClaims > 0 && (
+                      <div>
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => toggleNumberExpansion(number.id, number)}
+                          className="w-full flex items-center justify-between p-3 bg-white/60 rounded-lg border border-red-100 hover:border-red-200 transition-all"
+                        >
+                          <div className="flex items-center gap-2 flex-1">
+                            <Users className="w-4 h-4 text-red-600" />
+                            <div className="flex-1 text-left">
+                              <span className="text-sm font-semibold text-red-700">
+                                {pendingClaims} Agent{pendingClaims > 1 ? 's' : ''} Struck
+                              </span>
+                            </div>
+                          </div>
+                          {isExpanded ? (
+                            <ChevronUp className="w-4 h-4 text-red-600" />
+                          ) : (
+                            <ChevronDown className="w-4 h-4 text-red-600" />
+                          )}
+                        </motion.button>
+
+                        {isExpanded && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="mt-3 space-y-2"
+                          >
+                            {isLoadingStrikers ? (
+                              <div className="p-3 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                Loading strikers...
+                              </div>
+                            ) : strikers.length > 0 ? (
+                              strikers.map((striker, idx) => (
+                                <motion.div
+                                  key={striker.userId}
+                                  initial={{ opacity: 0, x: -10 }}
+                                  animate={{ opacity: 1, x: 0 }}
+                                  transition={{ delay: idx * 0.05 }}
+                                  className="p-3 bg-white rounded-lg border border-red-100 shadow-sm"
+                                >
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <div className="w-2 h-2 bg-red-500 rounded-full flex-shrink-0"></div>
+                                        <span className="text-sm font-semibold text-gray-900 truncate">{striker.name}</span>
+                                      </div>
+                                      <div className="flex items-center gap-2 ml-4">
+                                        <UserCheck className="w-3 h-3 text-gray-400" />
+                                        <span className="text-xs text-gray-600 truncate">{striker.teamName}</span>
+                                      </div>
+                                    </div>
+                                    <div className="text-xs text-gray-500 whitespace-nowrap flex-shrink-0">
+                                      {format(striker.claimedAt, 'd MMM, h:mm a')}
+                                    </div>
+                                  </div>
+                                </motion.div>
+                              ))
+                            ) : (
+                              <div className="p-3 text-center text-sm text-gray-500">No striker information available</div>
+                            )}
+                          </motion.div>
+                        )}
+                      </div>
+                    )}
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
 export function LeadList() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -292,6 +638,8 @@ export function LeadList() {
   const [isUpdatingGroup, setIsUpdatingGroup] = useState(false);
   const [statusTimers, setStatusTimers] = useState<Record<string, number>>({});
   const [leadStrikes, setLeadStrikes] = useState<Record<string, number>>({});
+  const [showStruckNumbersModal, setShowStruckNumbersModal] = useState(false);
+  const [selectedLeadForStruckNumbers, setSelectedLeadForStruckNumbers] = useState<Lead | null>(null);
 
 
   // Load plan details from Firebase when selectedLeadForChat changes
@@ -1801,6 +2149,26 @@ export function LeadList() {
       const exportData: any[] = [];
       let rowIndex = 0;
       
+      // Helper to parse activation date into sortable numeric key (ms since epoch)
+      const getActivationSortKey = (value: any): number => {
+        if (!value || value === 'N/A') return 0;
+        try {
+          if (typeof value?.toDate === 'function') {
+            return value.toDate().getTime();
+          }
+          if (value instanceof Date) {
+            return value.getTime();
+          }
+          if (typeof value === 'string') {
+            const parsed = new Date(value);
+            return isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+          }
+          return 0;
+        } catch {
+          return 0;
+        }
+      };
+
       enrichedLeads.forEach((lead) => {
         const anyLead = lead as any;
         const plans = lead.plans || [];
@@ -1815,7 +2183,7 @@ export function LeadList() {
         const rawActivationDate = anyLead.activationDate;
         const srNumber = anyLead.srNumber || anyLead.srNo || anyLead.sr;
         
-        // Helper function to normalize activation date
+        // Helper function to normalize activation date for display
         const normalizeActivationDate = (rawDate: any): string => {
           if (!rawDate) return 'N/A';
           if (typeof rawDate.toDate === 'function') {
@@ -1832,6 +2200,7 @@ export function LeadList() {
         
         // If lead has no plans, create one row with N/A for plan fields
         if (plans.length === 0) {
+          const sortKey = getActivationSortKey(rawActivationDate);
           exportData.push({
             'S.No': ++rowIndex,
             'Lead ID': lead.leadNumber || lead.id,
@@ -1856,7 +2225,9 @@ export function LeadList() {
           'Gender': lead.gender || 'N/A',
           'Language': lead.language || 'N/A',
           'Advance Payment': lead.advancePayment ? 'Yes' : 'No',
-          'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No'
+          'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No',
+          // Hidden sort key for activation date ordering
+          _activationSortKey: sortKey
           });
         } else {
           // Create one row for each plan/number
@@ -1881,6 +2252,8 @@ export function LeadList() {
             
             // Get plan-specific activation group
             const planActivationGroup = activationGroups[planIndex] || plan.group || 'N/A';
+
+            const sortKey = getActivationSortKey(planActivationDate);
             
             exportData.push({
               'S.No': ++rowIndex,
@@ -1907,9 +2280,26 @@ export function LeadList() {
               'Gender': lead.gender || 'N/A',
               'Language': lead.language || 'N/A',
               'Advance Payment': lead.advancePayment ? 'Yes' : 'No',
-              'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No'
+              'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No',
+              // Hidden sort key for activation date ordering
+              _activationSortKey: sortKey
             });
           });
+        }
+      });
+
+      // Sort rows by activation date (newest at the top) using the hidden sort key
+      exportData.sort((a, b) => {
+        const aKey = typeof a._activationSortKey === 'number' ? a._activationSortKey : 0;
+        const bKey = typeof b._activationSortKey === 'number' ? b._activationSortKey : 0;
+        return bKey - aKey;
+      });
+
+      // Re-assign S.No after sorting and remove internal sort key before export
+      exportData.forEach((row, index) => {
+        row['S.No'] = index + 1;
+        if ('_activationSortKey' in row) {
+          delete row._activationSortKey;
         }
       });
 
@@ -2651,7 +3041,16 @@ export function LeadList() {
                         <motion.div
                           initial={{ opacity: 0, scale: 0.9 }}
                           animate={{ opacity: 1, scale: 1 }}
-                          className="inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1"
+                          whileHover={isAdmin ? { scale: 1.05 } : {}}
+                          whileTap={isAdmin ? { scale: 0.95 } : {}}
+                          onClick={isAdmin ? () => {
+                            setSelectedLeadForStruckNumbers(lead);
+                            setShowStruckNumbersModal(true);
+                          } : undefined}
+                          className={clsx(
+                            "inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1",
+                            isAdmin && "cursor-pointer hover:bg-red-200 transition-colors"
+                          )}
                         >
                           <AlertCircle className="h-3 w-3 mr-1" />
                           {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
@@ -3499,6 +3898,17 @@ export function LeadList() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Struck Numbers Modal for Admin */}
+      {showStruckNumbersModal && selectedLeadForStruckNumbers && (
+        <StruckNumbersModal
+          lead={selectedLeadForStruckNumbers}
+          onClose={() => {
+            setShowStruckNumbersModal(false);
+            setSelectedLeadForStruckNumbers(null);
+          }}
+        />
+      )}
     </div>
   );
 }

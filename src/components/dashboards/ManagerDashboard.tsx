@@ -71,7 +71,8 @@ import {
   DollarSign,
   Phone,
   AlertCircle,
-  Download
+  Download,
+  Loader2
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Dialog, Transition } from '@headlessui/react';
@@ -234,6 +235,11 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
   const [attendanceMonth, setAttendanceMonth] = useState(new Date());
   const [teamData, setTeamData] = useState<{ commissionBased: boolean } | null>(null);
   const [showCommissionConfigModal, setShowCommissionConfigModal] = useState(false);
+  const [showCombinedReportModal, setShowCombinedReportModal] = useState(false);
+  const [selectedMonthsForExport, setSelectedMonthsForExport] = useState<string[]>(() => {
+    return Array.from({ length: 6 }, (_, i) => format(subMonths(new Date(), 5 - i), 'yyyy-MM'));
+  });
+  const [isExportingCombined, setIsExportingCombined] = useState(false);
 
   useEffect(() => {
     loadManagerData();
@@ -1024,6 +1030,165 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
     } catch (error) {
       console.error('Error exporting to PDF:', error);
       toast.error('Failed to export to PDF');
+    }
+  };
+
+  const handleExportCombinedExcel = async () => {
+    if (!user?.teamId || selectedMonthsForExport.length === 0) {
+      toast.error('Please select at least one month');
+      return;
+    }
+    setIsExportingCombined(true);
+    try {
+      const teamName = (window as any).__teamName__ || 'Unknown Team';
+      const teamNameForFile = teamName.replace(/[^a-zA-Z0-9]/g, '_');
+
+      const teamLeadsQuery = query(
+        collection(db, 'leads'),
+        where('teamId', '==', user.teamId),
+        orderBy('createdAt', 'desc')
+      );
+      const teamLeadsSnapshot = await getDocs(teamLeadsQuery);
+      const teamLeads = teamLeadsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate(),
+        updatedAt: doc.data().updatedAt?.toDate()
+      })) as Lead[];
+
+      const teamMembersQuery = query(
+        collection(db, 'users'),
+        where('teamId', '==', user.teamId)
+      );
+      const membersSnapshot = await getDocs(teamMembersQuery);
+      const members = membersSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate(),
+        updatedAt: doc.data().updatedAt?.toDate()
+      })) as User[];
+
+      const getActivatedAt = (lead: any): Date | null => {
+        const raw = lead?.activatedAt || lead?.updatedAt;
+        if (!raw) return null;
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+        const d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      };
+
+      const XLSX = await import('xlsx');
+      const wb = XLSX.utils.book_new();
+
+      for (const monthStr of selectedMonthsForExport) {
+        const monthDate = new Date(monthStr + '-01');
+        const startDate = startOfMonth(monthDate);
+        const endDate = endOfMonth(monthDate);
+
+        const targetsQuery = query(
+          collection(db, 'agentTargets'),
+          where('teamId', '==', user.teamId),
+          where('month', '==', monthStr)
+        );
+        const targetsSnapshot = await getDocs(targetsQuery);
+        const targets: Record<string, AgentTarget> = {};
+        targetsSnapshot.forEach(doc => {
+          const data = doc.data();
+          targets[data.agentId] = {
+            agentId: data.agentId,
+            target: data.target || 0,
+            mar: data.mar || 0,
+            month: data.month
+          };
+        });
+
+        const agentMetricsData = members
+          .filter(m => m.role === 'agent')
+          .map(agent => {
+            const agentLeads = teamLeads.filter(lead =>
+              lead.agentId === agent.id &&
+              lead.createdAt &&
+              lead.createdAt >= startDate &&
+              lead.createdAt <= endDate
+            );
+
+            const agentVerifiedLeads = teamLeads.filter(lead => {
+              if (lead.agentId !== agent.id) return false;
+              const verifiedAtRaw = (lead as any).verifiedAt;
+              if (!verifiedAtRaw) return false;
+              let verifiedAtDate: Date;
+              if (verifiedAtRaw instanceof Date) {
+                verifiedAtDate = verifiedAtRaw;
+              } else if (verifiedAtRaw && typeof verifiedAtRaw.toDate === 'function') {
+                verifiedAtDate = verifiedAtRaw.toDate();
+              } else {
+                verifiedAtDate = new Date(verifiedAtRaw);
+              }
+              return verifiedAtDate >= startDate && verifiedAtDate <= endDate;
+            });
+
+            const agentActivatedLeads = teamLeads.filter(lead => {
+              if (lead.agentId !== agent.id || (lead.status !== 'activated' && lead.status !== 'activated_non_verified')) return false;
+              const activatedAt = getActivatedAt(lead);
+              return activatedAt !== null && activatedAt >= startDate && activatedAt <= endDate;
+            });
+            const activated = agentActivatedLeads.reduce((count, lead) => count + (lead.plans?.length || 0), 0);
+
+            const target = targets[agent.id]?.target || 0;
+            const mar = targets[agent.id]?.mar || 0;
+            const achievement = target > 0 ? parseFloat(((activated / target) * 100).toFixed(1)) : 0;
+
+            return {
+              Agent: agent.name || agent.email || 'Unknown',
+              'Total Leads': agentLeads.length,
+              Verified: agentVerifiedLeads.length,
+              Activated: activated,
+              Target: target,
+              MAR: mar,
+              'Achievement %': `${achievement}%`
+            };
+          });
+
+        const totals = agentMetricsData.reduce(
+          (acc, r) => ({
+            totalLeads: acc.totalLeads + r['Total Leads'],
+            verified: acc.verified + r.Verified,
+            activated: acc.activated + r.Activated,
+            target: acc.target + r.Target,
+            mar: acc.mar + r.MAR
+          }),
+          { totalLeads: 0, verified: 0, activated: 0, target: 0, mar: 0 }
+        );
+        const totalAchievement = totals.target > 0 ? parseFloat(((totals.activated / totals.target) * 100).toFixed(1)) : 0;
+        agentMetricsData.push({
+          Agent: 'TOTAL',
+          'Total Leads': totals.totalLeads,
+          Verified: totals.verified,
+          Activated: totals.activated,
+          Target: totals.target,
+          MAR: totals.mar,
+          'Achievement %': `${totalAchievement}%`
+        });
+
+        const sheetName = format(monthDate, 'MMM-yy').replace(/[\\/*?:\[\]]/g, '');
+        const ws = XLSX.utils.json_to_sheet(agentMetricsData);
+        XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      }
+
+      const timestamp = format(new Date(), 'yyyy-MM-dd_HH-mm-ss');
+      const filename = `${teamNameForFile}_Combined_Report_${timestamp}.xlsx`;
+      XLSX.writeFile(wb, filename);
+
+      setShowCombinedReportModal(false);
+      toast.success('Combined report downloaded successfully!', { duration: 3000, icon: '✅' });
+    } catch (error) {
+      console.error('Error exporting combined report:', error);
+      toast.error('Failed to export combined report');
+    } finally {
+      setIsExportingCombined(false);
     }
   };
 
@@ -2034,6 +2199,14 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                       <span className="text-xs font-medium">Export Excel</span>
                     </button>
                     <button
+                      onClick={() => setShowCombinedReportModal(true)}
+                      className="inline-flex items-center px-2 py-1.5 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      title="Download combined report"
+                    >
+                      <Download className="h-3 w-3 mr-1" />
+                      <span className="text-xs font-medium">Combined</span>
+                    </button>
+                    <button
                       onClick={handleExportToPDF}
                       className="inline-flex items-center px-2 py-1.5 bg-gradient-to-r from-red-500 to-rose-600 text-white rounded-lg hover:from-red-600 hover:to-rose-700 transition-all duration-200 shadow-md hover:shadow-lg"
                       title="Export to PDF"
@@ -2085,6 +2258,14 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                     >
                       <FileText className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                       <span className="hidden sm:inline text-xs sm:text-sm font-medium">Export Excel</span>
+                    </button>
+                    <button
+                      onClick={() => setShowCombinedReportModal(true)}
+                      className="inline-flex items-center px-2 py-1.5 sm:px-4 sm:py-2 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                      title="Download combined report"
+                    >
+                      <Download className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                      <span className="hidden sm:inline text-xs sm:text-sm font-medium">Combined</span>
                     </button>
                     <button
                       onClick={handleExportToPDF}
@@ -2634,6 +2815,91 @@ export function ManagerDashboard({ user }: ManagerDashboardProps) {
                         onClick={handleSaveBonusAmounts}
                       >
                         Save Changes
+                      </button>
+                    </div>
+                  </Dialog.Panel>
+                </Transition.Child>
+              </div>
+            </div>
+          </Dialog>
+        </Transition>
+
+        {/* Combined Report Modal */}
+        <Transition appear show={showCombinedReportModal} as={Fragment}>
+          <Dialog as="div" className="relative z-50" onClose={() => setShowCombinedReportModal(false)}>
+            <Transition.Child
+              as={Fragment}
+              enter="ease-out duration-300"
+              enterFrom="opacity-0"
+              enterTo="opacity-100"
+              leave="ease-in duration-200"
+              leaveFrom="opacity-100"
+              leaveTo="opacity-0"
+            >
+              <div className="fixed inset-0 bg-black bg-opacity-25" />
+            </Transition.Child>
+            <div className="fixed inset-0 overflow-y-auto">
+              <div className="flex min-h-full items-center justify-center p-4 text-center">
+                <Transition.Child
+                  as={Fragment}
+                  enter="ease-out duration-300"
+                  enterFrom="opacity-0 scale-95"
+                  enterTo="opacity-100 scale-100"
+                  leave="ease-in duration-200"
+                  leaveFrom="opacity-100 scale-100"
+                  leaveTo="opacity-0 scale-95"
+                >
+                  <Dialog.Panel className="w-full max-w-md transform overflow-hidden rounded-2xl bg-white p-6 text-left align-middle shadow-xl transition-all">
+                    <Dialog.Title as="h3" className="text-lg font-medium leading-6 text-gray-900 mb-4">
+                      Download Combined Report
+                    </Dialog.Title>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Select months to include in the combined Excel report. Each month will be a separate sheet.
+                    </p>
+                    <div className="space-y-2 max-h-60 overflow-y-auto mb-6">
+                      {Array.from({ length: 6 }, (_, i) => format(subMonths(new Date(), 5 - i), 'yyyy-MM')).map((monthStr) => (
+                        <label key={monthStr} className="flex items-center gap-3 p-2 hover:bg-gray-50 rounded-lg cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedMonthsForExport.includes(monthStr)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedMonthsForExport(prev => [...prev, monthStr].sort());
+                              } else {
+                                setSelectedMonthsForExport(prev => prev.filter(m => m !== monthStr));
+                              }
+                            }}
+                            className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="font-medium text-gray-900">{format(new Date(monthStr + '-01'), 'MMMM yyyy')}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        className="inline-flex justify-center rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                        onClick={() => setShowCombinedReportModal(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={selectedMonthsForExport.length === 0 || isExportingCombined}
+                        className="inline-flex justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={handleExportCombinedExcel}
+                      >
+                        {isExportingCombined ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Exporting...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="h-4 w-4 mr-2" />
+                            Download Excel
+                          </>
+                        )}
                       </button>
                     </div>
                   </Dialog.Panel>
