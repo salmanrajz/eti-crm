@@ -38,7 +38,6 @@ export class NumberCheckService {
         };
       }
 
-
       // Call Firebase HTTP Cloud Function
       const response = await fetch(this.FUNCTION_URL, {
         method: 'POST',
@@ -55,7 +54,6 @@ export class NumberCheckService {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        
         // Handle timeout specifically
         if (response.status === 408) {
           return {
@@ -69,8 +67,6 @@ export class NumberCheckService {
       }
 
       const data = await response.json();
-      
-      
       return {
         isActive: data.isActive,
         status: data.status,
@@ -112,9 +108,6 @@ export class NumberCheckService {
    */
   static async canReserveNumber(number: string): Promise<boolean> {
     const result = await this.checkNumberStatus(number);
-    const canReserve = !result.isActive;
-    
-    
-    return canReserve;
+    return !result.isActive;
   }
 }

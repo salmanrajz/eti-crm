@@ -25,6 +25,35 @@ import { Lead, CoordinatorType } from '../types';
 import { getWhatsAppCredentials } from './configService';
 
 /**
+ * Send a plain text WhatsApp message using the same credentials as lead chatbox
+ * notifications (config/whatsapp_credentials: apiUrl + accessToken).
+ * @param to - Recipient number with country code, digits only (e.g. 919906686458)
+ * @param text - Message body
+ */
+export async function sendWhatsAppTextWithChatboxCredentials(to: string, text: string): Promise<void> {
+  const creds = await getWhatsAppCredentials();
+  const normalizedTo = to.replace(/\D/g, '');
+  if (!normalizedTo) throw new Error('Invalid recipient number');
+  const res = await fetch(creds.apiUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${creds.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: normalizedTo,
+      type: 'text',
+      text: { body: text },
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`WhatsApp send failed: ${res.status} ${err}`);
+  }
+}
+
+/**
  * Helper function to extract phone numbers from user data
  */
 function extractPhoneNumbers(userData: any): string[] {

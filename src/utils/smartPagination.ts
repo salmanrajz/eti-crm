@@ -199,9 +199,12 @@ export class SmartPagination<T> {
       };
     }
 
-    // Handle last page
+    // Handle last page: only fetch the remaining items (e.g. 5 when total=125, pageSize=120)
+    // Using limitToLast(pageSize) would return the last 120 docs and duplicate most of page 1
     if (pageNumber === this.totalPages) {
-      const q = query(this.buildBaseQuery(), limitToLast(this.options.pageSize));
+      const remaining = this.totalItems - (this.totalPages - 1) * this.options.pageSize;
+      const lastPageSize = Math.max(1, Math.min(remaining, this.options.pageSize));
+      const q = query(this.buildBaseQuery(), limitToLast(lastPageSize));
       const snapshot = await getDocs(q);
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as T[];
       

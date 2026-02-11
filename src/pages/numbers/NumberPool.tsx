@@ -3097,7 +3097,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         return;
       }
     } catch (error: any) {
-      console.error('Error checking number status:', error);
+      console.error('[NumberPool] Reserve: active status check failed', { number: number.number, id: number.id, error });
       toast.dismiss('number-check');
       toast.error('Failed to verify number status. Please try again.', {
         duration: 3000
