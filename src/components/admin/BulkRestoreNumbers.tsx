@@ -25,7 +25,7 @@
  */
 
 import { useState } from 'react';
-import { RotateCcw, AlertTriangle, CheckCircle, XCircle, Loader, Code } from 'lucide-react';
+import { RotateCcw, AlertTriangle, CheckCircle, XCircle, Loader, Code, Key } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
 import { doc, getDoc, collection, writeBatch, query, where, getDocs } from 'firebase/firestore';
@@ -50,6 +50,7 @@ interface BulkRestoreNumbersProps {
 export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps) {
   const [numbersText, setNumbersText] = useState('');
   const [newCode, setNewCode] = useState('');
+  const [newPasscode, setNewPasscode] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [result, setResult] = useState<BulkRestoreResult | null>(null);
@@ -110,10 +111,11 @@ export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps)
                 // Prepare number data for numberPool (remove deletedNumbers-specific fields)
                 const { deletedAt, originalId, originalCollection, ...numberData } = deletedNumberData;
 
-                // Update code if provided
+                // Update code and passcode if provided
                 const updatedNumberData = {
                   ...numberData,
                   code: newCode.trim() || numberData.code || '',
+                  passcode: newPasscode.trim() || numberData.passcode || '',
                   status: 'open',
                   lastStatusChange: serverTimestamp(),
                   reservedBy: null,
@@ -181,6 +183,7 @@ export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps)
         // Clear form on success
         setNumbersText('');
         setNewCode('');
+        setNewPasscode('');
       } else {
         toast.error('No numbers were successfully restored');
       }
@@ -196,6 +199,7 @@ export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps)
     if (!isProcessing) {
       setNumbersText('');
       setNewCode('');
+      setNewPasscode('');
       setResult(null);
       setShowConfirmDialog(false);
       onClose();
@@ -261,7 +265,7 @@ export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps)
                   </div>
 
                   {/* Code Update */}
-                  <div className="mb-6">
+                  <div className="mb-4">
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       <div className="flex items-center gap-2">
                         <Code className="h-4 w-4" />
@@ -278,6 +282,27 @@ export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps)
                     />
                     <p className="text-xs text-gray-500 mt-1">
                       Leave empty to keep original codes
+                    </p>
+                  </div>
+
+                  {/* Passcode Update */}
+                  <div className="mb-6">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      <div className="flex items-center gap-2">
+                        <Key className="h-4 w-4" />
+                        Update Passcode (optional)
+                      </div>
+                    </label>
+                    <input
+                      type="text"
+                      value={newPasscode}
+                      onChange={(e) => setNewPasscode(e.target.value)}
+                      placeholder="Enter new passcode for all restored numbers"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                      disabled={isProcessing}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Leave empty to keep original passcodes
                     </p>
                   </div>
 
@@ -411,6 +436,11 @@ export function BulkRestoreNumbers({ isOpen, onClose }: BulkRestoreNumbersProps)
                         {newCode.trim() && (
                           <span className="block mt-2 font-medium text-green-600">
                             Code will be updated to: "{newCode.trim()}"
+                          </span>
+                        )}
+                        {newPasscode.trim() && (
+                          <span className="block mt-2 font-medium text-green-600">
+                            Passcode will be updated to: "{newPasscode.trim()}"
                           </span>
                         )}
                       </p>
