@@ -3036,20 +3036,20 @@ export function LeadList() {
                         {getStatusIcon(lead.status)}
                         {getStatusDisplayText(lead.status)}
                       </motion.span>
-                      {/* Strikes Count */}
+                      {/* Strikes Count - clickable only for admin */}
                       {leadStrikes[lead.id] > 0 && (
                         <motion.div
                           initial={{ opacity: 0, scale: 0.9 }}
                           animate={{ opacity: 1, scale: 1 }}
-                          whileHover={isAdmin ? { scale: 1.05 } : {}}
-                          whileTap={isAdmin ? { scale: 0.95 } : {}}
-                          onClick={isAdmin ? () => {
+                          whileHover={isAdmin() ? { scale: 1.05 } : {}}
+                          whileTap={isAdmin() ? { scale: 0.95 } : {}}
+                          onClick={isAdmin() ? () => {
                             setSelectedLeadForStruckNumbers(lead);
                             setShowStruckNumbersModal(true);
                           } : undefined}
                           className={clsx(
                             "inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1",
-                            isAdmin && "cursor-pointer hover:bg-red-200 transition-colors"
+                            isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
                           )}
                         >
                           <AlertCircle className="h-3 w-3 mr-1" />
@@ -3241,12 +3241,19 @@ export function LeadList() {
                                 Pending Verification at Location
                               </motion.span>
                             )}
-                              {/* Strikes Count */}
+                              {/* Strikes Count - clickable only for admin */}
                               {leadStrikes[lead.id] > 0 && (
                                 <motion.div
                                   initial={{ opacity: 0, scale: 0.9 }}
                                   animate={{ opacity: 1, scale: 1 }}
-                            className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-100 text-red-700 border border-red-200"
+                                  onClick={isAdmin() ? () => {
+                                    setSelectedLeadForStruckNumbers(lead);
+                                    setShowStruckNumbersModal(true);
+                                  } : undefined}
+                                  className={clsx(
+                                    "inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-100 text-red-700 border border-red-200",
+                                    isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
+                                  )}
                                 >
                             <AlertCircle className="h-2 w-2 mr-0.5" />
                                   {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
