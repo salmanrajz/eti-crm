@@ -339,6 +339,12 @@ const STATUS_STYLES = {
     icon: Zap,
     gradient: 'from-indigo-50 to-indigo-100'
   },
+  activated_non_verified: {
+    bg: 'bg-indigo-100',
+    text: 'text-indigo-800',
+    icon: Zap,
+    gradient: 'from-indigo-50 to-indigo-100'
+  },
   follow_up: {
     bg: 'bg-orange-100',
     text: 'text-orange-800',
@@ -545,6 +551,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showMyClaimsDialog, setShowMyClaimsDialog] = useState(false);
   const [showClaimDialog, setShowClaimDialog] = useState(false);
   const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
+  const [strikeBlockedSameTeam, setStrikeBlockedSameTeam] = useState(false);
+  const [openingStrikeModalId, setOpeningStrikeModalId] = useState<string | null>(null);
   const [showStatusCheckDialog, setShowStatusCheckDialog] = useState(false);
   const [numberForStatusCheck, setNumberForStatusCheck] = useState<NumberPoolType | null>(null);
   const [isStatusCheckSubmitting, setIsStatusCheckSubmitting] = useState(false);
@@ -3733,7 +3741,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
    */
   const handleClaim = useCallback(async (number: NumberPoolType) => {
     if (!user?.id) return;
-    
+
     // Per-number claim queue cap
     const queueLength = number.claimQueue?.length || 0;
     if (queueLength >= 3) {
@@ -3762,8 +3770,36 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     
     setLastClaimAttempts(prev => new Map(prev.set(number.id, now)));
     setNumberToClaim(number);
-    setShowClaimDialog(true);
-  }, [user?.id, claimingNumbers, lastClaimAttempts, userClaimCount]);
+    setStrikeBlockedSameTeam(false);
+    setOpeningStrikeModalId(number.id);
+
+    try {
+      // For strike flow: check if number is in a lead owned by same-team agent (show in modal)
+      const isStrikeFlow = ['assigned', 'verified', 'follow_up'].includes(number.status);
+      if (isStrikeFlow && user.role === 'agent' && (number as any).leadId && user.teamId) {
+        try {
+          const leadDoc = await getDoc(doc(db, 'leads', (number as any).leadId));
+          if (leadDoc.exists()) {
+            const lead = leadDoc.data();
+            const leadOwnerId = lead?.agentId;
+            if (leadOwnerId && leadOwnerId !== user.id) {
+              const ownerUserDoc = await getDoc(doc(db, 'users', leadOwnerId));
+              const ownerTeamId = ownerUserDoc.data()?.teamId;
+              if (ownerTeamId && ownerTeamId === user.teamId) {
+                setStrikeBlockedSameTeam(true);
+              }
+            }
+          }
+        } catch {
+          // ignore; modal will show normally (e.g. permission denied for other-team agent)
+        }
+      }
+
+      setShowClaimDialog(true);
+    } finally {
+      setOpeningStrikeModalId(null);
+    }
+  }, [user?.id, user?.role, user?.teamId, claimingNumbers, lastClaimAttempts, userClaimCount]);
 
   const confirmClaim = async () => {
     if (!numberToClaim || !user?.id) return;
@@ -3804,6 +3840,28 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
         const numberData = numberDoc.data();
           const claims = numberData.claims || [];
+
+          // Same-team restriction: agents cannot strike on a number that is in a lead owned by someone from their team
+          // If we get permission error (e.g. agent can't read lead/owner), allow strike (different team or unverifiable)
+          if (user?.role === 'agent' && numberData.leadId && user.teamId) {
+            try {
+              const leadDoc = await getDoc(doc(db, 'leads', numberData.leadId));
+              if (leadDoc.exists()) {
+                const lead = leadDoc.data();
+                const leadOwnerId = lead?.agentId;
+                if (leadOwnerId && leadOwnerId !== user.id) {
+                  const ownerUserDoc = await getDoc(doc(db, 'users', leadOwnerId));
+                  const ownerTeamId = ownerUserDoc.data()?.teamId;
+                  if (ownerTeamId && ownerTeamId === user.teamId) {
+                    throw new Error('You cannot strike on a number that is in a lead owned by an agent from your team.');
+                  }
+                }
+              }
+            } catch (err: any) {
+              if (err?.message?.includes('cannot strike on a number that is in a lead')) throw err;
+              // Permission denied or other error: allow strike (different team or cannot verify)
+            }
+          }
           
           // Check if user already has a pending claim
           const existingClaim = claims.find((claim: any) => claim.userId === user.id && claim.status === 'pending');
@@ -3954,7 +4012,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       claimSucceeded = true;
 
     } catch (error: any) {
-      
       // Revert local state if there's an error
       setNumbers(prev => prev.map(n => 
         n.id === numberToClaim.id ? numberToClaim : n
@@ -6041,6 +6098,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             })()}
             <span>(R: {number.reservationCount || 0})</span>
             <span>(C: {number.claimQueue?.length || 0})</span>
+            {(() => {
+              const claims = (number as any).claims || [];
+              const strikeCount = claims.filter((c: any) => c.status === 'pending').length;
+              return <span title={strikeCount > 0 ? `${strikeCount} agent(s) struck` : ''} className={strikeCount > 0 ? 'text-red-600 font-semibold' : ''}>(S: {strikeCount})</span>;
+            })()}
           </div>
         </motion.span>
       </td>
@@ -6135,23 +6197,23 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             !((number as any).claims || []).some((claim: any) => claim.userId === user?.id && claim.status === 'pending') &&
                             !agentLeadNumberIds.has(number.id) && (
             <motion.button
-                              whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
-                              whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
+                              whileHover={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 1.05 }}
+                              whileTap={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 0.92 }}
                               onClick={() => handleClaim(number)}
-                              disabled={claimingNumbers.has(number.id)}
+                              disabled={claimingNumbers.has(number.id) || openingStrikeModalId === number.id}
               className={clsx(
                 "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
-                                claimingNumbers.has(number.id)
+                                (claimingNumbers.has(number.id) || openingStrikeModalId === number.id)
                   ? "bg-gray-100 text-gray-400 ring-gray-200 cursor-not-allowed"
-                  : "bg-gradient-to-r from-amber-50 to-orange-50 text-amber-600 hover:from-amber-100 hover:to-orange-100 ring-amber-100"
+                  : "bg-gradient-to-r from-amber-50 to-orange-50 text-amber-600 hover:from-amber-100 hover:to-orange-100 ring-amber-100 active:ring-2 active:ring-amber-300 active:scale-[0.98]"
               )}
             >
-                              {claimingNumbers.has(number.id) ? (
+                              {(claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? (
                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
               ) : (
                 <AlertTriangle className="h-4 w-4 mr-1.5" />
               )}
-                              {claimingNumbers.has(number.id) ? 'Striking...' : 'Strike'}
+                              {claimingNumbers.has(number.id) ? 'Striking...' : openingStrikeModalId === number.id ? 'Checking...' : 'Strike'}
             </motion.button>
           )}
           {/* Striked status - Only visible to agents */}
@@ -6504,6 +6566,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     <div>• Per-number queue cap: 3</div>
                     <div>• Claim window: 8 AM–10:30 PM (UAE time)</div>
                   </div>
+                  <div className="mt-2 text-[11px] text-gray-600 leading-snug border border-gray-200 rounded-md px-3 py-2 bg-gray-50">
+                    <div className="font-medium text-gray-700 mb-1">In number pool, status badges show:</div>
+                    <div><strong>(R)</strong> Reservations — times this number has been reserved</div>
+                    <div><strong>(C)</strong> Claim queue — agents in line to claim this number</div>
+                    <div><strong>(S)</strong> Strikes — agents who have struck (pending Strikes) this number</div>
+                  </div>
                   </div>
                 <button
                   onClick={() => setShowMyClaimsDialog(false)}
@@ -6608,14 +6676,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 }
               </h3>
               <p className="text-gray-500 text-center mb-6">
-                {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
+                {strikeBlockedSameTeam ? (
+                  <span className="text-amber-700 font-medium">
+                    This lead belongs to your team. You cannot strike on this number.
+                  </span>
+                ) : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
                   <>
                     Are you sure you want to strike the number {numberToClaim.number}?
                     <br />
                     <span className="text-sm mt-2 block">
                       This will notify the current agent that you are interested in this number.
                       The agent will be notified of your strike.
-            </span>
+                    </span>
                   </>
                 ) : (
                   <>
@@ -6625,38 +6697,44 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       The number will remain reserved by the original agent for {CLAIM_TIMEOUT / 60000} minutes.
                       After that time, it will be automatically reserved for you.
                     </span>
-        </>
-      )}
+                  </>
+                )}
               </p>
               <div className="flex justify-end space-x-3">
                 <button
-                  onClick={() => setShowClaimDialog(false)}
+                  onClick={() => {
+                    setShowClaimDialog(false);
+                    setStrikeBlockedSameTeam(false);
+                    setOpeningStrikeModalId(null);
+                  }}
                   className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
                 >
                   Cancel
                 </button>
-                <button
-                  onClick={confirmClaim}
-                  disabled={claimingNumbers.has(numberToClaim.id)}
-                  className={clsx(
-                    "px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors flex items-center",
-                    claimingNumbers.has(numberToClaim.id)
-                      ? "bg-gray-400 cursor-not-allowed"
+                {!strikeBlockedSameTeam && (
+                  <button
+                    onClick={confirmClaim}
+                    disabled={claimingNumbers.has(numberToClaim.id)}
+                    className={clsx(
+                      "px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors flex items-center",
+                      claimingNumbers.has(numberToClaim.id)
+                        ? "bg-gray-400 cursor-not-allowed"
+                        : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                        ? "bg-amber-600 hover:bg-amber-700"
+                        : "bg-blue-600 hover:bg-blue-700"
+                    )}
+                  >
+                    {claimingNumbers.has(numberToClaim.id) && (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    )}
+                    {claimingNumbers.has(numberToClaim.id)
+                      ? 'Processing...'
                       : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
-                      ? "bg-amber-600 hover:bg-amber-700"
-                      : "bg-blue-600 hover:bg-blue-700"
-                  )}
-                >
-                  {claimingNumbers.has(numberToClaim.id) && (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  )}
-                  {claimingNumbers.has(numberToClaim.id)
-                    ? 'Processing...'
-                    : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
-                    ? "Strike"
-                    : "Claim"
-                  }
-                </button>
+                      ? "Strike"
+                      : "Claim"
+                    }
+                  </button>
+                )}
               </div>
             </div>
           </div>

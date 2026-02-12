@@ -92,6 +92,7 @@ export type NumberStatus =
   | 'verified'              // Successfully verified
   | 'assigned'              // Assigned to a customer/lead
   | 'activated'             // Active and in use
+  | 'activated_non_verified' // Active but not yet verified
   | 'follow_up'             // Requires follow-up action
   | 'later'                 // Marked for later action
   | 'rejected'              // Rejected during verification
