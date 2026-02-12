@@ -138,10 +138,10 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
   const [loading, setLoading] = useState(true);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [customerSubmissions, setCustomerSubmissions] = useState<any[]>([]);
-  const navigate = useNavigate();
-  const { struckNumbers, loading: struckLoading } = useStruckNumbers(user.id);
-  const { remainingStrikes, lastStrikeTime } = useStrikeLimit(user.id);
   const [showStruck, setShowStruck] = useState(false);
+  const navigate = useNavigate();
+  const { struckNumbers, loading: struckLoading } = useStruckNumbers(user.id, showStruck);
+  const { remainingStrikes, lastStrikeTime } = useStrikeLimit(user.id);
   const [payrollOpen, setPayrollOpen] = useState(false);
   const [uaeNow, setUaeNow] = useState<Date>(() => new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Dubai' })));
 
@@ -1050,11 +1050,10 @@ export function AgentDashboard({ user }: AgentDashboardProps) {
           <button
             onClick={() => setShowStruck(true)}
             className="relative inline-flex items-center px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-600 text-white font-semibold rounded-xl shadow hover:from-amber-600 hover:to-orange-700 transition-all focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={struckLoading}
           >
             <span>Struck Numbers</span>
-            <span className="ml-2 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-amber-800 bg-amber-100 rounded-full">
-              {struckLoading ? '...' : struckNumbers.length}
+            <span className="ml-2 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-amber-800 bg-amber-100 rounded-full min-w-[1.5rem]">
+              {showStruck && struckLoading ? '...' : struckNumbers.length}
             </span>
           </button>
 

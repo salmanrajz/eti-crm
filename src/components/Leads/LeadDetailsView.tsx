@@ -3327,7 +3327,7 @@ Language: ${lead.language || 'N/A'}`;
             const numberData = numberDoc.data();
             const claims = numberData?.claims || [];
             
-            // Find the most recent pending claim (strike) from another agent
+            // Find pending claims (strikes) from other agents - reserve for FIRST striker (same as auto-reject)
             const pendingClaims = claims.filter((claim: any) => 
               claim.status === 'pending' && claim.userId !== user.id
             );
@@ -3337,14 +3337,14 @@ Language: ${lead.language || 'N/A'}`;
             let updatedClaims = claims;
             
             if (pendingClaims.length > 0) {
-              // Sort by claimedAt (most recent first) and get the first one
-              const sortedClaims = pendingClaims.sort((a: any, b: any) => {
+              // Sort by claimedAt ascending (earliest first) - first striker gets the number, like auto-reject
+              const sortedClaims = [...pendingClaims].sort((a: any, b: any) => {
                 const aTime = a.claimedAt?.toDate?.() || new Date(a.claimedAt || 0);
                 const bTime = b.claimedAt?.toDate?.() || new Date(b.claimedAt || 0);
-                return bTime.getTime() - aTime.getTime();
-        });
+                return aTime.getTime() - bTime.getTime();
+              });
               
-              // Reserve for the agent who made the strike
+              // Reserve for the first agent who struck (not the last)
               reservedByAgentId = sortedClaims[0].userId;
               hasStrike = true;
               
@@ -3846,7 +3846,7 @@ Language: ${lead.language || 'N/A'}`;
           )}
           {((user?.role === 'agent' && user?.id === lead.agentId) ||
             (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
-            !['pending_verification', 'activated', 'rejected', 'non_verified'].includes(localStatus) && (
+            !['pending_verification', 'activated', 'activated_non_verified', 'rejected', 'non_verified'].includes(localStatus) && (
             <button
               onClick={() => setShowRejectDialog(true)}
               disabled={rejecting}

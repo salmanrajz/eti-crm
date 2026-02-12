@@ -40,8 +40,8 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useMemo } from 'react';
-import { collection, query, where, getDocs, orderBy, Timestamp, addDoc, serverTimestamp, getDoc, doc } from 'firebase/firestore';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { collection, query, where, getDocs, orderBy, limit, Timestamp, addDoc, serverTimestamp, getDoc, doc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { NumberPoolType } from '../../types';
 import { motion } from 'framer-motion';
@@ -611,49 +611,74 @@ export function useStrikeLimit(userId: string): StrikeLimit {
   return strikeLimit;
 }
 
-export function useStruckNumbers(userId: string) {
-  const [struckNumbers, setStruckNumbers] = useState<NumberPoolType[]>([]);
-  const [loading, setLoading] = useState(true);
+const STRUCK_LEADS_LIMIT = 150; // Cap leads to keep first load fast
 
-  // Cache configuration
-  const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache
+export function useStruckNumbers(userId: string, enabled: boolean = false) {
+  const [struckNumbers, setStruckNumbers] = useState<NumberPoolType[]>([]);
+  const [loading, setLoading] = useState(false);
+  const backgroundFetchedRef = useRef(false);
+  const prevUserIdRef = useRef<string | null>(null);
+
   const CACHE_KEY = `struckNumbers_${userId}`;
 
+  // Apply cache immediately on mount so badge can show count without opening modal
   useEffect(() => {
     if (!userId) return;
-    loadStruckNumbers();
-    // eslint-disable-next-line
-  }, [userId]);
-
-  async function loadStruckNumbers() {
-    setLoading(true);
-    
-    // ✅ OPTIMIZED: Check cache first and show immediately
     try {
       const cachedData = localStorage.getItem(CACHE_KEY);
       if (cachedData) {
-        const { data, timestamp } = JSON.parse(cachedData);
-        const now = Date.now();
-        
-        // If cache is still valid (less than 5 minutes old), use it immediately
-        if (now - timestamp < CACHE_DURATION) {
-          setStruckNumbers(data);
-          setLoading(false);
-          return;
-        }
+        const { data } = JSON.parse(cachedData);
+        setStruckNumbers(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
+      console.warn('Error reading struck numbers cache:', error);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    if (prevUserIdRef.current !== userId) {
+      prevUserIdRef.current = userId;
+      backgroundFetchedRef.current = false;
+    }
+    if (enabled) {
+      loadStruckNumbers(true);
+      return;
+    }
+    setLoading(false);
+    if (!backgroundFetchedRef.current) {
+      backgroundFetchedRef.current = true;
+      const t = setTimeout(() => loadStruckNumbers(false), 400);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line
+  }, [userId, enabled]);
+
+  async function loadStruckNumbers(showLoading: boolean) {
+    // Stale-while-revalidate: show cache immediately (even expired), then refresh in background
+    let showedCache = false;
+    try {
+      const cachedData = localStorage.getItem(CACHE_KEY);
+      if (cachedData) {
+        const { data } = JSON.parse(cachedData);
+        setStruckNumbers(Array.isArray(data) ? data : []);
+        showedCache = true;
       }
     } catch (error) {
       console.warn('Error reading struck numbers cache:', error);
     }
 
+    if (!showedCache && showLoading) setLoading(true);
+
     try {
-      // ✅ PERFORMANCE OPTIMIZATION: Instead of fetching ALL numbers with claims (10k-50k docs!),
-      // we now fetch ONLY the agent's leads and then fetch specific numbers by ID
-      
-      // Step 1: Get agent's leads (typically 10-100 leads)
+      // ✅ PERFORMANCE: Fetch only agent's leads, limited for fast first load
       const leadsQuery = query(
         collection(db, 'leads'),
-        where('agentId', '==', userId)
+        where('agentId', '==', userId),
+        limit(STRUCK_LEADS_LIMIT)
       );
       const leadsSnapshot = await getDocs(leadsQuery);
       
