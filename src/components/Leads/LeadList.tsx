@@ -1748,6 +1748,153 @@ export function LeadList() {
     };
   }, [user?.id, user?.role, isMobile]);
 
+  // Helper: transform a Firestore doc snapshot into a lead object
+  const transformDoc = useCallback((doc: QueryDocumentSnapshot<DocumentData>) => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      ...data,
+      createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+      updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : data.updatedAt,
+      assignedToCordAt: data.assignedToCordAt?.toDate ? data.assignedToCordAt.toDate() : data.assignedToCordAt,
+      assignedAt: data.assignedAt?.toDate ? data.assignedAt.toDate() : data.assignedAt
+    };
+  }, []);
+
+  // Helper: apply role-based post-filters to search results
+  const applyRoleFilters = useCallback((searchResults: Lead[]): Lead[] => {
+    let results = searchResults;
+    if (user?.role === 'freelancer' && user?.id) {
+      results = results.filter(lead => lead.agentId === user.id);
+    }
+    if (user?.role === 'coordinator') {
+      results = results.filter(
+        lead => lead.status !== 'pending_verification' && lead.status !== 'non_verified'
+      );
+    }
+    if (user?.role === 'coordinator' && user.coordinatorType && ['g1', 'g2', 'g3', 'all'].includes(user.coordinatorType)) {
+      const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
+      results = results.filter(lead =>
+        isLeadInCoordinatorScope(lead, user.coordinatorType as CoordinatorType, coordinatorTeams)
+      );
+    }
+    if (user?.role === 'verifier' && user.verifierGroups && user.verifierGroups.length > 0) {
+      const hasAllGroups = user.verifierGroups.includes('all');
+      if (!hasAllGroups) {
+        results = results.filter(lead => {
+          const hasMatchingGroup = lead.plans?.some(plan => {
+            const planGroup = (plan.group || '').toLowerCase();
+            return (user.verifierGroups as VerifierGroups)?.some((verifierGroup: string) => {
+              const normalizedVerifierGroup = verifierGroup.toLowerCase();
+              return planGroup === normalizedVerifierGroup;
+            }) || false;
+          }) || false;
+          return hasMatchingGroup;
+        });
+      }
+    }
+    return results;
+  }, [user, isLeadInCoordinatorScope]);
+
+  // Helper: check if search term matches a lead (used for in-memory filtering)
+  const matchesSearch = useCallback((lead: any, normalizedSearch: string): boolean => {
+    const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
+    const srNumberMatch =
+      lead.srNumber?.toString?.().toLowerCase().includes(normalizedSearch) ||
+      lead.srNo?.toString?.().toLowerCase().includes(normalizedSearch) ||
+      lead.sr?.toString?.().toLowerCase().includes(normalizedSearch) ||
+      (Array.isArray(lead.srNumbers) && lead.srNumbers.some((sr: string) =>
+        sr?.toString?.().toLowerCase().includes(normalizedSearch)
+      )) ||
+      (lead.plans && lead.plans.some((plan: any) =>
+        plan.srNumber?.toString?.().toLowerCase().includes(normalizedSearch)
+      ));
+
+    return !!(
+      lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
+      lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+      lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
+      lead.plans?.some((plan: any) =>
+        plan.number?.toLowerCase().includes(normalizedSearch) ||
+        plan.plan?.toLowerCase().includes(normalizedSearch)
+      ) ||
+      lead.status?.toLowerCase().includes(normalizedSearch) ||
+      lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+      srNumberMatch ||
+      (canSearchEtisalatId && (
+        lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
+        (lead.etisalatLeadIds && Array.isArray(lead.etisalatLeadIds)
+          ? lead.etisalatLeadIds.some((id: string) => id?.toString?.().toLowerCase().includes(normalizedSearch))
+          : false) ||
+        (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
+      ))
+    );
+  }, [user?.role]);
+
+  // FAST-PATH: Targeted Firestore queries for phone number, customer number, lead number
+  // Fires parallel queries directly on indexed fields — returns results in milliseconds
+  const fastPathSearch = useCallback(async (term: string): Promise<Lead[]> => {
+    const leadsRef = collection(db, 'leads');
+    const results = new Map<string, Lead>();
+    const cleanTerm = term.trim();
+    const isNumeric = /^\d+$/.test(cleanTerm);
+    const FAST_LIMIT = 50;
+
+    // Build role-based constraints
+    const roleConstraints: any[] = [];
+    if (user?.role === 'agent' || user?.role === 'freelancer') {
+      roleConstraints.push(where('agentId', '==', user.id));
+    } else if (isManager() && user?.teamId) {
+      roleConstraints.push(where('teamId', '==', user.teamId));
+    }
+
+    const queries: Promise<void>[] = [];
+
+    // Query 1: customerNumber prefix match (best for phone number searches)
+    if (isNumeric && cleanTerm.length >= 3) {
+      queries.push(
+        getDocs(query(leadsRef, ...roleConstraints, where('customerNumber', '>=', cleanTerm), where('customerNumber', '<=', cleanTerm + '\uf8ff'), orderBy('customerNumber'), limit(FAST_LIMIT)))
+          .then(snap => { snap.docs.forEach(d => { if (!results.has(d.id)) results.set(d.id, transformDoc(d) as any); }); })
+          .catch(() => {})
+      );
+    }
+
+    // Query 2: leadNumber prefix match (for lead number searches like "ETS-100")
+    if (cleanTerm.length >= 2) {
+      const leadNumTerm = cleanTerm.toUpperCase();
+      queries.push(
+        getDocs(query(leadsRef, ...roleConstraints, where('leadNumber', '>=', leadNumTerm), where('leadNumber', '<=', leadNumTerm + '\uf8ff'), orderBy('leadNumber'), limit(FAST_LIMIT)))
+          .then(snap => { snap.docs.forEach(d => { if (!results.has(d.id)) results.set(d.id, transformDoc(d) as any); }); })
+          .catch(() => {})
+      );
+      // Also try lowercase/original case
+      if (leadNumTerm !== cleanTerm) {
+        queries.push(
+          getDocs(query(leadsRef, ...roleConstraints, where('leadNumber', '>=', cleanTerm), where('leadNumber', '<=', cleanTerm + '\uf8ff'), orderBy('leadNumber'), limit(FAST_LIMIT)))
+            .then(snap => { snap.docs.forEach(d => { if (!results.has(d.id)) results.set(d.id, transformDoc(d) as any); }); })
+            .catch(() => {})
+        );
+      }
+    }
+
+    // Query 3: customerNumber exact match (for exact phone lookups)
+    if (isNumeric && cleanTerm.length >= 7) {
+      queries.push(
+        getDocs(query(leadsRef, ...roleConstraints, where('customerNumber', '==', cleanTerm), limit(FAST_LIMIT)))
+          .then(snap => { snap.docs.forEach(d => { if (!results.has(d.id)) results.set(d.id, transformDoc(d) as any); }); })
+          .catch(() => {})
+      );
+    }
+
+    // Wait for all targeted queries (with a tight timeout so we don't block)
+    await Promise.race([
+      Promise.allSettled(queries),
+      new Promise<void>(resolve => setTimeout(resolve, 2000))
+    ]);
+
+    return Array.from(results.values());
+  }, [user, isManager, transformDoc]);
+
   // Firebase search function - searches Firebase when not found in loaded leads
   const searchFirebase = useCallback(async (searchTerm: string) => {
     if (!user || !searchTerm.trim()) {
@@ -1758,10 +1905,23 @@ export function LeadList() {
     setIsSearchingFirebase(true);
     try {
       const normalizedSearch = searchTerm.trim().toLowerCase();
+
+      // PHASE 1: Fast-path — fire targeted queries for phone/customer/lead numbers
+      // These return in <100ms for indexed fields
+      const fastResults = await fastPathSearch(searchTerm);
+      const filteredFastResults = applyRoleFilters(fastResults as Lead[]);
+
+      // If fast-path found results, show them IMMEDIATELY while full scan continues
+      if (filteredFastResults.length > 0) {
+        const enrichedFast = await processLeadsWithInfo(filteredFastResults);
+        setFirebaseSearchResults(enrichedFast);
+        setIsSearchPending(false);
+      }
+
+      // PHASE 2: Full scan with early termination for comprehensive results
       let baseQuery = collection(db, 'leads');
       let constraints: any[] = [];
 
-      // Add role-based filters
       if (user.role === 'agent' || user.role === 'freelancer') {
         constraints.push(where('agentId', '==', user.id));
       } else if (isVerifier()) {
@@ -1775,17 +1935,15 @@ export function LeadList() {
         constraints.push(where('teamId', '==', user.teamId));
       }
 
-      // Search in multiple fields - we'll fetch and filter in memory for complex searches
       constraints.push(orderBy('createdAt', 'desc'));
 
-      // Fetch all leads with pagination to ensure we get ALL matching leads
-      // Optimized: Process documents and filtering in parallel chunks for better performance
-      let allDocs: QueryDocumentSnapshot<DocumentData>[] = [];
+      let allMatchedDocs: any[] = [];
       let lastDocSnapshot: QueryDocumentSnapshot<DocumentData> | null = null;
-      const BATCH_SIZE = 1000; // Firestore can handle up to several thousand per query
+      const BATCH_SIZE = 1000;
+      const MAX_MATCHES = 500;
       let hasMore = true;
+      const seenIds = new Set(filteredFastResults.map(l => l.id));
 
-      // Fetch first batch immediately
       while (hasMore) {
         let batchConstraints = [...constraints];
         if (lastDocSnapshot) {
@@ -1794,131 +1952,46 @@ export function LeadList() {
         batchConstraints.push(limit(BATCH_SIZE));
 
         const q = query(baseQuery, ...batchConstraints);
-      const snapshot = await getDocs(q);
+        const snapshot = await getDocs(q);
 
         if (snapshot.empty) {
           hasMore = false;
         } else {
-          allDocs.push(...snapshot.docs);
+          // Transform and filter THIS batch immediately (no need to collect all first)
+          for (const docSnap of snapshot.docs) {
+            const lead = transformDoc(docSnap);
+            if (!seenIds.has(docSnap.id) && matchesSearch(lead, normalizedSearch)) {
+              allMatchedDocs.push(lead);
+              seenIds.add(docSnap.id);
+            }
+          }
+
           lastDocSnapshot = snapshot.docs[snapshot.docs.length - 1];
-          // If we got fewer than BATCH_SIZE, we've reached the end
+
           if (snapshot.docs.length < BATCH_SIZE) {
+            hasMore = false;
+          }
+
+          // Early termination: if we already have enough matches, stop fetching
+          if (allMatchedDocs.length >= MAX_MATCHES) {
             hasMore = false;
           }
         }
       }
 
-      // Process document transformation in parallel chunks for better performance
-      const CHUNK_SIZE = 500; // Process 500 documents at a time in parallel
-      const chunks: QueryDocumentSnapshot<DocumentData>[][] = [];
-      for (let i = 0; i < allDocs.length; i += CHUNK_SIZE) {
-        chunks.push(allDocs.slice(i, i + CHUNK_SIZE));
-      }
+      // Combine fast-path results with full-scan results (fast-path first for priority)
+      let searchResults = [...filteredFastResults, ...allMatchedDocs] as Lead[];
 
-      // Process chunks in parallel
-      const processedChunks = await Promise.all(
-        chunks.map(async (chunk) => {
-          return chunk.map(doc => {
-          const data = doc.data();
-          return {
-            id: doc.id,
-            ...data,
-            createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
-            updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : data.updatedAt,
-            assignedToCordAt: data.assignedToCordAt?.toDate ? data.assignedToCordAt.toDate() : data.assignedToCordAt,
-            assignedAt: data.assignedAt?.toDate ? data.assignedAt.toDate() : data.assignedAt
-          };
-          });
-        })
-      );
+      // Deduplicate by id
+      const finalSeenIds = new Set<string>();
+      searchResults = searchResults.filter(lead => {
+        if (finalSeenIds.has(lead.id)) return false;
+        finalSeenIds.add(lead.id);
+        return true;
+      });
 
-      // Flatten processed chunks
-      const processedDocs = processedChunks.flat();
-
-      // Filter in parallel chunks
-      const filterChunks: any[][] = [];
-      for (let i = 0; i < processedDocs.length; i += CHUNK_SIZE) {
-        filterChunks.push(processedDocs.slice(i, i + CHUNK_SIZE));
-      }
-
-      const filteredChunks = await Promise.all(
-        filterChunks.map(async (chunk) => {
-          const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
-          
-          return chunk.filter((lead: any) => {
-          // Check SR numbers (legacy single value, array, or in plans)
-          const srNumberMatch = 
-            lead.srNumber?.toString?.().toLowerCase().includes(normalizedSearch) ||
-            lead.srNo?.toString?.().toLowerCase().includes(normalizedSearch) ||
-            lead.sr?.toString?.().toLowerCase().includes(normalizedSearch) ||
-            (Array.isArray(lead.srNumbers) && lead.srNumbers.some((sr: string) => 
-              sr?.toString?.().toLowerCase().includes(normalizedSearch)
-            )) ||
-            (lead.plans && lead.plans.some((plan: any) => 
-              plan.srNumber?.toString?.().toLowerCase().includes(normalizedSearch)
-            ));
-          
-          return (
-            lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
-            lead.customerName?.toLowerCase().includes(normalizedSearch) ||
-            lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
-            lead.plans?.some((plan: any) => 
-              plan.number?.toLowerCase().includes(normalizedSearch) ||
-              plan.plan?.toLowerCase().includes(normalizedSearch)
-            ) ||
-            lead.status?.toLowerCase().includes(normalizedSearch) ||
-            lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
-            srNumberMatch ||
-            (canSearchEtisalatId && (
-              lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
-              (lead.etisalatLeadIds && Array.isArray(lead.etisalatLeadIds) 
-                ? lead.etisalatLeadIds.some((id: string) => id?.toString?.().toLowerCase().includes(normalizedSearch))
-                : false) ||
-              (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
-            ))
-          );
-          });
-        })
-      );
-
-      // Flatten filtered chunks
-      let searchResults = filteredChunks.flat() as any[] as Lead[];
-
-      // Apply role-based filtering (same as filteredLeads)
-      if (user?.role === 'freelancer' && user?.id) {
-        searchResults = searchResults.filter(lead => lead.agentId === user.id);
-      }
-
-      if (user?.role === 'coordinator') {
-        searchResults = searchResults.filter(
-          lead => lead.status !== 'pending_verification' && lead.status !== 'non_verified'
-        );
-      }
-
-      // Apply coordinator scope filtering
-      if (user?.role === 'coordinator' && user.coordinatorType && ['g1', 'g2', 'g3', 'all'].includes(user.coordinatorType)) {
-        const coordinatorTeams = (user as any).coordinatorTeams as string[] | undefined;
-        searchResults = searchResults.filter(lead => 
-          isLeadInCoordinatorScope(lead, user.coordinatorType as CoordinatorType, coordinatorTeams)
-        );
-      }
-
-      // Apply verifier group filtering
-      if (user?.role === 'verifier' && user.verifierGroups && user.verifierGroups.length > 0) {
-        const hasAllGroups = user.verifierGroups.includes('all');
-        if (!hasAllGroups) {
-          searchResults = searchResults.filter(lead => {
-            const hasMatchingGroup = lead.plans?.some(plan => {
-              const planGroup = (plan.group || '').toLowerCase();
-              return (user.verifierGroups as VerifierGroups)?.some((verifierGroup: string) => {
-                const normalizedVerifierGroup = verifierGroup.toLowerCase();
-                return planGroup === normalizedVerifierGroup;
-              }) || false;
-          }) || false;
-            return hasMatchingGroup;
-          });
-        }
-      }
+      // Apply role-based post-filters
+      searchResults = applyRoleFilters(searchResults);
 
       // Process with agent/team info
       const enrichedResults = await processLeadsWithInfo(searchResults);
@@ -1930,7 +2003,7 @@ export function LeadList() {
       setIsSearchingFirebase(false);
       setIsSearchPending(false);
     }
-  }, [user, isVerifier, isManager, processLeadsWithInfo, isLeadInCoordinatorScope]);
+  }, [user, isVerifier, isManager, processLeadsWithInfo, isLeadInCoordinatorScope, fastPathSearch, applyRoleFilters, matchesSearch, transformDoc]);
 
   // Memoized filtered leads with optimized search
   const filteredLeads = useMemo(() => {
@@ -2112,7 +2185,7 @@ export function LeadList() {
         // isSearchingFirebase will be set to true in searchFirebase function
           searchFirebase(searchTerm);
       }
-    }, 500); // Debounce Firebase search
+    }, 300); // Debounce Firebase search (reduced for faster response)
 
     return () => {
       clearTimeout(debounceTimer);
@@ -3506,8 +3579,8 @@ export function LeadList() {
           </div>
         </motion.div>
 
-        {/* Empty State */}
-        {filteredLeads.length === 0 && (
+        {/* Empty State - only show when combined results (local + Firebase search) are empty */}
+        {sortedAndFilteredLeads.length === 0 && !isSearchingFirebase && !isSearchPending && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}

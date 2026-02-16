@@ -42,6 +42,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { collection, addDoc, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
@@ -362,6 +363,8 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [allPlans, setAllPlans] = useState<Plan[]>([]);
   const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
   const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
+  const [showNumberNotInPoolPopup, setShowNumberNotInPoolPopup] = useState(false);
+  const [numberNotInPoolInfo, setNumberNotInPoolInfo] = useState<{ numbers: string[]; message: string } | null>(null);
   const [isCheckingNumber, setIsCheckingNumber] = useState(false);
   const [numberActiveCheckEnabled, setNumberActiveCheckEnabled] = useState(true); // Default to enabled
 
@@ -1224,6 +1227,44 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
         };
       }
 
+      // Validate numbers only in numberPool: lead can be created only if number status is 'open'
+      // OR number is 'reserved' by the same agent (selectedAgentId or current user).
+      const plansToValidate = (finalLeadData.plans || []) as Array<{ numberId: string; number: string }>;
+      const realPlansToValidate = plansToValidate.filter(p => !p.numberId?.startsWith('virtual-'));
+      const currentAgentId = selectedAgentId || user?.id || '';
+      if (realPlansToValidate.length > 0) {
+        const invalidNumbers: string[] = [];
+        for (let i = 0; i < realPlansToValidate.length; i++) {
+          const plan = realPlansToValidate[i];
+          const poolSnap = await getDoc(doc(db, 'numberPool', plan.numberId));
+          const displayNumber = plan.number || plan.numberId;
+          if (!poolSnap.exists()) {
+            invalidNumbers.push(displayNumber);
+            continue;
+          }
+          const data = poolSnap.data();
+          const status = data?.status;
+          const reservedBy = data?.reservedBy;
+          // Only two allowed cases: status must be exactly 'open', or exactly 'reserved' by this agent.
+          // If reservedBy is same agent but status is something else (e.g. pending_verification), reject.
+          const allowed =
+            status === 'open' ||
+            (status === 'reserved' && reservedBy === currentAgentId);
+          if (!allowed) {
+            invalidNumbers.push(displayNumber);
+          }
+        }
+        if (invalidNumbers.length > 0) {
+          setNumberNotInPoolInfo({
+            numbers: invalidNumbers,
+            message: 'The following number(s) are not in the number pool or are not available. A number must be open or reserved by you to create a lead.'
+          });
+          setShowNumberNotInPoolPopup(true);
+          setLoading(false);
+          return;
+        }
+      }
+
       if (isEditing && onSave) {
         try {
         await onSave(cleanedLeadData);
@@ -1277,21 +1318,18 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           );
           const numberDocs = await Promise.all(numberDocsPromises);
           
-          // Batch update all numbers (parallel)
+          // We already validated all numbers (exist in pool, open or reserved by agent) before creating the lead.
           const updatePromises = realPlans.map(async (plan, index) => {
             try {
               const numberRef = doc(db, 'numberPool', plan.numberId);
               const numberDoc = numberDocs[index];
               const oldData = numberDoc.exists() ? numberDoc.data() : null;
-              
               await updateDoc(numberRef, {
                 status: 'pending_verification',
                 lastStatusChange: new Date(),
                 leadId: docRef.id,
                 reservedBy: selectedAgentId || user?.id || null
               });
-              
-              // Log the lead creation action (non-blocking - fire and forget)
               logNumberAction(
                 plan.numberId,
                 plan.number,
@@ -1302,9 +1340,9 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               ).catch(err => {
                 console.error(`Error logging number action for ${plan.numberId}:`, err);
               });
-              
             } catch (err) {
               console.error(`Error updating number ${plan.numberId}:`, err);
+              toast.error(`Could not update number ${plan.number || plan.numberId} in the pool. The lead was created.`);
             }
           });
           
@@ -2578,6 +2616,49 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
             </div>
           </div>
         </div>
+      )}
+
+      {/* Number not in pool / not available popup - rendered in portal so it stays visible */}
+      {showNumberNotInPoolPopup && numberNotInPoolInfo && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999]" aria-modal="true" role="dialog">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
+            <div className="flex items-center justify-center mb-6">
+              <div className="p-3 rounded-full bg-red-100">
+                <XCircle className="h-8 w-8 text-red-600" />
+              </div>
+            </div>
+            <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
+              Number not in pool
+            </h3>
+            <p className="text-gray-500 text-center mb-3">
+              {numberNotInPoolInfo.message}
+            </p>
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+              <ul className="list-disc list-inside space-y-1">
+                {numberNotInPoolInfo.numbers.map((num, idx) => (
+                  <li key={idx} className="text-red-800 font-mono text-sm">
+                    {num}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <p className="text-sm text-gray-500 text-center mb-6">
+              Please select a number that is open or reserved by you.
+            </p>
+            <div className="flex justify-center">
+              <button
+                onClick={() => {
+                  setShowNumberNotInPoolPopup(false);
+                  setNumberNotInPoolInfo(null);
+                }}
+                className="px-6 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );

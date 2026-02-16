@@ -870,6 +870,34 @@ export function LeadDetails() {
           !oldPlans.some((oldPlan: any) => oldPlan.numberId === newPlan.numberId)
         );
         
+        // Validate added numbers: only numberPool; number must be open or reserved by this agent
+        const addedReal = addedNumbers.filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+        if (addedReal.length > 0) {
+          const currentAgentId = leadData.agentId || user?.id || '';
+          for (let i = 0; i < addedReal.length; i++) {
+            const plan = addedReal[i];
+            const poolSnap = await getDoc(doc(db, 'numberPool', plan.numberId));
+            const displayNumber = plan.number || plan.numberId;
+            if (!poolSnap.exists()) {
+              setMissingNumbers([displayNumber]);
+              setShowNumberErrorModal(true);
+              throw new Error('Number not in pool');
+            }
+            const data = poolSnap.data();
+            const status = data?.status;
+            const reservedBy = data?.reservedBy;
+            // Only allow if status is exactly 'open' or exactly 'reserved' by this agent.
+            const allowed =
+              status === 'open' ||
+              (status === 'reserved' && reservedBy === currentAgentId);
+            if (!allowed) {
+              setMissingNumbers([displayNumber]);
+              setShowNumberErrorModal(true);
+              throw new Error('Number not available');
+            }
+          }
+        }
+        
         // Find existing numbers (in both old and new plans)
         const existingNumbers = newPlans.filter((newPlan: any) => 
           oldPlans.some((oldPlan: any) => oldPlan.numberId === newPlan.numberId)
@@ -2057,11 +2085,13 @@ export function LeadDetails() {
                       >
                         <div className="max-w-[85%]">
                           <div className="text-xs font-medium mb-1 text-gray-700">
-                            {message.userId === user?.id 
-                              ? `You (${message.userRole})` 
-                              : userDetails[message.userId]?.name 
-                                ? `${userDetails[message.userId].name} (${message.userRole})`
-                                : message.userRole}
+                            {message.userId === 'system'
+                              ? 'System'
+                              : message.userId === user?.id 
+                                ? `You (${message.userRole})` 
+                                : userDetails[message.userId]?.name 
+                                  ? `${userDetails[message.userId].name} (${message.userRole})`
+                                  : message.userRole}
                           </div>
                           <VoiceNotePlayer 
                             src={message.mediaUrl!} 
@@ -2098,11 +2128,13 @@ export function LeadDetails() {
                       }`}
                     >
                       <div className="text-xs font-medium mb-1">
-                          {message.userId === user?.id 
-                            ? `You (${message.userRole})` 
-                            : userDetails[message.userId]?.name 
-                              ? `${userDetails[message.userId].name} (${message.userRole})`
-                              : message.userRole}
+                          {message.userId === 'system'
+                            ? 'System'
+                            : message.userId === user?.id 
+                              ? `You (${message.userRole})` 
+                              : userDetails[message.userId]?.name 
+                                ? `${userDetails[message.userId].name} (${message.userRole})`
+                                : message.userRole}
                       </div>
                         {message.message && (
                       <div className="text-sm whitespace-pre-wrap break-words">{message.message}</div>

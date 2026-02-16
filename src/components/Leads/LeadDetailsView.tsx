@@ -2985,31 +2985,69 @@ Language: ${lead.language || 'N/A'}`;
                 `Coordinator ${user?.name || 'Unknown'} rejected lead (Number Return), deleted number and moved to deletedNumbers`
               );
             } else {
-              // Default: Set number status to 'open' (for billing_issue, cap_limit)
-            await updateDoc(numberRef, {
-              status: 'open',
-              lastStatusChange: new Date(),
-              leadId: null,
-              reservedBy: null,
-              reservedAt: null,
-              claimingAgentId: null,
-              claimingStartedAt: null,
-              claimingExpiresAt: null,
-              claimQueue: []
-            });
+              // Default reject (billing_issue, cap_limit, not_answer, etc.): same as agent self-reject
+              // If the number has strikes (pending claims), reserve for the first striker; otherwise set to open.
+              const claims = numberData?.claims || [];
+              const pendingClaims = claims.filter((claim: any) => claim.status === 'pending');
 
-              const reasonText = rejectionReason === 'billing_issue' ? 'Billing issue' :
-                                rejectionReason === 'cap_limit' ? 'Cap Limit' :
-                                rejectionReason === 'not_answer' ? 'Not Answer' : 'Unknown';
-
-            await logNumberAction(
-              plan.numberId,
-              plan.number || '',
-              'status_changed',
-              { status: numberData?.status },
-              { status: 'open', leadId: null },
-                `Coordinator ${user?.name || 'Unknown'} rejected lead (${reasonText}), set number to open`
-            );
+              if (pendingClaims.length > 0) {
+                // Sort by claimedAt ascending - first striker gets the number (same as agent reject)
+                const sortedClaims = [...pendingClaims].sort((a: any, b: any) => {
+                  const aTime = a.claimedAt?.toDate?.() || new Date(a.claimedAt || 0);
+                  const bTime = b.claimedAt?.toDate?.() || new Date(b.claimedAt || 0);
+                  return aTime.getTime() - bTime.getTime();
+                });
+                const reservedByAgentId = sortedClaims[0].userId;
+                const updatedClaims = claims.map((claim: any) =>
+                  claim.userId === reservedByAgentId && claim.status === 'pending'
+                    ? { ...claim, status: 'completed' }
+                    : claim
+                );
+                await updateDoc(numberRef, {
+                  status: 'reserved',
+                  reservedBy: reservedByAgentId,
+                  reservedAt: serverTimestamp(),
+                  lastStatusChange: serverTimestamp(),
+                  leadId: null,
+                  claimingAgentId: null,
+                  claimingStartedAt: null,
+                  claimingExpiresAt: null,
+                  claimQueue: [],
+                  claims: updatedClaims
+                });
+                await logNumberAction(
+                  plan.numberId,
+                  plan.number || '',
+                  'reserved',
+                  { status: numberData?.status, reservedBy: numberData?.reservedBy },
+                  { status: 'reserved', reservedBy: reservedByAgentId },
+                  `Coordinator/Admin ${user?.name || 'Unknown'} rejected lead, number reserved for first striker (${reservedByAgentId})`
+                );
+              } else {
+                // No strikes: set number to open (same as previous default)
+                await updateDoc(numberRef, {
+                  status: 'open',
+                  lastStatusChange: new Date(),
+                  leadId: null,
+                  reservedBy: null,
+                  reservedAt: null,
+                  claimingAgentId: null,
+                  claimingStartedAt: null,
+                  claimingExpiresAt: null,
+                  claimQueue: []
+                });
+                const reasonText = rejectionReason === 'billing_issue' ? 'Billing issue' :
+                                  rejectionReason === 'cap_limit' ? 'Cap Limit' :
+                                  rejectionReason === 'not_answer' ? 'Not Answer' : 'Unknown';
+                await logNumberAction(
+                  plan.numberId,
+                  plan.number || '',
+                  'status_changed',
+                  { status: numberData?.status },
+                  { status: 'open', leadId: null },
+                  `Coordinator ${user?.name || 'Unknown'} rejected lead (${reasonText}), set number to open`
+                );
+              }
             }
           });
           

@@ -144,7 +144,10 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 
 const NumberCard: React.FC<{ number: NumberPool }> = ({ number }) => {
   const isNotFound = number.id === 'not-found';
-  
+  const reservationCount = number.reservationCount ?? 0;
+  const claimQueueCount = number.claimQueue?.length ?? 0;
+  const strikeCount = (number.claims || []).filter((c: { status: string }) => c.status === 'pending').length;
+
   return (
     <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
       <div className="p-4 space-y-3">
@@ -165,6 +168,25 @@ const NumberCard: React.FC<{ number: NumberPool }> = ({ number }) => {
             <span className="text-gray-500">Status:</span>
             <StatusBadge status={number.status} />
           </div>
+          {!isNotFound && (
+            <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-100">
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                <span className="opacity-80">R</span>
+                <span>{reservationCount}</span>
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                <span className="opacity-80">C</span>
+                <span>{claimQueueCount}</span>
+              </span>
+              <span className={clsx(
+                'inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold border',
+                strikeCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : 'bg-gray-50 text-gray-500 border-gray-200'
+              )}>
+                <span className="opacity-80">S</span>
+                <span>{strikeCount}</span>
+              </span>
+            </div>
+          )}
           {isNotFound && (
             <div className="mt-3 p-2 bg-yellow-50 border border-yellow-200 rounded-md">
               <p className="text-xs text-yellow-800">

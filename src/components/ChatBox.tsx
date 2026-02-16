@@ -203,7 +203,7 @@ export function ChatBox({ numberId, originalAgentId, claimingAgentId, onClose }:
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 20 }}
-      className="fixed bottom-4 right-4 w-96 bg-white rounded-lg shadow-xl border border-gray-200 z-50"
+      className="fixed bottom-24 right-4 w-96 max-w-[calc(100vw-2rem)] bg-white rounded-lg shadow-xl border border-gray-200 z-[60]"
     >
       <div className="p-4 border-b border-gray-200 flex justify-between items-center">
         <h3 className="text-lg font-semibold text-gray-900">Number Claim Chat</h3>
