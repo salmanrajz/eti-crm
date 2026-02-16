@@ -690,51 +690,50 @@ export class UnifiedSearch {
 
       // For multi-column search, we need to fetch a dataset and filter in memory
       // This is because Firestore doesn't support complex AND queries across multiple fields
-      // Keep fetching batches until we have enough matching results
-      const batchSize = 1000; // Fetch 1000 docs per batch
+      const batchSize = 1000;
       let currentCursor = cursorDoc;
-      hasMoreData = false; // Reset the function-level variable
-      const maxAttempts = 10; // Allow more attempts to find all matches (up to 10,000 docs)
+      hasMoreData = false;
+      const maxAttempts = 10;
       let attempts = 0;
-
-      // Keep fetching until we have enough results
       let totalFetched = 0;
+      let statusFallback = false; // Track if status index is missing so we don't retry
+
+      // Pre-compute helpers and normalized terms ONCE (outside the loop)
+      const normalize = (value: any) => (value || '').toString().toLowerCase();
+      const normalizeLoose = (value: any) =>
+        normalize(value).replace(/[^a-z0-9]/g, '');
+
+      const normalizedTerms = fieldSearchTerms.map(term => {
+        const termLower = term.toLowerCase();
+        const termLoose = termLower.replace(/[^a-z0-9]/g, '');
+        return { termLower, termLoose };
+      });
+
+      // Pre-build the reusable base query parts
+      const npCollection = collection(db, 'numberPool');
+
       while (results.size < maxResults && attempts < maxAttempts) {
         attempts++;
 
-        // Build query for this batch
-        let batchQuery = query(collection(db, 'numberPool'));
-        
+        // Build query for this batch (reuse known-good path)
+        let batchQuery = query(npCollection, orderBy('number'));
         if (category !== 'all') {
           batchQuery = query(batchQuery, where('category', '==', category));
         }
-        
-        // If status filter is found, add it to the query for efficiency
-        if (statusFilter) {
-          try {
-            batchQuery = query(batchQuery, where('status', '==', statusFilter));
-          } catch (error) {
-            // If query fails (e.g., missing index), we'll filter in memory instead
-          }
+        if (statusFilter && !statusFallback) {
+          batchQuery = query(batchQuery, where('status', '==', statusFilter));
         }
-        
-        // Add ordering for consistent pagination
-        batchQuery = query(batchQuery, orderBy('number'));
-        
-        // Add cursor for pagination
         if (currentCursor) {
           batchQuery = query(batchQuery, startAfter(currentCursor));
         }
-        
-        // Add limit + 1 to detect if there are more results
         batchQuery = query(batchQuery, limit(batchSize + 1));
-        
+
         try {
           snapshot = await getDocs(batchQuery);
         } catch (error) {
-          // If query with status filter fails (e.g., missing composite index), 
-          // fall back to querying without status filter and filter in memory
-          let fallbackQuery = query(collection(db, 'numberPool'), orderBy('number'));
+          // Status composite index missing — fall back without status filter
+          statusFallback = true;
+          let fallbackQuery = query(npCollection, orderBy('number'));
           if (category !== 'all') {
             fallbackQuery = query(fallbackQuery, where('category', '==', category));
           }
@@ -744,69 +743,43 @@ export class UnifiedSearch {
           fallbackQuery = query(fallbackQuery, limit(batchSize + 1));
           snapshot = await getDocs(fallbackQuery);
         }
-        
+
         totalFetched += snapshot.docs.length;
-        
-        // Check if we have more data to fetch
         hasMoreData = snapshot.docs.length > batchSize;
         const docsToProcess = hasMoreData ? snapshot.docs.slice(0, batchSize) : snapshot.docs;
-        
-        // If no documents returned, we've reached the end
-        if (docsToProcess.length === 0) {
-          break;
-        }
-        
-        // Update cursor for next batch
+
+        if (docsToProcess.length === 0) break;
+
         currentCursor = docsToProcess[docsToProcess.length - 1];
-      
-        // Helper to normalize strings for case-insensitive and punctuation-insensitive comparison
-        const normalize = (value: any) => (value || '').toString().toLowerCase();
-        const normalizeLoose = (value: any) =>
-          normalize(value).replace(/[^a-z0-9]/g, ''); // remove spaces/punctuation for fuzzy matches
 
-        // Pre-normalize search terms to ensure strict case-insensitive matching
-        const normalizedTerms = fieldSearchTerms.map(term => {
-          const termLower = term.toLowerCase();
-          const termLoose = termLower.replace(/[^a-z0-9]/g, '');
-          return { termLower, termLoose };
-        });
+        // Filter in memory
+        for (let i = 0; i < docsToProcess.length; i++) {
+          if (results.size >= maxResults) break;
+          const docSnap = docsToProcess[i] as QueryDocumentSnapshot;
+          const number = docSnap.data() as NumberPool;
 
-        // Filter numbers where ALL search terms match in ANY column (AND logic)
-        docsToProcess.forEach((doc: QueryDocumentSnapshot) => {
-          if (results.size >= maxResults) return; // Stop if we have enough
-          
-          const number = doc.data() as NumberPool;
-          
-          // Verify status filter in memory (in case query didn't filter or we're in fallback mode)
-          if (statusFilter && number.status !== statusFilter) {
-            return;
-          }
-          
-          // If no field search terms (only status was searched), include all results
+          if (statusFilter && number.status !== statusFilter) continue;
+
           if (normalizedTerms.length === 0) {
-            results.set(doc.id, { ...number, id: doc.id });
-            lastDoc = doc; // Track last document
-            return;
+            results.set(docSnap.id, { ...number, id: docSnap.id });
+            lastDoc = docSnap;
+            continue;
           }
-          
+
           const numberStr = normalize(number.number);
           const codeStr = normalize(number.code);
           const planStr = normalize((number as any).plan);
           const categoryStr = normalize(number.category);
           const groupStr = normalize(number.group);
-
           const numberLoose = normalizeLoose(number.number);
           const codeLoose = normalizeLoose(number.code);
           const planLoose = normalizeLoose((number as any).plan);
           const categoryLoose = normalizeLoose(number.category);
           const groupLoose = normalizeLoose(number.group);
-          
-          // Check if ALL search terms match in ANY column (AND logic)
-          const allTermsMatch = normalizedTerms.every(({ termLower, termLoose }) => {
 
+          const allTermsMatch = normalizedTerms.every(({ termLower, termLoose }) => {
             const matchesField = (field: string, looseField: string) =>
               field.includes(termLower) || (termLoose ? looseField.includes(termLoose) : false);
-
             return (
               matchesField(numberStr, numberLoose) ||
               matchesField(codeStr, codeLoose) ||
@@ -815,17 +788,14 @@ export class UnifiedSearch {
               matchesField(groupStr, groupLoose)
             );
           });
-          
-          if (allTermsMatch) {
-            results.set(doc.id, { ...number, id: doc.id });
-            lastDoc = doc; // Track last document
-          }
-        });
 
-        // If we have enough results or no more data, stop fetching
-        if (results.size >= maxResults || !hasMoreData) {
-          break;
+          if (allTermsMatch) {
+            results.set(docSnap.id, { ...number, id: docSnap.id });
+            lastDoc = docSnap;
+          }
         }
+
+        if (results.size >= maxResults || !hasMoreData) break;
       }
 
       // Log for debugging
@@ -896,166 +866,114 @@ export class UnifiedSearch {
           const code = (data.code || '').toUpperCase();
           const codeNormalized = code.replace(/[^0-9A-Z]/g, '');
           
+          let matched = false;
           // Exact match (full code) - case-insensitive
           if (codeNormalized === searchTermNormalized) {
-            results.set(doc.id, { ...data, id: doc.id });
-            if (!lastDoc) lastDoc = doc;
-            continue;
+            matched = true;
           }
-          
           // Prefix match (starts with) - case-insensitive
-          if (codeNormalized.startsWith(searchTermNormalized)) {
-            results.set(doc.id, { ...data, id: doc.id });
-            if (!lastDoc) lastDoc = doc;
-            continue;
+          if (!matched && codeNormalized.startsWith(searchTermNormalized)) {
+            matched = true;
           }
-          
-          // Initials match: extract first character of each word/segment from code
-          // For codes like "28DECSILG3", extract "28DSG" or "2DSG" etc.
-          const codeInitials = this.extractInitials(codeNormalized);
-          const searchInitials = this.extractInitials(searchTermNormalized);
-          if (codeInitials.startsWith(searchInitials) || codeInitials === searchInitials) {
+          // Initials match
+          if (!matched) {
+            const codeInitials = this.extractInitials(codeNormalized);
+            const searchInitials = this.extractInitials(searchTermNormalized);
+            if (codeInitials.startsWith(searchInitials) || codeInitials === searchInitials) {
+              matched = true;
+            }
+          }
+          if (matched) {
             results.set(doc.id, { ...data, id: doc.id });
-            if (!lastDoc) lastDoc = doc;
+            lastDoc = doc; // Always track the LAST matched doc for correct cursor
           }
         }
         
-        hasMore = results.size > maxResults;
-        if (results.size > 0 && !lastDoc) {
-          const docsArray = Array.from(results.values());
-          // Try to find the last doc from the snapshot
-          const lastResult = docsArray[docsArray.length - 1];
-          const lastDocFromSnap = snap.docs.find(d => d.id === lastResult.id);
-          if (lastDocFromSnap) lastDoc = lastDocFromSnap;
-        }
+        // hasMore = Firestore returned a full batch (meaning more docs probably exist beyond it)
+        // AND we found at least maxResults matches (so a next page is warranted)
+        hasMore = snap.docs.length >= (maxResults * 3) && results.size >= maxResults;
       } else {
-        // First page: Try strategies in order of speed (fastest first)
-        // Note: Firestore queries are case-sensitive, so we need to try multiple case variations
-        
-        // Strategy 1: Exact match (fastest - direct equality query)
-        // Try uppercase, lowercase, and original case
-        try {
-          const searchTermUpper = searchTerm.toUpperCase();
-          const searchTermLower = searchTerm.toLowerCase();
-          const exactQueries = [
-            query(base, where('code', '==', searchTermUpper), limit(maxResults)),
-            query(base, where('code', '==', searchTermLower), limit(maxResults)),
-            query(base, where('code', '==', searchTerm), limit(maxResults))
-          ];
-          
-          for (const exactQuery of exactQueries) {
-            if (results.size >= maxResults) break;
-            try {
-              const snap = await getDocs(exactQuery);
-              snap.docs.forEach(doc => {
-                if (results.size >= maxResults) return;
-                const data = doc.data() as NumberPool;
-                results.set(doc.id, { ...data, id: doc.id });
-                if (!lastDoc) lastDoc = doc;
-              });
-              if (results.size > 0) break; // Found exact matches, use them
-            } catch (_) {}
-          }
-        } catch (_) {}
-        
-        // Strategy 2: Prefix match (starts with) - fast with Firestore range queries
-        // Since Firestore is case-sensitive, we need to scan a range and filter in memory
-        if (results.size < maxResults && searchTermNormalized.length >= 2) {
-          try {
-            // Use the normalized uppercase version for range query
-            // This will catch codes starting with the search term in any case
-            const prefixQuery = query(
-              base,
-              orderBy('code'),
-              startAt(searchTermNormalized),
-              endAt(searchTermNormalized + '\uf8ff'),
-              limit(maxResults * 3) // Fetch more to filter case-insensitively
+        // First page: Run exact match + prefix match + initials match in PARALLEL
+        // All three strategies fire simultaneously; results are merged with dedup by doc.id
+        const searchTermUpper = searchTerm.toUpperCase();
+        const searchTermLower = searchTerm.toLowerCase();
+
+        // Build all query promises upfront
+        const queryPromises: Promise<{ docs: any[]; strategy: string }>[] = [];
+
+        // Strategy 1: Exact match queries (all 3 case variants in parallel)
+        const exactCases = [searchTermUpper, searchTermLower, searchTerm];
+        // Deduplicate cases (e.g. if term is already all-upper, upper===original)
+        const uniqueCases = [...new Set(exactCases)];
+        for (const caseTerm of uniqueCases) {
+          queryPromises.push(
+            getDocs(query(base, where('code', '==', caseTerm), limit(maxResults)))
+              .then(snap => ({ docs: snap.docs, strategy: 'exact' }))
+              .catch(() => ({ docs: [], strategy: 'exact' }))
+          );
+        }
+
+        // Strategy 2: Prefix match (uppercase + lowercase range queries in parallel)
+        if (searchTermNormalized.length >= 2) {
+          queryPromises.push(
+            getDocs(query(base, orderBy('code'), startAt(searchTermNormalized), endAt(searchTermNormalized + '\uf8ff'), limit(maxResults * 3)))
+              .then(snap => ({ docs: snap.docs, strategy: 'prefix' }))
+              .catch(() => ({ docs: [], strategy: 'prefix' }))
+          );
+          const lowerPrefix = searchTermNormalized.toLowerCase();
+          if (lowerPrefix !== searchTermNormalized) {
+            queryPromises.push(
+              getDocs(query(base, orderBy('code'), startAt(lowerPrefix), endAt(lowerPrefix + '\uf8ff'), limit(maxResults * 3)))
+                .then(snap => ({ docs: snap.docs, strategy: 'prefix' }))
+                .catch(() => ({ docs: [], strategy: 'prefix' }))
             );
-            
-            const snap = await getDocs(prefixQuery);
-            snap.docs.forEach(doc => {
-              if (results.size >= maxResults) return;
-              const data = doc.data() as NumberPool;
+          }
+        }
+
+        // Strategy 3: Initials match (only for short terms 2-5 chars)
+        if (searchTermNormalized.length >= 2 && searchTermNormalized.length <= 5) {
+          const searchInitials = this.extractInitials(searchTermNormalized);
+          if (searchInitials.length >= 2) {
+            const initialsPrefix = searchInitials.substring(0, Math.min(3, searchInitials.length));
+            queryPromises.push(
+              getDocs(query(base, orderBy('code'), startAt(initialsPrefix), endAt(initialsPrefix + '\uf8ff'), limit(maxResults * 5)))
+                .then(snap => ({ docs: snap.docs, strategy: 'initials' }))
+                .catch(() => ({ docs: [], strategy: 'initials' }))
+            );
+          }
+        }
+
+        // Fire all queries in parallel and merge results
+        const allResults = await Promise.all(queryPromises);
+        const searchInitialsForMatch = this.extractInitials(searchTermNormalized);
+
+        for (const { docs, strategy } of allResults) {
+          for (const doc of docs) {
+            if (results.size >= maxResults) break;
+            if (results.has(doc.id)) continue;
+            const data = doc.data() as NumberPool;
+
+            if (strategy === 'exact') {
+              results.set(doc.id, { ...data, id: doc.id });
+              lastDoc = doc;
+            } else if (strategy === 'prefix') {
               const code = (data.code || '').toUpperCase();
               const codeNormalized = code.replace(/[^0-9A-Z]/g, '');
-              
-              // Case-insensitive prefix match
               if (codeNormalized.startsWith(searchTermNormalized)) {
-                if (!results.has(doc.id)) {
-                  results.set(doc.id, { ...data, id: doc.id });
-                  if (!lastDoc) lastDoc = doc;
-                }
+                results.set(doc.id, { ...data, id: doc.id });
+                lastDoc = doc;
               }
-            });
-            
-            // Also try lowercase prefix range (in case codes are stored in lowercase)
-            if (results.size < maxResults) {
-              const searchTermLower = searchTermNormalized.toLowerCase();
-              const prefixQueryLower = query(
-                base,
-                orderBy('code'),
-                startAt(searchTermLower),
-                endAt(searchTermLower + '\uf8ff'),
-                limit(maxResults * 3)
-              );
-              
-              try {
-                const snapLower = await getDocs(prefixQueryLower);
-                snapLower.docs.forEach(doc => {
-                  if (results.size >= maxResults) return;
-                  const data = doc.data() as NumberPool;
-                  const code = (data.code || '').toUpperCase();
-                  const codeNormalized = code.replace(/[^0-9A-Z]/g, '');
-                  
-                  // Case-insensitive prefix match
-                  if (codeNormalized.startsWith(searchTermNormalized)) {
-                    if (!results.has(doc.id)) {
-                      results.set(doc.id, { ...data, id: doc.id });
-                      if (!lastDoc) lastDoc = doc;
-                    }
-                  }
-                });
-              } catch (_) {}
-            }
-          } catch (_) {}
-        }
-        
-        // Strategy 3: Initials match (if search term is short, likely looking for initials)
-        // Only try this if we have few results and search term is short (2-4 chars)
-        if (results.size < maxResults && searchTermNormalized.length >= 2 && searchTermNormalized.length <= 5) {
-          try {
-            const searchInitials = this.extractInitials(searchTermNormalized);
-            if (searchInitials.length >= 2) {
-              // Search for codes that start with these initials
-              // We'll need to scan a range and filter in memory
-              const initialsPrefix = searchInitials.substring(0, Math.min(3, searchInitials.length));
-              
-              const initialsQuery = query(
-                base,
-                orderBy('code'),
-                startAt(initialsPrefix),
-                endAt(initialsPrefix + '\uf8ff'),
-                limit(maxResults * 5) // Fetch more for initials filtering
-              );
-              
-              const snap = await getDocs(initialsQuery);
-              for (const doc of snap.docs) {
-                if (results.size >= maxResults) break;
-                const data = doc.data() as NumberPool;
-                const code = (data.code || '').toUpperCase();
-                const codeNormalized = code.replace(/[^0-9A-Z]/g, '');
-                const codeInitials = this.extractInitials(codeNormalized);
-                
-                // Check if code initials match search initials (case-insensitive)
-                if (codeInitials.startsWith(searchInitials) || codeInitials === searchInitials) {
-                  if (!results.has(doc.id)) {
-                    results.set(doc.id, { ...data, id: doc.id });
-                    if (!lastDoc) lastDoc = doc;
-                  }
-                }
+            } else if (strategy === 'initials') {
+              const code = (data.code || '').toUpperCase();
+              const codeNormalized = code.replace(/[^0-9A-Z]/g, '');
+              const codeInitials = this.extractInitials(codeNormalized);
+              if (codeInitials.startsWith(searchInitialsForMatch) || codeInitials === searchInitialsForMatch) {
+                results.set(doc.id, { ...data, id: doc.id });
+                lastDoc = doc;
               }
             }
-          } catch (_) {}
+          }
+          if (results.size >= maxResults) break;
         }
       }
       
@@ -1065,19 +983,17 @@ export class UnifiedSearch {
     
     const finalResults = Array.from(results.values()).slice(0, maxResults);
     
-    // Update lastDoc for pagination if we have results
-    if (finalResults.length > 0 && !lastDoc) {
-      hasMore = finalResults.length >= maxResults;
-    } else if (lastDoc) {
-      hasMore = finalResults.length >= maxResults;
-    }
+    // For cursor path: hasMore was set based on whether Firestore returned a full batch.
+    // For first-page path: if we filled the page (results >= maxResults), assume more exist.
+    // If we got fewer results than the limit, there are definitively no more to load.
+    const finalHasMore = finalResults.length >= maxResults && (hasMore || !cursorDoc);
     
     return {
       data: finalResults,
       totalItems: finalResults.length,
       source: 'firebase',
-      isComplete: finalResults.length < maxResults,
-      hasMore: hasMore || finalResults.length >= maxResults,
+      isComplete: !finalHasMore,
+      hasMore: finalHasMore,
       lastDoc: lastDoc
     };
   }

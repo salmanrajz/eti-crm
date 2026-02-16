@@ -130,6 +130,7 @@ export const functions = (() => {
 export const claimNumberFunction = httpsCallable(functions, 'claimNumber');
 export const processLeadRejectionFunction = httpsCallable(functions, 'processLeadRejection');
 export const checkNumberAvailabilityFunction = httpsCallable(functions, 'checkNumberAvailability');
+export const createStrikeAlertBroadcastFunction = httpsCallable(functions, 'createStrikeAlertBroadcast');
 
 interface CreateUserOptions {
   teamId?: string;

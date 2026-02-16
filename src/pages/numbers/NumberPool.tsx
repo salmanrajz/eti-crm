@@ -53,7 +53,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc, setDoc } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+import { db, createStrikeAlertBroadcastFunction } from '../../lib/firebase';
 // IndexedDB helpers intentionally not used for search to keep direct Firestore fetches fast
 import { NumberPoolPagination, paginationUtils } from '../../utils/pagination';
 import { numberPoolManager } from '../../utils/numberPoolManager';
@@ -631,6 +631,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   const [claimingNumbers, setClaimingNumbers] = useState<Set<string>>(new Set());
+  const [cancellingNumbers, setCancellingNumbers] = useState<Set<string>>(new Set());
   const [reservingNumbers, setReservingNumbers] = useState<Set<string>>(new Set());
   const [chattingNumbers, setChattingNumbers] = useState<Set<string>>(new Set());
   const [operationTimeouts, setOperationTimeouts] = useState<Map<string, NodeJS.Timeout>>(new Map());
@@ -820,7 +821,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   
   // Debounced search term for performance optimization
   // Debounce search input to 800ms to allow users to complete typing
-  const debouncedSearchTerm = useDebounce(searchTerm, 800);
+  const debouncedSearchTerm = useDebounce(searchTerm, 350);
 
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
@@ -1639,29 +1640,34 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // Otherwise, search all categories
       const searchCategory = (selectedCategory && selectedCategory !== 'all') ? selectedCategory : 'all';
         
-        const result = await unifiedSearch.search(debouncedSearchTerm, {
-        category: searchCategory, // Search within selected category if filter is set
+        // Run main search and secondary searches (deleted/activated) in PARALLEL for speed
+        const endsWithFlag = endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim());
+        const mainSearchPromise = unifiedSearch.search(debouncedSearchTerm, {
+          category: searchCategory,
           limit: searchLimit,
-        startAfter: loadMore ? searchLastDoc : null,
+          startAfter: loadMore ? searchLastDoc : null,
           includeStale: false,
-          endsWith: endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
+          endsWith: endsWithFlag
         });
-        
-      // Also search deletedNumbers collection if admin or coordinator
-      // Use selected category if filter is set, otherwise search all
-        const deletedResults = await searchDeletedNumbers(
-          debouncedSearchTerm, 
-        searchCategory,
-        endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
-      );
 
-      // Also search activatedNumbers collection if admin or coordinator
-      // Use selected category if filter is set, otherwise search all
-      const activatedResults = await searchActivatedNumbers(
-        debouncedSearchTerm,
-        searchCategory,
-          endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim())
-        );
+        // Only search deletedNumbers and activatedNumbers on first search, not on loadMore
+        // (they don't support cursor pagination and would return the same results)
+        let deletedResults: NumberPoolType[] = [];
+        let activatedResults: NumberPoolType[] = [];
+        let result: Awaited<ReturnType<typeof unifiedSearch.search>>;
+
+        if (!loadMore) {
+          const [mainResult, deletedResult, activatedResult] = await Promise.all([
+            mainSearchPromise,
+            searchDeletedNumbers(debouncedSearchTerm, searchCategory, endsWithFlag),
+            searchActivatedNumbers(debouncedSearchTerm, searchCategory, endsWithFlag)
+          ]);
+          result = mainResult;
+          deletedResults = deletedResult;
+          activatedResults = activatedResult;
+        } else {
+          result = await mainSearchPromise;
+        }
         
         // Avoid race conditions: only apply if term hasn't changed
       // Check both the trimmed version and the original to handle whitespace differences
@@ -1697,9 +1703,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           }
           
         if (loadMore) {
-          // Append new results to existing ones
+          // Append new results to existing ones, deduplicating by id
           const existingOriginal = (fullSearchResultsRef.current as any).originalUnfilteredResults || fullSearchResultsRef.current;
-          const combinedOriginalResults = [...existingOriginal, ...originalUnfilteredResults];
+          const existingIds = new Set(existingOriginal.map((n: NumberPoolType) => n.id));
+          const newUniqueResults = originalUnfilteredResults.filter((n: NumberPoolType) => !existingIds.has(n.id));
+          const combinedOriginalResults = [...existingOriginal, ...newUniqueResults];
           
           // Re-apply all filters to combined results
           let combinedFiltered = [...combinedOriginalResults];
@@ -1734,6 +1742,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           setSearchTotalItems(combinedFiltered.length);
           setSearchHasNextPage(endIndex < combinedFiltered.length);
           setSearchHasPreviousPage(searchCurrentPage > 1);
+          
+          // Update hasMore from the search result: if no new unique results came, stop showing Load More
+          setSearchLastDoc(result.lastDoc);
+          setSearchHasMore(result.hasMore && newUniqueResults.length > 0);
           
           // Scroll to top after loading more results
           setTimeout(() => {
@@ -3489,6 +3501,83 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
   }
 
+  /** Cancel my pending strike on this number (set my claim to cancelled). */
+  const handleCancelStrike = async (number: NumberPoolType) => {
+    if (!user?.id) return;
+    const claims = (number as any).claims || [];
+    const myPending = claims.find((c: any) => c.userId === user.id && c.status === 'pending');
+    if (!myPending) return;
+    if (cancellingNumbers.has(number.id)) return;
+    setCancellingNumbers(prev => new Set(prev).add(number.id));
+    try {
+      const numberRef = doc(db, 'numberPool', number.id);
+      const updatedClaims = claims.map((c: any) =>
+        c.userId === user.id && c.status === 'pending' ? { ...c, status: 'cancelled' as const } : c
+      );
+      await updateDoc(numberRef, { claims: updatedClaims });
+      toast.success('Strike cancelled');
+      await logNumberAction(
+        number.id,
+        number.number || '',
+        'claimed',
+        { claims },
+        { claims: updatedClaims },
+        'Strike cancelled by agent'
+      );
+      await refreshNumberData(number.id);
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to cancel strike');
+    } finally {
+      setCancellingNumbers(prev => { const s = new Set(prev); s.delete(number.id); return s; });
+    }
+  };
+
+  /** Leave claim queue (or give up claiming window) for this number. */
+  const handleCancelQueue = async (number: NumberPoolType) => {
+    if (!user?.id) return;
+    const claimQueue = number.claimQueue || [];
+    const inQueue = claimQueue.some((c: any) => c.agentId === user.id);
+    if (!inQueue) return;
+    if (cancellingNumbers.has(number.id)) return;
+    setCancellingNumbers(prev => new Set(prev).add(number.id));
+    try {
+      const numberRef = doc(db, 'numberPool', number.id);
+      const numberDoc = await getDoc(numberRef);
+      if (!numberDoc.exists()) throw new Error('Number not found');
+      const data = numberDoc.data();
+      const queue = (data.claimQueue || []).filter((c: any) => c.agentId !== user.id);
+      const isCurrentClaimer = data.claimingAgentId === user.id;
+      const nextClaim = queue[0];
+      const now = new Date();
+      const updatePayload: Record<string, unknown> = {
+        claimQueue: queue,
+        lastStatusChange: serverTimestamp(),
+      };
+      if (isCurrentClaimer) {
+        updatePayload.claimingAgentId = nextClaim ? nextClaim.agentId : null;
+        updatePayload.claimingStartedAt = nextClaim ? serverTimestamp() : null;
+        updatePayload.claimingExpiresAt = nextClaim ? new Date(now.getTime() + CLAIM_TIMEOUT) : null;
+      }
+      await updateDoc(numberRef, updatePayload);
+      toast.success('Left claim queue');
+      await logNumberAction(
+        number.id,
+        number.number || '',
+        'released',
+        { claimQueue: number.claimQueue, claimingAgentId: (number as any).claimingAgentId },
+        { claimQueue: queue, claimingAgentId: nextClaim?.agentId ?? null },
+        'Agent left claim queue'
+      );
+      await refreshNumberData(number.id);
+    } catch (e) {
+      console.error(e);
+      toast.error('Failed to leave queue');
+    } finally {
+      setCancellingNumbers(prev => { const s = new Set(prev); s.delete(number.id); return s; });
+    }
+  };
+
   const handleBulkDelete = async () => {
     if (!isAdmin()) {
       toast.error('Only administrators can delete numbers');
@@ -3886,8 +3975,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             claimCount: (numberData.claimCount || 0) + 1
           });
 
-          // Log the strike action
-          await logNumberAction(
+          // Log the strike action (fire-and-forget so UI stays fast)
+          void logNumberAction(
             numberToClaim.id,
             numberToClaim.number || '',
             'claimed',
@@ -3895,6 +3984,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             { claims: updatedClaims, claimCount: (numberData.claimCount || 0) + 1 },
             `Striked number (status: ${numberToClaim.status})`
           );
+
+          // Notify lead owner via Cloud Function (fire-and-forget so UI stays fast)
+          const leadId = numberData.leadId;
+          if (leadId && user?.id) {
+            createStrikeAlertBroadcastFunction({
+              leadId,
+              numberId: numberToClaim.id,
+              number: numberToClaim.number || ''
+            }).catch((broadcastErr) => {
+              console.warn('Strike broadcast to lead owner failed:', broadcastErr);
+            });
+          }
 
           // Update local state immediately for better UX
           setNumbers(prev => prev.map(n => 
@@ -4000,12 +4101,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         }
       }
 
-      // Success - close dialog and show success message
+      // Success - close dialog and show success message (no await so Processing ends immediately)
       setShowClaimDialog(false);
-      
-      // Refresh with latest data from Firestore
-      await refreshNumberData(numberToClaim.id);
-      
+      void refreshNumberData(numberToClaim.id);
       toast.success(['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) 
         ? 'Number Striked successfully' 
         : 'Number claimed successfully');
@@ -4019,16 +4117,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       
       toast.error(error.message || 'Failed to claim number');
     } finally {
-      if (claimSucceeded) {
-        await recordDailyClaim();
-      }
-      // Cleanup loading state and timeout
+      // Clear loading state first so "Processing..." ends immediately
       setClaimingNumbers(prev => {
         const newSet = new Set(prev);
         newSet.delete(numberToClaim.id);
         return newSet;
       });
-      
       const timeoutId = operationTimeouts.get(numberToClaim.id);
       if (timeoutId) {
         clearTimeout(timeoutId);
@@ -4037,6 +4131,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           newMap.delete(numberToClaim.id);
           return newMap;
         });
+      }
+      if (claimSucceeded) {
+        void recordDailyClaim();
       }
     }
   };
@@ -6278,15 +6375,44 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.button>
           ) : null
           )}
-                          {number.status === 'reserved' && number.reservedBy === user?.id && (
+                          {/* Release: release my reservation */}
+          {number.status === 'reserved' && number.reservedBy === user?.id && (
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-                              onClick={() => handleRelease(number)}
+              onClick={() => handleRelease(number)}
               className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 relative z-20"
             >
               <XCircle className="h-4 w-4 mr-1.5" />
               Release
+            </motion.button>
+          )}
+          {/* Cancel: cancel my strike */}
+          {user?.role === 'agent' && (number.status === 'pending_verification' || number.status === 'assigned' || number.status === 'verified' || number.status === 'follow_up') &&
+            ((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') && (
+            <motion.button
+              whileHover={{ scale: cancellingNumbers.has(number.id) ? 1 : 1.05 }}
+              whileTap={{ scale: cancellingNumbers.has(number.id) ? 1 : 0.95 }}
+              onClick={() => handleCancelStrike(number)}
+              disabled={cancellingNumbers.has(number.id)}
+              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 relative z-20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {cancellingNumbers.has(number.id) ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <XCircle className="h-4 w-4 mr-1.5" />}
+              Cancel
+            </motion.button>
+          )}
+          {/* Cancel: leave claim queue */}
+          {user?.role === 'agent' && number.status === 'reserved' && number.reservedBy !== user?.id &&
+            (number.claimQueue || []).some((c: any) => c.agentId === user?.id) && (
+            <motion.button
+              whileHover={{ scale: cancellingNumbers.has(number.id) ? 1 : 1.05 }}
+              whileTap={{ scale: cancellingNumbers.has(number.id) ? 1 : 0.95 }}
+              onClick={() => handleCancelQueue(number)}
+              disabled={cancellingNumbers.has(number.id)}
+              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 relative z-20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {cancellingNumbers.has(number.id) ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <XCircle className="h-4 w-4 mr-1.5" />}
+              Cancel
             </motion.button>
           )}
                           {(isAdmin() || (number.claimingAgentId && (user?.id === number.claimingAgentId || user?.id === number.reservedBy))) && (
