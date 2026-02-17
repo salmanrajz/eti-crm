@@ -1229,10 +1229,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
       // Validate numbers only in numberPool: lead can be created only if number status is 'open'
       // OR number is 'reserved' by the same agent (selectedAgentId or current user).
+      // Skip this check when verifier/coordinator/admin is editing – the number is already reserved for the agent.
+      const skipNumberPoolCheck = isEditing && (isVerifier() || isCoordinator() || isAdmin());
       const plansToValidate = (finalLeadData.plans || []) as Array<{ numberId: string; number: string }>;
       const realPlansToValidate = plansToValidate.filter(p => !p.numberId?.startsWith('virtual-'));
       const currentAgentId = selectedAgentId || user?.id || '';
-      if (realPlansToValidate.length > 0) {
+      if (!skipNumberPoolCheck && realPlansToValidate.length > 0) {
         const invalidNumbers: string[] = [];
         for (let i = 0; i < realPlansToValidate.length; i++) {
           const plan = realPlansToValidate[i];
