@@ -3348,10 +3348,12 @@ Language: ${lead.language || 'N/A'}`;
             
             if (!numberDoc.exists()) {
               // Number doesn't exist, default to rejecting agent
+              const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
           await updateDoc(numberRef, {
             status: 'reserved',
             reservedBy: user.id,
             reservedAt: serverTimestamp(),
+            expiresAt,
             lastStatusChange: serverTimestamp(),
             claimingAgentId: null,
             claimingStartedAt: null,
@@ -3395,11 +3397,16 @@ Language: ${lead.language || 'N/A'}`;
               });
             }
             
+            // Set expiresAt so reservation expiry doesn't immediately release the number.
+            // (If we don't set it, an old expiresAt from the document can be in the past and
+            // the reservation-expiry trigger will release the number, allowing another agent to reserve it.)
+            const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
             // Update number with reservation - IMPORTANT: set status to 'reserved', not 'open'
             const updateData: any = {
               status: 'reserved', // Must be 'reserved', not 'open'
               reservedBy: reservedByAgentId,
               reservedAt: serverTimestamp(),
+              expiresAt,
               lastStatusChange: serverTimestamp(),
               claimingAgentId: null,
               claimingStartedAt: null,
