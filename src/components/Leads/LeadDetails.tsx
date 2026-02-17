@@ -187,7 +187,7 @@ const VoiceNotePlayer = ({ src, durationMs, onPlay, currentlyPlaying }: { src: s
 export function LeadDetails() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { user } = useAuthStore();
+  const { user, isVerifier, isCoordinator, isAdmin } = useAuthStore();
   const [lead, setLead] = useState<Lead | null>(null);
   const [loading, setLoading] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -870,9 +870,11 @@ export function LeadDetails() {
           !oldPlans.some((oldPlan: any) => oldPlan.numberId === newPlan.numberId)
         );
         
-        // Validate added numbers: only numberPool; number must be open or reserved by this agent
+        // Validate added numbers: only numberPool; number must be open or reserved by this agent.
+        // Skip when verifier/coordinator/admin is editing – the number is already reserved for the agent.
+        const skipNumberPoolCheck = isVerifier() || isCoordinator() || isAdmin();
         const addedReal = addedNumbers.filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
-        if (addedReal.length > 0) {
+        if (!skipNumberPoolCheck && addedReal.length > 0) {
           const currentAgentId = leadData.agentId || user?.id || '';
           for (let i = 0; i < addedReal.length; i++) {
             const plan = addedReal[i];
