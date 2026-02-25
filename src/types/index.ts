@@ -294,10 +294,14 @@ export interface Lead {
     group?: string;
     type: string;
     status: string;
+    /** Etisalat SR number per plan (when lead has multiple plans) */
+    etisalatSrNumber?: string;
   }[];
   verificationMedia: (string | VerificationMedia)[];
   customerNumbers?: CustomerNumber[];
   etisalatLeadId?: string;
+  /** Etisalat SR number added by admin/coordinator when lead is activated */
+  etisalatSrNumber?: string;
   scheduledFor?: Date; // Date when lead should appear in unassigned for coordinator
   leadNumber?: string; // Sequential lead number in format: TEAMNAME-SEQUENCE-MMMYY (e.g., ETS-100-NOV25)
   leadNumberGeneratedAt?: Date; // Timestamp when lead number was generated

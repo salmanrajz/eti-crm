@@ -2,7 +2,46 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.25); }
+  50%       { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0); }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.8s ease-in-out infinite;
+}
+
+/* "Tap a number below to select it" = 31 chars */
+@keyframes typewriter-loop {
+  0%   { width: 0ch; }
+  45%  { width: 31ch; }
+  55%  { width: 31ch; }
+  95%  { width: 0ch; }
+  100% { width: 0ch; }
+}
+
+@keyframes blink-caret {
+  0%, 100% { border-color: transparent; }
+  50%       { border-color: rgb(99, 102, 241); }
+}
+
+.animate-typewriter {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  width: 0ch;
+  border-right: 2px solid rgb(99, 102, 241);
+  animation:
+    typewriter-loop  3.5s steps(31, end) infinite,
+    blink-caret      0.7s step-end infinite;
+}
+
 @layer base {
+  /* Eliminate 300ms tap delay on all interactive elements across the entire app */
+  a, button, [role="button"], input[type="submit"], input[type="button"], label {
+    touch-action: manipulation;
+  }
+
   /* System font stack for optimal performance */
   html {
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;

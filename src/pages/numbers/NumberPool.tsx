@@ -107,7 +107,9 @@ import {
   Minus,
   Info,
   ChevronUp,
-  Download
+  Download,
+  Rows3,
+  MessageCircle
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -523,8 +525,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
+  const [isReleasing, setIsReleasing] = useState(false);
   const [selectedNumber, setSelectedNumber] = useState<NumberPoolType | null>(null);
   const [selectedNumbers, setSelectedNumbers] = useState<string[]>([]);
+  const [selectAllMode, setSelectAllMode] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [endsWithToggle, setEndsWithToggle] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(propSelectedCategory || null);
@@ -552,6 +556,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showClaimDialog, setShowClaimDialog] = useState(false);
   const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
   const [strikeBlockedSameTeam, setStrikeBlockedSameTeam] = useState(false);
+  const [sameTeamBlockAgentName, setSameTeamBlockAgentName] = useState<string | null>(null);
+  const [sameTeamBlockMode, setSameTeamBlockMode] = useState<'strikeLead' | 'reservedOwner' | 'teamClaim' | null>(null);
   const [openingStrikeModalId, setOpeningStrikeModalId] = useState<string | null>(null);
   const [showStatusCheckDialog, setShowStatusCheckDialog] = useState(false);
   const [numberForStatusCheck, setNumberForStatusCheck] = useState<NumberPoolType | null>(null);
@@ -1645,7 +1651,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const mainSearchPromise = unifiedSearch.search(debouncedSearchTerm, {
           category: searchCategory,
           limit: searchLimit,
-          startAfter: loadMore ? searchLastDoc : null,
+        startAfter: loadMore ? searchLastDoc : null,
           includeStale: false,
           endsWith: endsWithFlag
         });
@@ -3281,6 +3287,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   }
 
   async function handleRelease(number: NumberPoolType) {
+    setIsReleasing(true);
+    // Fetch the latest state of the number and verify the current user is the one who reserved it
+    try {
+      const freshDoc = await getDoc(doc(db, 'numberPool', number.id));
+      if (!freshDoc.exists()) {
+        toast.error('Number not found.');
+        setIsReleasing(false);
+        return;
+      }
+      const fresh = freshDoc.data();
+      if (fresh.reservedBy !== user?.id) {
+        toast.error('You can only release a number that you originally reserved.');
+        setIsReleasing(false);
+        return;
+      }
+    } catch (err) {
+      console.error('Error verifying reservation ownership:', err);
+      toast.error('Could not verify ownership. Please try again.');
+      setIsReleasing(false);
+      return;
+    }
+
+    setIsReleasing(false);
     setSelectedNumber(number);
     setShowReleaseDialog(true);
   }
@@ -3288,6 +3317,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   async function confirmRelease() {
     if (!selectedNumber) return;
+    setIsReleasing(true);
 
     try {
       // Update local state immediately
@@ -3498,6 +3528,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       );
       setHasReservation(true);
       toast.error('Failed to release number');
+    } finally {
+      setIsReleasing(false);
     }
   }
 
@@ -3831,13 +3863,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const handleClaim = useCallback(async (number: NumberPoolType) => {
     if (!user?.id) return;
 
-    // Per-number claim queue cap
-    const queueLength = number.claimQueue?.length || 0;
-    if (queueLength >= 3) {
-      toast.error('Claim queue full (3/3) for this number');
-      return;
-    }
-
     // Per-user daily claim limit (resets at UAE midnight)
     if (userClaimCount >= MAX_CLAIMS_PER_24H) {
       toast.error(`Daily claim limit reached (${MAX_CLAIMS_PER_24H} per day)`);
@@ -3858,29 +3883,77 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
     
     setLastClaimAttempts(prev => new Map(prev.set(number.id, now)));
-    setNumberToClaim(number);
     setStrikeBlockedSameTeam(false);
+    setSameTeamBlockAgentName(null);
+    setSameTeamBlockMode(null);
     setOpeningStrikeModalId(number.id);
 
     try {
-      // For strike flow: check if number is in a lead owned by same-team agent (show in modal)
-      const isStrikeFlow = ['assigned', 'verified', 'follow_up'].includes(number.status);
-      if (isStrikeFlow && user.role === 'agent' && (number as any).leadId && user.teamId) {
+      // Always fetch the latest state of this number before proceeding
+      const numberRef = doc(db, 'numberPool', number.id);
+      const latestDoc = await getDoc(numberRef);
+      if (!latestDoc.exists()) {
+        toast.error('Number not found or has been removed');
+        return;
+      }
+      const latestData = latestDoc.data() as any;
+      const latestNumber: NumberPoolType = {
+        ...number,
+        ...latestData,
+        id: number.id,
+      };
+
+      // If status is no longer valid for claim/strike, stop here
+      const isStrikeFlow = ['assigned', 'verified', 'follow_up'].includes(latestNumber.status);
+      const isClaimFlow = latestNumber.status === 'reserved';
+      if (!isStrikeFlow && !isClaimFlow) {
+        toast.error('This number is not available for claiming or striking right now.');
+        return;
+      }
+
+      // Use the fresh number everywhere (dialog + confirmClaim)
+      setNumberToClaim(latestNumber);
+
+      // Same-team (center) restriction:
+      // - STRIKE: block when lead belongs to same team (uses lead.agentId)
+      // - CLAIM (reserved): block when the reserving agent is from same team (uses reservedBy)
+      if (isStrikeFlow && user.role === 'agent' && (latestNumber as any).leadId && user.teamId) {
         try {
-          const leadDoc = await getDoc(doc(db, 'leads', (number as any).leadId));
+          const leadDoc = await getDoc(doc(db, 'leads', (latestNumber as any).leadId));
           if (leadDoc.exists()) {
             const lead = leadDoc.data();
             const leadOwnerId = lead?.agentId;
             if (leadOwnerId && leadOwnerId !== user.id) {
               const ownerUserDoc = await getDoc(doc(db, 'users', leadOwnerId));
-              const ownerTeamId = ownerUserDoc.data()?.teamId;
+              const ownerData = ownerUserDoc.data();
+              const ownerTeamId = ownerData?.teamId;
               if (ownerTeamId && ownerTeamId === user.teamId) {
                 setStrikeBlockedSameTeam(true);
+                setSameTeamBlockAgentName(ownerData?.name || null);
+                setSameTeamBlockMode('strikeLead');
               }
             }
           }
         } catch {
           // ignore; modal will show normally (e.g. permission denied for other-team agent)
+        }
+      }
+
+      if (isClaimFlow && user.role === 'agent' && (latestNumber as any).reservedBy && user.teamId) {
+        try {
+          const ownerUserDoc = await getDoc(doc(db, 'users', (latestNumber as any).reservedBy));
+          if (ownerUserDoc.exists()) {
+            const ownerData = ownerUserDoc.data();
+            const ownerTeamId = ownerData?.teamId;
+            const ownerId = ownerData?.id || (number as any).reservedBy;
+            if (ownerTeamId && ownerTeamId === user.teamId && ownerId !== user.id) {
+              setStrikeBlockedSameTeam(true);
+              setSameTeamBlockAgentName(ownerData?.name || null);
+              setSameTeamBlockMode('reservedOwner');
+            }
+          }
+        } catch {
+          // ignore; if we can't verify team, allow claim (likely different team)
         }
       }
 
@@ -4020,6 +4093,61 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         
         if (numberData.status !== 'reserved') {
           throw new Error('This number is not available for claiming');
+        }
+
+        // Same-team (center) restriction for CLAIM on reserved numbers:
+        // agents cannot claim a number that is reserved by someone from their own team.
+        // If we can't verify the reserving user's team (permission denied or missing data), allow claim.
+        if (user?.role === 'agent' && numberData.reservedBy && user.teamId) {
+          try {
+            const ownerUserDoc = await getDoc(doc(db, 'users', numberData.reservedBy));
+            if (ownerUserDoc.exists()) {
+              const ownerData = ownerUserDoc.data();
+              const ownerTeamId = ownerData?.teamId;
+              const ownerId = ownerData?.id || numberData.reservedBy;
+              if (ownerTeamId && ownerTeamId === user.teamId && ownerId !== user.id) {
+                throw new Error('You cannot claim a number that is reserved by an agent from your team.');
+              }
+            }
+          } catch (err: any) {
+            if (err?.message?.includes('cannot claim a number that is reserved by an agent from your team')) throw err;
+            // Permission denied or other error: allow claim (different team or cannot verify)
+          }
+        }
+
+        // One-claim-per-team rule:
+        // If another agent from the same team has already claimed (is in the claim queue),
+        // block additional claims from that team for this reserved number.
+        if (user?.role === 'agent' && user.teamId && Array.isArray(numberData.claimQueue) && numberData.claimQueue.length > 0) {
+          try {
+            const existingAgentIds = Array.from(
+              new Set(
+                numberData.claimQueue
+                  .map((c: any) => c?.agentId)
+                  .filter((id: string | null | undefined): id is string => Boolean(id))
+              )
+            );
+
+            // Load team info for existing claimants (queue is small, so this is cheap)
+            for (const agentId of existingAgentIds) {
+              if (agentId === user.id) continue; // handled by separate "already in queue" check
+              const agentDoc = await getDoc(doc(db, 'users', agentId));
+              if (agentDoc.exists()) {
+                const agentData = agentDoc.data();
+                const agentTeamId = agentData?.teamId;
+                if (agentTeamId && agentTeamId === user.teamId) {
+                  const agentName = agentData?.name || 'someone from your team';
+                  setStrikeBlockedSameTeam(true);
+                  setSameTeamBlockAgentName(agentName);
+                  setSameTeamBlockMode('teamClaim');
+                  throw new Error(`Another agent from your team (${agentName}) has already claimed this number.`);
+                }
+              }
+            }
+          } catch (err: any) {
+            if (err?.message?.includes('has already claimed this number')) throw err;
+            // On any other error (e.g. permission), fall back to allowing the claim.
+          }
         }
 
         if (numberData.claimingAgentId === user.id) {
@@ -4619,23 +4747,40 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
    * Main component render - comprehensive number pool interface with all dialogs and tables
    */
   return showPool ? (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 pb-12 pt-0 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 pb-5 sm:pb-12 pt-0 px-0 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
         {/* Header Section */}
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
-            className="mb-6 sm:mb-12 pt-2"
+            className="mb-2 sm:mb-12 pt-2 px-4 sm:px-0"
         >
            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 sm:gap-4">
-            <div className="w-full">
+            {/* Title row — on mobile: heading left, quota stats right */}
+            <div className="flex items-start justify-between md:block w-full">
+              <div>
                <h1 className="text-2xl sm:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-purple-600">
                 Number Pool
               </h1>
-               <p className="mt-1 sm:mt-2 text-sm sm:text-lg text-gray-600">
+                <p className="hidden sm:block mt-1 sm:mt-2 text-sm sm:text-lg text-gray-600">
                 Manage and reserve phone numbers for your leads
             </p>
+              </div>
+              {/* Mobile-only: Check Your List button (right of heading) */}
+              {user?.role === 'agent' && (
+                <motion.button
+                  className="md:hidden inline-flex items-center justify-center gap-1.5 h-8 px-2.5 bg-white border border-gray-200 rounded-lg shadow-sm text-[11px] font-medium text-gray-700 whitespace-nowrap ml-2 flex-shrink-0 w-[7.5rem]"
+                  whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.95 }}
+                  onClick={() => { setShowNumberStatusChecker(true); setPastedNumbers(''); setNumberStatusResults([]); }}
+                  type="button"
+                >
+                  <div className="bg-gradient-to-br from-purple-500 to-pink-500 p-1 rounded-md flex-shrink-0">
+                    <Clipboard className="w-3 h-3 text-white" />
+                  </div>
+                  Check Your List
+                </motion.button>
+              )}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
             {isAdmin() && (
@@ -4676,6 +4821,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 </>
             )}
               {user?.role === 'agent' && (
+                <>
+                  {/* Check Your List — desktop only (mobile version is in the title row) */}
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
@@ -4685,7 +4832,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     setNumberStatusResults([]);
                   }}
                   type="button"
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer border border-gray-200"
+                    className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 h-8 bg-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer border border-gray-200"
                 >
                   <div className="bg-gradient-to-br from-purple-500 to-pink-600 p-1 rounded flex-shrink-0">
                     <Clipboard className="w-3.5 h-3.5 text-white" />
@@ -4694,6 +4841,60 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     <span className="text-xs font-medium text-gray-700 whitespace-nowrap">Check Your List</span>
                   </div>
                 </motion.button>
+
+                  {/* Mobile-only: quota stats on the left, Bulk Copy + Notes on the right */}
+                  <div className="md:hidden flex items-center gap-1.5 bg-white border border-indigo-100 rounded-lg px-2 py-1.5 shadow-sm flex-shrink-0">
+                    <div className="p-1 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 text-white shadow-sm flex-shrink-0">
+                      <Shield className="h-3 w-3" />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[8px] font-semibold whitespace-nowrap">
+                        <CheckCircle className="h-2.5 w-2.5" />{userClaimCount}/{MAX_CLAIMS_PER_24H}
+                      </span>
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[8px] font-semibold whitespace-nowrap">
+                        <Circle className="h-2.5 w-2.5" />{Math.max(0, MAX_CLAIMS_PER_24H - userClaimCount)}
+                      </span>
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-purple-100 text-purple-800 text-[8px] font-semibold whitespace-nowrap">
+                        <Clock className="h-2.5 w-2.5" />{myBeingClaimedAll.length}
+                      </span>
+                    </div>
+                    <button onClick={() => setShowMyClaimsDialog(true)}
+                      className="text-[8px] px-1.5 py-0.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-sm flex-shrink-0">
+                      View
+                    </button>
+                  </div>
+
+                  {/* Mobile-only: Bulk Copy + Notes — same total width as Check Your List */}
+                  <div className="md:hidden flex items-center gap-1 ml-auto w-[7.5rem] flex-shrink-0">
+                    <motion.button
+                      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.95 }}
+                      onClick={selectedNumbers.length > 0 ? clearSelectedNumbers : toggleBulkCopyMode}
+                      className={`flex-1 inline-flex items-center justify-center gap-1 h-8 rounded-lg border text-[11px] font-medium transition-all ${
+                        bulkCopyMode
+                          ? selectedNumbers.length > 0
+                            ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white border-green-500'
+                            : 'bg-gradient-to-r from-indigo-500 to-blue-600 text-white border-indigo-500'
+                          : 'bg-white text-gray-700 border-gray-200 shadow-sm'
+                      }`}
+                    >
+                      {selectedNumbers.length > 0 ? (
+                        <><Check className="w-3 h-3" /><span>Done</span></>
+                      ) : (
+                        <><div className="bg-gradient-to-br from-indigo-500 to-blue-500 p-0.5 rounded flex-shrink-0"><Clipboard className="w-2.5 h-2.5 text-white" /></div>Copy</>
+                      )}
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.95 }}
+                      onMouseEnter={() => setShowNotepad(true)}
+                      className="flex-1 inline-flex items-center justify-center gap-1 h-8 bg-white border border-gray-200 rounded-lg shadow-sm text-[11px] font-medium text-gray-700 transition-all"
+                    >
+                      <div className={`bg-gradient-to-br p-0.5 rounded flex-shrink-0 ${showNotepad ? 'from-blue-500 to-indigo-500' : 'from-amber-400 to-orange-500'}`}>
+                        <StickyNote className="w-2.5 h-2.5 text-white" />
+                      </div>
+                      Notes
+                    </motion.button>
+                  </div>
+                </>
             )}
             {isAdmin() && (
                 <motion.button
@@ -4712,8 +4913,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             {/* Agent Utilities */}
             {user?.role === 'agent' && (
               <div className="flex items-center gap-2 flex-wrap justify-between w-full">
-                {/* My Claim Quota Summary - Compact for Single Row */}
-                <div className="flex items-center gap-1.5 sm:gap-2 bg-white border border-indigo-100 rounded-lg sm:rounded-xl px-2 sm:px-3 py-1.5 sm:py-2 shadow-sm">
+                {/* My Claim Quota Summary - hidden on mobile (shown in title row), visible on desktop */}
+                <div className="hidden md:flex items-center gap-1.5 sm:gap-2 bg-white border border-indigo-100 rounded-lg sm:rounded-xl px-2 sm:px-3 py-1.5 sm:py-2 shadow-sm">
                   <div className="p-1 sm:p-1.5 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-500 text-white shadow-sm flex-shrink-0">
                     <Shield className="h-3 w-3 sm:h-4 sm:w-4" />
                       </div>
@@ -4741,8 +4942,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     </button>
                 </div>
 
-                {/* Bulk Copy and Notes Buttons */}
-                <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 ml-auto">
+                {/* Bulk Copy and Notes Buttons - hidden on mobile (shown in buttons row), visible on desktop */}
+                <div className="hidden md:flex items-center gap-1.5 sm:gap-2 flex-shrink-0 ml-auto">
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
@@ -4872,13 +5073,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           )}
 
                           <motion.button
-                            whileHover={{ scale: 1.02 }}
-                            whileTap={{ scale: 0.98 }}
+                            whileHover={{ scale: isReleasing ? 1 : 1.02 }}
+                            whileTap={{ scale: isReleasing ? 1 : 0.98 }}
                         onClick={() => handleRelease(number)}
-                            className="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100"
-                      >
+                            disabled={isReleasing}
+                            className="w-full sm:w-auto inline-flex items-center justify-center px-4 py-2 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {isReleasing ? (
+                              <>
+                                <svg className="animate-spin h-4 w-4 mr-1.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                                </svg>
+                                Releasing…
+                              </>
+                            ) : (
+                              <>
                             <XCircle className="h-4 w-4 mr-1.5" />
                         Release
+                              </>
+                            )}
                           </motion.button>
                         </div>
                     </div>
@@ -4895,7 +5109,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2 }}
-          className="mb-10"
+          className="mb-10 px-4 sm:px-0"
         >
           {/* Desktop: Search bar in first row, filters in second row */}
           <div className="flex flex-col gap-3 md:gap-4">
@@ -5960,7 +6174,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.3 }}
-          className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100"
+          className="bg-white rounded-none sm:rounded-2xl shadow-none sm:shadow-xl overflow-hidden border-y border-x-0 sm:border sm:border-gray-100"
         >
         {loading ? (
           <div className="flex items-center justify-center h-64">
@@ -5984,7 +6198,222 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </div>
           </div>
         ) : (
-        <div className="overflow-x-auto">
+        <>
+        {/* ── Mobile card list (phones only) ──────────────────────────────── */}
+        <div className="block sm:hidden divide-y divide-gray-100">
+          {paginatedNumbers.map((number, index) => {
+            const isBeingClaimed = number.status === 'reserved' && number.claimingAgentId;
+            const getStatusStyle = (status: NumberStatus) =>
+              status === 'non_verified' ? STATUS_STYLES.reserved : STATUS_STYLES[status as keyof typeof STATUS_STYLES];
+            const statusStyle = getStatusStyle(number.status);
+            const StatusIcon = statusStyle?.icon || CheckCircle2;
+            const serialNumber = (displayPagination.currentPage - 1) * pageSize + index + 1;
+
+            let timeLeft = reservationCountdowns[number.id];
+            if (!timeLeft && number.expiresAt) {
+              const now = Date.now();
+              let expiresAt: number;
+              if (typeof number.expiresAt === 'object' && typeof (number.expiresAt as any)?.toDate === 'function') {
+                expiresAt = (number.expiresAt as any).toDate().getTime();
+              } else if (number.expiresAt instanceof Date) {
+                expiresAt = number.expiresAt.getTime();
+              } else {
+                expiresAt = new Date(number.expiresAt as any).getTime();
+              }
+              if (!Number.isNaN(expiresAt)) timeLeft = Math.max(0, expiresAt - now);
+            }
+
+            // Reusable action buttons block
+            const actionButtons = (
+              <div className="flex flex-col justify-center gap-1 h-full">
+                {bulkCopyMode && (
+                  <input type="checkbox" className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 mx-auto"
+                    checked={selectedNumbers.includes(number.id)}
+                    onChange={() => toggleNumberSelection(number.id, number.number, number.status)}
+                    onClick={(e) => e.stopPropagation()} />
+                )}
+                {number.status === 'open' && (
+                  <motion.button type="button" whileTap={{ scale: 0.97 }}
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleReserve(number); }}
+                    disabled={reservingNumbers.has(number.id) || checkingReserveId === number.id}
+                    className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
+                      reservingNumbers.has(number.id) || checkingReserveId === number.id
+                        ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                        : 'bg-gradient-to-r from-indigo-50 to-purple-50 text-indigo-600 border-indigo-100 active:from-indigo-100')}>
+                    {reservingNumbers.has(number.id) || checkingReserveId === number.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Clock className="h-3.5 w-3.5" />}
+                    {reservingNumbers.has(number.id) ? 'Reserving…' : checkingReserveId === number.id ? 'Checking…' : 'Reserve'}
+                  </motion.button>
+                )}
+                {user?.role === 'agent' && ['assigned','verified','follow_up'].includes(number.status) &&
+                  number.reservedBy !== user?.id &&
+                  !((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') &&
+                  !agentLeadNumberIds.has(number.id) && (
+                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleClaim(number)}
+                    disabled={claimingNumbers.has(number.id) || openingStrikeModalId === number.id}
+                    className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
+                      (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-gradient-to-r from-amber-50 to-orange-50 text-amber-600 border-amber-100 active:from-amber-100')}>
+                    {(claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+                    {claimingNumbers.has(number.id) ? 'Striking…' : openingStrikeModalId === number.id ? 'Checking…' : 'Strike'}
+                  </motion.button>
+                )}
+                {user?.role === 'agent' && ['pending_verification','assigned','verified','follow_up'].includes(number.status) &&
+                  ((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') && (
+                  <span className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs border border-gray-200 w-full">
+                    <CheckCircle2 className="h-3.5 w-3.5" />Striked
+                  </span>
+                )}
+                {user?.role === 'agent' && number.status === 'reserved' && number.reservedBy !== user?.id && number.claimingAgentId !== user?.id && (
+                  reservedNumbers.length >= MAX_RESERVATIONS ? (
+                    <button type="button" onClick={() => setShowReservationLimitClaimDialog(true)}
+                      className="inline-flex items-center justify-center p-2 rounded-lg bg-amber-50 text-amber-600 border border-amber-200 w-full">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                    </button>
+                  ) : isWithinClaimWindow && (number.claimQueue?.length || 0) < 3 && !userClaimLimitReached ? (
+                    <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleClaim(number)}
+                      disabled={claimingNumbers.has(number.id) || number.claimQueue?.some((c: any) => c.agentId === user?.id)}
+                      className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
+                        claimingNumbers.has(number.id) || number.claimQueue?.some((c: any) => c.agentId === user?.id)
+                          ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                          : 'bg-gradient-to-r from-blue-50 to-indigo-50 text-blue-600 border-blue-100 active:from-blue-100')}>
+                      {claimingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                      {claimingNumbers.has(number.id) ? 'Claiming…' : number.claimQueue?.some((c: any) => c.agentId === user?.id) ? 'Claimed' : 'Claim'}
+                    </motion.button>
+                  ) : null
+                )}
+                {number.status === 'reserved' && number.reservedBy === user?.id && (
+                  <motion.button whileTap={{ scale: isReleasing ? 1 : 0.97 }} onClick={() => handleRelease(number)} disabled={isReleasing}
+                    className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-gradient-to-r from-red-50 to-red-100 text-red-600 border border-red-100 disabled:opacity-60 w-full">
+                    {isReleasing ? <svg className="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <XCircle className="h-3.5 w-3.5" />}
+                    {isReleasing ? 'Releasing…' : 'Release'}
+                  </motion.button>
+                )}
+                {user?.role === 'agent' && ['pending_verification','assigned','verified','follow_up'].includes(number.status) &&
+                  ((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') && (
+                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleCancelStrike(number)} disabled={cancellingNumbers.has(number.id)}
+                    className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 border border-red-100 disabled:opacity-50 w-full">
+                    {cancellingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}Cancel
+                  </motion.button>
+                )}
+                {user?.role === 'agent' && number.status === 'reserved' && number.reservedBy !== user?.id &&
+                  (number.claimQueue || []).some((c: any) => c.agentId === user?.id) && (
+                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleCancelQueue(number)} disabled={cancellingNumbers.has(number.id)}
+                    className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 border border-red-100 disabled:opacity-50 w-full">
+                    {cancellingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}Cancel
+                  </motion.button>
+                )}
+                {(isAdmin() || (number.claimingAgentId && (user?.id === number.claimingAgentId || user?.id === number.reservedBy))) && (
+                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleOpenChat(number)} disabled={chattingNumbers.has(number.id)}
+                    className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
+                      chattingNumbers.has(number.id) ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-gradient-to-r from-green-50 to-emerald-50 text-green-600 border-green-100 active:from-green-100')}>
+                    {chattingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageSquare className="h-3.5 w-3.5" />}
+                    {chattingNumbers.has(number.id) ? 'Opening…' : 'Chat'}
+                  </motion.button>
+                )}
+                {(number.group?.includes('G4') || number.group?.includes('G5')) && ['open','reserved'].includes(number.status) && renderStatusCheck(number)}
+                {canEditNumbers() && (isAdmin() || (isCoordinator() && ['rejected','pending_verification','non_verified','follow_up','follow_verification','open','reserved'].includes(number.status))) && (
+                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => openEditModal(number)}
+                    className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-gradient-to-r from-blue-50 to-indigo-50 text-indigo-600 border border-indigo-100 active:from-blue-100 w-full">
+                    <Edit className="h-3.5 w-3.5" />Edit
+                  </motion.button>
+                )}
+              </div>
+            );
+
+            return (
+              <div key={number.id} className="flex items-stretch gap-2 px-2.5 py-2 bg-white active:bg-gray-50 transition-colors border-b border-gray-100">
+                {/* Left: serial number */}
+                <div className="flex flex-col items-center justify-center w-5 flex-shrink-0 pt-0.5">
+                  <span className="text-[10px] text-gray-400 leading-none">{serialNumber}</span>
+                </div>
+
+                {/* Middle: two rows of info */}
+                <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
+                  {/* Row 1: number · status · category */}
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className={clsx(
+                      'font-mono text-sm font-bold tracking-wide px-2 py-0.5 rounded-md flex-shrink-0',
+                      (number.status === 'activated' || number.struckThrough)
+                        ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
+                        : number.status === 'reserved'
+                        ? `${STATUS_STYLES.reserved.bg} text-gray-800`
+                        : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`,
+                      (number as any).isDeleted && 'line-through'
+                    )}>
+                      {number.number}
+                    </span>
+                    <span className={clsx(
+                      'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0',
+                      (() => {
+                        const cat = (number.category || '') as string;
+                        const c = cat.toLowerCase();
+                        if (c === 'platinum') return 'bg-purple-100 text-purple-700';
+                        if (c === 'gold plus') return 'bg-amber-100 text-amber-700';
+                        if (c === 'gold') return 'bg-yellow-100 text-yellow-700';
+                        if (c === 'silver plus') return 'bg-blue-200 text-blue-800';
+                        if (c === 'silver') return 'bg-blue-100 text-blue-700';
+                        if (c === 'standard') return 'bg-gray-100 text-gray-600';
+                        return 'bg-gray-100 text-gray-600';
+                      })()
+                    )}>
+                      <Tag className="h-2.5 w-2.5" />
+                      {(() => {
+                        const cat = (number.category || '') as string;
+                        const c = cat.toLowerCase();
+                        if (c === 'silver') return 'Sil';
+                        if (c === 'silver plus') return 'Sil+';
+                        if (c === 'gold') return 'Gld';
+                        if (c === 'gold plus') return 'Gld+';
+                        if (c === 'platinum') return 'Plat';
+                        if (c === 'standard') return 'Std';
+                        return cat;
+                      })()}
+                    </span>
+                    <span className={clsx(
+                      'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium flex-shrink-0',
+                      number.status === 'reserved' ? `${STATUS_STYLES.reserved.bg} ${STATUS_STYLES.reserved.text}` : `${statusStyle?.bg || STATUS_STYLES.open.bg} ${statusStyle?.text || STATUS_STYLES.open.text}`
+                    )}>
+                      <StatusIcon className="h-2.5 w-2.5" />
+                      {number.status === 'reserved' ? 'Reserved' : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </span>
+                  </div>
+                  {/* Row 2: group · code · R/C/S · timer · agent */}
+                  <div className="flex flex-wrap items-center gap-1">
+                    {number.group && <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded font-medium">{number.group}</span>}
+                    {number.code && <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">{number.code}</span>}
+                    <span className="text-[10px] text-gray-400">
+                      R:{number.reservationCount || 0} C:{number.claimQueue?.length || 0}
+                      {(() => {
+                        const sc = ((number as any).claims || []).filter((c: any) => c.status === 'pending').length;
+                        return sc > 0 ? <span className="text-red-500 font-semibold"> S:{sc}</span> : <> S:0</>;
+                      })()}
+                    </span>
+                    {number.status === 'reserved' && timeLeft && timeLeft > 0 && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded border border-green-100">
+                        <Clock className="h-2.5 w-2.5" />{formatReservationCountdown(timeLeft)}
+                      </span>
+                    )}
+                    {canViewAdminColumns && number.status !== 'open' && (number.reservedBy || number.claimingAgentId) && (
+                      <AgentTeamInfo agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string} leadId={number.leadId} />
+                    )}
+                  </div>
+                  {canViewAdminColumns && (
+                    <div className="text-[10px] text-gray-600 mt-0.5">
+                      {number.passcode || '-'}
+                    </div>
+                  )}
+                </div>
+
+                {/* Right: action buttons spanning both rows */}
+                <div className="flex-shrink-0 w-20">
+                  {actionButtons}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ── Desktop table (sm and above) ──────────────────────────────────── */}
+        <div className="hidden sm:block overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead>
                 <tr className="bg-gradient-to-r from-gray-50 to-gray-100">
@@ -6341,15 +6770,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 <AlertTriangle className="h-5 w-5" />
               </button>
             ) : isWithinClaimWindow &&
-                           (number.claimQueue?.length || 0) < 3 &&
                            !userClaimLimitReached ? (
             <motion.button
-                              whileHover={{ scale: claimingNumbers.has(number.id) ? 1 : 1.05 }}
-                              whileTap={{ scale: claimingNumbers.has(number.id) ? 1 : 0.95 }}
+                              whileHover={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 1.05 }}
+                              whileTap={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 0.95 }}
                               onClick={() => handleClaim(number)}
               className={clsx(
                 "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
-                                claimingNumbers.has(number.id)
+                                (claimingNumbers.has(number.id) || openingStrikeModalId === number.id)
                   ? "bg-gray-100 text-gray-400 ring-gray-200 cursor-not-allowed"
                                   : number.claimQueue?.some((claim: any) => claim.agentId === user?.id)
                   ? "bg-gray-100 text-gray-600 ring-gray-200 cursor-not-allowed"
@@ -6357,18 +6785,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               )}
                                disabled={
                                  claimingNumbers.has(number.id) ||
+                                 openingStrikeModalId === number.id ||
                                  number.claimQueue?.some((claim: any) => claim.agentId === user?.id) ||
-                                 (number.claimQueue?.length || 0) >= 3 ||
                                  userClaimLimitReached
                                }
             >
-                              {claimingNumbers.has(number.id) ? (
+                              {(claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? (
                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
               ) : (
                 <Zap className="h-4 w-4 mr-1.5" />
               )}
                               {claimingNumbers.has(number.id) 
                 ? 'Claiming...' 
+                                : openingStrikeModalId === number.id
+                ? 'Checking...'
                                 : number.claimQueue?.some((claim: any) => claim.agentId === user?.id) 
                 ? 'Claimed' 
                 : 'Claim'}
@@ -6378,13 +6808,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           {/* Release: release my reservation */}
           {number.status === 'reserved' && number.reservedBy === user?.id && (
             <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
+              whileHover={{ scale: isReleasing ? 1 : 1.05 }}
+              whileTap={{ scale: isReleasing ? 1 : 0.95 }}
               onClick={() => handleRelease(number)}
-              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 relative z-20"
+              disabled={isReleasing}
+              className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-red-50 to-red-100 text-red-600 rounded-lg hover:from-red-100 hover:to-red-200 transition-all duration-200 group ring-1 ring-red-100 relative z-20 disabled:opacity-60 disabled:cursor-not-allowed"
             >
+              {isReleasing ? (
+                <>
+                  <svg className="animate-spin h-4 w-4 mr-1.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                  Releasing…
+                </>
+              ) : (
+                <>
               <XCircle className="h-4 w-4 mr-1.5" />
               Release
+                </>
+              )}
             </motion.button>
           )}
           {/* Cancel: cancel my strike */}
@@ -6470,15 +6913,51 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               })}
             </tbody>
           </table>
-        </div>
+        </div>{/* end hidden sm:block overflow-x-auto */}
+        </>
         )}
 
-        {/* Enhanced Pagination with Firebase Integration - Mobile Optimized */}
+        {/* Pagination */}
         {!loading && paginatedNumbers.length > 0 && (
-          <div className="px-6 py-4 bg-gradient-to-r from-gray-50 to-gray-100 border-t border-gray-200">
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center space-x-4">
-              <div className="text-sm text-gray-700">
+          <div className="bg-gradient-to-r from-gray-50 to-gray-100 border-t border-gray-200">
+
+            {/* ── Mobile layout ── */}
+            <div className="sm:hidden px-3 py-2 flex items-center gap-2">
+              {/* Info pill */}
+              <span className="flex-shrink-0 h-9 flex items-center justify-center rounded-xl text-xs font-semibold border bg-white text-gray-600 border-gray-200 px-2.5 whitespace-nowrap">
+                {debouncedSearchTerm.trim()
+                  ? `${searchResults.length}/${fullSearchResultsRef.current.length}`
+                  : `${displayPagination.currentPage}/${displayPagination.totalPages}`}
+              </span>
+              {/* Scrollable page pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+                {generatePageNumbers().map((page, index) => (
+                  <motion.button key={index} whileTap={{ scale: page !== '...' ? 0.9 : 1 }}
+                    onClick={() => { if (typeof page === 'number') { debouncedSearchTerm.trim() ? goToSearchPage(page) : goToPage(page); } }}
+                    disabled={page === '...' || page === displayPagination.currentPage || loading}
+                    className={`flex-shrink-0 min-w-[2.25rem] h-9 flex items-center justify-center rounded-xl text-xs font-medium border transition-all ${
+                      page === displayPagination.currentPage
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm shadow-indigo-200'
+                        : page === '...'
+                        ? 'bg-transparent text-gray-400 border-transparent cursor-default'
+                        : 'bg-white text-gray-600 border-gray-200 active:bg-gray-100'
+                    }`}>
+                    {page}
+                  </motion.button>
+                ))}
+              </div>
+              {/* Load More */}
+              {debouncedSearchTerm.trim() && searchHasMore && displayPagination.currentPage === displayPagination.totalPages && (
+                <motion.button whileTap={{ scale: 0.9 }} onClick={() => performSearch(true)} disabled={isLoadingMore || isSearching}
+                  className="h-7 px-2 flex items-center gap-1 rounded-lg bg-indigo-600 text-white text-[10px] font-medium disabled:opacity-50 shrink-0">
+                  {isLoadingMore ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronDown className="h-3 w-3" />}More
+                </motion.button>
+              )}
+            </div>
+
+            {/* ── Desktop layout (unchanged) ── */}
+            <div className="hidden sm:flex items-center justify-between gap-2 px-6 py-4">
+              <div className="text-sm text-gray-700 shrink-0">
                 {debouncedSearchTerm.trim() ? (
                   `Showing ${searchResults.length} of ${fullSearchResultsRef.current.length} search results`
                 ) : selectedCategory ? (
@@ -6487,119 +6966,53 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   `Page ${displayPagination.currentPage} of ${displayPagination.totalPages} (${displayPagination.totalItems} total)`
                 )}
               </div>
-              </div>
-              
-              {/* Enhanced Pagination Controls - Mobile Optimized */}
-              <div className="w-full sm:w-auto">
-                <div className="flex items-center space-x-1 overflow-x-auto scrollbar-hide pb-2 sm:pb-0 min-w-0" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
-                {/* First Page Button */}
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+              <div className="flex items-center space-x-1">
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                   onClick={() => debouncedSearchTerm.trim() ? goToSearchPage(1) : goToPage(1)}
                   disabled={displayPagination.currentPage === 1 || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-l-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
-                  title="First Page"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                  <ChevronLeft className="h-4 w-4 -ml-1" />
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-l-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                  <ChevronLeft className="h-4 w-4" /><ChevronLeft className="h-4 w-4 -ml-1" />
                 </motion.button>
-
-                {/* Previous Button */}
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                   onClick={debouncedSearchTerm.trim() ? goToPreviousSearchPage : goToPreviousPage}
                   disabled={!displayPagination.hasPreviousPage || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
-                  title="Previous Page"
-                >
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                   <ChevronLeft className="h-4 w-4" />
                 </motion.button>
-
-                {/* Dynamic Page Numbers */}
                 {generatePageNumbers().map((page, index) => (
-                  <motion.button
-                    key={index}
-                    whileHover={{ scale: page !== '...' ? 1.05 : 1 }}
-                    whileTap={{ scale: page !== '...' ? 0.95 : 1 }}
-                    onClick={() => {
-                      if (typeof page === 'number') {
-                        if (debouncedSearchTerm.trim()) {
-                          goToSearchPage(page);
-                        } else {
-                          goToPage(page);
-                        }
-                      }
-                    }}
+                  <motion.button key={index} whileHover={{ scale: page !== '...' ? 1.05 : 1 }} whileTap={{ scale: page !== '...' ? 0.95 : 1 }}
+                    onClick={() => { if (typeof page === 'number') { debouncedSearchTerm.trim() ? goToSearchPage(page) : goToPage(page); } }}
                     disabled={page === '...' || page === displayPagination.currentPage || loading}
-                    className={`inline-flex items-center px-3 py-2 text-sm font-medium border transition-all duration-200 ${
-                      page === displayPagination.currentPage
-                        ? 'bg-indigo-600 text-white border-indigo-600 z-10 relative'
-                        : page === '...'
-                        ? 'bg-white text-gray-400 border-gray-300 cursor-default'
-                        : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50 hover:text-gray-700'
-                    }`}
-                    title={page === '...' ? 'More pages' : `Page ${page}`}
-                  >
+                    className={`inline-flex items-center px-3 py-2 text-sm font-medium border transition-all ${
+                      page === displayPagination.currentPage ? 'bg-indigo-600 text-white border-indigo-600 z-10' :
+                      page === '...' ? 'bg-white text-gray-400 border-gray-300 cursor-default' :
+                      'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'
+                    }`}>
                     {page}
                   </motion.button>
                 ))}
-
-                {/* Next Button */}
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                   onClick={debouncedSearchTerm.trim() ? goToNextSearchPage : goToNextPage}
                   disabled={!displayPagination.hasNextPage || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
-                  title="Next Page"
-                >
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                   <ChevronRight className="h-4 w-4" />
                 </motion.button>
-
-                {/* Last Page Button - Show for both browse and search mode */}
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
+                <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                   onClick={() => debouncedSearchTerm.trim() ? goToSearchPage(displayPagination.totalPages) : goToPage(displayPagination.totalPages)}
                   disabled={displayPagination.currentPage === displayPagination.totalPages || loading}
-                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0"
-                  title="Last Page"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                  <ChevronRight className="h-4 w-4 -ml-1" />
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-r-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                  <ChevronRight className="h-4 w-4" /><ChevronRight className="h-4 w-4 -ml-1" />
                 </motion.button>
-
-                {/* Load More Button - Only show on last page when searching and more results available */}
-                {debouncedSearchTerm.trim() && 
-                 searchHasMore && 
-                 displayPagination.currentPage === displayPagination.totalPages && (
-                  <motion.button
-                    type="button"
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={() => performSearch(true)}
-                    disabled={isLoadingMore || isSearching}
-                    className="inline-flex items-center px-3 py-2 text-xs font-medium text-white bg-indigo-600 border border-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex-shrink-0 ml-1"
-                    title="Load More Results"
-                  >
-                    {isLoadingMore ? (
-                      <>
-                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                        Loading...
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="h-3 w-3 mr-1" />
-                        Load More
-                      </>
-                    )}
+                {debouncedSearchTerm.trim() && searchHasMore && displayPagination.currentPage === displayPagination.totalPages && (
+                  <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                    onClick={() => performSearch(true)} disabled={isLoadingMore || isSearching}
+                    className="inline-flex items-center px-3 py-2 text-xs font-medium text-white bg-indigo-600 border border-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-all ml-1">
+                    {isLoadingMore ? <><Loader2 className="h-3 w-3 animate-spin mr-1" />Loading...</> : <><ChevronDown className="h-3 w-3 mr-1" />More</>}
                   </motion.button>
                 )}
                 </div>
               </div>
-            </div>
+
           </div>
         )}
 
@@ -6803,9 +7216,51 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               </h3>
               <p className="text-gray-500 text-center mb-6">
                 {strikeBlockedSameTeam ? (
-                  <span className="text-amber-700 font-medium">
-                    This lead belongs to your team. You cannot strike on this number.
-                  </span>
+                  <>
+                    {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
+                      <span className="text-amber-700 font-medium">
+                        This lead belongs to your team
+                        {sameTeamBlockAgentName && (
+                          <>
+                            {' '}(
+                            <span className="text-red-600 font-semibold">{sameTeamBlockAgentName}</span>
+                            )
+                          </>
+                        )}
+                        . You cannot strike this number.
+                      </span>
+                    ) : (
+                      <span className="text-amber-700 font-medium">
+                        {sameTeamBlockMode === 'reservedOwner' && (
+                          <>
+                            This number is already reserved by{' '}
+                            {sameTeamBlockAgentName ? (
+                              <span className="text-red-600 font-semibold">{sameTeamBlockAgentName}</span>
+                            ) : (
+                              'someone from your team'
+                            )}
+                            {' '}from your team. You cannot claim this number.
+                          </>
+                        )}
+                        {sameTeamBlockMode === 'teamClaim' && (
+                          <>
+                            This number is already claimed by{' '}
+                            {sameTeamBlockAgentName ? (
+                              <span className="text-red-600 font-semibold">{sameTeamBlockAgentName}</span>
+                            ) : (
+                              'someone from your team'
+                            )}
+                            {' '}from your team. You cannot claim this number.
+                          </>
+                        )}
+                        {!sameTeamBlockMode && (
+                          <>
+                            This number is blocked for your team. You cannot claim this number.
+                          </>
+                        )}
+                      </span>
+                    )}
+                  </>
                 ) : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
                   <>
                     Are you sure you want to strike the number {numberToClaim.number}?
@@ -6831,6 +7286,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   onClick={() => {
                     setShowClaimDialog(false);
                     setStrikeBlockedSameTeam(false);
+                    setSameTeamBlockAgentName(null);
+                    setSameTeamBlockMode(null);
                     setOpeningStrikeModalId(null);
                   }}
                   className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
@@ -6992,15 +7449,27 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               <div className="flex justify-end space-x-3">
                 <button
                   onClick={() => setShowReleaseDialog(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                  disabled={isReleasing}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={confirmRelease}
-                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                  disabled={isReleasing}
+                  className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Release
+                  {isReleasing ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 mr-1.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      Releasing…
+                    </>
+                  ) : (
+                    'Release'
+                  )}
                 </button>
               </div>
             </div>
@@ -7450,88 +7919,68 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   className="w-full h-96 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-sm font-mono"
                   style={{ lineHeight: '1.5' }}
                 />
-                <div className="mt-3 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <p className="text-xs text-gray-500">
-                      <Check className="w-3 h-3 inline mr-1" />
-                      Auto-saved locally
-                    </p>
+                <p className="mt-2 text-[10px] text-gray-400 flex items-center gap-1">
+                  <Check className="w-3 h-3 text-emerald-500" />
+                  Auto-saved
+                </p>
+                <div className="mt-1.5 flex flex-nowrap items-center gap-1.5">
                   <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
+                    type="button"
+                    whileTap={{ scale: 0.97 }}
                       onClick={() => setWhatsappBlankLines(!whatsappBlankLines)}
-                      className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded transition-all duration-300 ${
+                    className={clsx(
+                      'flex-1 min-w-0 inline-flex items-center justify-center gap-1 px-1.5 py-1.5 rounded text-[10px] font-medium transition-all border',
                         whatsappBlankLines
-                          ? 'bg-blue-100 text-blue-700 border border-blue-300'
-                          : 'bg-gray-100 text-gray-600 border border-gray-300'
-                      }`}
-                      title={whatsappBlankLines ? 'Blank lines ON (for WhatsApp)' : 'Blank lines OFF'}
-                    >
-                      <span className="mr-1">{whatsappBlankLines ? '✓' : '○'}</span>
-                      Blank Lines
+                        ? 'bg-gradient-to-r from-indigo-500 to-violet-500 text-white border-indigo-400/50 shadow-sm shadow-indigo-200/40'
+                        : 'bg-gradient-to-r from-gray-50 to-gray-100 text-gray-500 border-gray-200 hover:from-gray-100 hover:to-gray-200'
+                    )}
+                    title={whatsappBlankLines ? 'Blank lines ON' : 'Blank lines OFF'}
+                  >
+                    <Rows3 className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate">Blank</span>
+                    <span className={clsx('flex-shrink-0', whatsappBlankLines ? 'text-white/90' : 'text-gray-400')}>{whatsappBlankLines ? 'ON' : 'OFF'}</span>
                     </motion.button>
-                  </div>
-                  <div className="flex items-center gap-3">
                     <motion.button
+                    type="button"
                       onClick={copyNotepadContent}
                       disabled={!notepadContent.trim() || isCopyingNotepad}
-                      whileHover={notepadContent.trim() ? { scale: 1.05 } : {}}
-                      whileTap={notepadContent.trim() ? { scale: 0.95 } : {}}
-                      className="inline-flex items-center px-3 py-1 text-xs font-medium bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded hover:from-green-600 hover:to-emerald-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                    whileTap={notepadContent.trim() && !isCopyingNotepad ? { scale: 0.97 } : {}}
+                    className={clsx(
+                      'flex-1 min-w-0 inline-flex items-center justify-center gap-1 px-1.5 py-1.5 rounded text-[10px] font-semibold transition-all border',
+                      notepadContent.trim() && !isCopyingNotepad
+                        ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-white border-emerald-400/50 shadow-sm shadow-emerald-200/40 hover:from-emerald-600 hover:to-teal-600'
+                        : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-400 border-gray-200 cursor-not-allowed'
+                    )}
+                    title={notepadContent.trim() ? 'Copy for WhatsApp' : 'Add notes first'}
                   >
                       <AnimatePresence mode="wait">
                         {isCopyingNotepad ? (
-                          <motion.span
-                            key="copying"
-                            initial={{ opacity: 0, y: -5 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 5 }}
-                            transition={{ duration: 0.2 }}
-                            className="inline-flex items-center"
-                          >
-                            <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                            Copying...
+                        <motion.span key="copying" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="inline-flex items-center gap-1">
+                          <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+                          <span className="truncate">…</span>
                           </motion.span>
                         ) : notepadCopied ? (
-                          <motion.span
-                            key="copied"
-                            initial={{ opacity: 0, scale: 0.8 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.8 }}
-                            transition={{ duration: 0.2 }}
-                            className="inline-flex items-center"
-                          >
-                            <Check className="w-3 h-3 mr-1" />
-                            Copied!
+                        <motion.span key="copied" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="inline-flex items-center gap-1">
+                          <Check className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate">Copied</span>
                           </motion.span>
                         ) : (
-                          <motion.span
-                            key="copy"
-                            initial={{ opacity: 0, y: -5 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 5 }}
-                            transition={{ duration: 0.2 }}
-                            className="inline-flex items-center"
-                          >
-                            <Clipboard className="w-3 h-3 mr-1" />
-                            Copy for WhatsApp
+                        <motion.span key="copy" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="inline-flex items-center gap-1">
+                          <MessageCircle className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate">WhatsApp</span>
                           </motion.span>
                         )}
                       </AnimatePresence>
                     </motion.button>
                     <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={() => {
-                        if (window.confirm('Clear all notes?')) {
-                          setNotepadContent('');
-                        }
-                      }}
-                      className="text-xs text-red-600 hover:text-red-700 font-medium transition-colors"
-                    >
-                      Clear Notes
+                    type="button"
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => { if (window.confirm('Clear all notes?')) setNotepadContent(''); }}
+                    className="flex-1 min-w-0 inline-flex items-center justify-center gap-1 px-1.5 py-1.5 rounded text-[10px] font-medium bg-gradient-to-r from-rose-400 to-red-500 text-white border border-rose-300/50 shadow-sm shadow-rose-200/40 hover:from-rose-500 hover:to-red-600 transition-all"
+                  >
+                    <Trash2 className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate">Clear</span>
                   </motion.button>
-                  </div>
                 </div>
                 </div>
             </motion.div>
@@ -7542,7 +7991,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       {/* Number Status Checker Modal */}
       {showNumberStatusChecker && (
         <div
-          className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-black/40 px-0 sm:px-4"
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 px-4"
           onClick={() => {
             if (!checkingNumbers) setShowNumberStatusChecker(false);
           }}
@@ -7550,7 +7999,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-4xl max-h-[95vh] sm:max-h-[90vh] flex flex-col"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
             style={{ position: 'relative', zIndex: 10000 }}
           >
             <div className="flex items-center justify-between p-3 sm:p-4 md:p-6 border-b border-gray-200 bg-gradient-to-r from-indigo-50 to-purple-50">
