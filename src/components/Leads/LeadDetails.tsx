@@ -1776,18 +1776,24 @@ export function LeadDetails() {
           }
         });
         
-        // Handle remaining/new numbers - update their status
+        // Handle remaining/new numbers - update status and reserve for lead creator (agent), never for verifier
         const realPlans = newPlans;
+        const agentId = leadData.agentId;
+        const now = new Date();
+        const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
         realPlans.forEach((plan: any) => {
           updatePromises.push(
             (async () => {
           try {
             const numberRef = doc(db, 'numberPool', plan.numberId);
             await updateDoc(numberRef, {
-              // Keep number status aligned with lead status; do not downgrade to pending_verification
               status: leadData.status === 'activated_non_verified' ? 'activated_non_verified' : 'pending_verification',
-              lastStatusChange: new Date(),
-              leadId: id
+              lastStatusChange: now,
+              leadId: id,
+              // Always reserve for the lead creator (agent); never link the verifier's id to the number
+              reservedBy: agentId || null,
+              reservedAt: now,
+              expiresAt
             });
           } catch (err) {
             console.error('Failed updating numberPool for plan', plan.numberId, err);

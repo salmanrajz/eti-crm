@@ -85,7 +85,8 @@ import {
   Users,
   UserCheck,
   Timer,
-  RefreshCw
+  RefreshCw,
+  Pencil
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'react-hot-toast';
@@ -640,7 +641,18 @@ export function LeadList() {
   const [leadStrikes, setLeadStrikes] = useState<Record<string, number>>({});
   const [showStruckNumbersModal, setShowStruckNumbersModal] = useState(false);
   const [selectedLeadForStruckNumbers, setSelectedLeadForStruckNumbers] = useState<Lead | null>(null);
-
+  const [showEtisalatSrModal, setShowEtisalatSrModal] = useState(false);
+  const [selectedLeadForEtisalatSr, setSelectedLeadForEtisalatSr] = useState<Lead | null>(null);
+  const [etisalatSrInput, setEtisalatSrInput] = useState('');
+  /** Per-plan Etisalat SR inputs when lead has multiple plans (index = plan index) */
+  const [etisalatSrInputsByPlanIndex, setEtisalatSrInputsByPlanIndex] = useState<string[]>([]);
+  const [isSavingEtisalatSr, setIsSavingEtisalatSr] = useState(false);
+  // Coordinator "all groups" = same as CoordinatorDashboard: (coordinatorType || 'all') === 'all' → "You are assigned to handle leads from all groups (G1, G2, G3, G4, G5)"
+  const isAllGroupsCoordinator = useMemo(() => {
+    if (user?.role !== 'coordinator') return false;
+    const ct = (user?.coordinatorType ?? 'all').toString().toLowerCase();
+    return ct === 'all';
+  }, [user?.role, user?.coordinatorType]);
 
   // Load plan details from Firebase when selectedLeadForChat changes
   useEffect(() => {
@@ -1695,6 +1707,9 @@ export function LeadList() {
       setShowChangeGroupModal(false);
       setSelectedLeadForGroupChange(null);
       setNewGroup('');
+      setSelectedLeadForEtisalatSr(null);
+      setEtisalatSrInput('');
+      setEtisalatSrInputsByPlanIndex([]);
       
       // Clear cache and reload
       leadsCache.clear();
@@ -1796,6 +1811,16 @@ export function LeadList() {
     return results;
   }, [user, isLeadInCoordinatorScope]);
 
+  // Status -> searchable display label (so "Assigned to Activation" matches assigned_to_cord)
+  const getStatusSearchLabel = useCallback((status: string | undefined): string => {
+    if (!status) return '';
+    if (status === 'assigned_to_cord') return 'assigned to activation';
+    if (status === 'assigned') return 'processed with etisalat';
+    if (status === 'non_verified') return 'non verified';
+    if (status === 'follow_up') return 'follow-up';
+    return status.replace(/_/g, ' ').toLowerCase();
+  }, []);
+
   // Helper: check if search term matches a lead (used for in-memory filtering)
   const matchesSearch = useCallback((lead: any, normalizedSearch: string): boolean => {
     const canSearchEtisalatId = user?.role === 'admin' || user?.role === 'coordinator';
@@ -1810,6 +1835,12 @@ export function LeadList() {
         plan.srNumber?.toString?.().toLowerCase().includes(normalizedSearch)
       ));
 
+    const statusSearchLabel = getStatusSearchLabel(lead.status);
+    const statusMatch =
+      lead.status?.toLowerCase().includes(normalizedSearch) ||
+      lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+      (statusSearchLabel && (statusSearchLabel.includes(normalizedSearch) || normalizedSearch.includes(statusSearchLabel)));
+
     return !!(
       lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
       lead.customerName?.toLowerCase().includes(normalizedSearch) ||
@@ -1818,8 +1849,7 @@ export function LeadList() {
         plan.number?.toLowerCase().includes(normalizedSearch) ||
         plan.plan?.toLowerCase().includes(normalizedSearch)
       ) ||
-      lead.status?.toLowerCase().includes(normalizedSearch) ||
-      lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+      statusMatch ||
       srNumberMatch ||
       (canSearchEtisalatId && (
         lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
@@ -1829,7 +1859,7 @@ export function LeadList() {
         (lead.plans && lead.plans.some((plan: any) => plan.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch)))
       ))
     );
-  }, [user?.role]);
+  }, [user?.role, getStatusSearchLabel]);
 
   // FAST-PATH: Targeted Firestore queries for phone number, customer number, lead number
   // Fires parallel queries directly on indexed fields — returns results in milliseconds
@@ -2098,16 +2128,21 @@ export function LeadList() {
         ))
       );
       
+      const statusSearchLabel = getStatusSearchLabel(lead.status);
+      const statusMatch =
+        lead.status?.toLowerCase().includes(normalizedSearch) ||
+        lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+        (statusSearchLabel && (statusSearchLabel.includes(normalizedSearch) || normalizedSearch.includes(statusSearchLabel)));
+
       const matchesSearch = !normalizedSearch || (
         lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.customerName?.toLowerCase().includes(normalizedSearch) ||
         lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.plans?.some(plan => 
-          plan.number.toLowerCase().includes(normalizedSearch) ||
+          plan.number?.toLowerCase().includes(normalizedSearch) ||
           plan.plan?.toLowerCase().includes(normalizedSearch)
         ) ||
-        lead.status?.toLowerCase().includes(normalizedSearch) ||
-        lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
+        statusMatch ||
         srNumberMatch ||
         (canSearchEtisalatId && (
           lead.etisalatLeadId?.toString?.().toLowerCase().includes(normalizedSearch) ||
@@ -2128,7 +2163,7 @@ export function LeadList() {
       
       return matchesSearch && matchesStatus;
     });
-  }, [leads, searchTerm, statusFilter, user?.role, user?.coordinatorType, user?.verifierGroups]);
+  }, [leads, searchTerm, statusFilter, user?.role, user?.coordinatorType, user?.verifierGroups, getStatusSearchLabel]);
 
   // Combine loaded leads with Firebase search results when searching
   const finalFilteredLeads = useMemo(() => {
@@ -2286,6 +2321,7 @@ export function LeadList() {
             'Etisalat Lead ID': anyLead.etisalatLeadId || 'N/A',
             'Activation Date': normalizeActivationDate(rawActivationDate),
             'SR Number': srNumber || 'N/A',
+            'Etisalat SR Number': anyLead.etisalatSrNumber || 'N/A',
             'Selected Numbers': 'No Numbers',
             'Plans': 'No Plans',
             'Plan Categories': 'No Categories',
@@ -2340,6 +2376,7 @@ export function LeadList() {
               'Etisalat Lead ID': planEtisalatId || 'N/A',
               'Activation Date': normalizeActivationDate(planActivationDate),
               'SR Number': planSrNumber || 'N/A',
+              'Etisalat SR Number': (plan as any).etisalatSrNumber || anyLead.etisalatSrNumber || 'N/A',
               'Service Order Number': planServiceOrderNumber,
               'Selected Numbers': plan.number || 'N/A',
               'Plans': plan.plan || 'N/A',
@@ -2393,6 +2430,7 @@ export function LeadList() {
         { wch: 18 },  // Etisalat Lead ID
         { wch: 14 },  // Activation Date
         { wch: 14 },  // SR Number
+        { wch: 18 },  // Etisalat SR Number
         { wch: 18 },  // Service Order Number
         { wch: 15 },  // Selected Numbers
         { wch: 40 },  // Plans
@@ -2426,6 +2464,210 @@ export function LeadList() {
       toast.error('Failed to export leads. Please try again.');
     }
   }, [processLeadsWithInfo]);
+
+  // Etisalat sheets export: group-wise (G1, G2, G3) with different column layouts
+  const handleExportEtisalatSheets = useCallback(async (filteredLeads: Lead[]) => {
+    try {
+      const XLSX = await import('xlsx');
+
+      const normalizeActivationDate = (rawDate: any): string => {
+        if (!rawDate) return '';
+        if (typeof rawDate.toDate === 'function') return rawDate.toDate().toLocaleDateString();
+        if (rawDate instanceof Date) return rawDate.toLocaleDateString();
+        if (typeof rawDate === 'string') {
+          const parsed = new Date(rawDate);
+          return isNaN(parsed.getTime()) ? rawDate : parsed.toLocaleDateString();
+        }
+        return String(rawDate);
+      };
+
+      const getActivationSortKey = (rawDate: any): number => {
+        if (!rawDate) return 0;
+        try {
+          if (typeof rawDate.toDate === 'function') return rawDate.toDate().getTime();
+          if (rawDate instanceof Date) return rawDate.getTime();
+          if (typeof rawDate === 'string') {
+            const parsed = new Date(rawDate);
+            return isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+          }
+          return 0;
+        } catch {
+          return 0;
+        }
+      };
+
+      const g1Rows: any[] = [];
+      const g2Rows: any[] = [];
+      const g3Rows: any[] = [];
+
+      filteredLeads.forEach((lead) => {
+        const anyLead = lead as any;
+        const plans = lead.plans || [];
+        const activationDates = anyLead.activationDates || [];
+        const srNumbers = anyLead.srNumbers || [];
+        const activationGroups = anyLead.activationGroups || [];
+        const rawActivationDate = anyLead.activationDate;
+        const srNumber = anyLead.srNumber || anyLead.srNo || anyLead.sr;
+
+        if (plans.length === 0) {
+          const group = (anyLead.activationGroups && anyLead.activationGroups[0]) || anyLead.activationGroup || '';
+          const actDate = normalizeActivationDate(rawActivationDate);
+          const reqNo = srNumber || '';
+          const sortKey = getActivationSortKey(rawActivationDate);
+          if (group === 'G1') {
+            g1Rows.push({
+              'Sr No': g1Rows.length + 1,
+              'RATE_PLAN_DESC': 'N/A',
+              'CLOSED_DATE': actDate,
+              'SUBREQUEST_ID': '',
+              'SUBREQUEST_STATUS': 'CLOSED',
+              'ISTNAME': '',
+              '2ND NAME': '',
+              'PARTNER': 'CONNECT',
+              'REQ NO': reqNo,
+              'Selected Number': 'N/A',
+              _activationSortKey: sortKey
+            });
+          } else           if (group === 'G2') {
+            const pt = (lead.productType || '').toString().trim();
+            const accountTypeDisplay = pt.toLowerCase() === 'new' ? 'New Account' : (pt || '');
+            g2Rows.push({
+              'S. No': g2Rows.length + 1,
+              'Account Type': accountTypeDisplay,
+              'Product Type': 'POSTPAID',
+              'PACKAGE_DESC': 'N/A',
+              'CLOSED_DATE': actDate,
+              'SUBREQUEST_ID': '',
+              'SUBREQUEST_STATUS': 'CLOSED',
+              'ISTNAME': '',
+              '2NDNAME': '',
+              'PARTNER': 'EXPRESS DIAL',
+              'REQ NO': reqNo,
+              'Selected Number': 'N/A',
+              _activationSortKey: sortKey
+            });
+          } else if (group === 'G3') {
+            g3Rows.push({
+              'Sr NO': g3Rows.length + 1,
+              'DATE': actDate,
+              'CUSTOMER NAME': lead.customerName || '',
+              'MNP/NEW NUMBER': 'N/A',
+              'SIM TYPE': 'NEW',
+              _activationSortKey: sortKey
+            });
+          }
+          return;
+        }
+
+        plans.forEach((plan: any, planIndex: number) => {
+          const planGroup = (activationGroups[planIndex] || plan.group || '').toString().toUpperCase();
+          const planActivationDate = activationDates[planIndex] || (planIndex === 0 ? rawActivationDate : null);
+          const planSrNumber = srNumbers[planIndex] || (planIndex === 0 ? srNumber : null);
+          const actDate = normalizeActivationDate(planActivationDate);
+          const planName = plan.plan || 'N/A';
+          const selectedNumber = plan.number || 'N/A';
+
+          const sortKey = getActivationSortKey(planActivationDate);
+          if (planGroup === 'G1') {
+            g1Rows.push({
+              'Sr No': g1Rows.length + 1,
+              'RATE_PLAN_DESC': planName,
+              'CLOSED_DATE': actDate,
+              'SUBREQUEST_ID': '',
+              'SUBREQUEST_STATUS': 'CLOSED',
+              'ISTNAME': '',
+              '2ND NAME': '',
+              'PARTNER': 'CONNECT',
+              'REQ NO': planSrNumber || '',
+              'Selected Number': selectedNumber,
+              _activationSortKey: sortKey
+            });
+          } else if (planGroup === 'G2') {
+            const pt = (lead.productType || '').toString().trim();
+            const accountTypeDisplay = pt.toLowerCase() === 'new' ? 'New Account' : (pt || '');
+            g2Rows.push({
+              'S. No': g2Rows.length + 1,
+              'Account Type': accountTypeDisplay,
+              'Product Type': 'POSTPAID',
+              'PACKAGE_DESC': planName,
+              'CLOSED_DATE': actDate,
+              'SUBREQUEST_ID': '',
+              'SUBREQUEST_STATUS': 'CLOSED',
+              'ISTNAME': '',
+              '2NDNAME': '',
+              'PARTNER': 'EXPRESS DIAL',
+              'REQ NO': planSrNumber || '',
+              'Selected Number': selectedNumber,
+              _activationSortKey: sortKey
+            });
+          } else if (planGroup === 'G3') {
+            g3Rows.push({
+              'Sr NO': g3Rows.length + 1,
+              'DATE': actDate,
+              'CUSTOMER NAME': lead.customerName || '',
+              'MNP/NEW NUMBER': selectedNumber,
+              'SIM TYPE': 'NEW',
+              _activationSortKey: sortKey
+            });
+          }
+        });
+      });
+
+      // Sort each sheet strictly by activation date (newest first), then remove sort key and re-assign serial numbers
+      const sortByActivation = (a: any, b: any) => (b._activationSortKey ?? 0) - (a._activationSortKey ?? 0);
+      g1Rows.sort(sortByActivation);
+      g2Rows.sort(sortByActivation);
+      g3Rows.sort(sortByActivation);
+      [g1Rows, g2Rows, g3Rows].forEach(rows => {
+        rows.forEach((row: any) => {
+          if ('_activationSortKey' in row) delete row._activationSortKey;
+        });
+      });
+      g1Rows.forEach((row, i) => { row['Sr No'] = i + 1; });
+      g2Rows.forEach((row, i) => { row['S. No'] = i + 1; });
+      g3Rows.forEach((row, i) => { row['Sr NO'] = i + 1; });
+
+      const filesExported: string[] = [];
+
+      if (g1Rows.length > 0) {
+        const wb1 = XLSX.utils.book_new();
+        const ws1 = XLSX.utils.json_to_sheet(g1Rows);
+        ws1['!cols'] = [{ wch: 8 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 16 }, { wch: 16 }];
+        XLSX.utils.book_append_sheet(wb1, ws1, 'RC77 CONNECT');
+        const filename1 = 'RC77 CONNECT.xlsx';
+        XLSX.writeFile(wb1, filename1);
+        filesExported.push(`${filename1} (${g1Rows.length} rows)`);
+      }
+      if (g2Rows.length > 0) {
+        const wb2 = XLSX.utils.book_new();
+        const ws2 = XLSX.utils.json_to_sheet(g2Rows);
+        ws2['!cols'] = [{ wch: 8 }, { wch: 14 }, { wch: 12 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+        XLSX.utils.book_append_sheet(wb2, ws2, 'RC65 EXPRESS DIAL');
+        const filename2 = 'RC65 EXPRESS DIAL.xlsx';
+        XLSX.writeFile(wb2, filename2);
+        filesExported.push(`${filename2} (${g2Rows.length} rows)`);
+      }
+      if (g3Rows.length > 0) {
+        const wb3 = XLSX.utils.book_new();
+        const ws3 = XLSX.utils.json_to_sheet(g3Rows);
+        ws3['!cols'] = [{ wch: 8 }, { wch: 14 }, { wch: 24 }, { wch: 16 }, { wch: 12 }];
+        XLSX.utils.book_append_sheet(wb3, ws3, 'RC86 TELECON');
+        const filename3 = 'RC86 TELECON.xlsx';
+        XLSX.writeFile(wb3, filename3);
+        filesExported.push(`${filename3} (${g3Rows.length} rows)`);
+      }
+
+      const total = g1Rows.length + g2Rows.length + g3Rows.length;
+      if (total === 0) {
+        toast.error('No leads with group G1, G2, or G3 found in the filtered results.');
+        return;
+      }
+      toast.success(`Etisalat export: ${filesExported.join('; ')}`);
+    } catch (error) {
+      console.error('Etisalat sheets export error:', error);
+      toast.error('Failed to export Etisalat sheets. Please try again.');
+    }
+  }, []);
 
   // Memoized sorted and filtered leads
   const sortedAndFilteredLeads = useMemo(() => {
@@ -2492,7 +2734,12 @@ export function LeadList() {
     setCurrentPage(1); // Reset to first page when changing items per page
   }, []);
 
-  const getStatusBadgeClass = useCallback((status: string) => {
+  const getStatusBadgeClass = useCallback((status: string, lead?: Lead) => {
+    // Activated with Etisalat SR number set (lead-level or any plan) → green
+    const hasEtisalatSr = lead && ((lead as any).etisalatSrNumber || lead.plans?.some(p => (p as any).etisalatSrNumber));
+    if (status === 'activated' && hasEtisalatSr) {
+      return 'bg-green-100 text-green-800';
+    }
     switch (status) {
       case 'verified':
         return 'bg-green-100 text-green-800';
@@ -2564,6 +2811,109 @@ export function LeadList() {
     if (status === 'follow_up') return 'Follow-up';
     return status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
   }, []);
+
+  const handleSaveEtisalatSr = useCallback(async () => {
+    if (!selectedLeadForEtisalatSr || isSavingEtisalatSr) return;
+    const plans = selectedLeadForEtisalatSr.plans ?? [];
+    const isMultiPlan = plans.length > 1;
+    setIsSavingEtisalatSr(true);
+    try {
+      const leadRef = doc(db, 'leads', selectedLeadForEtisalatSr.id);
+      if (isMultiPlan) {
+        const updatedPlans = plans.map((p, i) => ({
+          ...p,
+          etisalatSrNumber: (etisalatSrInputsByPlanIndex[i] ?? '').trim() || undefined
+        }));
+        await updateDoc(leadRef, { plans: updatedPlans, updatedAt: new Date() });
+        const updatedLead: Lead = { ...selectedLeadForEtisalatSr, plans: updatedPlans } as Lead;
+        setLeads(prev => prev.map(l => l.id === selectedLeadForEtisalatSr.id ? updatedLead : l));
+        setFirebaseSearchResults(prev => prev.map(l => l.id === selectedLeadForEtisalatSr.id ? updatedLead : l));
+        toast.success('Etisalat SR numbers saved.');
+        setShowEtisalatSrModal(false);
+        setSelectedLeadForEtisalatSr(null);
+        setEtisalatSrInput('');
+        setEtisalatSrInputsByPlanIndex([]);
+      } else {
+        const value = etisalatSrInput.trim();
+        await updateDoc(leadRef, { etisalatSrNumber: value || null });
+        const updateLead = (l: Lead) =>
+          l.id === selectedLeadForEtisalatSr.id ? { ...l, etisalatSrNumber: value || undefined } as Lead : l;
+        setLeads(prev => prev.map(updateLead));
+        setFirebaseSearchResults(prev => prev.map(updateLead));
+        toast.success(value ? 'Etisalat SR number saved.' : 'Etisalat SR number cleared.');
+        if (showChangeGroupModal && selectedLeadForGroupChange?.id === selectedLeadForEtisalatSr.id) {
+          setSelectedLeadForGroupChange(prev => prev ? { ...prev, etisalatSrNumber: value || undefined } as Lead : null);
+        } else {
+          setShowEtisalatSrModal(false);
+          setSelectedLeadForEtisalatSr(null);
+          setEtisalatSrInput('');
+          setEtisalatSrInputsByPlanIndex([]);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to save Etisalat SR number(s).');
+    } finally {
+      setIsSavingEtisalatSr(false);
+    }
+  }, [selectedLeadForEtisalatSr, etisalatSrInput, etisalatSrInputsByPlanIndex, isSavingEtisalatSr, showChangeGroupModal, selectedLeadForGroupChange]);
+
+  const handleSaveEtisalatSrFromGroupModal = useCallback(async () => {
+    if (!selectedLeadForGroupChange || isSavingEtisalatSr) return;
+    const plans = selectedLeadForGroupChange.plans ?? [];
+    const isMultiPlan = plans.length > 1;
+    setIsSavingEtisalatSr(true);
+    try {
+      const leadRef = doc(db, 'leads', selectedLeadForGroupChange.id);
+      if (isMultiPlan) {
+        const updatedPlans = plans.map((p, i) => ({
+          ...p,
+          etisalatSrNumber: (etisalatSrInputsByPlanIndex[i] ?? '').trim() || undefined
+        }));
+        await updateDoc(leadRef, { plans: updatedPlans, updatedAt: new Date() });
+        const updatedLead: Lead = {
+          ...selectedLeadForGroupChange,
+          plans: updatedPlans
+        } as Lead;
+        setLeads(prev => prev.map(l => l.id === selectedLeadForGroupChange.id ? updatedLead : l));
+        setFirebaseSearchResults(prev => prev.map(l => l.id === selectedLeadForGroupChange.id ? updatedLead : l));
+        toast.success('Etisalat SR numbers saved.');
+        setShowChangeGroupModal(false);
+        setSelectedLeadForGroupChange(null);
+        setNewGroup('');
+        setSelectedLeadForEtisalatSr(null);
+        setEtisalatSrInput('');
+        setEtisalatSrInputsByPlanIndex([]);
+      } else {
+        const value = etisalatSrInput.trim();
+        const firstPlan = plans[0] ? { ...plans[0], etisalatSrNumber: value || undefined } : plans[0];
+        const updatedPlans = plans.length ? [firstPlan, ...plans.slice(1)] : [];
+        await updateDoc(leadRef, {
+          etisalatSrNumber: value || null,
+          ...(updatedPlans.length ? { plans: updatedPlans, updatedAt: new Date() } : {})
+        });
+        const updatedLead: Lead = {
+          ...selectedLeadForGroupChange,
+          etisalatSrNumber: value || undefined,
+          plans: updatedPlans.length ? updatedPlans : selectedLeadForGroupChange.plans
+        } as Lead;
+        setLeads(prev => prev.map(l => l.id === selectedLeadForGroupChange.id ? updatedLead : l));
+        setFirebaseSearchResults(prev => prev.map(l => l.id === selectedLeadForGroupChange.id ? updatedLead : l));
+        toast.success(value ? 'Etisalat SR number saved.' : 'Etisalat SR number cleared.');
+        setShowChangeGroupModal(false);
+        setSelectedLeadForGroupChange(null);
+        setNewGroup('');
+        setSelectedLeadForEtisalatSr(null);
+        setEtisalatSrInput('');
+        setEtisalatSrInputsByPlanIndex([]);
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to save Etisalat SR number(s).');
+    } finally {
+      setIsSavingEtisalatSr(false);
+    }
+  }, [selectedLeadForGroupChange, etisalatSrInput, etisalatSrInputsByPlanIndex, isSavingEtisalatSr]);
 
   // Load more function for infinite scroll (optional)
   const loadMoreLeads = useCallback(() => {
@@ -2982,7 +3332,7 @@ export function LeadList() {
                 {(lead as any).verificationMethod === 'whatsapp' && (
                   <div className="absolute left-0 top-0 bottom-0 w-1 bg-emerald-500 z-10"></div>
                 )}
-                <div className="px-6 py-4">
+                <div className="px-6 py-4 relative z-10">
                   {/* Desktop Layout */}
                   <div className="hidden sm:grid grid-cols-12 gap-3 items-center">
                     {/* Customer Information */}
@@ -3096,39 +3446,67 @@ export function LeadList() {
                     </div>
 
                     {/* Status */}
-                    <div className="col-span-1 pr-8">
+                    <div className="col-span-1 pr-8 relative z-10">
                       <div className="flex flex-col space-y-1 items-start">
                       <motion.span
                         whileHover={{ scale: 1.05 }}
                         className={clsx(
                           "inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium shadow-sm ring-1 ring-opacity-5",
-                          getStatusBadgeClass(lead.status),
+                          getStatusBadgeClass(lead.status, lead),
                           "ring-current"
                         )}
                       >
                         {getStatusIcon(lead.status)}
                         {getStatusDisplayText(lead.status)}
                       </motion.span>
-                      {/* Strikes Count - clickable only for admin */}
-                      {leadStrikes[lead.id] > 0 && (
-                        <motion.div
-                          initial={{ opacity: 0, scale: 0.9 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          whileHover={isAdmin() ? { scale: 1.05 } : {}}
-                          whileTap={isAdmin() ? { scale: 0.95 } : {}}
-                          onClick={isAdmin() ? () => {
-                            setSelectedLeadForStruckNumbers(lead);
-                            setShowStruckNumbersModal(true);
-                          } : undefined}
-                          className={clsx(
-                            "inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 mt-1",
-                            isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
-                          )}
-                        >
-                          <AlertCircle className="h-3 w-3 mr-1" />
-                          {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
-                        </motion.div>
-                      )}
+                        {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || leadStrikes[lead.id] > 0) && (
+                          <div className="flex items-center gap-1.5 mt-1 flex-nowrap shrink-0">
+                            {((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) && (
+                              <button
+                                type="button"
+                                role="button"
+                                tabIndex={0}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setSelectedLeadForEtisalatSr(lead);
+                                  const plans = lead.plans ?? [];
+                                  setEtisalatSrInput(plans.length === 1
+                                    ? ((plans[0] as any).etisalatSrNumber ?? (lead as any).etisalatSrNumber ?? '')
+                                    : (lead as any).etisalatSrNumber ?? '');
+                                  setEtisalatSrInputsByPlanIndex(plans.map(p => (p as any).etisalatSrNumber ?? ''));
+                                  setShowEtisalatSrModal(true);
+                                }}
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                className="relative z-20 inline-flex items-center justify-center p-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-indigo-600 transition-colors cursor-pointer touch-manipulation flex-shrink-0"
+                                title="Add or edit Etisalat SR number"
+                                aria-label="Add or edit Etisalat SR number"
+                              >
+                                <Settings className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                            {leadStrikes[lead.id] > 0 && (
+                              <motion.div
+                                initial={{ opacity: 0, scale: 0.9 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                whileHover={isAdmin() ? { scale: 1.05 } : {}}
+                                whileTap={isAdmin() ? { scale: 0.95 } : {}}
+                                onClick={isAdmin() ? () => {
+                                  setSelectedLeadForStruckNumbers(lead);
+                                  setShowStruckNumbersModal(true);
+                                } : undefined}
+                                className={clsx(
+                                  "inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 whitespace-nowrap flex-shrink-0",
+                                  isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
+                                )}
+                              >
+                                <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
+                                {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
+                              </motion.div>
+                            )}
+                          </div>
+                        )}
                         {lead.status === 'assigned' && (() => {
                           const duration = getAssignmentDuration(lead);
                           if (duration) {
@@ -3213,6 +3591,12 @@ export function LeadList() {
                             onClick={() => {
                               setSelectedLeadForGroupChange(lead);
                               setNewGroup(lead.plans[0]?.group || '');
+                              setSelectedLeadForEtisalatSr(lead);
+                              const plans = lead.plans ?? [];
+                              setEtisalatSrInput(plans.length === 1
+                                ? ((plans[0] as any).etisalatSrNumber ?? (lead as any).etisalatSrNumber ?? '')
+                                : (lead as any).etisalatSrNumber ?? '');
+                              setEtisalatSrInputsByPlanIndex(plans.map(p => (p as any).etisalatSrNumber ?? ''));
                               setShowChangeGroupModal(true);
                             }}
                             title="Change Plan Group"
@@ -3293,16 +3677,64 @@ export function LeadList() {
                           </div>
                           {/* Status Badge */}
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                            <div className="inline-flex flex-col items-end gap-0.5 relative z-10">
                             <motion.span
                               className={clsx(
                             "inline-flex items-center px-2 py-1 rounded-md text-[10px] font-semibold shadow-sm ring-1 ring-opacity-5",
-                                getStatusBadgeClass(lead.status),
+                                getStatusBadgeClass(lead.status, lead),
                                 "ring-current"
                               )}
                             >
                               {getStatusIcon(lead.status)}
                           <span className="ml-0.5">{getStatusDisplayText(lead.status)}</span>
                             </motion.span>
+                              {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || leadStrikes[lead.id] > 0) && (
+                                <div className="flex items-center gap-1 mt-0.5 flex-nowrap shrink-0">
+                                  {((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) && (
+                                    <button
+                                      type="button"
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        setSelectedLeadForEtisalatSr(lead);
+                                        const plans = lead.plans ?? [];
+                                        setEtisalatSrInput(plans.length === 1
+                                          ? ((plans[0] as any).etisalatSrNumber ?? (lead as any).etisalatSrNumber ?? '')
+                                          : (lead as any).etisalatSrNumber ?? '');
+                                        setEtisalatSrInputsByPlanIndex(plans.map(p => (p as any).etisalatSrNumber ?? ''));
+                                        setShowEtisalatSrModal(true);
+                                      }}
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                      onPointerDown={(e) => e.stopPropagation()}
+                                      className="relative z-20 inline-flex items-center justify-center p-1 rounded text-gray-500 hover:bg-gray-100 hover:text-indigo-600 cursor-pointer touch-manipulation flex-shrink-0"
+                                      title="Add or edit Etisalat SR number"
+                                      aria-label="Add or edit Etisalat SR number"
+                                    >
+                                      <Settings className="h-3 w-3" />
+                                    </button>
+                                  )}
+                                  {leadStrikes[lead.id] > 0 && (
+                                    <motion.div
+                                      initial={{ opacity: 0, scale: 0.9 }}
+                                      animate={{ opacity: 1, scale: 1 }}
+                                      onClick={isAdmin() ? () => {
+                                        setSelectedLeadForStruckNumbers(lead);
+                                        setShowStruckNumbersModal(true);
+                                      } : undefined}
+                                      className={clsx(
+                                        "inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-100 text-red-700 border border-red-200 whitespace-nowrap flex-shrink-0",
+                                        isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
+                                      )}
+                                    >
+                                      <AlertCircle className="h-2 w-2 mr-0.5 flex-shrink-0" />
+                                      {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
+                                    </motion.div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                             {/* Pending Verification at Location Indicator */}
                             {((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && lead.status !== 'rejected' && (
                               <motion.span
@@ -3314,24 +3746,6 @@ export function LeadList() {
                                 Pending Verification at Location
                               </motion.span>
                             )}
-                              {/* Strikes Count - clickable only for admin */}
-                              {leadStrikes[lead.id] > 0 && (
-                                <motion.div
-                                  initial={{ opacity: 0, scale: 0.9 }}
-                                  animate={{ opacity: 1, scale: 1 }}
-                                  onClick={isAdmin() ? () => {
-                                    setSelectedLeadForStruckNumbers(lead);
-                                    setShowStruckNumbersModal(true);
-                                  } : undefined}
-                                  className={clsx(
-                                    "inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-100 text-red-700 border border-red-200",
-                                    isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
-                                  )}
-                                >
-                            <AlertCircle className="h-2 w-2 mr-0.5" />
-                                  {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
-                                </motion.div>
-                              )}
                               {/* Countdown Timer / At Risk Indicator */}
                               {(lead.status === 'verified' || lead.status === 'follow_up') && (() => {
                                 const elapsed = statusTimers[lead.id] ?? getStatusTimeElapsed(lead);
@@ -3529,6 +3943,12 @@ export function LeadList() {
                               onClick={() => {
                                 setSelectedLeadForGroupChange(lead);
                                 setNewGroup(lead.plans[0]?.group || '');
+                                setSelectedLeadForEtisalatSr(lead);
+                                const plans = lead.plans ?? [];
+                                setEtisalatSrInput(plans.length === 1
+                                  ? ((plans[0] as any).etisalatSrNumber ?? (lead as any).etisalatSrNumber ?? '')
+                                  : (lead as any).etisalatSrNumber ?? '');
+                                setEtisalatSrInputsByPlanIndex(plans.map(p => (p as any).etisalatSrNumber ?? ''));
                                 setShowChangeGroupModal(true);
                               }}
                               title="Change Plan Group"
@@ -3571,8 +3991,8 @@ export function LeadList() {
                   </div>
                 </div>
 
-                {/* Hover Effect Overlay */}
-                <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/0 to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all duration-200 pointer-events-none" />
+                {/* Hover Effect Overlay - z-0 so content (z-10) stays clickable */}
+                <div className="absolute inset-0 z-0 bg-gradient-to-r from-indigo-500/0 to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all duration-200 pointer-events-none" />
               </motion.div>
             ))}
           </AnimatePresence>
@@ -3724,6 +4144,7 @@ export function LeadList() {
         leads={leads}
         onFiltersChange={handleAdvancedFiltersChange}
         onExportResults={handleExportResults}
+        onExportEtisalatSheets={handleExportEtisalatSheets}
         isVisible={showAdvancedSearch}
         onClose={() => setShowAdvancedSearch(false)}
       />
@@ -3757,6 +4178,9 @@ export function LeadList() {
                 setShowChangeGroupModal(false);
                 setSelectedLeadForGroupChange(null);
                 setNewGroup('');
+                setSelectedLeadForEtisalatSr(null);
+                setEtisalatSrInput('');
+                setEtisalatSrInputsByPlanIndex([]);
               }
             }}
           >
@@ -3780,6 +4204,9 @@ export function LeadList() {
                       setShowChangeGroupModal(false);
                       setSelectedLeadForGroupChange(null);
                       setNewGroup('');
+                      setSelectedLeadForEtisalatSr(null);
+                      setEtisalatSrInput('');
+                      setEtisalatSrInputsByPlanIndex([]);
                     }
                   }}
                   disabled={isUpdatingGroup}
@@ -3819,13 +4246,16 @@ export function LeadList() {
                 )}
               </div>
 
-              <div className="flex gap-3 justify-end">
+              <div className="flex gap-3 justify-end mb-6">
                 <button
                   onClick={() => {
                     if (!isUpdatingGroup) {
                       setShowChangeGroupModal(false);
                       setSelectedLeadForGroupChange(null);
                       setNewGroup('');
+                      setSelectedLeadForEtisalatSr(null);
+                      setEtisalatSrInput('');
+                      setEtisalatSrInputsByPlanIndex([]);
                     }
                   }}
                   disabled={isUpdatingGroup}
@@ -3851,6 +4281,106 @@ export function LeadList() {
                   )}
                 </button>
               </div>
+
+              {isAdmin() && (
+                <div className="pt-4 border-t border-gray-200">
+                  {(selectedLeadForGroupChange.plans?.length ?? 0) > 1 ? (
+                    <>
+                      <p className="text-sm font-medium text-gray-700 mb-3">Etisalat SR Number (per number)</p>
+                      <div className="space-y-4">
+                        {(selectedLeadForGroupChange.plans ?? []).map((plan, planIndex) => {
+                          const planEtisalatId = (plan as any).etisalatLeadId ?? selectedLeadForGroupChange.etisalatLeadId ?? '—';
+                          const inputValue = etisalatSrInputsByPlanIndex[planIndex] ?? '';
+                          return (
+                            <div key={plan.numberId || planIndex} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                              <p className="text-xs text-gray-600 mb-1 flex justify-between items-center gap-2">
+                                <span><span className="text-gray-500">SR Number:</span>{' '}<span className="font-medium text-gray-900">{(plan as any).srNumber ?? (selectedLeadForGroupChange as any).srNumbers?.[planIndex] ?? (planIndex === 0 ? (selectedLeadForGroupChange as any).srNumber : null) ?? '—'}</span></span>
+                                <span><span className="text-gray-500">Number:</span>{' '}<span className="font-medium text-gray-900">{plan.number}</span></span>
+                              </p>
+                              {planEtisalatId !== '—' && (
+                                <p className="text-xs text-gray-600 mb-2 text-center">
+                                  <span className="text-gray-500">Etisalat ID:</span>{' '}
+                                  <span className="font-medium text-gray-900">{planEtisalatId}</span>
+                                </p>
+                              )}
+                              {planEtisalatId === '—' && <div className="mb-2" />}
+                              <input
+                                type="text"
+                                value={inputValue}
+                                onChange={(e) => {
+                                  setEtisalatSrInputsByPlanIndex(prev => {
+                                    const n = [...prev];
+                                    n[planIndex] = e.target.value;
+                                    return n;
+                                  });
+                                }}
+                                disabled={isSavingEtisalatSr}
+                                placeholder="Enter Etisalat SR Number"
+                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-3 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleSaveEtisalatSrFromGroupModal}
+                          disabled={isSavingEtisalatSr}
+                          className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {isSavingEtisalatSr ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            'Save Etisalat SR'
+                          )}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-sm text-gray-600 mb-3">
+                        <span className="text-gray-500">SR Number:</span>{' '}
+                        <span className="font-medium text-gray-900">{(selectedLeadForGroupChange as any).srNumber?.toString() || '—'}</span>
+                        <span className="text-gray-400 mx-2">|</span>
+                        <span className="text-gray-500">Etisalat ID:</span>{' '}
+                        <span className="font-medium text-gray-900">
+                          {selectedLeadForGroupChange.etisalatLeadId || (selectedLeadForGroupChange.plans?.[0] as any)?.etisalatLeadId || '—'}
+                        </span>
+                      </p>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Etisalat SR Number</label>
+                      <input
+                        type="text"
+                        value={etisalatSrInput}
+                        onChange={(e) => setEtisalatSrInput(e.target.value)}
+                        disabled={isSavingEtisalatSr}
+                        placeholder="Enter Etisalat SR Number"
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50"
+                      />
+                      <div className="mt-3 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleSaveEtisalatSrFromGroupModal}
+                          disabled={isSavingEtisalatSr}
+                          className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {isSavingEtisalatSr ? (
+                            <>
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            'Save Etisalat SR'
+                          )}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
@@ -3989,6 +4519,183 @@ export function LeadList() {
           }}
         />
       )}
+
+      {/* Etisalat SR Number Modal (Admin / Coordinator for activated leads) */}
+      <AnimatePresence>
+        {showEtisalatSrModal && selectedLeadForEtisalatSr && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+            onClick={() => {
+              if (!isSavingEtisalatSr) {
+                setShowEtisalatSrModal(false);
+                setSelectedLeadForEtisalatSr(null);
+                setEtisalatSrInput('');
+                setEtisalatSrInputsByPlanIndex([]);
+              }
+            }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-indigo-100 rounded-lg">
+                    <Pencil className="h-5 w-5 text-indigo-600" />
+                  </div>
+                  <h2 className="text-xl font-semibold text-gray-900">{selectedLeadForEtisalatSr.customerName || 'Etisalat SR Number'}</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isSavingEtisalatSr) {
+                      setShowEtisalatSrModal(false);
+                      setSelectedLeadForEtisalatSr(null);
+                      setEtisalatSrInput('');
+                      setEtisalatSrInputsByPlanIndex([]);
+                    }
+                  }}
+                  disabled={isSavingEtisalatSr}
+                  className="text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-50"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              {(selectedLeadForEtisalatSr.plans?.length ?? 0) > 1 ? (
+                <>
+                  <p className="text-sm font-medium text-gray-700 mb-3">Etisalat SR Number (per number)</p>
+                  <div className="space-y-4">
+                    {(selectedLeadForEtisalatSr.plans ?? []).map((plan, planIndex) => {
+                      const planEtisalatId = (plan as any).etisalatLeadId ?? selectedLeadForEtisalatSr.etisalatLeadId ?? '—';
+                      const inputValue = etisalatSrInputsByPlanIndex[planIndex] ?? '';
+                      return (
+                        <div key={plan.numberId || planIndex} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                          <p className="text-xs text-gray-600 mb-1 flex justify-between items-center gap-2">
+                            <span><span className="text-gray-500">SR Number:</span>{' '}<span className="font-medium text-gray-900">{(plan as any).srNumber ?? (selectedLeadForEtisalatSr as any).srNumbers?.[planIndex] ?? (planIndex === 0 ? (selectedLeadForEtisalatSr as any).srNumber : null) ?? '—'}</span></span>
+                            <span><span className="text-gray-500">Number:</span>{' '}<span className="font-medium text-gray-900">{plan.number}</span></span>
+                          </p>
+                          {planEtisalatId !== '—' && (
+                            <p className="text-xs text-gray-600 mb-2 text-center">
+                              <span className="text-gray-500">Etisalat ID:</span>{' '}
+                              <span className="font-medium text-gray-900">{planEtisalatId}</span>
+                            </p>
+                          )}
+                          {planEtisalatId === '—' && <div className="mb-2" />}
+                          <input
+                            type="text"
+                            value={inputValue}
+                            onChange={(e) => {
+                              setEtisalatSrInputsByPlanIndex(prev => {
+                                const n = [...prev];
+                                n[planIndex] = e.target.value;
+                                return n;
+                              });
+                            }}
+                            disabled={isSavingEtisalatSr}
+                            placeholder="Enter Etisalat SR Number"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-6 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!isSavingEtisalatSr) {
+                          setShowEtisalatSrModal(false);
+                          setSelectedLeadForEtisalatSr(null);
+                          setEtisalatSrInput('');
+                          setEtisalatSrInputsByPlanIndex([]);
+                        }
+                      }}
+                      disabled={isSavingEtisalatSr}
+                      className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveEtisalatSr}
+                      disabled={isSavingEtisalatSr}
+                      className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {isSavingEtisalatSr ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        'Save'
+                      )}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-gray-600 mb-4">
+                    <span className="text-gray-500">SR Number:</span>{' '}
+                    <span className="font-medium text-gray-900">{(selectedLeadForEtisalatSr as any).srNumber?.toString() || '—'}</span>
+                    <span className="text-gray-400 mx-2">|</span>
+                    <span className="text-gray-500">Etisalat ID:</span>{' '}
+                    <span className="font-medium text-gray-900">
+                      {selectedLeadForEtisalatSr.etisalatLeadId || (selectedLeadForEtisalatSr.plans?.[0] as any)?.etisalatLeadId || '—'}
+                    </span>
+                  </p>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Etisalat SR Number</label>
+                  <input
+                    type="text"
+                    value={etisalatSrInput}
+                    onChange={(e) => setEtisalatSrInput(e.target.value)}
+                    disabled={isSavingEtisalatSr}
+                    placeholder="Enter Etisalat SR Number"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50"
+                  />
+                  <div className="mt-6 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!isSavingEtisalatSr) {
+                          setShowEtisalatSrModal(false);
+                          setSelectedLeadForEtisalatSr(null);
+                          setEtisalatSrInput('');
+                          setEtisalatSrInputsByPlanIndex([]);
+                        }
+                      }}
+                      disabled={isSavingEtisalatSr}
+                      className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveEtisalatSr}
+                      disabled={isSavingEtisalatSr}
+                      className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {isSavingEtisalatSr ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        'Save'
+                      )}
+                    </button>
+                  </div>
+                </>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

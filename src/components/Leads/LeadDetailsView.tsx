@@ -44,14 +44,14 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { WhatsAppConversationView, WhatsAppMessage } from '../WhatsApp/WhatsAppConversationView';
 import { normalizeTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, onSnapshot, orderBy, deleteDoc, writeBatch, setDoc } from 'firebase/firestore';
+import { doc, updateDoc, addDoc, collection, getDoc, getDocs, query, where, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
@@ -60,21 +60,19 @@ import { logLeadAction } from '../../utils/leadLogging';
 import { getPlans } from '../../utils/planService';
 import { incrementVerifierCounters } from '../../utils/verifierCounters';
 import { 
-  UserIcon, Phone, MapPin, Calendar, Globe2, 
+  Phone, MapPin, Calendar, Globe2, 
   Languages, Users, Clock, Package, Hash,
-  FileText, CheckCircle, Building2, FileCheck,
-  ChevronLeft, ChevronDown, AtSign, User2, CreditCard, Mail,
-  MapPinned, FileSpreadsheet, Briefcase,
-  Clock as ClockIcon, CheckCircle2, AlertCircle, AlertTriangle, ThumbsDown,
+  FileText, CheckCircle, FileCheck,
+  ChevronDown, User2, Mail,
+  MapPinned, Briefcase,
+  AlertCircle, AlertTriangle,
   MessageSquare, CheckCircle as CheckCircleIcon, XCircle, X,
-  MessageCircle, Check, CheckCheck, Paperclip, RefreshCw, Trash2
+  MessageCircle, Check, Paperclip, RefreshCw, Trash2
 } from 'lucide-react';
 import { countryList } from '../../utils/countries';
-import type { Lead, UserRole } from '../../types';
+import type { Lead } from '../../types';
 import { FormSection } from './FormSection';
 import { FormInput } from './FormInput';
-import { FormSelect } from './FormSelect';
-import { NumberSelect } from './NumberSelect';
 import { QuickNumberSelect } from './QuickNumberSelect';
 import clsx from 'clsx';
 import { MediaUpload } from './MediaUpload';
@@ -93,21 +91,6 @@ const emirates = [
   'Ras Al Khaimah',
   'Fujairah'
 ];
-
-const areas = {
-  'Abu Dhabi': ['Abu Dhabi City', 'Al Ain', 'Al Dhafra', 'Musaffah', 'Khalifa City'],
-  'Dubai': ['Deira', 'Bur Dubai', 'Dubai Marina', 'JLT', 'Downtown Dubai'],
-  'Sharjah': ['Al Majaz', 'Al Nahda', 'Al Qasimia', 'Al Taawun'],
-  'Ajman': ['Ajman City', 'Al Jurf', 'Al Rashidiya'],
-  'Umm Al Quwain': ['UAQ City', 'Al Salamah', 'Al Raas'],
-  'Ras Al Khaimah': ['RAK City', 'Al Hamra', 'Al Nakheel'],
-  'Fujairah': ['Fujairah City', 'Dibba', 'Al Faseel']
-};
-
-const languages = ['Arabic', 'English', 'Hindi', 'Urdu', 'Malayalam', 'Filipino', 'Bengali'];
-const productTypes = ['New', 'Port In'];
-const numberTypes = ['Gold', 'Gold Plus', 'Platinum', 'Silver', 'Silver Plus', 'Standard'];
-const plans = ['Basic', 'Standard', 'Premium', 'VIP'];
 
 const VERIFY_CHECKLIST = [
   {
@@ -221,6 +204,23 @@ const READY_MADE_MESSAGES = [
 
 type LeadMediaItem = Lead['verificationMedia'] extends Array<infer T> ? T : never;
 
+// Pure helpers outside component so they are never recreated on re-render
+function getCountryNameHelper(code?: string | null): string {
+  if (!code) return '';
+  const upper = code.toUpperCase();
+  const match = countryList.find(c => c.code === upper || c.name.toUpperCase() === upper);
+  return match ? match.name : code;
+}
+
+function getServiceProviderHelper(group: string): string {
+  switch (group?.toUpperCase()) {
+    case 'G1': return 'Connect';
+    case 'G2': return 'Express Dial';
+    case 'G3': return 'Telecon';
+    default: return group || 'Unknown Group';
+  }
+}
+
 export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { lead: Lead; onEdit: () => void; onResubmit?: () => void; isResubmitting?: boolean }) {
   const { user, isAdmin, isVerifier, isCoordinator, isManager } = useAuthStore();
   const navigate = useNavigate();
@@ -298,7 +298,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [editableNumberIds, setEditableNumberIds] = useState<string[]>([]);
   const [editablePlans, setEditablePlans] = useState<string[]>([]);
   const [originalNumbers, setOriginalNumbers] = useState<string[]>([]);
-  const [originalPlans, setOriginalPlans] = useState<string[]>([]);
   const [showNumberSelectors, setShowNumberSelectors] = useState<boolean[]>([]);
   const [removedPlanIndices, setRemovedPlanIndices] = useState<Set<number>>(new Set());
   
@@ -369,7 +368,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         const numberIdsArray: string[] = [];
         const plansArray: string[] = [];
         const originalNumbersArray: string[] = [];
-        const originalPlansArray: string[] = [];
         const showSelectorsArray: boolean[] = [];
         
         // Get today's date in YYYY-MM-DD format for date input
@@ -389,7 +387,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
           numberIdsArray.push(plan.numberId || '');
           plansArray.push(plan.plan || '');
           originalNumbersArray.push(plan.number || '');
-          originalPlansArray.push(plan.plan || '');
           showSelectorsArray.push(false);
           
           if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
@@ -421,7 +418,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         setEditableNumberIds(numberIdsArray);
         setEditablePlans(plansArray);
         setOriginalNumbers(originalNumbersArray);
-        setOriginalPlans(originalPlansArray);
         setShowNumberSelectors(showSelectorsArray);
         setRemovedPlanIndices(new Set());
         
@@ -455,7 +451,6 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         setEditableNumberIds([]);
         setEditablePlans([]);
         setOriginalNumbers([]);
-        setOriginalPlans([]);
         setShowNumberSelectors([]);
         setRemovedPlanIndices(new Set());
       }
@@ -681,7 +676,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     }
   };
 
-  const fetchWhatsAppMessagesFromAPI = async () => {
+  const fetchWhatsAppMessagesFromAPI = useCallback(async () => {
     if (!lead?.customerNumber) {
       console.warn('No customer number found for lead');
       return;
@@ -815,7 +810,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     } catch (error: any) {
       console.error('Error fetching WhatsApp messages from API:', error);
     }
-  };
+  }, [lead?.customerNumber, lead?.id]);
 
   // Auto-poll WhatsApp messages from API (only when chat is open)
   useEffect(() => {
@@ -842,7 +837,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         whatsappLogsUnsubRef.current = null;
       }
     };
-  }, [lead?.id, lead?.customerNumber, showWhatsAppChat]);
+  }, [lead?.id, lead?.customerNumber, showWhatsAppChat, fetchWhatsAppMessagesFromAPI]);
   
   // Determine if we need to show the postpaid campaign checklist
   const showPostpaidCampaignChecklist = hasPostpaidCampaignPlan(lead);
@@ -875,29 +870,25 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const [planPasscodes, setPlanPasscodes] = useState<Record<string, string>>({});
 
-  const isUserCoordinator = isCoordinator() || isAdmin();
+  const isUserCoordinator = useMemo(() => isCoordinator() || isAdmin(), [isCoordinator, isAdmin]);
 
-  const getCountryName = (code?: string | null) => {
-    if (!code) return '';
-    const upper = code.toUpperCase();
-    const match = countryList.find(c => c.code === upper || c.name.toUpperCase() === upper);
-    return match ? match.name : code;
-  };
+  const getCountryName = getCountryNameHelper;
 
-  // Load plan details from Firebase when lead changes
+  // Load plan details from Firebase only when the plan name changes
+  const firstPlanName = lead?.plans?.[0]?.plan ?? null;
   useEffect(() => {
+    if (!firstPlanName) {
+      setPlanDetails(null);
+      return;
+    }
+    let cancelled = false;
     async function loadPlanDetails() {
-      if (!lead?.plans?.[0]?.plan) {
-        setPlanDetails(null);
-        return;
-      }
       try {
-        const planName = lead.plans[0].plan;
-        const plansQuery = query(collection(db, 'plans'), where('name', '==', planName));
+        const plansQuery = query(collection(db, 'plans'), where('name', '==', firstPlanName));
         const plansSnapshot = await getDocs(plansQuery);
+        if (cancelled) return;
         if (!plansSnapshot.empty) {
-          const planDoc = plansSnapshot.docs[0];
-          const planData = planDoc.data();
+          const planData = plansSnapshot.docs[0].data();
           setPlanDetails({
             amount: planData.amount || 'N/A',
             benefits: planData.benefits || 'N/A',
@@ -907,50 +898,51 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
           setPlanDetails(null);
         }
       } catch (error) {
-        console.error('Error loading plan details:', error);
-        setPlanDetails(null);
+        if (!cancelled) {
+          console.error('Error loading plan details:', error);
+          setPlanDetails(null);
+        }
       }
     }
     loadPlanDetails();
-  }, [lead]);
+    return () => { cancelled = true; };
+  }, [firstPlanName]);
 
-  // Load number passcodes for coordinator view
+  // Load number passcodes for coordinator view – parallel Firestore reads
   useEffect(() => {
-    const loadPasscodes = async () => {
-      if (!isUserCoordinator) {
-        setPlanPasscodes({});
-        return;
-      }
-
-      try {
-        const result: Record<string, string> = {};
-        const realPlans = (lead.plans || []).filter(
-          (p: any) => p?.numberId && typeof p.numberId === 'string' && !p.numberId.startsWith('virtual-')
-        );
-
-        for (const p of realPlans) {
-          try {
-            const numberRef = doc(db, 'numberPool', p.numberId);
-            const numberDoc = await getDoc(numberRef);
-            if (numberDoc.exists()) {
-              const numberData = numberDoc.data();
-              result[p.numberId] = numberData.passcode || 'N/A';
-            }
-          } catch (err) {
-            console.error('Error loading passcode for number', p.numberId, err);
-          }
+    if (!isUserCoordinator) {
+      setPlanPasscodes({});
+      return;
+    }
+    let cancelled = false;
+    const realPlans = (lead.plans || []).filter(
+      (p: any) => p?.numberId && typeof p.numberId === 'string' && !p.numberId.startsWith('virtual-')
+    );
+    if (realPlans.length === 0) {
+      setPlanPasscodes({});
+      return;
+    }
+    Promise.all(
+      realPlans.map(async (p: any) => {
+        try {
+          const numberDoc = await getDoc(doc(db, 'numberPool', p.numberId));
+          return { id: p.numberId, passcode: numberDoc.exists() ? (numberDoc.data().passcode || 'N/A') : 'N/A' };
+        } catch {
+          return { id: p.numberId, passcode: 'N/A' };
         }
-
-        setPlanPasscodes(result);
-      } catch (error) {
-        console.error('Error loading plan passcodes:', error);
-      }
-    };
-
-    loadPasscodes();
+      })
+    ).then(entries => {
+      if (cancelled) return;
+      const result: Record<string, string> = {};
+      entries.forEach(e => { result[e.id] = e.passcode; });
+      setPlanPasscodes(result);
+    }).catch(error => {
+      if (!cancelled) console.error('Error loading plan passcodes:', error);
+    });
+    return () => { cancelled = true; };
   }, [lead.plans, isUserCoordinator, lead.id]);
 
-  const canEdit = (
+  const canEdit = useMemo(() => (
     // Verifiers can edit pending verification, activated_non_verified, and reverification leads
     (isVerifier() && (
       lead.status === 'pending_verification' ||
@@ -968,42 +960,31 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
       (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
     isAdmin() ||
     isCoordinator()
-  );
-  const canVerify = (isVerifier() || isAdmin()) && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified' || lead.status === 'reverification');
-  const isUserManager = isManager();
+  ), [isVerifier, isManager, isAdmin, isCoordinator, user, lead.status, lead.agentId, lead.teamId]);
+  const canVerify = useMemo(() => (isVerifier() || isAdmin()) && (lead.status === 'pending_verification' || lead.status === 'non_verified' || lead.status === 'activated_non_verified' || lead.status === 'reverification'), [isVerifier, isAdmin, lead.status]);
+  const isUserManager = useMemo(() => isManager(), [isManager]);
   const isActivationDialog = coordinatorAction === 'activate' || coordinatorAction === 'activate_non_verified';
   // Manager can assign any of their verified, follow_up, or later leads to coordinator
   // (even if previously managerAssigned) – UI should always show the option
   // Multi-team managers can assign leads from any of their managed teams
-  const canManagerAssign = (isUserManager &&
+  const canManagerAssign = useMemo(() => (isUserManager &&
     ((user?.id === lead.managerId) ||
      (user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
     (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later')) ||
-    (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later'));
+    (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later')), [isUserManager, isAdmin, user, lead.managerId, lead.teamId, lead.status]);
   // Agent can also request assignment to coordinator for their own verified/follow_up/later leads
-  const canAgentAssignToCoordinator =
+  const canAgentAssignToCoordinator = useMemo(() =>
     user?.role === 'agent' &&
     user.id === lead.agentId &&
     ((lead.status === 'verified' && !lead.managerAssigned) ||
      (lead.status === 'follow_up' && !lead.managerAssigned) ||
-     (lead.status === 'later' && !lead.managerAssigned));
+     (lead.status === 'later' && !lead.managerAssigned))
+  , [user, lead.agentId, lead.status, lead.managerAssigned]);
 
-  // Helper function to get service provider based on group
-  const getServiceProvider = (group: string) => {
-    switch (group?.toUpperCase()) {
-      case 'G1':
-        return 'Connect';
-      case 'G2':
-        return 'Express Dial';
-      case 'G3':
-        return 'Telecon';
-      default:
-        return group || 'Unknown Group';
-    }
-  };
+  const getServiceProvider = getServiceProviderHelper;
 
   // Helper function to generate formatted assignment message
-  const generateAssignmentMessage = async (lead: Lead, etisalatId: string | string[], emirate: string) => {
+  const generateAssignmentMessage = useCallback(async (lead: Lead, etisalatId: string | string[], emirate: string) => {
     // Get passcodes for all numbers from number pool
     const plansWithPasscodes = await Promise.all(
       (lead.plans || []).map(async (plan) => {
@@ -1108,7 +1089,7 @@ Language: ${lead.language || 'N/A'}`;
 
       return message;
     }
-  };
+  }, []);
 
   useEffect(() => {
     // Auto scroll to chat box only on page refresh (initial mount)
@@ -1194,44 +1175,35 @@ Language: ${lead.language || 'N/A'}`;
     fetchPlans();
   }, []);
 
-  // Helper function to get plan description
-  const getPlanDescription = (planName: string) => {
+  const getPlanDescription = useCallback((planName: string) => {
     const plan = plans.find(p => p.name === planName);
     return plan?.description || 'No description available';
-  };
+  }, [plans]);
 
   // Validate that all numbers in lead plans exist in numberPool
-  const validateNumbersExist = async (): Promise<{ valid: boolean; missingNumbers: string[] }> => {
-    const plans = lead.plans || [];
-    const realPlans = plans.filter((p: any) => p.numberId && !p.numberId.startsWith('virtual-'));
+  const validateNumbersExist = useCallback(async (): Promise<{ valid: boolean; missingNumbers: string[] }> => {
+    const leadPlans = lead.plans || [];
+    const realPlans = leadPlans.filter((p: any) => p.numberId && !p.numberId.startsWith('virtual-'));
     
     if (realPlans.length === 0) {
       return { valid: true, missingNumbers: [] };
     }
 
-    const missingNumbers: string[] = [];
-    
-    // Check each numberId exists in numberPool
-    const checkPromises = realPlans.map(async (plan: any) => {
-      try {
-        const numberRef = doc(db, 'numberPool', plan.numberId);
-        const numberDoc = await getDoc(numberRef);
-        if (!numberDoc.exists()) {
-          missingNumbers.push(plan.number || plan.numberId);
+    const results = await Promise.all(
+      realPlans.map(async (plan: any) => {
+        try {
+          const numberDoc = await getDoc(doc(db, 'numberPool', plan.numberId));
+          return numberDoc.exists() ? null : (plan.number || plan.numberId);
+        } catch (error) {
+          console.error(`Error checking number ${plan.numberId}:`, error);
+          return plan.number || plan.numberId;
         }
-      } catch (error) {
-        console.error(`Error checking number ${plan.numberId}:`, error);
-        missingNumbers.push(plan.number || plan.numberId);
-      }
-    });
+      })
+    );
 
-    await Promise.all(checkPromises);
-
-    return {
-      valid: missingNumbers.length === 0,
-      missingNumbers
-    };
-  };
+    const missing = results.filter((r): r is string => r !== null);
+    return { valid: missing.length === 0, missingNumbers: missing };
+  }, [lead.plans]);
 
   const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified' | 'verify_at_location', noteOverride?: string) => {
     setIsVerifyActionProcessing(true);
@@ -1614,9 +1586,8 @@ Language: ${lead.language || 'N/A'}`;
             
             if (agentPhone) {
               try {
-                const { sendWhatsAppTemplateByGroup, getPartnerLabel } = await import('../../utils/whatsappRouter');
+                const { sendWhatsAppTemplateByGroup } = await import('../../utils/whatsappRouter');
                 const group = lead.plans?.[0]?.group || undefined;
-                const partnerLabel = getPartnerLabel(group);
                 await sendWhatsAppTemplateByGroup({
                   to: agentPhone,
                   group,
@@ -2300,7 +2271,7 @@ Language: ${lead.language || 'N/A'}`;
       const plansCount = lead.plans?.length || 0;
       if (plansCount > 1) {
         // Multiple numbers - validate all Etisalat IDs
-        const missingIds = etisalatLeadIds.filter((id, index) => !id.trim());
+        const missingIds = etisalatLeadIds.filter((id) => !id.trim());
         if (missingIds.length > 0) {
           toast.error(`Etisalat Lead ID is required for all ${plansCount} numbers`);
           return;
@@ -2502,10 +2473,6 @@ Language: ${lead.language || 'N/A'}`;
                 return null;
               }
               
-              // Check if number or plan changed
-              const numberChanged = editableNumbers[index] && editableNumbers[index] !== originalNumbers[index];
-              const planChanged = editablePlans[index] && editablePlans[index] !== originalPlans[index];
-              
               return {
             ...p,
                 // Update number and numberId if changed
@@ -2531,7 +2498,7 @@ Language: ${lead.language || 'N/A'}`;
           const filteredPasscodes: string[] = [];
           const filteredCategories: string[] = [];
           
-          currentPlans.forEach((p: any, index: number) => {
+          currentPlans.forEach((_p: any, index: number) => {
             if (!removedPlanIndices.has(index)) {
               filteredActivationDates.push(activationDates[index] ? new Date(activationDates[index]) : new Date());
               filteredSrNumbers.push(srNumbers[index]?.trim() || '');
@@ -2578,51 +2545,34 @@ Language: ${lead.language || 'N/A'}`;
             updateData.status = 'activated_non_verified';
           }
           
-          // Handle SR images for all numbers (including new ones)
-          const allSrImagePromises: Promise<{ dataUrl: string; name: string; index: number } | null>[] = [];
-          
-          // Existing numbers' SR images
-          srImageFiles.forEach(async (file, imgIndex) => {
+          // Handle SR images for all numbers (including new ones) – all reads run in parallel
+          const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve((reader.result as string) || '');
+            reader.onerror = reject;
+            reader.readAsDataURL(f);
+          });
+
+          const existingImagePromises = srImageFiles.map((file, imgIndex) => {
             if (file && !removedPlanIndices.has(imgIndex)) {
-              const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve((reader.result as string) || '');
-                reader.onerror = reject;
-                reader.readAsDataURL(f);
-              });
-              try {
-                const dataUrl = await toDataUrl(file);
-                allSrImagePromises.push(Promise.resolve({ dataUrl, name: file.name, index: imgIndex }));
-              } catch (_) {
-                allSrImagePromises.push(Promise.resolve(null));
-              }
-            } else {
-              allSrImagePromises.push(Promise.resolve(null));
+              return toDataUrl(file)
+                .then(dataUrl => ({ dataUrl, name: file.name, index: imgIndex }))
+                .catch(() => null);
             }
+            return Promise.resolve(null);
           });
-          
-          // New numbers' SR images
-          newNumbers.forEach(async (newNum, newIndex) => {
+
+          const newImagePromises = newNumbers.map((newNum, newIndex) => {
             if (newNum.srImageFile) {
-              const toDataUrl = (f: File) => new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve((reader.result as string) || '');
-                reader.onerror = reject;
-                reader.readAsDataURL(f);
-              });
-              try {
-                const dataUrl = await toDataUrl(newNum.srImageFile);
-                const actualIndex = (lead.plans?.length || 0) - removedPlanIndices.size + newIndex;
-                allSrImagePromises.push(Promise.resolve({ dataUrl, name: newNum.srImageFile.name, index: actualIndex }));
-              } catch (_) {
-                allSrImagePromises.push(Promise.resolve(null));
-              }
-            } else {
-              allSrImagePromises.push(Promise.resolve(null));
+              const actualIndex = (lead.plans?.length || 0) - removedPlanIndices.size + newIndex;
+              return toDataUrl(newNum.srImageFile)
+                .then(dataUrl => ({ dataUrl, name: (newNum.srImageFile as File).name, index: actualIndex }))
+                .catch(() => null);
             }
+            return Promise.resolve(null);
           });
-          
-          const srImageResults = await Promise.all(allSrImagePromises);
+
+          const srImageResults = await Promise.all([...existingImagePromises, ...newImagePromises]);
           const srImages = srImageResults.filter((r): r is { dataUrl: string; name: string; index: number } => r !== null);
           if (srImages.length > 0) {
             (updateData as any).srImages = srImages.map(img => ({
@@ -2740,7 +2690,7 @@ Language: ${lead.language || 'N/A'}`;
         const currentPlans = Array.isArray(lead.plans) ? lead.plans : [];
         const numberPoolUpdates: Promise<void>[] = [];
         
-        currentPlans.forEach(async (p: any, index: number) => {
+        currentPlans.forEach(async (_p: any, index: number) => {
           // Skip removed plans (they were already handled in handleRemoveNumber)
           if (removedPlanIndices.has(index)) {
             return;
@@ -3999,7 +3949,6 @@ Language: ${lead.language || 'N/A'}`;
                 {VERIFY_CHECKLIST.map((section, idx) => {
                   const hasLongContent = section.details.length > 2 || section.details.some(item => item.length > 50);
                   const isExpanded = expandedSections[idx];
-                  const isAcknowledgementOfTerms = section.header === 'Acknowledgement of Terms';
                   
                   return (
                     <div 
@@ -4561,7 +4510,6 @@ Language: ${lead.language || 'N/A'}`;
                       
                       {/* Display new numbers being added */}
                       {newNumbers.map((newNum, newIndex) => {
-                        const actualIndex = (lead.plans?.length || 0) + newIndex;
                         return (
                           <div key={`new-${newIndex}`} className="border border-green-200 rounded-xl p-4 bg-green-50">
                             <div className="mb-4 pb-3 border-b border-green-200 flex items-center justify-between">
@@ -6271,7 +6219,7 @@ Language: ${lead.language || 'N/A'}`;
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 20 }}
               transition={{ duration: 0.2 }}
-              className="bg-white rounded-2xl p-0 max-w-3xl w-full mx-4 shadow-2xl overflow-hidden max-h-[85vh] flex flex-col"
+              className="bg-white rounded-2xl p-0 max-w-3xl w-full mx-2 sm:mx-4 shadow-2xl overflow-hidden max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-2rem)] sm:max-h-[85vh] flex flex-col"
             >
               <div className="px-4 sm:px-6 py-3 bg-gradient-to-r from-emerald-50 to-green-50 border-b border-emerald-100 flex items-center justify-between flex-shrink-0">
                 <div className="flex items-center gap-2.5">
@@ -6601,25 +6549,6 @@ Language: ${lead.language || 'N/A'}`;
       )}
     </div>
   );
-}
-
-function getStatusColor(status: string | undefined) {
-  switch (status) {
-    case 'verified':
-      return 'text-green-600 font-medium';
-    case 'rejected':
-      return 'text-red-600 font-medium';
-    case 'pending_verification':
-      return 'text-yellow-600 font-medium';
-    case 'Non Verified':
-      return 'text-orange-600 font-medium';
-    default:
-      return 'text-gray-900';
-  }
-}
-
-function getBooleanColor(value: string | undefined) {
-  return value === 'Yes' ? 'text-green-600 font-medium' : 'text-red-600 font-medium';
 }
 
 function getStatusDisplayText(status: string | undefined): string {

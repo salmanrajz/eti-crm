@@ -132,6 +132,7 @@ interface AdvancedLeadSearchProps {
   leads: Lead[];
   onFiltersChange: (filters: AdvancedSearchFilters) => void;
   onExportResults: (filteredLeads: Lead[]) => void;
+  onExportEtisalatSheets?: (filteredLeads: Lead[]) => void;
   isVisible: boolean;
   onClose: () => void;
 }
@@ -165,6 +166,7 @@ export function AdvancedLeadSearch({
   leads, 
   onFiltersChange, 
   onExportResults, 
+  onExportEtisalatSheets, 
   isVisible, 
   onClose 
 }: AdvancedLeadSearchProps) {
@@ -686,6 +688,16 @@ export function AdvancedLeadSearch({
     setLoadingLeads(false);
   }, [fetchLeadsFromFirebase, filters, fetchedLeads, onExportResults]);
 
+  // Export Etisalat sheets (G1, G2, G3 group-wise)
+  const handleExportEtisalatSheets = useCallback(async () => {
+    if (!onExportEtisalatSheets) return;
+    setLoadingLeads(true);
+    const firebaseLeads = await fetchLeadsFromFirebase(filters);
+    const leadsToExport = firebaseLeads && firebaseLeads.length > 0 ? firebaseLeads : fetchedLeads;
+    await onExportEtisalatSheets(leadsToExport);
+    setLoadingLeads(false);
+  }, [fetchLeadsFromFirebase, filters, fetchedLeads, onExportEtisalatSheets]);
+
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections(prev => ({
       ...prev,
@@ -719,53 +731,54 @@ export function AdvancedLeadSearch({
       initial={{ opacity: 0, y: -20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
-      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-[60] p-0 sm:p-4"
     >
       <motion.div
-        initial={{ scale: 0.95 }}
-        animate={{ scale: 1 }}
-        exit={{ scale: 0.95 }}
-        className="bg-white rounded-xl shadow-2xl w-full max-w-6xl h-[95vh] flex flex-col overflow-hidden"
+        initial={{ scale: 0.98, y: 20 }}
+        animate={{ scale: 1, y: 0 }}
+        exit={{ scale: 0.98, y: 20 }}
+        className="bg-white rounded-t-2xl sm:rounded-xl shadow-2xl w-full max-w-6xl max-h-[100dvh] sm:max-h-[95vh] h-[95dvh] sm:h-[95vh] flex flex-col overflow-hidden"
       >
-        {/* Header */}
-        <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white p-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <Settings className="h-6 w-6" />
-              <h2 className="text-2xl font-bold">Advanced Lead Search</h2>
-              <span className="bg-white bg-opacity-20 px-3 py-1 rounded-full text-sm">
+        {/* Header - compact on mobile */}
+        <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white px-3 py-3 sm:px-6 sm:py-4 pt-[max(0.75rem,env(safe-area-inset-top))] flex-shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <Settings className="h-5 w-5 sm:h-6 sm:w-6 flex-shrink-0" />
+              <h2 className="text-lg sm:text-2xl font-bold truncate">Advanced Lead Search</h2>
+              <span className="bg-white/20 px-2 py-0.5 sm:px-3 sm:py-1 rounded-full text-xs sm:text-sm flex-shrink-0 whitespace-nowrap">
                 Admin &amp; Coordinator
               </span>
             </div>
             <button
               onClick={onClose}
-              className="text-white hover:bg-white hover:bg-opacity-20 p-2 rounded-lg transition-colors"
+              className="text-white hover:bg-white/20 p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 touch-manipulation"
+              aria-label="Close"
             >
-              <X className="h-6 w-6" />
+              <X className="h-5 w-5 sm:h-6 sm:w-6" />
             </button>
           </div>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="p-6">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
+          <div className="p-3 sm:p-6">
 
-          {/* Plan and Number Information Section */}
-          <div className="mb-8">
+          {/* Plan and Number Information Section - compact on mobile */}
+          <div className="mb-4 sm:mb-8">
             <button
               onClick={() => toggleSection('plan')}
-              className="flex items-center justify-between w-full p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl hover:from-blue-100 hover:to-indigo-100 transition-all duration-300 border border-blue-200 shadow-sm"
+              className="flex items-center justify-between w-full p-3 sm:p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl sm:rounded-2xl hover:from-blue-100 hover:to-indigo-100 transition-all duration-200 border border-blue-200 shadow-sm touch-manipulation"
             >
-              <div className="flex items-center space-x-4">
-                <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center">
-                  <Package className="h-6 w-6 text-white" />
+              <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+                <div className="w-10 h-10 sm:w-12 sm:h-12 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg sm:rounded-xl flex items-center justify-center flex-shrink-0">
+                  <Package className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
                 </div>
-                <div className="text-left">
-                  <h3 className="text-xl font-bold text-gray-900">Plan & Number Information</h3>
-                  <p className="text-sm text-gray-600">Filter leads by plan and number details</p>
+                <div className="text-left min-w-0">
+                  <h3 className="text-base sm:text-xl font-bold text-gray-900">Plan & Number Information</h3>
+                  <p className="text-xs sm:text-sm text-gray-600 truncate">Filter by plan and number details</p>
                 </div>
               </div>
-              {expandedSections.plan ? <ChevronUp className="h-6 w-6 text-blue-600" /> : <ChevronDown className="h-6 w-6 text-blue-600" />}
+              {expandedSections.plan ? <ChevronUp className="h-5 w-5 sm:h-6 sm:w-6 text-blue-600 flex-shrink-0" /> : <ChevronDown className="h-5 w-5 sm:h-6 sm:w-6 text-blue-600 flex-shrink-0" />}
             </button>
             
             <AnimatePresence>
@@ -774,28 +787,28 @@ export function AdvancedLeadSearch({
                   initial={{ height: 0, opacity: 0 }}
                   animate={{ height: 'auto', opacity: 1 }}
                   exit={{ height: 0, opacity: 0 }}
-                  className="bg-gradient-to-br from-white to-blue-50 rounded-2xl border border-blue-200 shadow-lg p-8 mt-4"
+                  className="bg-gradient-to-br from-white to-blue-50 rounded-xl sm:rounded-2xl border border-blue-200 shadow-lg p-4 sm:p-8 mt-3 sm:mt-4"
                 >
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 lg:gap-8">
                     {/* Plan Name */}
-                    <div className="space-y-3">
-                      <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                        <Search className="h-4 w-4 mr-2 text-blue-600" />
+                    <div className="space-y-1.5 sm:space-y-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-800 mb-1.5 sm:mb-3 flex items-center">
+                        <Search className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 text-blue-600 flex-shrink-0" />
                         Plan Name
                       </label>
                       
                       {/* Selected Plans */}
                       {filters.planName.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-3">
+                        <div className="flex flex-wrap gap-1.5 sm:gap-2 mb-2 sm:mb-3">
                           {filters.planName.map((plan, index) => (
                             <span
                               key={`selected-plan-${index}-${plan}`}
-                              className="inline-flex items-center px-3 py-1 bg-blue-100 text-blue-800 text-sm rounded-full"
+                              className="inline-flex items-center px-2 py-0.5 sm:px-3 sm:py-1 bg-blue-100 text-blue-800 text-xs sm:text-sm rounded-full max-w-full truncate"
                             >
-                              {plan}
+                              <span className="truncate">{plan}</span>
                               <button
                                 onClick={() => removeFromArrayFilter('planName', plan)}
-                                className="ml-2 hover:bg-blue-200 rounded-full p-0.5"
+                                className="ml-1.5 hover:bg-blue-200 rounded-full p-0.5 flex-shrink-0 touch-manipulation"
                               >
                                 <X className="h-3 w-3" />
                               </button>
@@ -814,7 +827,7 @@ export function AdvancedLeadSearch({
                             e.target.value = ''; // Reset selection
                           }}
                           disabled={loadingPlans}
-                          className="w-full px-4 py-3 bg-white border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-blue-100 focus:border-blue-500 transition-all duration-200 appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="w-full px-3 py-2 sm:px-4 sm:py-3 bg-white border border-gray-200 sm:border-2 rounded-lg sm:rounded-xl focus:ring-2 sm:focus:ring-4 focus:ring-blue-100 focus:border-blue-500 transition-all duration-200 appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base min-h-[40px] sm:min-h-0"
                         >
                           <option value="">
                             {loadingPlans ? 'Loading plans...' : 'Select Plan Names'}
@@ -825,29 +838,29 @@ export function AdvancedLeadSearch({
                               <option key={`plan-${index}-${planName}`} value={planName}>{planName}</option>
                             ))}
                         </select>
-                        <ChevronDownIcon className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
+                        <ChevronDownIcon className="absolute right-2.5 sm:right-3 top-1/2 -translate-y-1/2 h-4 w-4 sm:h-5 sm:w-5 text-gray-400 pointer-events-none" />
                       </div>
                     </div>
 
                     {/* Number Category */}
-                    <div className="space-y-3">
-                      <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                        <Tag className="h-4 w-4 mr-2 text-green-600" />
+                    <div className="space-y-1.5 sm:space-y-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-800 mb-1.5 sm:mb-3 flex items-center">
+                        <Tag className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 text-green-600 flex-shrink-0" />
                         Number Category
                       </label>
                       
                       {/* Selected Categories */}
                       {filters.numberCategory.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-3">
+                        <div className="flex flex-wrap gap-1.5 sm:gap-2 mb-2 sm:mb-3">
                           {filters.numberCategory.map(category => (
                             <span
                               key={category}
-                              className="inline-flex items-center px-3 py-1 bg-green-100 text-green-800 text-sm rounded-full"
+                              className="inline-flex items-center px-2 py-0.5 sm:px-3 sm:py-1 bg-green-100 text-green-800 text-xs sm:text-sm rounded-full"
                             >
                               {category}
                               <button
                                 onClick={() => removeFromArrayFilter('numberCategory', category)}
-                                className="ml-2 hover:bg-green-200 rounded-full p-0.5"
+                                className="ml-1.5 hover:bg-green-200 rounded-full p-0.5 flex-shrink-0 touch-manipulation"
                               >
                                 <X className="h-3 w-3" />
                               </button>
@@ -865,7 +878,7 @@ export function AdvancedLeadSearch({
                             }
                             e.target.value = ''; // Reset selection
                           }}
-                          className="w-full px-4 py-3 bg-white border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-green-100 focus:border-green-500 transition-all duration-200 appearance-none cursor-pointer"
+                          className="w-full px-3 py-2 sm:px-4 sm:py-3 bg-white border border-gray-200 sm:border-2 rounded-lg sm:rounded-xl focus:ring-2 sm:focus:ring-4 focus:ring-green-100 focus:border-green-500 transition-all duration-200 appearance-none cursor-pointer text-sm sm:text-base min-h-[40px] sm:min-h-0"
                         >
                           <option value="">Select Categories</option>
                           {NUMBER_CATEGORIES
@@ -874,29 +887,29 @@ export function AdvancedLeadSearch({
                               <option key={category} value={category}>{category}</option>
                             ))}
                         </select>
-                        <ChevronDownIcon className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
+                        <ChevronDownIcon className="absolute right-2.5 sm:right-3 top-1/2 -translate-y-1/2 h-4 w-4 sm:h-5 sm:w-5 text-gray-400 pointer-events-none" />
                       </div>
                     </div>
 
                     {/* Number Group */}
-                    <div className="space-y-3">
-                      <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                        <Users className="h-4 w-4 mr-2 text-purple-600" />
+                    <div className="space-y-1.5 sm:space-y-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-800 mb-1.5 sm:mb-3 flex items-center">
+                        <Users className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 text-purple-600 flex-shrink-0" />
                         Number Group
                       </label>
                       
                       {/* Selected Groups */}
                       {filters.numberGroup.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-3">
+                        <div className="flex flex-wrap gap-1.5 sm:gap-2 mb-2 sm:mb-3">
                           {filters.numberGroup.map(group => (
                             <span
                               key={group}
-                              className="inline-flex items-center px-3 py-1 bg-purple-100 text-purple-800 text-sm rounded-full"
+                              className="inline-flex items-center px-2 py-0.5 sm:px-3 sm:py-1 bg-purple-100 text-purple-800 text-xs sm:text-sm rounded-full"
                             >
                               {group}
                               <button
                                 onClick={() => removeFromArrayFilter('numberGroup', group)}
-                                className="ml-2 hover:bg-purple-200 rounded-full p-0.5"
+                                className="ml-1.5 hover:bg-purple-200 rounded-full p-0.5 flex-shrink-0 touch-manipulation"
                               >
                                 <X className="h-3 w-3" />
                               </button>
@@ -914,7 +927,7 @@ export function AdvancedLeadSearch({
                             }
                             e.target.value = ''; // Reset selection
                           }}
-                          className="w-full px-4 py-3 bg-white border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-purple-100 focus:border-purple-500 transition-all duration-200 appearance-none cursor-pointer"
+                          className="w-full px-3 py-2 sm:px-4 sm:py-3 bg-white border border-gray-200 sm:border-2 rounded-lg sm:rounded-xl focus:ring-2 sm:focus:ring-4 focus:ring-purple-100 focus:border-purple-500 transition-all duration-200 appearance-none cursor-pointer text-sm sm:text-base min-h-[40px] sm:min-h-0"
                         >
                           <option value="">Select Groups</option>
                           {NUMBER_GROUPS
@@ -923,29 +936,29 @@ export function AdvancedLeadSearch({
                               <option key={group} value={group}>{group}</option>
                             ))}
                         </select>
-                        <ChevronDownIcon className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
+                        <ChevronDownIcon className="absolute right-2.5 sm:right-3 top-1/2 -translate-y-1/2 h-4 w-4 sm:h-5 sm:w-5 text-gray-400 pointer-events-none" />
                       </div>
                     </div>
 
                     {/* Status */}
-                    <div className="space-y-3">
-                      <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                        <CheckCircle className="h-4 w-4 mr-2 text-orange-600" />
+                    <div className="space-y-1.5 sm:space-y-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-800 mb-1.5 sm:mb-3 flex items-center">
+                        <CheckCircle className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 text-orange-600 flex-shrink-0" />
                         Status
                       </label>
                       
                       {/* Selected Statuses */}
                       {filters.status.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-3">
+                        <div className="flex flex-wrap gap-1.5 sm:gap-2 mb-2 sm:mb-3">
                           {filters.status.map(status => (
                             <span
                               key={status}
-                              className="inline-flex items-center px-3 py-1 bg-orange-100 text-orange-800 text-sm rounded-full"
+                              className="inline-flex items-center px-2 py-0.5 sm:px-3 sm:py-1 bg-orange-100 text-orange-800 text-xs sm:text-sm rounded-full"
                             >
-                              {status.replace(/_/g, ' ').toUpperCase()}
+                              <span className="max-w-[100px] sm:max-w-none truncate">{status.replace(/_/g, ' ').toUpperCase()}</span>
                               <button
                                 onClick={() => removeFromArrayFilter('status', status)}
-                                className="ml-2 hover:bg-orange-200 rounded-full p-0.5"
+                                className="ml-1.5 hover:bg-orange-200 rounded-full p-0.5 flex-shrink-0 touch-manipulation"
                               >
                                 <X className="h-3 w-3" />
                               </button>
@@ -963,7 +976,7 @@ export function AdvancedLeadSearch({
                             }
                             e.target.value = ''; // Reset selection
                           }}
-                          className="w-full px-4 py-3 bg-white border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-orange-100 focus:border-orange-500 transition-all duration-200 appearance-none cursor-pointer"
+                          className="w-full px-3 py-2 sm:px-4 sm:py-3 bg-white border border-gray-200 sm:border-2 rounded-lg sm:rounded-xl focus:ring-2 sm:focus:ring-4 focus:ring-orange-100 focus:border-orange-500 transition-all duration-200 appearance-none cursor-pointer text-sm sm:text-base min-h-[40px] sm:min-h-0"
                         >
                           <option value="">Select Statuses</option>
                           {STATUS_OPTIONS
@@ -972,47 +985,47 @@ export function AdvancedLeadSearch({
                               <option key={status} value={status}>{status.replace(/_/g, ' ').toUpperCase()}</option>
                           ))}
                         </select>
-                        <ChevronDownIcon className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
+                        <ChevronDownIcon className="absolute right-2.5 sm:right-3 top-1/2 -translate-y-1/2 h-4 w-4 sm:h-5 sm:w-5 text-gray-400 pointer-events-none" />
                       </div>
                     </div>
 
-                    {/* Created Date Range */}
-                    <div className="space-y-3">
-                      <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                        <Calendar className="h-4 w-4 mr-2 text-indigo-600" />
+                    {/* Created Date Range - hidden on phones */}
+                    <div className="hidden sm:block space-y-1.5 sm:space-y-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-800 mb-1.5 sm:mb-3 flex items-center">
+                        <Calendar className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 text-indigo-600 flex-shrink-0" />
                         Created Date Range
                       </label>
-                      <div className="bg-white rounded-xl border-2 border-gray-200 p-4 space-y-3">
-                        <div className="flex items-center space-x-2">
-                          <Calendar className="h-4 w-4 text-gray-400" />
+                      <div className="bg-white rounded-lg sm:rounded-xl border border-gray-200 sm:border-2 p-3 sm:p-4 space-y-2 sm:space-y-3">
+                        <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                          <Calendar className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-gray-400 flex-shrink-0" />
                           <input
                             type="date"
                             value={filters.createdDateRange.from}
                             onChange={(e) => handleNestedFilterChange('createdDateRange', 'from', e.target.value)}
-                            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
-                            placeholder="From Date"
+                            className="w-full min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm sm:text-base"
+                            placeholder="From"
                           />
                         </div>
-                        <div className="flex items-center space-x-2">
-                          <Calendar className="h-4 w-4 text-gray-400" />
+                        <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                          <Calendar className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-gray-400 flex-shrink-0" />
                           <input
                             type="date"
                             value={filters.createdDateRange.to}
                             onChange={(e) => handleNestedFilterChange('createdDateRange', 'to', e.target.value)}
-                            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
-                            placeholder="To Date"
+                            className="w-full min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm sm:text-base"
+                            placeholder="To"
                           />
                         </div>
-                        <div className="flex space-x-2">
+                        <div className="flex gap-1.5 sm:gap-2">
                           <button
                             onClick={() => handleNestedFilterChange('createdDateRange', 'from', datePresets.today)}
-                            className="flex-1 px-3 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
+                            className="flex-1 px-2 py-1.5 sm:px-3 sm:py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-xs sm:text-sm font-medium touch-manipulation"
                           >
                             Today
                           </button>
                           <button
                             onClick={() => handleNestedFilterChange('createdDateRange', 'from', datePresets.lastWeek)}
-                            className="flex-1 px-3 py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-sm font-medium"
+                            className="flex-1 px-2 py-1.5 sm:px-3 sm:py-2 bg-indigo-100 text-indigo-700 rounded-lg hover:bg-indigo-200 transition-colors text-xs sm:text-sm font-medium touch-manipulation"
                           >
                             Last Week
                           </button>
@@ -1021,42 +1034,42 @@ export function AdvancedLeadSearch({
                     </div>
 
                     {/* Activated Date Range */}
-                    <div className="space-y-3">
-                      <label className="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                        <Clock className="h-4 w-4 mr-2 text-pink-600" />
+                    <div className="space-y-1.5 sm:space-y-3">
+                      <label className="block text-xs sm:text-sm font-semibold text-gray-800 mb-1.5 sm:mb-3 flex items-center">
+                        <Clock className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 text-pink-600 flex-shrink-0" />
                         Activated Date Range
                       </label>
-                      <div className="bg-white rounded-xl border-2 border-gray-200 p-4 space-y-3">
-                        <div className="flex items-center space-x-2">
-                          <Clock className="h-4 w-4 text-gray-400" />
+                      <div className="bg-white rounded-lg sm:rounded-xl border border-gray-200 sm:border-2 p-3 sm:p-4 space-y-2 sm:space-y-3">
+                        <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                          <Clock className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-gray-400 flex-shrink-0" />
                           <input
                             type="date"
                             value={filters.activatedDateRange.from}
                             onChange={(e) => handleNestedFilterChange('activatedDateRange', 'from', e.target.value)}
-                            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-pink-500 transition-all duration-200"
-                            placeholder="From Date"
+                            className="w-full min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-pink-500 text-sm sm:text-base"
+                            placeholder="From"
                           />
                         </div>
-                        <div className="flex items-center space-x-2">
-                          <Clock className="h-4 w-4 text-gray-400" />
+                        <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                          <Clock className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-gray-400 flex-shrink-0" />
                           <input
                             type="date"
                             value={filters.activatedDateRange.to}
                             onChange={(e) => handleNestedFilterChange('activatedDateRange', 'to', e.target.value)}
-                            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-pink-500 transition-all duration-200"
-                            placeholder="To Date"
+                            className="w-full min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-pink-500 text-sm sm:text-base"
+                            placeholder="To"
                           />
                         </div>
-                        <div className="flex space-x-2">
+                        <div className="flex gap-1.5 sm:gap-2">
                           <button
                             onClick={() => handleNestedFilterChange('activatedDateRange', 'from', datePresets.today)}
-                            className="flex-1 px-3 py-2 bg-pink-100 text-pink-700 rounded-lg hover:bg-pink-200 transition-colors text-sm font-medium"
+                            className="flex-1 px-2 py-1.5 sm:px-3 sm:py-2 bg-pink-100 text-pink-700 rounded-lg hover:bg-pink-200 transition-colors text-xs sm:text-sm font-medium touch-manipulation"
                           >
                             Today
                           </button>
                           <button
                             onClick={() => handleNestedFilterChange('activatedDateRange', 'from', datePresets.lastWeek)}
-                            className="flex-1 px-3 py-2 bg-pink-100 text-pink-700 rounded-lg hover:bg-pink-200 transition-colors text-sm font-medium"
+                            className="flex-1 px-2 py-1.5 sm:px-3 sm:py-2 bg-pink-100 text-pink-700 rounded-lg hover:bg-pink-200 transition-colors text-xs sm:text-sm font-medium touch-manipulation"
                           >
                             Last Week
                           </button>
@@ -1076,10 +1089,10 @@ export function AdvancedLeadSearch({
         {showResults && (
           <div className="bg-gradient-to-br from-gray-50 to-gray-100 border-t border-gray-200">
             {/* Results Header */}
-            <div className="px-6 py-6 bg-white border-b border-gray-200">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-2xl font-bold text-gray-900 mb-2">
+            <div className="px-3 py-4 sm:px-6 sm:py-6 bg-white border-b border-gray-200">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <h3 className="text-lg sm:text-2xl font-bold text-gray-900 mb-1 sm:mb-2 truncate">
                     Search Results
                   </h3>
                   {loadingLeads ? (
@@ -1120,7 +1133,7 @@ export function AdvancedLeadSearch({
                 </div>
               </div>
             ) : filteredLeads.length > 0 ? (
-              <div className="px-6 py-6 max-h-[50vh] overflow-y-auto">
+              <div className="px-3 py-4 sm:px-6 sm:py-6 max-h-[50vh] overflow-y-auto overflow-x-auto">
                 {/* Table Header */}
                 <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
                   <div className="overflow-x-auto">
@@ -1292,26 +1305,26 @@ export function AdvancedLeadSearch({
                 </div>
 
                 {/* Results Summary */}
-                <div className="mt-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl p-6 text-white">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-xl font-bold mb-2">Search Summary</h4>
-                      <p className="text-blue-100">Total leads found matching your criteria</p>
+                <div className="mt-4 sm:mt-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg sm:rounded-xl p-4 sm:p-6 text-white">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <h4 className="text-base sm:text-xl font-bold mb-1 sm:mb-2">Search Summary</h4>
+                      <p className="text-blue-100 text-xs sm:text-sm truncate">Leads matching criteria</p>
                     </div>
-                    <div className="text-right">
-                      <div className="text-4xl font-bold">{filteredLeads.length}</div>
-                      <div className="text-blue-200 text-sm">Leads</div>
+                    <div className="text-right flex-shrink-0">
+                      <div className="text-2xl sm:text-4xl font-bold">{filteredLeads.length}</div>
+                      <div className="text-blue-200 text-xs sm:text-sm">Leads</div>
                     </div>
                   </div>
                   
                   {/* Status Breakdown */}
-                  <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="mt-4 sm:mt-6 grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
                     {['verified', 'pending', 'activated', 'assigned'].map(status => {
                       const count = filteredLeads.filter(lead => lead.status === status).length;
                       return (
-                        <div key={status} className="bg-white bg-opacity-20 rounded-lg p-3 text-center">
-                          <div className="text-2xl font-bold">{count}</div>
-                          <div className="text-xs text-blue-200 capitalize">{status.replace('_', ' ')}</div>
+                        <div key={status} className="bg-white/20 rounded-lg p-2 sm:p-3 text-center">
+                          <div className="text-lg sm:text-2xl font-bold">{count}</div>
+                          <div className="text-[10px] sm:text-xs text-blue-200 capitalize truncate">{status.replace('_', ' ')}</div>
                         </div>
                       );
                     })}
@@ -1339,54 +1352,74 @@ export function AdvancedLeadSearch({
           </div>
         )}
 
-        {/* Footer */}
-        <div className="bg-gray-50 px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center space-x-4">
+        {/* Footer - stacked on mobile, row on desktop; safe-area for notched phones */}
+        <div className="bg-gray-50 px-3 py-3 sm:px-6 sm:py-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between flex-shrink-0 border-t border-gray-200">
+          <div className="hidden sm:flex justify-center sm:justify-start order-2 sm:order-1">
             <button
               onClick={clearAllFilters}
-              className="flex items-center space-x-2 px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
+              className="flex items-center justify-center gap-1.5 sm:gap-2 px-3 py-2 sm:px-4 text-gray-600 hover:text-gray-800 transition-colors text-sm touch-manipulation"
             >
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className="h-4 w-4 flex-shrink-0" />
               <span>Clear All</span>
             </button>
           </div>
           
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={handleExport}
-              className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={loadingLeads}
-            >
-              {loadingLeads ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>Exporting...</span>
-                </>
-              ) : (
-                <>
-                  <Download className="h-4 w-4" />
-                  <span>Export Results</span>
-                </>
-              )}
-            </button>
-            
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3 order-1 sm:order-2 w-full sm:w-auto">
             <button
               onClick={applyFilters}
               disabled={loadingLeads}
-              className="flex items-center space-x-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="hidden sm:flex w-full sm:w-auto items-center justify-center gap-1.5 sm:gap-2 px-4 py-2.5 sm:px-6 sm:py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base font-medium touch-manipulation min-h-[44px] sm:min-h-0"
             >
               {loadingLeads ? (
                 <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <RefreshCw className="h-4 w-4 animate-spin flex-shrink-0" />
                   <span>Loading...</span>
                 </>
               ) : (
                 <>
-                  <Search className="h-4 w-4" />
+                  <Search className="h-4 w-4 flex-shrink-0" />
                   <span>Apply Filters</span>
                 </>
               )}
             </button>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:gap-3">
+              <button
+                onClick={handleExport}
+                className="w-full sm:w-auto flex items-center justify-center gap-1.5 sm:gap-2 px-3 py-2.5 sm:px-4 sm:py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm touch-manipulation min-h-[44px] sm:min-h-0"
+                disabled={loadingLeads}
+              >
+                {loadingLeads ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin flex-shrink-0" />
+                    <span>Exporting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="h-4 w-4 flex-shrink-0" />
+                    <span className="truncate">Export Results</span>
+                  </>
+                )}
+              </button>
+              {onExportEtisalatSheets && (
+                <button
+                  onClick={handleExportEtisalatSheets}
+                  className="w-full sm:w-auto flex items-center justify-center gap-1.5 sm:gap-2 px-3 py-2.5 sm:px-4 sm:py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm touch-manipulation min-h-[44px] sm:min-h-0"
+                  disabled={loadingLeads}
+                >
+                  {loadingLeads ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin flex-shrink-0" />
+                      <span>Exporting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4 flex-shrink-0" />
+                      <span className="truncate">Etisalat Sheets</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </motion.div>

@@ -316,12 +316,20 @@ interface CreateLeadProps {
 // const INITIAL_LOAD_SIZE = 50;
 // const SEARCH_DEBOUNCE = 150;
 
-// Helper to load saved form draft from localStorage
+const DRAFT_TTL_MS = 3 * 60 * 1000; // 3 minutes
+
+// Helper to load saved form draft from localStorage — returns null if missing or expired
 function loadFormDraft() {
   try {
     const saved = localStorage.getItem(FORM_DRAFT_KEY);
     if (saved) {
-      return JSON.parse(saved);
+      const parsed = JSON.parse(saved);
+      const age = Date.now() - new Date(parsed.timestamp).getTime();
+      if (age > DRAFT_TTL_MS) {
+        localStorage.removeItem(FORM_DRAFT_KEY);
+        return null;
+      }
+      return parsed;
     }
   } catch (error) {
     console.error('Error loading form draft:', error);
@@ -342,19 +350,24 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   const [selectedPlans, setSelectedPlans] = useState<PlanSelection[]>(
     initialData?.plans || savedDraft?.selectedPlans || []
   );
+  // When editing, existing numbers are already in selectedPlans — currentNumber is only for staging a new addition
   const [currentNumber, setCurrentNumber] = useState(
-    initialData?.plans?.[0]?.number || ''
+    isEditing ? '' : (initialData?.plans?.[0]?.number || '')
   );
   const [currentPlan, setCurrentPlan] = useState<string>('');
   const [currentNumberData, setCurrentNumberData] = useState<NumberPool | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>(
     initialData?.plans?.[0]?.category || 'Standard'
   );
-  const [showNumberPool, setShowNumberPool] = useState(true);
+  // When editing a lead that already has plans, start with picker closed
+  const [showNumberPool, setShowNumberPool] = useState(
+    !(isEditing && (initialData?.plans?.length ?? 0) > 0)
+  );
   const [selectedAgentId, setSelectedAgentId] = useState<string>(user?.id || '');
   const [managedAgents, setManagedAgents] = useState<User[]>([]);
   const [teamManagerId, setTeamManagerId] = useState<string | null>(null);
   const planErrorRef = useRef<HTMLDivElement | null>(null);
+  const numberSectionRef = useRef<HTMLDivElement | null>(null);
   const [showSuccessPopup, setShowSuccessPopup] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [whatsappVerificationEnabled, setWhatsappVerificationEnabled] = useState(true);
@@ -425,6 +438,36 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       setSelectedPlans(initialData.plans as unknown as PlanSelection[]);
     }
   }, [isEditing, initialData?.plans]);
+
+  // Auto-advance the time field every minute so it never falls into the past
+  useEffect(() => {
+    if (isEditing) return;
+
+    const tick = () => {
+      setFormData(prev => {
+        const today = format(new Date(), 'yyyy-MM-dd');
+        if (prev.startDate !== today) return prev; // only auto-update for today
+
+        const [h, m] = prev.startTime.split(':').map(Number);
+        const stored = new Date();
+        stored.setHours(h, m, 0, 0);
+        const now = new Date();
+
+        if (stored <= now) {
+          // Bump to current time + 1 min
+          const updated = addMinutes(now, 1);
+          return { ...prev, startTime: format(updated, 'HH:mm') };
+        }
+        return prev;
+      });
+      // Also clear any stale "in the past" error
+      setFormErrors(prev => prev.startTime ? { ...prev, startTime: '' } : prev);
+    };
+
+    tick(); // run immediately on mount / date change
+    const id = setInterval(tick, 60_000);
+    return () => clearInterval(id);
+  }, [isEditing]);
 
   // Load agents from managed teams for multi-team managers
   useEffect(() => {
@@ -608,8 +651,7 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
   // Auto-save form data to localStorage (only when creating new leads, not editing)
   useEffect(() => {
-    if (isEditing) return; // Don't save when editing existing leads
-    
+    if (isEditing) return;
     try {
       const { startTime, ...formDataWithoutTime } = formData;
       const draftData = {
@@ -622,6 +664,28 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       console.error('Error saving form draft:', error);
     }
   }, [formData, selectedPlans, isEditing]);
+
+  // Auto-expire draft after 3 minutes — clear localStorage so next open starts fresh
+  useEffect(() => {
+    if (isEditing) return;
+    const saved = localStorage.getItem(FORM_DRAFT_KEY);
+    if (!saved) return;
+    try {
+      const { timestamp } = JSON.parse(saved);
+      const remaining = DRAFT_TTL_MS - (Date.now() - new Date(timestamp).getTime());
+      if (remaining <= 0) {
+        localStorage.removeItem(FORM_DRAFT_KEY);
+        return;
+      }
+      const timer = setTimeout(() => {
+        localStorage.removeItem(FORM_DRAFT_KEY);
+      }, remaining);
+      return () => clearTimeout(timer);
+    } catch {
+      localStorage.removeItem(FORM_DRAFT_KEY);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing]);
 
   const loadWhatsAppSetting = async () => {
     try {
@@ -746,15 +810,23 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
   }, [clearLocationUrlError]);
 
   const handleAddPlan = useCallback(async () => {
-    if (!currentPlan || currentPlan === '') {
-      toast.error('Please select a plan');
+    // Validate both fields and show inline errors rather than just toasts
+    let hasError = false;
+    if (!isNoNumberProduct && !currentNumber) {
       setFormErrors(prev => ({
         ...prev,
-        plans: 'Please select a plan'
+        selectedNumber: 'Please select a number first before adding a plan',
       }));
-      
-      return;
+      hasError = true;
     }
+    if (!currentPlan || currentPlan === '') {
+      setFormErrors(prev => ({
+        ...prev,
+        plans: 'Please select a plan',
+      }));
+      hasError = true;
+    }
+    if (hasError) return;
 
     // Extract plan name from value if it contains plan ID (format: "planId|planName" or "category|planName|index")
     const planName = currentPlan.includes('|') 
@@ -1035,13 +1107,20 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
 
     // Plans
     if (!selectedPlans.length) {
-      errors.plans = 'At least one plan must be selected';
+      errors.plans = 'At least one number and plan must be added';
+      // Only show the "select a number first" error if no number is currently staged either
+      if (!isNoNumberProduct && !currentNumber) {
+        errors.selectedNumber = 'Select a number first, then add a plan';
+      }
       console.warn('[CreateLead] Validation failed: no plans selected');
     }
 
     if (Object.keys(errors).length > 0) {
       setFormErrors(errors);
-      if (errors.plans) {
+      if (errors.selectedNumber && numberSectionRef.current) {
+        // No number selected at all — scroll to the number picker section
+        numberSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else if (errors.plans) {
         const planEl = document.getElementById('planSelect');
         if (planEl) {
           planEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -2002,143 +2081,21 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
           <FormSection
             icon={Package}
             title="Number and Plan Selection"
-            description="Select numbers and assign plans"
+            description="Pick a number, choose a plan, then add to lead"
           >
-            <div className="col-span-2 space-y-6">
-              {/* Step 1: Number Selection */}
-              {!isNoNumberProduct && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
-                        <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold">1</span>
-                        Select Number
-                      </h3>
-                    </div>
-                    {currentNumber && !isEditing && (
-                      <motion.button
-                        type="button"
-                        onClick={() => setShowNumberPool(true)}
-                        disabled={isCoordinatorEditing}
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        className="px-4 py-2 text-xs font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center gap-2"
-                      >
-                        <Phone className="w-4 h-4" />
-                        Change Number
-                      </motion.button>
-                    )}
-                  </div>
-                  
-                    {showNumberPool ? (
-                    <div className={isCoordinatorEditing ? 'pointer-events-none opacity-50' : ''}>
-                        <QuickNumberSelect 
-                          onSelect={handleNumberSelect}
-                        selectedCategory={selectedCategory}
-                        onCategoryChange={(category) => setSelectedCategory(category)}
-                      />
-                    </div>
-                    ) : (
-                    /* Only show button when no current number is selected (to avoid showing it when user is in the process of adding) */
-                    !currentNumber && (() => {
-                      // Helper function to get ordinal number (1st, 2nd, 3rd, etc.)
-                      const getOrdinal = (n: number): string => {
-                        const s = ['th', 'st', 'nd', 'rd'];
-                        const v = n % 100;
-                        return n + (s[(v - 20) % 10] || s[v] || s[0]);
-                      };
-                      
-                      const nextNumber = selectedPlans.length + 1;
-                      const buttonText = selectedPlans.length > 0 
-                        ? `Add ${getOrdinal(nextNumber)} Number`
-                        : (isEditing ? 'Add Another Number' : 'Select Number');
-                      
-                      return (
-                        <motion.button
-                        type="button"
-                        onClick={() => setShowNumberPool(true)}
-                          disabled={isCoordinatorEditing}
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          className="w-full px-4 py-3 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-2"
-                        >
-                          <Phone className="w-5 h-5" />
-                          {buttonText}
-                        </motion.button>
-                      );
-                    })()
-                  )}
-                  
-              {formErrors.selectedNumber && (
-                    <motion.div
-                      initial={{ opacity: 0, y: -5 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="p-3 bg-red-50 border border-red-200 rounded-lg"
-                    >
-                      <p className="text-sm text-red-600 flex items-center gap-2">
-                        <XCircle className="w-4 h-4" />
-                  {formErrors.selectedNumber}
-                      </p>
-                    </motion.div>
-              )}
-                  
-              {currentNumber && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="bg-gradient-to-r from-indigo-50 to-purple-50 p-4 rounded-lg border-2 border-indigo-200 shadow-sm"
-                    >
-                  <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="flex items-center justify-center w-10 h-10 rounded-full bg-indigo-100">
-                            <Phone className="w-5 h-5 text-indigo-600" />
-                          </div>
-                    <div>
-                            <p className="text-base font-semibold text-gray-900">{currentNumber}</p>
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                                {selectedCategory}
-                              </span>
-                            </div>
-                          </div>
-                    </div>
-                    {!isEditing && (
-                          <motion.button
-                      type="button"
-                      onClick={() => {
-                        setCurrentNumber('');
-                        setCurrentNumberData(null);
-                        setSelectedCategory('Standard');
-                        setCurrentPlan('');
-                              setShowNumberPool(true);
-                      }}
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            className="p-2 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors duration-200"
-                            title="Clear and select another number"
-                    >
-                            <XCircle className="w-5 h-5" />
-                          </motion.button>
-                    )}
-                  </div>
-                    </motion.div>
-                  )}
-                </div>
-              )}
-              
-              {/* No Number Product Category Selection */}
+            <div className="col-span-2 space-y-5">
+
+              {/* ── No-number product: category only ── */}
               {isNoNumberProduct && (
                 <div className="space-y-3">
-                  <div className="p-4 rounded-lg bg-yellow-50 border border-yellow-200 flex items-start gap-3">
-                    <div className="flex-shrink-0 mt-0.5">
-                      <div className="w-5 h-5 rounded-full bg-yellow-500 flex items-center justify-center">
-                        <span className="text-white text-xs font-bold">!</span>
-                      </div>
+                  <div className="flex items-start gap-3 p-3 rounded-xl bg-amber-50 border border-amber-200">
+                    <div className="w-5 h-5 rounded-full bg-amber-400 flex items-center justify-center flex-shrink-0 mt-0.5">
+                      <span className="text-white text-xs font-bold">!</span>
                     </div>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-yellow-900">No Number Required</p>
-                      <p className="text-xs text-yellow-700 mt-1">
-                        Number attachment is not required for <span className="font-semibold">{formData.productType}</span>. Please choose a category and then select a plan.
+                    <div>
+                      <p className="text-sm font-medium text-amber-900">No number required</p>
+                      <p className="text-xs text-amber-700 mt-0.5">
+                        <span className="font-semibold">{formData.productType}</span> doesn't need a number — choose a category and plan below.
                       </p>
                     </div>
                   </div>
@@ -2149,226 +2106,267 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                       formData.productType === 'Home Wifi'
                         ? [{ value: 'Home Wifi', label: 'Home Wifi' }]
                         : [
-                      { value: 'Standard', label: 'Standard' },
-                      { value: 'Silver', label: 'Silver' },
-                      { value: 'Silver Plus', label: 'Silver Plus' },
-                      { value: 'Gold', label: 'Gold' },
-                      { value: 'Gold Plus', label: 'Gold Plus' },
-                      { value: 'Platinum', label: 'Platinum' },
+                            { value: 'Standard', label: 'Standard' },
+                            { value: 'Silver', label: 'Silver' },
+                            { value: 'Silver Plus', label: 'Silver Plus' },
+                            { value: 'Gold', label: 'Gold' },
+                            { value: 'Gold Plus', label: 'Gold Plus' },
+                            { value: 'Platinum', label: 'Platinum' },
                           ]
                     }
-                    value={
-                      formData.productType === 'Home Wifi'
-                        ? 'Home Wifi'
-                        : selectedCategory
-                    }
+                    value={formData.productType === 'Home Wifi' ? 'Home Wifi' : selectedCategory}
                     disabled={isCoordinatorEditing}
                     onChange={(e) => setSelectedCategory(e.target.value)}
                   />
                 </div>
               )}
-              
-              {/* Step 2: Plan Selection */}
-              <div className="space-y-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
-                    <span className="flex items-center justify-center w-6 h-6 rounded-full bg-purple-100 text-purple-600 text-xs font-bold">2</span>
-                    Select Plan
-                  </h3>
-                </div>
-              <div ref={planErrorRef} />
-              <FormSelect
-                label="Plan"
-                icon={Package}
-                id="planSelect"
-                options={[
-                  { value: '', label: 'Select a plan' },
-                  ...filteredPlanCategories.flatMap((category, categoryIndex) => [
-                    { value: `category-${categoryIndex}`, label: category.label, disabled: true },
-                    ...category.options.map((option) => ({
-                      value: option.value, // Use the exact value from filteredPlanCategories (planId|planName format)
-                      label: option.label
-                    }))
-                    ])
-                ]}
-                value={currentPlan}
-                  disabled={isCoordinatorEditing}
-                  onChange={(e) => {
-                    const selectedValue = e.target.value;
-                    // Prevent selection of category headers or empty value
-                    if (selectedValue.startsWith('category-') || !selectedValue || selectedValue === '') {
-                      return;
-                    }
-                    // Store the full value (with plan ID if present) for uniqueness
-                    // This ensures the select dropdown shows the selected plan
-                    setCurrentPlan(selectedValue);
-                    setFormErrors(prev => {
-                      const { plans, ...rest } = prev;
-                      return rest;
-                    });
-                  }}
-                  error={formErrors.plans}
-              />
-              </div>
 
-              {/* Hint message when number and plan are selected */}
-              {currentPlan && (currentNumber || isNoNumberProduct) && !isCoordinatorEditing && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-2"
-                >
-                  <motion.div 
-                    className="flex-shrink-0 mt-0.5"
-                    animate={{ 
-                      scale: [1, 1.2, 1],
-                    }}
-                    transition={{ 
-                      duration: 1.5,
-                      repeat: Infinity,
-                      ease: "easeInOut"
-                    }}
-                  >
-                    <div className="w-5 h-5 rounded-full bg-blue-500 flex items-center justify-center">
-                      <span className="text-white text-xs font-bold">!</span>
-                    </div>
-                  </motion.div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-blue-900">
-                      Ready to add?
-                    </p>
-                    <p className="text-xs text-blue-700 mt-1">
-                      Click the{' '}
-                      <motion.span
-                        className="font-bold text-red-600"
-                        animate={{ 
-                          scale: [1, 1.1, 1],
+              {/* ── Step 1: Number picker — hidden after plans added unless actively picking ── */}
+              {!isNoNumberProduct && (currentNumber || showNumberPool || selectedPlans.length === 0) && (
+                <div ref={numberSectionRef} className={`rounded-xl border bg-gray-50 overflow-hidden transition-colors ${formErrors.selectedNumber ? 'border-red-300' : 'border-gray-200'}`}>
+                  {/* Header */}
+                  <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200">
+                    <span className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-xs font-bold ${formErrors.selectedNumber ? 'bg-red-500' : 'bg-indigo-600'}`}>1</span>
+                      Select Number
+                    </span>
+                    {currentNumber && !isEditing && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCurrentNumber('');
+                          setCurrentNumberData(null);
+                          setSelectedCategory('Standard');
+                          setCurrentPlan('');
+                          setShowNumberPool(true);
                         }}
-                        transition={{ 
-                          duration: 1.2,
-                          repeat: Infinity,
-                          ease: "easeInOut"
-                        }}
+                        disabled={isCoordinatorEditing}
+                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium disabled:opacity-40 transition-colors"
                       >
-                        {isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}
-                      </motion.span>
-                      {' '}button below to add {isNoNumberProduct ? 'this plan' : 'this number with plan'} to your lead.
-                    </p>
+                        Change
+                      </button>
+                    )}
                   </div>
-                </motion.div>
-              )}
 
-              <motion.button
-                type="button"
-                onClick={handleAddPlan}
-                disabled={isCoordinatorEditing || isCheckingNumber || !currentPlan || (!currentNumber && !isNoNumberProduct)}
-                whileHover={!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) ? { scale: 1.02 } : {}}
-                whileTap={!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) ? { scale: 0.98 } : {}}
-                className="relative w-full px-5 py-2.5 text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg hover:from-indigo-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 overflow-hidden shadow-lg shadow-indigo-500/25 group mt-4"
-              >
-                <AnimatePresence mode="wait">
-                  {isCheckingNumber ? (
-                    <motion.div
-                      key="checking"
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      className="flex items-center justify-center gap-2"
-                    >
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Checking Number...</span>
-                    </motion.div>
-                  ) : (
-                    <motion.div
-                      key="add"
-                      initial={{ opacity: 0, y: -5 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: 5 }}
-                      className="flex items-center justify-center gap-2"
-                    >
-                      <Plus className="w-4 h-4 group-hover:rotate-90 transition-transform duration-300" />
-                      <span>{isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}</span>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-                
-                {/* Shimmer effect on hover */}
-                {!isCheckingNumber && currentPlan && (currentNumber || isNoNumberProduct) && (
-                  <motion.div
-                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
-                    initial={{ x: '-100%' }}
-                    whileHover={{ x: '100%' }}
-                    transition={{ duration: 0.6, ease: 'easeInOut' }}
-                  />
-                )}
-              </motion.button>
-
-              {selectedPlans.length > 0 && (
-                <div className="mt-6">
-                  <h3 className="text-sm font-medium text-gray-700 mb-3">Selected Numbers and Plans</h3>
-                  <div className="space-y-3">
-                    {selectedPlans.map((plan) => (
-                      <div
-                        key={plan.numberId}
-                        className="flex items-center justify-between bg-white p-4 rounded-lg border border-gray-200 shadow-sm"
-                      >
-                        <div className="flex-1">
-                          <div className="flex items-center space-x-4">
-                            <div>
-                              <p className="text-sm font-medium text-gray-900">{plan.number}</p>
-                              <p className="text-sm text-gray-500">{plan.category}</p>
-                            </div>
-                            <div className="min-w-[260px]">
-                              <label htmlFor={`plan-select-${plan.numberId}`} className="sr-only">Change Plan</label>
-                              <select
-                                id={`plan-select-${plan.numberId}`}
-                                className="block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
-                                disabled={isCoordinatorEditing}
-                                value={(() => {
-                                  // Determine current value by matching id|name when possible
-                                  const catNorm = normalizeCategory(plan.category);
-                                  const matching = allPlans.find(p => (!catNorm || normalizeCategory(p.category) === catNorm) && p.name === plan.plan);
-                                  if (matching && matching.id) return `${matching.id}|${matching.name}`;
-                                  // Fallback to plain name if no exact match found yet
-                                  return plan.plan || '';
-                                })()}
-                                onChange={(e) => handleChangePlanFor(plan.numberId, e.target.value)}
-                              >
-                                {allPlans.length === 0 && (
-                                  <option value="" disabled>Loading plans…</option>
-                                )}
-                                {allPlans.length > 0 && (
-                                  <>
-                                    <option value="" disabled>Select plan…</option>
-                                    {(() => {
-                                      const catNorm = normalizeCategory(plan.category);
-                                      const byCategory = catNorm ? allPlans.filter(p => normalizeCategory(p.category) === catNorm) : [];
-                                      const source = byCategory.length > 0 ? byCategory : allPlans; // fallback when no matches
-                                      return source.map((p, idx) => (
-                                        <option key={p.id || `${plan.category}-${p.name}-${idx}`} value={p.id ? `${p.id}|${p.name}` : p.name}>
-                                          {p.name}
-                                        </option>
-                                      ));
-                                    })()}
-                                  </>
-                                )}
-                              </select>
-                            </div>
-                          </div>
+                  <div className="p-4">
+                    {/* Selected number chip */}
+                    {currentNumber && !showNumberPool ? (
+                      <div className="flex items-center gap-3 p-3 rounded-xl bg-indigo-50 border border-indigo-200">
+                        <div className="flex items-center justify-center w-9 h-9 rounded-full bg-indigo-100 flex-shrink-0">
+                          <Phone className="w-4 h-4 text-indigo-600" />
                         </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-bold text-indigo-900 tracking-wide">{currentNumber}</p>
+                          <p className="text-xs text-indigo-600">{selectedCategory}</p>
+                        </div>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                          ✓ Selected
+                        </span>
                         <button
                           type="button"
-                          onClick={() => handleRemovePlan(plan.numberId)}
                           disabled={isCoordinatorEditing}
-                          className="ml-4 text-sm font-medium text-red-600 hover:text-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={() => {
+                            setCurrentNumber('');
+                            setCurrentNumberData(null);
+                            setCurrentPlan('');
+                            setSelectedCategory('Standard');
+                            setShowNumberPool(true);
+                          }}
+                          className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 transition-colors flex-shrink-0"
+                          title="Clear and pick again"
                         >
-                          Remove
+                          <XCircle className="w-4 h-4" />
                         </button>
                       </div>
-                    ))}
+                    ) : !showNumberPool ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowNumberPool(true)}
+                        disabled={isCoordinatorEditing}
+                        className="w-full py-3 rounded-xl border-2 border-dashed border-indigo-300 text-sm font-medium text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50/60 disabled:opacity-40 transition-all flex items-center justify-center gap-2"
+                      >
+                        <Phone className="w-4 h-4" />
+                        {selectedPlans.length > 0
+                          ? `Add ${selectedPlans.length + 1}${selectedPlans.length === 0 ? 'st' : selectedPlans.length === 1 ? 'nd' : selectedPlans.length === 2 ? 'rd' : 'th'} Number`
+                          : isEditing ? 'Add Another Number' : 'Search & Select a Number'}
+                      </button>
+                    ) : (
+                      <div className={isCoordinatorEditing ? 'pointer-events-none opacity-50' : ''}>
+                        <QuickNumberSelect
+                          onSelect={handleNumberSelect}
+                          selectedCategory={selectedCategory}
+                          onCategoryChange={(category) => setSelectedCategory(category)}
+                        />
+                      </div>
+                    )}
+
+                    {formErrors.selectedNumber && (
+                      <p className="mt-2 text-xs text-red-600 flex items-center gap-1">
+                        <XCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                        {formErrors.selectedNumber}
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
+
+              {/* ── Step 2: Plan picker — only visible after a number is selected (or no-number product) ── */}
+              {(currentNumber || isNoNumberProduct) ? (
+                // number chosen → show the real plan picker
+                <div className={`rounded-xl border bg-gray-50 overflow-hidden transition-colors ${formErrors.plans ? 'border-red-300' : 'border-gray-200'}`}>
+                  <div className="flex items-center gap-2 px-4 py-3 bg-white border-b border-gray-200">
+                    <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-xs font-bold ${formErrors.plans ? 'bg-red-500' : 'bg-purple-600'}`}>
+                      {isNoNumberProduct ? '1' : '2'}
+                    </span>
+                    <span className="text-sm font-semibold text-gray-800">Select Plan</span>
+                  </div>
+                  <div className="p-4">
+                    <div ref={planErrorRef} />
+                    <FormSelect
+                      label="Plan"
+                      icon={Package}
+                      id="planSelect"
+                      options={[
+                        { value: '', label: 'Select a plan' },
+                        ...filteredPlanCategories.flatMap((category, categoryIndex) => [
+                          { value: `category-${categoryIndex}`, label: category.label, disabled: true },
+                          ...category.options.map((option) => ({
+                            value: option.value,
+                            label: option.label,
+                          })),
+                        ]),
+                      ]}
+                      value={currentPlan}
+                      disabled={isCoordinatorEditing}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v.startsWith('category-') || !v) return;
+                        setCurrentPlan(v);
+                        setFormErrors(prev => { const { plans, ...rest } = prev; return rest; });
+                      }}
+                      error={formErrors.plans}
+                    />
+                  </div>
+                </div>
+              ) : !showNumberPool && selectedPlans.length === 0 ? (
+                /* Step 2 placeholder — only on first load before anything is added */
+                <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/60 px-4 py-3 flex items-center gap-2.5">
+                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gray-200 text-gray-400 text-xs font-bold flex-shrink-0">2</span>
+                  <p className="text-sm text-gray-400">Select Plan — choose a number above first</p>
+                </div>
+              ) : null}
+
+              {/* ── Add button — only after number + plan both present ── */}
+              {(currentNumber || isNoNumberProduct) && (
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleAddPlan}
+                    disabled={isCoordinatorEditing || isCheckingNumber}
+                    className="w-full py-3 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 shadow-sm"
+                  >
+                    {isCheckingNumber ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        Checking…
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4" />
+                        {isNoNumberProduct ? 'Add Plan' : 'Add Number with Plan'}
+                      </>
+                    )}
+                  </button>
+
+                </div>
+              )}
+
+              {/* Inline error: no number/plan added on submit */}
+              {formErrors.plans && selectedPlans.length === 0 && !currentNumber && !isNoNumberProduct && (
+                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-red-50 border border-red-200">
+                  <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  <p className="text-sm font-medium text-red-600">{formErrors.plans}</p>
+                </div>
+              )}
+
+              {/* ── Selected plans list ── */}
+              {selectedPlans.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-0.5">
+                    Added ({selectedPlans.length})
+                  </p>
+                  {selectedPlans.map((plan, idx) => (
+                    <div
+                      key={plan.numberId}
+                      className="flex items-center gap-3 p-3 rounded-xl bg-white border border-gray-200 shadow-sm"
+                    >
+                      {/* Index bubble */}
+                      <div className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center">
+                        <span className="text-xs font-bold text-indigo-700">{idx + 1}</span>
+                      </div>
+
+                      {/* Number + plan info */}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold text-gray-900 truncate">{plan.number || '—'}</p>
+                        <p className="text-xs text-gray-400 truncate">{plan.category}</p>
+                        {/* Plan selector */}
+                        <select
+                          className="mt-1.5 block w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={isCoordinatorEditing}
+                          value={(() => {
+                            const catNorm = normalizeCategory(plan.category);
+                            const matching = allPlans.find(p => (!catNorm || normalizeCategory(p.category) === catNorm) && p.name === plan.plan);
+                            if (matching?.id) return `${matching.id}|${matching.name}`;
+                            return plan.plan || '';
+                          })()}
+                          onChange={(e) => handleChangePlanFor(plan.numberId, e.target.value)}
+                        >
+                          {allPlans.length === 0 && <option value="" disabled>Loading plans…</option>}
+                          {allPlans.length > 0 && (
+                            <>
+                              <option value="" disabled>Select plan…</option>
+                              {(() => {
+                                const catNorm = normalizeCategory(plan.category);
+                                const byCategory = catNorm ? allPlans.filter(p => normalizeCategory(p.category) === catNorm) : [];
+                                const source = byCategory.length > 0 ? byCategory : allPlans;
+                                return source.map((p, i) => (
+                                  <option key={p.id || `${plan.category}-${p.name}-${i}`} value={p.id ? `${p.id}|${p.name}` : p.name}>
+                                    {p.name}
+                                  </option>
+                                ));
+                              })()}
+                            </>
+                          )}
+                        </select>
+                      </div>
+
+                      {/* Remove */}
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePlan(plan.numberId)}
+                        disabled={isCoordinatorEditing}
+                        className="flex-shrink-0 p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 transition-colors"
+                        title="Remove"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+
+                  {/* Add another number link */}
+                  {!isNoNumberProduct && !showNumberPool && !currentNumber && (
+                    <button
+                      type="button"
+                      onClick={() => setShowNumberPool(true)}
+                      disabled={isCoordinatorEditing}
+                      className="w-full py-2 rounded-xl border border-dashed border-gray-300 text-xs font-medium text-gray-500 hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-40 transition-all"
+                    >
+                      + Add another number
+                    </button>
+                  )}
+                </div>
+              )}
+
             </div>
           </FormSection>
 
