@@ -553,7 +553,13 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [sharedWithNames, setSharedWithNames] = useState<string[]>([]);
   const [rejecting, setRejecting] = useState(false);
   const [showRejectDialog, setShowRejectDialog] = useState(false);
+  const [rejectDialogHasStrike, setRejectDialogHasStrike] = useState<boolean | null>(null);
+  const [rejectDialogCheckingStrike, setRejectDialogCheckingStrike] = useState(false);
   const [localStatus, setLocalStatus] = useState(lead.status);
+  // Sync local status when lead prop updates (e.g. parent refetch or navigation)
+  useEffect(() => {
+    setLocalStatus(lead.status);
+  }, [lead.id, lead.status]);
   const [isVerifyActionProcessing, setIsVerifyActionProcessing] = useState(false);
   const [isCoordinatorActionProcessing, setIsCoordinatorActionProcessing] = useState(false);
   const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
@@ -970,16 +976,16 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const canManagerAssign = useMemo(() => (isUserManager &&
     ((user?.id === lead.managerId) ||
      (user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
-    (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later')) ||
-    (isAdmin() && (lead.status === 'verified' || lead.status === 'follow_up' || lead.status === 'later')), [isUserManager, isAdmin, user, lead.managerId, lead.teamId, lead.status]);
+    (localStatus === 'verified' || localStatus === 'follow_up' || localStatus === 'later')) ||
+    (isAdmin() && (localStatus === 'verified' || localStatus === 'follow_up' || localStatus === 'later')), [isUserManager, isAdmin, user, lead.managerId, lead.teamId, localStatus]);
   // Agent can also request assignment to coordinator for their own verified/follow_up/later leads
   const canAgentAssignToCoordinator = useMemo(() =>
     user?.role === 'agent' &&
     user.id === lead.agentId &&
-    ((lead.status === 'verified' && !lead.managerAssigned) ||
-     (lead.status === 'follow_up' && !lead.managerAssigned) ||
-     (lead.status === 'later' && !lead.managerAssigned))
-  , [user, lead.agentId, lead.status, lead.managerAssigned]);
+    ((localStatus === 'verified' && !lead.managerAssigned) ||
+     (localStatus === 'follow_up' && !lead.managerAssigned) ||
+     (localStatus === 'later' && !lead.managerAssigned))
+  , [user, lead.agentId, localStatus, lead.managerAssigned]);
 
   const getServiceProvider = getServiceProviderHelper;
 
@@ -1271,11 +1277,14 @@ Language: ${lead.language || 'N/A'}`;
 
       await updateDoc(leadRef, updateData);
 
-      // Fetch the updated lead to ensure we have the latest status for notifications
+      // Fetch the updated lead to ensure we have the latest status for notifications and number reservation
       const updatedLeadDoc = await getDoc(leadRef);
       const updatedLead = updatedLeadDoc.exists() 
         ? { id: updatedLeadDoc.id, ...updatedLeadDoc.data() } as Lead
         : { ...lead, status: leadStatus } as Lead; // Use new status if fetch fails
+
+      // Persisted agent (owner) - use for non_verified reservation and notifications so we never use verifier when lead was edited
+      const persistedAgentId = updatedLead?.agentId ?? lead.agentId;
       
       // Log lead verification action (non-blocking - fire and forget)
       const action: 'verified' | 'rejected' | 'non_verified' = 
@@ -1387,9 +1396,8 @@ Language: ${lead.language || 'N/A'}`;
               );
           }
           } else if (leadStatus === 'non_verified') {
-            // For non_verified leads, reserve the number for the original agent
-            // Get the agentId from the lead
-            const agentId = lead.agentId;
+            // For non_verified leads, reserve the number for the original agent (use persisted value, not in-memory lead)
+            const agentId = persistedAgentId;
             const now = new Date();
             const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
             
@@ -1550,21 +1558,18 @@ Language: ${lead.language || 'N/A'}`;
         await Promise.all(updatePromises);
       }
 
-      // Use lead.agentId directly - it's always preserved and never modified when verifiers edit leads
-      const agentId = lead.agentId;
-
       // Prepare all non-blocking operations to run in parallel after critical operations
       const nonBlockingOperations: Promise<void>[] = [];
 
-      // Send notification to the agent (non-blocking)
-      if (agentId) {
+      // Send notification to the agent who created/owns the lead (use persistedAgentId; non-blocking)
+      if (persistedAgentId) {
         const statusMessage = leadStatus === 'verified' ? 'Lead Verified' : 
                             leadStatus === 'rejected' ? 'Lead Rejected' : 
                             'Lead Marked as Non Verified';
         
         nonBlockingOperations.push(
           addDoc(collection(db, 'notifications'), {
-          userId: agentId,
+          userId: persistedAgentId,
           type: 'lead_verification',
           title: statusMessage,
           message: `${user?.name} has ${leadStatus === 'verified' ? 'verified' : 
@@ -1578,7 +1583,7 @@ Language: ${lead.language || 'N/A'}`;
           }).then(async () => {
             // Send WhatsApp notification to agent if they have a phone number (non-blocking)
         try {
-          const agentRef = doc(db, 'users', agentId);
+          const agentRef = doc(db, 'users', persistedAgentId);
           const agentDoc = await getDoc(agentRef);
           if (agentDoc.exists()) {
             const agentData = agentDoc.data();
@@ -3276,6 +3281,36 @@ Language: ${lead.language || 'N/A'}`;
     }
   };
 
+  // Open reject dialog after checking if any number has a strike (so we can show correct message)
+  const openRejectDialog = useCallback(async () => {
+    setRejectDialogCheckingStrike(true);
+    let hasStrike = false;
+    try {
+      const plansWithNumbers = (lead.plans || []).filter(
+        (p: any) => p.numberId && !String(p.numberId).startsWith('virtual-')
+      );
+      if (plansWithNumbers.length > 0) {
+        const results = await Promise.all(
+          plansWithNumbers.map(async (plan: any) => {
+            const numberRef = doc(db, 'numberPool', plan.numberId);
+            const numberDoc = await getDoc(numberRef);
+            if (!numberDoc.exists()) return false;
+            const data = numberDoc.data();
+            const claims = data?.claims || [];
+            return claims.some((c: any) => c.status === 'pending' && c.userId !== user?.id);
+          })
+        );
+        hasStrike = results.some(Boolean);
+      }
+    } catch (_) {
+      // If check fails, show default "reserved for you"
+    } finally {
+      setRejectDialogHasStrike(hasStrike);
+      setRejectDialogCheckingStrike(false);
+      setShowRejectDialog(true);
+    }
+  }, [lead.plans, user?.id]);
+
   // Handler for agent self-reject
   const handleAgentReject = async () => {
     if (!user || user.id !== lead.agentId) return;
@@ -3421,6 +3456,7 @@ Language: ${lead.language || 'N/A'}`;
       }
       setLocalStatus('rejected');
       setShowRejectDialog(false);
+      setRejectDialogHasStrike(null);
     } catch (error) {
       console.error('Error rejecting lead:', error);
       toast.error('Failed to reject lead.');
@@ -3429,8 +3465,8 @@ Language: ${lead.language || 'N/A'}`;
     }
   };
 
-  const watermarkText = getStatusWatermarkText(lead.status);
-  const watermarkGradient = getStatusGradient(lead.status);
+  const watermarkText = getStatusWatermarkText(localStatus);
+  const watermarkGradient = getStatusGradient(localStatus);
 
   return (
     <div className="relative min-h-screen">
@@ -3460,9 +3496,9 @@ Language: ${lead.language || 'N/A'}`;
           )}
           {isUserCoordinator && (
             <>
-              {(lead.status === 'verified') || 
-               (lead.status === 'follow_up' && lead.managerAssigned === true) ||
-               (lead.status === 'assigned_to_cord') ? (
+              {(localStatus === 'verified') ||
+               (localStatus === 'follow_up' && lead.managerAssigned === true) ||
+               (localStatus === 'assigned_to_cord') ? (
                 <>
                   <button
                     onClick={() => {
@@ -3843,11 +3879,11 @@ Language: ${lead.language || 'N/A'}`;
             (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
             !['pending_verification', 'activated', 'activated_non_verified', 'rejected', 'non_verified'].includes(localStatus) && (
             <button
-              onClick={() => setShowRejectDialog(true)}
-              disabled={rejecting}
+              onClick={openRejectDialog}
+              disabled={rejecting || rejectDialogCheckingStrike}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
             >
-              {rejecting ? 'Rejecting...' : 'Reject My Lead'}
+              {rejectDialogCheckingStrike ? 'Checking...' : rejecting ? 'Rejecting...' : 'Reject My Lead'}
             </button>
           )}
           {user?.id === lead.agentId && localStatus === 'rejected' && (
@@ -6016,13 +6052,23 @@ Language: ${lead.language || 'N/A'}`;
       </div>
 
       {/* Confirmation Dialog */}
-      <Dialog open={showRejectDialog} onClose={() => setShowRejectDialog(false)} className="fixed z-50 inset-0 overflow-y-auto">
+      <Dialog
+        open={showRejectDialog}
+        onClose={() => {
+          setShowRejectDialog(false);
+          setRejectDialogHasStrike(null);
+        }}
+        className="fixed z-50 inset-0 overflow-y-auto"
+      >
         <div className="flex items-center justify-center min-h-screen px-4">
           <Dialog.Overlay className="fixed inset-0 bg-black opacity-30" />
           <div className="relative bg-white rounded-lg max-w-md w-full mx-auto p-4 sm:p-6 z-10 shadow-xl">
             <Dialog.Title className="text-lg font-semibold text-gray-900 mb-2">Reject Lead?</Dialog.Title>
             <Dialog.Description className="text-gray-600 mb-4">
-              Are you sure you want to reject this lead? This action cannot be undone. The number(s) will be reserved for you.
+              Are you sure you want to reject this lead? This action cannot be undone.{' '}
+              {rejectDialogHasStrike === true
+                ? 'The number(s) will be reserved for the first striker.'
+                : 'The number(s) will be reserved for you.'}
             </Dialog.Description>
             <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 sm:space-x-3">
               <button
