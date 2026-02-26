@@ -52,6 +52,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc, setDoc } from 'firebase/firestore';
 import { db, createStrikeAlertBroadcastFunction } from '../../lib/firebase';
 // IndexedDB helpers intentionally not used for search to keep direct Firestore fetches fast
@@ -299,6 +300,14 @@ const BUTTON_DEBOUNCE_DELAY = 300; // 300ms debounce
  * Timeout for claim operations to prevent hanging states
  */
 const CLAIM_OPERATION_TIMEOUT = 10000; // 10 seconds timeout for claim operations
+
+/**
+ * Maximum number of documents fetched per Firestore search query.
+ * Used both as the query limit and as the threshold for deciding whether
+ * in-memory filtering on a cached result set is safe (i.e. the cache is
+ * complete only when results < this limit).
+ */
+const SEARCH_LIMIT = 2000;
 
 /**
  * Status styling configuration for number status badges
@@ -557,7 +566,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
   const [strikeBlockedSameTeam, setStrikeBlockedSameTeam] = useState(false);
   const [sameTeamBlockAgentName, setSameTeamBlockAgentName] = useState<string | null>(null);
-  const [sameTeamBlockMode, setSameTeamBlockMode] = useState<'strikeLead' | 'reservedOwner' | 'teamClaim' | null>(null);
+  const [sameTeamBlockMode, setSameTeamBlockMode] = useState<'strikeLead' | 'reservedOwner' | 'teamClaim' | 'teamStrike' | null>(null);
   const [openingStrikeModalId, setOpeningStrikeModalId] = useState<string | null>(null);
   const [showStatusCheckDialog, setShowStatusCheckDialog] = useState(false);
   const [numberForStatusCheck, setNumberForStatusCheck] = useState<NumberPoolType | null>(null);
@@ -1259,17 +1268,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return;
     }
 
-    // Check if we have cached results and only pageSize/page changed (not search term or filters)
-    // This allows fast re-pagination without re-searching
-    const hasCachedResults = fullSearchResultsRef.current.length > 0;
+    // "hasCachedResults" means we have already executed a Firestore query for this exact term
+    // (the result may legitimately be an empty array for a term that matches nothing).
+    // Using length > 0 was wrong: it caused repeated Firestore reads for 0-result searches.
     const lastSearchTerm = (fullSearchResultsRef.current as any).lastSearchTerm;
+    const hasCachedResults = lastSearchTerm !== undefined && lastSearchTerm === debouncedSearchTerm.trim();
     const lastCategory = (fullSearchResultsRef.current as any).lastCategory;
     const lastGroup = (fullSearchResultsRef.current as any).lastGroup;
     const lastInitials = (fullSearchResultsRef.current as any).lastInitials;
     const lastEndsWithToggle = (fullSearchResultsRef.current as any).lastEndsWithToggle;
     
     // Determine if search term or any filter changed
-    const searchTermChanged = debouncedSearchTerm !== lastSearchTerm;
+    // Always compare trimmed values — lastSearchTerm is stored trimmed and debouncedSearchTerm
+    // may contain leading/trailing whitespace that should be ignored.
+    const searchTermChanged = debouncedSearchTerm.trim() !== lastSearchTerm;
     const categoryChanged = selectedCategory !== lastCategory;
     const groupChanged = selectedGroup !== lastGroup;
     const initialsChanged = selectedInitials !== lastInitials;
@@ -1487,9 +1499,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         activatedQuery = query(activatedNumbersRef, ...constraints);
       }
 
-      // Build the final query
-      activatedQuery = query(activatedNumbersRef, ...constraints);
-
       const snapshot = await getDocs(activatedQuery);
       const activatedNumbers = snapshot.docs.map(doc => {
         const data = doc.data() as any;
@@ -1514,16 +1523,24 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const termAtStart = debouncedSearchTerm.trim();
     
     const lastSearchTerm = (fullSearchResultsRef.current as any)?.lastSearchTerm;
-    const hasResultsForThisTerm = lastSearchTerm === termAtStart && fullSearchResultsRef.current.length > 0;
+    // True when we have already searched for this exact term (even if Firestore returned 0 docs).
+    // Dropping the `length > 0` guard prevents re-querying Firestore for a term we know returns nothing.
+    const hasResultsForThisTerm = lastSearchTerm === termAtStart && termAtStart !== '';
     
-    // OPTIMIZATION: Try in-memory filtering if we have existing results and new term is more specific
+    // OPTIMIZATION: Try in-memory filtering if we have existing results and the new term is a
+    // refinement (superset) of the previous term.
+    //
+    // CRITICAL: Only use in-memory filtering when the cached result set is COMPLETE — i.e. fewer
+    // documents than SEARCH_LIMIT were returned last time, meaning Firestore gave us everything.
+    // If we hit the limit the cache is a partial subset and narrowing in-memory can falsely show
+    // "0 results" for numbers that exist in Firestore but weren't in the 2000-doc sample.
     if (!loadMore && termAtStart !== '' && fullSearchResultsRef.current.length > 0) {
       const lastSearchTerm = (fullSearchResultsRef.current as any)?.lastSearchTerm;
       const originalUnfilteredResults = (fullSearchResultsRef.current as any)?.originalUnfilteredResults || fullSearchResultsRef.current;
       
-      // Check if new search term contains the previous search term (more specific search)
-      
-      if (lastSearchTerm && termAtStart.includes(lastSearchTerm) && originalUnfilteredResults.length > 0) {
+      const cachedSetIsComplete = originalUnfilteredResults.length < SEARCH_LIMIT;
+
+      if (lastSearchTerm && termAtStart.includes(lastSearchTerm) && originalUnfilteredResults.length > 0 && cachedSetIsComplete) {
         // Parse search terms (handle multi-term searches like "999 0" or "050 14JANSILG1" or "999 silver")
         const searchTerms = termAtStart.split(/\s+/).filter(t => t.length > 0);
         
@@ -1559,24 +1576,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         // Apply visibility filter
         filteredResults = filterByVisibility(filteredResults);
         
-        // Apply category filter in memory (only if we searched 'all' categories)
-        const searchCategory = (selectedCategory && selectedCategory !== 'all') ? selectedCategory : 'all';
-        if (searchCategory === 'all' && selectedCategory && selectedCategory !== 'all') {
+        // Apply all active UI filters in-memory
+        if (selectedCategory && selectedCategory !== 'all') {
           filteredResults = filteredResults.filter((n: NumberPoolType) => n.category === selectedCategory);
         }
-        
-        // Apply group filter
         if (selectedGroup) {
           filteredResults = filteredResults.filter((n: NumberPoolType) => n.group === selectedGroup);
         }
-        
-        // Apply initials filter
         if (selectedInitials) {
           filteredResults = filteredResults.filter((n: NumberPoolType) => (n.number || '').startsWith(selectedInitials));
         }
         
-        // If we got good results from in-memory filtering, use them
-        if (filteredResults.length > 0 || searchTerms.length > 0) {
+        // Only use in-memory results when we actually found something.
+        // If the filter returns 0, fall through to Firestore — the cached set may not contain
+        // all matching documents (e.g. the number just became available, or the cache was stale).
+        if (filteredResults.length > 0) {
           // Mark this search term as being processed
           currentSearchTermRef.current = termAtStart;
           
@@ -1639,8 +1653,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       
       try {
         // Use unified search for consistent results
-      // Fetch a larger first batch to reduce extra roundtrips while keeping pagination client-side
-      const searchLimit = 2000;
       
       // If category filter is set, search within that category for maximum results
       // Otherwise, search all categories
@@ -1650,7 +1662,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const endsWithFlag = endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim());
         const mainSearchPromise = unifiedSearch.search(debouncedSearchTerm, {
           category: searchCategory,
-          limit: searchLimit,
+          limit: SEARCH_LIMIT,
         startAfter: loadMore ? searchLastDoc : null,
           includeStale: false,
           endsWith: endsWithFlag
@@ -1839,21 +1851,6 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         }
       }
   }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers]);
-
-  // DISABLED: Real-time listeners for search results
-  // Search already fetches fresh data, no need for additional real-time listeners
-  // This prevents "400 Bad Request" errors from too many concurrent Firebase connections
-  useEffect(() => {
-    // Cleanup any existing search listeners
-    const unsubs = searchVisibleUnsubsRef.current;
-      for (const fn of unsubs.values()) fn();
-      unsubs.clear();
-    
-    return () => {
-      for (const fn of unsubs.values()) fn();
-      unsubs.clear();
-    };
-  }, []); // Run once on mount/unmount only
 
   // Load stats for total pages (OPTIMIZED) - Mobile performance
   useEffect(() => {
@@ -2294,6 +2291,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   useEffect(() => {
     setCurrentPage(1);
   }, [searchTerm, selectedCategory, selectedGroup, selectedInitials, pageSize]);
+
+  // True while the user has typed something but the 350 ms debounce hasn't fired yet.
+  // Lets us show the spinner immediately on each keystroke instead of waiting for the
+  // debounce + async Firestore round-trip before any loading indicator appears.
+  const isDebouncing = searchTerm.trim() !== '' && searchTerm.trim() !== debouncedSearchTerm.trim();
 
   // Enforce allowed group for agents (pre-applied filter)
   useEffect(() => {
@@ -2941,20 +2943,27 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const full = fullSearchResultsRef.current;
     if (!full || full.length === 0) return;
 
-    // Preserve all metadata from cached results
+    // Preserve ALL metadata from cached results, including originalUnfilteredResults.
+    // Without copying originalUnfilteredResults, a subsequent filter change would fall back
+    // to the already-filtered sorted array instead of the full pre-filter result set.
     const lastSearchTerm = (full as any).lastSearchTerm;
     const lastCategory = (full as any).lastCategory;
     const lastGroup = (full as any).lastGroup;
     const lastInitials = (full as any).lastInitials;
     const lastEndsWithToggle = (full as any).lastEndsWithToggle;
+    const originalUnfilteredResults = (full as any).originalUnfilteredResults;
 
     const sortedFull = computeSorted(full);
-    // Preserve all metadata
     (sortedFull as any).lastSearchTerm = lastSearchTerm;
     (sortedFull as any).lastCategory = lastCategory;
     (sortedFull as any).lastGroup = lastGroup;
     (sortedFull as any).lastInitials = lastInitials;
     (sortedFull as any).lastEndsWithToggle = lastEndsWithToggle;
+    // Re-sort the originalUnfilteredResults too, so any future in-memory filter
+    // starts from the correctly sorted full set.
+    if (originalUnfilteredResults) {
+      (sortedFull as any).originalUnfilteredResults = computeSorted(originalUnfilteredResults);
+    }
     fullSearchResultsRef.current = sortedFull as any;
 
     const startIndex = (searchCurrentPage - 1) * pageSize;
@@ -3939,6 +3948,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         }
       }
 
+      // One-strike-per-team rule (pre-dialog check):
+      // If any pending claim in the strikes array already belongs to a same-team agent, block.
+      if (isStrikeFlow && user.role === 'agent' && user.teamId) {
+        const existingClaims: any[] = latestData.claims || [];
+        const pendingClaims = existingClaims.filter((c: any) => c.status === 'pending' && c.userId !== user.id);
+        for (const claim of pendingClaims) {
+          try {
+            const claimantDoc = await getDoc(doc(db, 'users', claim.userId));
+            if (claimantDoc.exists()) {
+              const claimantData = claimantDoc.data();
+              if (claimantData?.teamId && claimantData.teamId === user.teamId) {
+                setStrikeBlockedSameTeam(true);
+                setSameTeamBlockAgentName(claimantData.name || null);
+                setSameTeamBlockMode('teamStrike');
+                break;
+              }
+            }
+          } catch {
+            // ignore; if we can't verify, allow
+          }
+        }
+      }
+
       if (isClaimFlow && user.role === 'agent' && (latestNumber as any).reservedBy && user.teamId) {
         try {
           const ownerUserDoc = await getDoc(doc(db, 'users', (latestNumber as any).reservedBy));
@@ -4025,6 +4057,27 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             }
           }
           
+          // One-strike-per-team rule (write guard):
+          // If another agent from the same team already has a pending strike, block.
+          if (user?.role === 'agent' && user.teamId) {
+            const pendingStrikes = claims.filter((c: any) => c.status === 'pending' && c.userId !== user.id);
+            for (const strike of pendingStrikes) {
+              try {
+                const strikerDoc = await getDoc(doc(db, 'users', strike.userId));
+                if (strikerDoc.exists()) {
+                  const strikerData = strikerDoc.data();
+                  if (strikerData?.teamId && strikerData.teamId === user.teamId) {
+                    const agentName = strikerData.name || 'someone from your team';
+                    throw new Error(`Another agent from your team (${agentName}) has already struck this number.`);
+                  }
+                }
+              } catch (err: any) {
+                if (err?.message?.includes('has already struck this number')) throw err;
+                // ignore other errors (e.g. permission denied)
+              }
+            }
+          }
+
           // Check if user already has a pending claim
           const existingClaim = claims.find((claim: any) => claim.userId === user.id && claim.status === 'pending');
           if (existingClaim) {
@@ -5131,7 +5184,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 }}
                 className="pl-10 sm:pl-12 pr-28 sm:pr-32 py-2.5 sm:py-3.5 w-full rounded-lg border border-gray-200 bg-white shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all hover:border-indigo-200 text-sm sm:text-base"
               />
-              {isSearching && (
+              {(isSearching || isDebouncing) && (
                 <div className="absolute inset-y-0 right-20 sm:right-24 pr-3 sm:pr-4 flex items-center">
                   <Loader2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 animate-spin text-gray-400" />
                 </div>
@@ -5206,11 +5259,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               >
                 <RefreshCw className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${loading && !debouncedSearchTerm.trim() ? 'animate-spin' : ''}`} />
               </button>
-              {debouncedSearchTerm.trim() && (
+              {(debouncedSearchTerm.trim() || isDebouncing) && (
                 <div className="mt-1 text-xs text-gray-500 pl-10 sm:pl-12">
-                  {isSearching ? 'Searching…' : (
+                  {(isSearching || isDebouncing) ? 'Searching…' : (
                     <>
-                      Found {fullSearchResultsRef.current.length} result{fullSearchResultsRef.current.length === 1 ? '' : 's'}
+                      Found {searchTotalItems} result{searchTotalItems === 1 ? '' : 's'}
                       {endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim()) && (
                         <span className="ml-2 text-indigo-600 font-medium">(Ends with: {debouncedSearchTerm.trim()})</span>
                       )}
@@ -6180,7 +6233,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <div className="flex items-center justify-center h-64">
             <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
           </div>
-        ) : isSearching && debouncedSearchTerm.trim() ? (
+        ) : (isSearching || isDebouncing) && (debouncedSearchTerm.trim() || searchTerm.trim()) ? (
           <div className="flex items-center justify-center h-64 text-gray-500">
             <div className="text-center">
               <Loader2 className="h-8 w-8 animate-spin text-blue-500 mx-auto mb-4" />
@@ -7189,8 +7242,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           </div>
         )}
 
-        {/* Claim Dialog */}
-        {showClaimDialog && numberToClaim && (
+        {/* Claim Dialog — rendered via portal so real-time list re-renders can't cause removeChild DOM errors */}
+        {(showClaimDialog && numberToClaim) ? createPortal(
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-xl transform transition-all">
               <div className="flex items-center justify-center mb-6">
@@ -7219,15 +7272,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   <>
                     {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
                       <span className="text-amber-700 font-medium">
-                        This lead belongs to your team
-                        {sameTeamBlockAgentName && (
+                        {sameTeamBlockMode === 'teamStrike' ? (
                           <>
-                            {' '}(
-                            <span className="text-red-600 font-semibold">{sameTeamBlockAgentName}</span>
-                            )
+                            This number is already struck by{' '}
+                            {sameTeamBlockAgentName ? (
+                              <span className="text-red-600 font-semibold">{sameTeamBlockAgentName}</span>
+                            ) : (
+                              'someone from your team'
+                            )}
+                            {' '}from your team. You cannot strike this number.
+                          </>
+                        ) : (
+                          <>
+                            This lead belongs to your team
+                            {sameTeamBlockAgentName && (
+                              <>
+                                {' '}(
+                                <span className="text-red-600 font-semibold">{sameTeamBlockAgentName}</span>
+                                )
+                              </>
+                            )}
+                            . You cannot strike this number.
                           </>
                         )}
-                        . You cannot strike this number.
                       </span>
                     ) : (
                       <span className="text-amber-700 font-medium">
@@ -7321,7 +7388,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               </div>
             </div>
           </div>
-        )}
+        , document.body) : null}
 
         {/* Status Check Confirmation Dialog */}
         {showStatusCheckDialog && numberForStatusCheck && (
