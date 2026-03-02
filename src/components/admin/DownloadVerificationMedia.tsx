@@ -3,7 +3,7 @@
  * Streams ZIP directly from Cloud Function (no storage, no public URLs)
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { auth, firebaseApp } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
 import { format } from 'date-fns';
@@ -20,6 +20,11 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
   const [selectedDate, setSelectedDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) setError(null);
+  }, [isOpen]);
 
   const handleDownload = async () => {
     if (!selectedDate) {
@@ -35,6 +40,7 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
 
     setDownloading(true);
     setProgress('Preparing download...');
+    setError(null);
 
     try {
       const token = await user.getIdToken();
@@ -52,10 +58,13 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
         const errData = await res.json().catch(() => ({}));
         const msg = errData.error || res.statusText || 'Download failed';
         if (res.status === 403) {
+          setError('Admin access required');
           toast.error('Admin access required');
         } else if (res.status === 404) {
-          toast.error('No verification media found for this date');
+          setError('No recordings found for this date.');
+          toast.error('No recordings found for this date.');
         } else {
+          setError(msg);
           toast.error(msg);
         }
         return;
@@ -71,12 +80,15 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
       document.body.removeChild(a);
       URL.revokeObjectURL(downloadUrl);
 
+      setError(null);
       toast.success(`Downloaded verification media for ${format(new Date(selectedDate), 'dd MMM yyyy')}`);
       onClose();
     } catch (error: unknown) {
       console.error('Download verification media failed:', error);
       const err = error as { message?: string };
-      toast.error(err.message || 'Failed to download verification media');
+      const msg = err.message || 'Failed to download verification media';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setDownloading(false);
       setProgress('');
@@ -106,6 +118,7 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
 
           <p className="text-sm text-gray-500 mb-4">
             Download all verification media from leads created on the selected date as a ZIP file.
+           
           </p>
 
           <div className="space-y-4">
@@ -116,7 +129,10 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
                 <input
                   type="date"
                   value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedDate(e.target.value);
+                    setError(null);
+                  }}
                   disabled={downloading}
                   className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100"
                 />
@@ -127,6 +143,11 @@ export function DownloadVerificationMedia({ isOpen, onClose }: DownloadVerificat
               <div className="flex items-center gap-2 text-sm text-indigo-600">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>{progress}</span>
+              </div>
+            )}
+            {error && (
+              <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
+                {error}
               </div>
             )}
           </div>
