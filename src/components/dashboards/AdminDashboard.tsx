@@ -59,6 +59,7 @@ import { BulkDeletedNumberSearch } from '../admin/BulkDeletedNumberSearch';
 import { BulkActivateNumbers } from '../admin/BulkActivateNumbers';
 import { BulkRestoreNumbers } from '../admin/BulkRestoreNumbers';
 import { CustomerLinkTracking } from '../admin/CustomerLinkTracking';
+import { DownloadVerificationMedia } from '../admin/DownloadVerificationMedia';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
 import { 
@@ -107,7 +108,8 @@ import {
   Archive,
   Sparkles,
   RefreshCw as RefreshCwIcon,
-  RotateCcw
+  RotateCcw,
+  FileImage
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { Line, Bar } from 'react-chartjs-2';
@@ -287,6 +289,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       'Bulk DNC Import': 'bg-gradient-to-br from-blue-400/20 via-cyan-400/20 to-sky-400/20 backdrop-blur-sm border-2 border-blue-200/50',
       'Trusted Devices': 'bg-gradient-to-br from-slate-400/20 via-gray-400/20 to-zinc-400/20 backdrop-blur-sm border-2 border-slate-200/50',
       'WhatsApp Settings': 'bg-gradient-to-br from-lime-400/20 via-green-400/20 to-emerald-400/20 backdrop-blur-sm border-2 border-lime-200/50',
+      'Download Verification Media': 'bg-gradient-to-br from-violet-400/20 via-purple-400/20 to-fuchsia-400/20 backdrop-blur-sm border-2 border-violet-200/50',
     };
     return glassmorph[cardName as keyof typeof glassmorph] || '';
   };
@@ -348,6 +351,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   const [bulkActivateModalOpen, setBulkActivateModalOpen] = useState(false);
   const [bulkRestoreModalOpen, setBulkRestoreModalOpen] = useState(false);
   const [customerLinkTrackingModalOpen, setCustomerLinkTrackingModalOpen] = useState(false);
+  const [downloadVerificationMediaModalOpen, setDownloadVerificationMediaModalOpen] = useState(false);
   // Number lookup states
   const [numberLookupOpen, setNumberLookupOpen] = useState(false);
   const [numberLookupInput, setNumberLookupInput] = useState('');
@@ -1856,6 +1860,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       color: 'bg-gradient-to-br from-amber-500 to-amber-600',
       textColor: 'text-amber-600',
     },
+    {
+      name: 'Download Verification Media',
+      description: 'Download media by date',
+      value: 'Download',
+      href: '#download-verification-media',
+      icon: FileImage,
+      color: 'bg-gradient-to-br from-violet-500 to-violet-600',
+      textColor: 'text-violet-600',
+    },
   ], [metrics.totalLeads, metrics.pendingVerification, metrics.pendingAssignment, metrics.verified, metrics.activated, metrics.rejected, metrics.assigned, openRequestsLoading, openRequests.length]);
 
   // Memoize sorted team metrics to prevent unnecessary re-sorting
@@ -2543,6 +2556,33 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             <button
               key={stat.name}
               onClick={() => setPosterModalOpen(true)}
+              className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
+              type="button"
+            >
+              <div className="p-2 sm:p-4 md:p-6">
+                <div className="flex items-center justify-between mb-1 sm:mb-2 md:mb-4">
+                  <div className={`p-1.5 sm:p-2 md:p-3 rounded-lg sm:rounded-xl ${stat.color} group-hover:scale-110 transition-transform duration-300`}>
+                    <stat.icon className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
+                  </div>
+                  <div className="hidden sm:block text-xs sm:text-sm font-medium text-gray-500 group-hover:text-gray-700 transition-colors duration-300">
+                    {stat.description}
+                  </div>
+                </div>
+                <div className="space-y-1 sm:space-y-2">
+                  <h3 className="text-xs sm:text-sm md:text-lg font-semibold text-gray-900 group-hover:text-gray-700 transition-colors duration-300 leading-tight">
+                    {stat.name}
+                  </h3>
+                  <div className="flex items-baseline justify-between">
+                    <p className={`text-lg sm:text-xl md:text-3xl font-bold ${stat.textColor}`}>{stat.value}</p>
+                  </div>
+                </div>
+              </div>
+              <div className={`absolute bottom-0 left-0 right-0 h-1 ${stat.color} transform scale-x-0 group-hover:scale-x-100 transition-transform duration-300`} />
+            </button>
+          ) : stat.name === 'Download Verification Media' ? (
+            <button
+              key={stat.name}
+              onClick={() => setDownloadVerificationMediaModalOpen(true)}
               className={`overflow-hidden shadow-lg rounded-lg sm:rounded-xl md:rounded-2xl hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 cursor-pointer relative group w-full text-left ${getGlassmorphismClass(stat.name)}`}
               type="button"
             >
@@ -3733,6 +3773,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       <CustomerLinkTracking 
         isOpen={customerLinkTrackingModalOpen} 
         onClose={() => setCustomerLinkTrackingModalOpen(false)} 
+      />
+
+      {/* Download Verification Media Modal */}
+      <DownloadVerificationMedia 
+        isOpen={downloadVerificationMediaModalOpen} 
+        onClose={() => setDownloadVerificationMediaModalOpen(false)} 
       />
 
       {/* Trusted Devices Management Modal */}
