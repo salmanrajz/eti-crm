@@ -374,11 +374,31 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         const today = new Date();
         const todayStr = today.toISOString().split('T')[0];
         
-        // Fetch passcodes and set defaults for each plan
+        // Fetch all passcodes in PARALLEL with getPlans() — previously this was a sequential
+        // for-loop (one await per plan) followed by a second await for getPlans(), meaning
+        // N+1 serial round-trips. Now all fire at once.
+        const [passcodeResults, allPlansData] = await Promise.all([
+          Promise.all(
+            plans.map(async (plan) => {
+              if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
+                try {
+                  const numberDoc = await getDoc(doc(db, 'numberPool', plan.numberId));
+                  return numberDoc.exists() ? (numberDoc.data()?.passcode || '') : '';
+                } catch {
+                  return '';
+                }
+              }
+              return '';
+            })
+          ),
+          getPlans(),
+        ]);
+
+        // Build all arrays from plan data (sync, no awaits needed)
         for (const plan of plans) {
           categories.push(plan.category || '');
           groups.push(plan.group || '');
-          activationDatesArray.push(todayStr); // Pre-fill with today's date
+          activationDatesArray.push(todayStr);
           srNumbersArray.push('');
           serviceOrderNumbersArray.push('');
           selectedGroupsArray.push(plan.group || '');
@@ -388,24 +408,10 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
           plansArray.push(plan.plan || '');
           originalNumbersArray.push(plan.number || '');
           showSelectorsArray.push(false);
-          
-          if (plan.numberId && !plan.numberId.startsWith('virtual-')) {
-            try {
-              const numberRef = doc(db, 'numberPool', plan.numberId);
-              const numberDoc = await getDoc(numberRef);
-              if (numberDoc.exists()) {
-                const numberData = numberDoc.data();
-                passcodes.push(numberData?.passcode || '');
-              } else {
-                passcodes.push('');
-              }
-            } catch {
-              passcodes.push('');
-            }
-          } else {
-            passcodes.push('');
-          }
+          passcodes.push(''); // placeholder; overwritten below
         }
+        // Fill passcodes from parallel results
+        passcodeResults.forEach((pc, i) => { passcodes[i] = pc; });
         
         setEditablePasscodes(passcodes);
         setEditableCategories(categories);
@@ -420,6 +426,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
         setOriginalNumbers(originalNumbersArray);
         setShowNumberSelectors(showSelectorsArray);
         setRemovedPlanIndices(new Set());
+        setAllPlans(allPlansData);
         
         // Also set first plan values for backward compatibility
         const firstPlan = plans[0];
@@ -432,12 +439,8 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
           setOriginalNumber(firstPlan.number || '');
           setOriginalPlan(firstPlan.plan || '');
           setEditablePasscode(passcodes[0] || '');
-          setActivationDate(todayStr); // Pre-fill with today's date for backward compatibility
+          setActivationDate(todayStr);
         }
-        
-        // Load all plans for the dropdown
-        const allPlansData = await getPlans();
-        setAllPlans(allPlansData);
       } catch (_) {
         // Reset on error
         setEditablePasscodes([]);
@@ -566,97 +569,55 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [whatsAppLogs, setWhatsAppLogs] = useState<any[]>([]);
   const whatsappLogsUnsubRef = useRef<null | (() => void)>(null);
   const [sendingVerification, setSendingVerification] = useState(false);
-  // Flow state tracking
-  const [flowState, setFlowState] = useState<'welcome' | 'terms' | 'delivery' | 'name' | 'address' | 'nationality' | 'complete'>('welcome');
-  const [deliveryData, setDeliveryData] = useState({ name: '', address: '', nationality: '' });
+  // Flow state and delivery data — derived directly from whatsAppLogs via useMemo.
+  // Previously these were useState + useEffect, meaning every 3-second WhatsApp poll fired
+  // setState → extra re-render. Now they update in the same render that updates whatsAppLogs.
+  type FlowStateType = 'welcome' | 'terms' | 'delivery' | 'name' | 'address' | 'nationality' | 'complete';
+  const { flowState, deliveryData } = useMemo(() => {
+    const empty = { flowState: 'welcome' as FlowStateType, deliveryData: { name: '', address: '', nationality: '' } };
+    if (whatsAppLogs.length === 0) return empty;
 
-  // Track flow progress based on customer responses
-  useEffect(() => {
-    if (whatsAppLogs.length === 0) {
-      setFlowState('welcome');
-      return;
-    }
-
-    // Check for welcome message (outbound with template)
-    const hasWelcomeMessage = whatsAppLogs.some(log => 
-      log.direction === 'outbound' && 
+    const hasWelcomeMessage = whatsAppLogs.some(log =>
+      log.direction === 'outbound' &&
       (log.templateName || log.messageText?.includes('Welcome to Express Dial'))
     );
+    if (!hasWelcomeMessage) return empty;
 
-    if (!hasWelcomeMessage) {
-      setFlowState('welcome');
-      return;
-    }
-
-    // Check customer responses in chronological order
-    const sortedLogs = [...whatsAppLogs].sort((a, b) => 
+    const sortedLogs = [...whatsAppLogs].sort((a, b) =>
       new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
     );
 
-    let currentState: typeof flowState = 'welcome';
+    let currentState: FlowStateType = 'welcome';
     const responses: { name?: string; address?: string; nationality?: string } = {};
 
     for (const log of sortedLogs) {
       if (log.direction !== 'inbound') continue;
-
       const text = (log.messageText || '').toLowerCase().trim();
-      // Get messageType from formatted message or from payload (API returns 'type' field)
       const messageType = log.messageType || log.payload?.type || log.type || 'text';
 
-      // Check for "Continue" button click (after welcome) - button type or exact text match
       if ((messageType === 'button' && text === 'continue') || (text === 'continue' && currentState === 'welcome')) {
         currentState = 'terms';
-      }
-      // Check for "Agree & Continue" or "Continue & Agree" button click
-      else if (messageType === 'button' && (text.includes('agree') && text.includes('continue'))) {
+      } else if (messageType === 'button' && text.includes('agree') && text.includes('continue')) {
         currentState = 'delivery';
-      }
-      else if ((text.includes('agree') && text.includes('continue')) || text === 'continue & agree') {
+      } else if ((text.includes('agree') && text.includes('continue')) || text === 'continue & agree') {
         currentState = 'delivery';
-      }
-      // Check for "Talk to Live Agent" - skip this button option
-      else if (text.includes('talk to live agent') || (messageType === 'button' && text.includes('talk'))) {
+      } else if (text.includes('talk to live agent') || (messageType === 'button' && text.includes('talk'))) {
         continue;
-      }
-      // Check if it's a delivery detail response (name, address, nationality)
-      // These come after "Agree & Continue" button click
-      else if (currentState === 'delivery' || currentState === 'address' || currentState === 'nationality') {
-        // Skip button clicks, very short responses, and common button texts
-        const isButtonClick = messageType === 'button' || 
-                             text === 'continue' || 
-                             text.includes('agree') || 
-                             text === 'no' || 
-                             text === 'yes' || 
-                             text.includes('talk to live agent') || 
-                             text.length <= 1 ||
-                             text === 'tab'; // Skip "Tab" as it's likely a keyboard input, not actual response
-        
+      } else if (currentState === 'delivery' || currentState === 'address' || currentState === 'nationality') {
+        const isButtonClick = messageType === 'button' || text === 'continue' || text.includes('agree') ||
+          text === 'no' || text === 'yes' || text.includes('talk to live agent') || text.length <= 1 || text === 'tab';
         if (!isButtonClick) {
-          // First non-button response after delivery state = name
-          if (!responses.name) {
-            responses.name = log.messageText || text;
-            currentState = 'address';
-          } 
-          // Second non-button response = address
-          else if (!responses.address) {
-            responses.address = log.messageText || text;
-            currentState = 'nationality';
-          } 
-          // Third non-button response = nationality
-          else if (!responses.nationality) {
-            responses.nationality = log.messageText || text;
-            currentState = 'complete';
-          }
+          if (!responses.name) { responses.name = log.messageText || text; currentState = 'address'; }
+          else if (!responses.address) { responses.address = log.messageText || text; currentState = 'nationality'; }
+          else if (!responses.nationality) { responses.nationality = log.messageText || text; currentState = 'complete'; }
         }
       }
     }
 
-    setDeliveryData(prev => ({
-      name: responses.name || prev.name,
-      address: responses.address || prev.address,
-      nationality: responses.nationality || prev.nationality
-    }));
-    setFlowState(currentState);
+    return {
+      flowState: currentState,
+      deliveryData: { name: responses.name || '', address: responses.address || '', nationality: responses.nationality || '' },
+    };
   }, [whatsAppLogs]);
   const [showVerificationDialog, setShowVerificationDialog] = useState(false);
   const [replyText, setReplyText] = useState('');
@@ -873,46 +834,28 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     }
   };
   const [plans, setPlans] = useState<any[]>([]);
-  const [planDetails, setPlanDetails] = useState<{ amount: string; benefits: string; duration: string } | null>(null);
   const [planPasscodes, setPlanPasscodes] = useState<Record<string, string>>({});
 
   const isUserCoordinator = useMemo(() => isCoordinator() || isAdmin(), [isCoordinator, isAdmin]);
 
   const getCountryName = getCountryNameHelper;
 
-  // Load plan details from Firebase only when the plan name changes
+  // Derive the first plan name once — used as a memo dependency below
   const firstPlanName = lead?.plans?.[0]?.plan ?? null;
-  useEffect(() => {
-    if (!firstPlanName) {
-      setPlanDetails(null);
-      return;
-    }
-    let cancelled = false;
-    async function loadPlanDetails() {
-      try {
-        const plansQuery = query(collection(db, 'plans'), where('name', '==', firstPlanName));
-        const plansSnapshot = await getDocs(plansQuery);
-        if (cancelled) return;
-        if (!plansSnapshot.empty) {
-          const planData = plansSnapshot.docs[0].data();
-          setPlanDetails({
-            amount: planData.amount || 'N/A',
-            benefits: planData.benefits || 'N/A',
-            duration: planData.duration || 'N/A'
-          });
-        } else {
-          setPlanDetails(null);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error('Error loading plan details:', error);
-          setPlanDetails(null);
-        }
-      }
-    }
-    loadPlanDetails();
-    return () => { cancelled = true; };
-  }, [firstPlanName]);
+
+  // Derive plan details from the already-cached `plans` array (populated by getPlans() below).
+  // Previously this was a separate useState + uncached getDocs effect, which fired an extra
+  // Firestore round-trip on every lead open. Now it is zero-cost after the plans cache warms.
+  const planDetails = useMemo(() => {
+    if (!firstPlanName || plans.length === 0) return null;
+    const plan = plans.find((p: any) => p.name === firstPlanName);
+    if (!plan) return null;
+    return {
+      amount: (plan as any).amount || 'N/A',
+      benefits: (plan as any).benefits || 'N/A',
+      duration: (plan as any).duration || 'N/A',
+    };
+  }, [firstPlanName, plans]);
 
   // Load number passcodes for coordinator view – parallel Firestore reads
   useEffect(() => {
@@ -1106,14 +1049,6 @@ Language: ${lead.language || 'N/A'}`;
     }
   }, []);
 
-  useEffect(() => {
-    // Auto scroll to end of page only on page refresh (initial mount)
-    // Use hasScrolledOnMountRef to ensure it only happens once per page load
-    if (!hasScrolledOnMountRef.current && pageEndRef.current) {
-      pageEndRef.current.scrollIntoView({ behavior: 'smooth' });
-      hasScrolledOnMountRef.current = true;
-    }
-  }, []);
 
   useEffect(() => {
     if (lead.verificationMedia) {
@@ -1169,16 +1104,9 @@ Language: ${lead.language || 'N/A'}`;
   }, [lead.sharedWith]);
 
   useEffect(() => {
-    const fetchPlans = async () => {
-      try {
-        const plansData = await getPlans();
-        setPlans(plansData);
-      } catch (error) {
-        console.error('Error fetching plans:', error);
-      }
-    };
-
-    fetchPlans();
+    let cancelled = false;
+    getPlans().then(data => { if (!cancelled) setPlans(data); }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   const getPlanDescription = useCallback((planName: string) => {
@@ -5963,7 +5891,6 @@ Language: ${lead.language || 'N/A'}`;
                             : 'unknown'
                     : media.type;
                   const mediaName = typeof media === 'string' ? `Media ${index + 1}` : media.name;
-                  const azureUrl = typeof media === 'string' ? undefined : (media as any).azureUrl as string | undefined;
 
                   return (
                   <div key={index} className="bg-gray-50 p-3 sm:p-4 rounded-lg">
@@ -5999,10 +5926,7 @@ Language: ${lead.language || 'N/A'}`;
                       <div className="mt-2 text-xs sm:text-sm text-gray-700 space-y-1">
                         <div className="font-medium">{mediaName}</div>
                         <div className="flex flex-wrap gap-2">
-                          <a href={mediaUrl} target="_blank" rel="noreferrer" className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-indigo-700 bg-white hover:bg-indigo-50">Open in Firebase</a>
-                          {azureUrl && (
-                            <a href={azureUrl} target="_blank" rel="noreferrer" className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-emerald-700 bg-white hover:bg-emerald-50">Open in Azure</a>
-                          )}
+                          <a href={mediaUrl} target="_blank" rel="noreferrer" className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-indigo-700 bg-white hover:bg-indigo-50">Open File</a>
                         </div>
                     </div>
           </div>
