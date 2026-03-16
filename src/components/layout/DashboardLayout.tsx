@@ -658,12 +658,14 @@ export function DashboardLayout() {
                     }
                   }}
                 >
-                <button
-                className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors relative z-10"
-              >
-                <Menu className="h-5 w-5" />
-              </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsSidebarOpen(open => !open)}
+                    className="p-2 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors relative z-10"
+                  >
+                    <Menu className="h-5 w-5" />
+                  </button>
+                </div>
               <div className="hidden sm:block">
                 <h1 className="text-xl font-semibold text-gray-900"></h1>
               </div>

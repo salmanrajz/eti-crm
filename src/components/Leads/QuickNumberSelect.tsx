@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { collection, query, where, getDocs, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { NumberPool } from '../../types';
-import { Search, CheckCircle2, Star, Loader2, MousePointerClick } from 'lucide-react';
+import { Search, CheckCircle2, Star, Loader2, MousePointerClick, ChevronDown } from 'lucide-react';
 import { useDebounce } from '../../hooks/useDebounce';
 import { clsx } from 'clsx';
 import { useAuthStore } from '../../store/authStore';
@@ -119,14 +119,14 @@ export function QuickNumberSelect({
     return () => { unsub?.(); };
   }, [loadReservedNumbers]);
 
-  const searchFirebaseByTokens = useCallback(async (tokens: string[], category: string) => {
-    const snap = await getDocs(query(
-      collection(db, 'numberPool'),
-      where('category', '==', category),
+  const searchFirebaseByTokens = useCallback(async (tokens: string[], category?: string) => {
+    const constraints: any[] = [
       where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned', 'reserved']),
       where('numberTokens', 'array-contains-any', tokens),
-      limit(SEARCH_LIMIT)
-    ));
+      limit(SEARCH_LIMIT),
+    ];
+    if (category) constraints.unshift(where('category', '==', category));
+    const snap = await getDocs(query(collection(db, 'numberPool'), ...constraints));
     const results = snap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
     return results.filter(n => {
       const t = (n as any).numberTokens || [];
@@ -134,31 +134,34 @@ export function QuickNumberSelect({
     });
   }, []);
 
-  const searchFirebaseBySingleToken = useCallback(async (token: string, category: string) => {
-    const snap = await getDocs(query(
-      collection(db, 'numberPool'),
-      where('category', '==', category),
+  const searchFirebaseBySingleToken = useCallback(async (token: string, category?: string) => {
+    const constraints: any[] = [
       where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned', 'reserved']),
       where('numberTokens', 'array-contains', token),
-      limit(SEARCH_LIMIT)
-    ));
+      limit(SEARCH_LIMIT),
+    ];
+    if (category) constraints.unshift(where('category', '==', category));
+    const snap = await getDocs(query(collection(db, 'numberPool'), ...constraints));
     return snap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
   }, []);
 
+  // When searching from Reserved tab, search across all categories (cat = undefined)
   const searchNumbers = useCallback(async (term: string) => {
     if (!term || term.length < MIN_SEARCH_LENGTH) {
       setNumbers([]);
       return;
     }
     setLoading(true);
+    const cat = showingReserved ? undefined : selectedCategory;
     try {
       // 1) cache fast search
-      const cached = await searchCachedNumbersFast(term, selectedCategory, SEARCH_LIMIT);
+      const cached = await searchCachedNumbersFast(term, cat || '', SEARCH_LIMIT);
       if (cached?.length) {
         const isNum = /^\d+$/.test(term);
-        const filtered = isNum
+        let filtered = isNum
           ? cached.filter(n => n.number?.toString().includes(term))
           : cached;
+        if (!cat) filtered = filtered; // all categories
         const statusFiltered = filtered.filter(n =>
           ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
         );
@@ -171,40 +174,41 @@ export function QuickNumberSelect({
       // 2) multi-token cache
       const tokens = term.split(/\s+/).filter(Boolean);
       if (tokens.length > 1) {
-        const tokenResults = await searchCachedNumbersByTokens(tokens, selectedCategory, SEARCH_LIMIT);
+        const tokenResults = await searchCachedNumbersByTokens(tokens, cat || '', SEARCH_LIMIT);
         if (tokenResults?.length) {
           const sf = tokenResults.filter(n =>
             ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
           );
           if (sf.length) { await addStatusChecks(filterByVisibility(sf)); return; }
         }
-        const fbResults = await searchFirebaseByTokens(tokens, selectedCategory).catch(() => []);
+        const fbResults = await searchFirebaseByTokens(tokens, cat).catch(() => []);
         if (fbResults.length) { await addStatusChecks(filterByVisibility(fbResults)); return; }
       }
 
       // 3) single token firebase
       if (tokens.length === 1) {
-        const singleResults = await searchFirebaseBySingleToken(tokens[0], selectedCategory).catch(() => []);
+        const singleResults = await searchFirebaseBySingleToken(tokens[0], cat).catch(() => []);
         if (singleResults.length) { await addStatusChecks(filterByVisibility(singleResults)); return; }
       }
 
       // 4) fallback prefix + substring Firestore scan
-      const prefixSnap = await getDocs(query(
-        collection(db, 'numberPool'),
-        where('category', '==', selectedCategory),
+      const prefixConstraints: any[] = [
         where('number', '>=', term),
         where('number', '<=', term + '\uf8ff'),
         where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned', 'reserved']),
         orderBy('number', 'asc'),
-        limit(SEARCH_LIMIT)
-      ));
-      const secondarySnap = await getDocs(query(
-        collection(db, 'numberPool'),
-        where('category', '==', selectedCategory),
+        limit(SEARCH_LIMIT),
+      ];
+      if (cat) prefixConstraints.unshift(where('category', '==', cat));
+      const secondaryConstraints: any[] = [
         where('status', 'in', ['open', 'pending_verification', 'verified', 'assigned', 'reserved']),
         orderBy('number', 'asc'),
-        limit(SECONDARY_SCAN_LIMIT)
-      ));
+        limit(SECONDARY_SCAN_LIMIT),
+      ];
+      if (cat) secondaryConstraints.unshift(where('category', '==', cat));
+
+      const prefixSnap = await getDocs(query(collection(db, 'numberPool'), ...prefixConstraints));
+      const secondarySnap = await getDocs(query(collection(db, 'numberPool'), ...secondaryConstraints));
       const prefix = prefixSnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
       const contains = (secondarySnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[])
         .filter(n => n.number?.toString().includes(term));
@@ -217,7 +221,7 @@ export function QuickNumberSelect({
     } finally {
       setLoading(false);
     }
-  }, [selectedCategory, filterByVisibility, addStatusChecks, searchFirebaseByTokens, searchFirebaseBySingleToken]);
+  }, [showingReserved, selectedCategory, filterByVisibility, addStatusChecks, searchFirebaseByTokens, searchFirebaseBySingleToken]);
 
   useEffect(() => {
     searchNumbers(debouncedSearch);
@@ -231,25 +235,27 @@ export function QuickNumberSelect({
     return isOpen || reservedByMe;
   };
 
-  const displayNumbers = searchTerm.length >= MIN_SEARCH_LENGTH ? numbers : [];
+  const isSearching = searchTerm.length >= MIN_SEARCH_LENGTH;
+  const displayNumbers = isSearching ? numbers : [];
+
+  // Filter reserved numbers by search term when actively searching
+  const filteredReserved = isSearching
+    ? reservedNumbers.filter(n => n.number?.toString().includes(searchTerm.replace(/\D/g, '')))
+    : reservedNumbers;
 
   return (
     <div className="space-y-3">
-      {/* Category pills — grid so all 7 fit at once */}
-      <div className="grid grid-cols-4 gap-1.5">
-        {/* Reserved pill */}
+      {/* ── Desktop: grid pills ── */}
+      <div className="hidden sm:grid grid-cols-4 gap-1.5">
         <button
           type="button"
-          onClick={() => {
-            setShowingReserved(true);
-            setSearchTerm('');
-          }}
+          onClick={() => { setShowingReserved(true); setSearchTerm(''); }}
           className={clsx(
-              'w-full px-2 py-1.5 text-xs font-medium rounded-lg border transition-all flex items-center justify-center gap-1',
-              showingReserved
-                ? 'bg-amber-100 text-amber-800 border-amber-300 shadow-sm'
-                : 'bg-white text-gray-500 border-gray-200 hover:border-amber-300 hover:text-amber-700'
-            )}
+            'w-full px-2 py-1.5 text-xs font-medium rounded-lg border transition-all flex items-center justify-center gap-1',
+            showingReserved
+              ? 'bg-amber-100 text-amber-800 border-amber-300 shadow-sm'
+              : 'bg-white text-gray-500 border-gray-200 hover:border-amber-300 hover:text-amber-700'
+          )}
         >
           <Star className={clsx('h-3 w-3', showingReserved ? 'fill-amber-500 text-amber-500' : 'text-gray-400')} />
           Reserved
@@ -262,17 +268,11 @@ export function QuickNumberSelect({
             </span>
           )}
         </button>
-
-        {/* Regular category pills */}
         {numberCategories.map(cat => (
           <button
             key={cat}
             type="button"
-            onClick={() => {
-              setShowingReserved(false);
-              onCategoryChange(cat);
-              setSearchTerm('');
-            }}
+            onClick={() => { setShowingReserved(false); onCategoryChange(cat); setSearchTerm(''); }}
             className={clsx(
               'w-full px-2 py-1.5 text-xs font-medium rounded-lg border transition-all text-center',
               !showingReserved && selectedCategory === cat
@@ -285,8 +285,120 @@ export function QuickNumberSelect({
         ))}
       </div>
 
-      {/* Reserved tab — instant, no search needed */}
-      {showingReserved ? (
+      {/* ── Mobile: Reserved toggle + category dropdown ── */}
+      <div className="flex sm:hidden items-center gap-2">
+        <button
+          type="button"
+          onClick={() => { setShowingReserved(true); setSearchTerm(''); }}
+          className={clsx(
+            'flex-shrink-0 px-3 py-2 text-xs font-semibold rounded-lg border transition-all flex items-center gap-1.5',
+            showingReserved
+              ? 'bg-amber-100 text-amber-800 border-amber-300 shadow-sm'
+              : 'bg-white text-gray-500 border-gray-200 active:border-amber-300'
+          )}
+        >
+          <Star className={clsx('h-3.5 w-3.5', showingReserved ? 'fill-amber-500 text-amber-500' : 'text-gray-400')} />
+          Reserved
+          {reservedNumbers.length > 0 && (
+            <span className={clsx(
+              'px-1.5 py-0 rounded-full text-[10px] font-bold',
+              showingReserved ? 'bg-amber-200 text-amber-900' : 'bg-gray-100 text-gray-500'
+            )}>
+              {reservedNumbers.length}
+            </span>
+          )}
+        </button>
+
+        <div className="relative flex-1">
+          <select
+            value={showingReserved ? '' : selectedCategory}
+            onChange={(e) => {
+              if (e.target.value) {
+                setShowingReserved(false);
+                onCategoryChange(e.target.value);
+                setSearchTerm('');
+              }
+            }}
+            className={clsx(
+              'w-full appearance-none pl-3 pr-8 py-2 text-xs font-semibold rounded-lg border transition-all',
+              !showingReserved
+                ? (categoryColors[selectedCategory] ?? 'bg-indigo-100 text-indigo-700 border-indigo-300') + ' shadow-sm'
+                : 'bg-white text-gray-500 border-gray-200'
+            )}
+          >
+            <option value="" disabled>Select Category</option>
+            {numberCategories.map(cat => (
+              <option key={cat} value={cat}>{cat}</option>
+            ))}
+          </select>
+          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+        </div>
+      </div>
+
+      {/* ── Search input — always visible ── */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+        <input
+          ref={inputRef}
+          type="text"
+          inputMode="numeric"
+          value={searchTerm}
+          onChange={e => setSearchTerm(e.target.value)}
+          placeholder={showingReserved ? "Search across all categories…" : `Search ${selectedCategory} numbers…`}
+          className="w-full pl-9 pr-9 py-2.5 text-sm border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white transition"
+        />
+        {loading && (
+          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-indigo-500 animate-spin" />
+        )}
+        {searchTerm && !loading && (
+          <button
+            type="button"
+            onClick={() => setSearchTerm('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 hover:text-gray-600 transition"
+            aria-label="Clear search"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
+      {/* ── Content area ── */}
+      {searchTerm && searchTerm.length < MIN_SEARCH_LENGTH ? (
+        <p className="text-sm text-gray-400 text-center py-4">
+          Keep typing… {MIN_SEARCH_LENGTH - searchTerm.length} more digit{MIN_SEARCH_LENGTH - searchTerm.length !== 1 ? 's' : ''} needed
+        </p>
+      ) : isSearching ? (
+        /* Search results — across all categories when on Reserved tab */
+        <div>
+          {loading ? null : (displayNumbers.length > 0 || filteredReserved.length > 0) ? (
+            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
+              {filteredReserved.map(n => (
+                <NumberRow
+                  key={n.id}
+                  number={n}
+                  selected={selectedNumberId === n.id}
+                  selectable={isSelectable(n)}
+                  isReservedByMe
+                  onSelect={onSelect}
+                />
+              ))}
+              {displayNumbers.filter(n => !filteredReserved.some(r => r.id === n.id)).map(n => (
+                <NumberRow
+                  key={n.id}
+                  number={n}
+                  selected={selectedNumberId === n.id}
+                  selectable={isSelectable(n)}
+                  isReservedByMe={n.status === 'reserved' && n.reservedBy === user?.id}
+                  onSelect={onSelect}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400 text-center py-4">No numbers found</p>
+          )}
+        </div>
+      ) : showingReserved ? (
+        /* Reserved tab — no search active */
         <div>
           {reservedNumbers.length > 0 ? (
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
@@ -313,85 +425,18 @@ export function QuickNumberSelect({
           )}
         </div>
       ) : (
-        <>
-          {/* Search input */}
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
-            <input
-              ref={inputRef}
-              type="text"
-              inputMode="numeric"
-              value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Type at least 3 digits to search…"
-              className="w-full pl-9 pr-9 py-2.5 text-sm border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white transition"
-            />
-            {loading && (
-              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-indigo-500 animate-spin" />
-            )}
-            {searchTerm && !loading && (
-              <button
-                type="button"
-                onClick={() => setSearchTerm('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 hover:text-gray-600 transition"
-                aria-label="Clear search"
-              >
-                ✕
-              </button>
-            )}
+        /* Category tab — no search active: show prompt */
+        <div>
+          <div className="flex flex-col items-center gap-1.5 py-6 text-center">
+            <div className="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center">
+              <Search className="h-5 w-5 text-indigo-400" />
+            </div>
+            <p className="text-sm text-gray-500">Search the <span className="font-medium text-indigo-600">{selectedCategory}</span> pool</p>
+            <p className="text-xs text-gray-400">Enter at least 3 digits to see matching numbers</p>
           </div>
-
-          {/* Results area */}
-          <div>
-            {/* Prompt: no search yet */}
-            {!searchTerm && (
-              <div className="flex flex-col items-center gap-1.5 py-6 text-center">
-                <div className="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center">
-                  <Search className="h-5 w-5 text-indigo-400" />
-                </div>
-                <p className="text-sm text-gray-500">Search the <span className="font-medium text-indigo-600">{selectedCategory}</span> pool</p>
-                <p className="text-xs text-gray-400">Enter at least 3 digits to see matching numbers</p>
-              </div>
-            )}
-
-            {/* Too short to search */}
-            {searchTerm && searchTerm.length < MIN_SEARCH_LENGTH && (
-              <p className="text-sm text-gray-400 text-center py-4">
-                Keep typing… {MIN_SEARCH_LENGTH - searchTerm.length} more digit{MIN_SEARCH_LENGTH - searchTerm.length !== 1 ? 's' : ''} needed
-              </p>
-            )}
-
-            {/* Search results */}
-            {searchTerm.length >= MIN_SEARCH_LENGTH && !loading && (
-              displayNumbers.length > 0 ? (
-                <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
-                  <div className="flex items-center gap-2 px-2.5 py-1.5 mb-1 bg-indigo-50 border border-indigo-200 rounded-lg shadow-sm animate-pulse-ring">
-                    <MousePointerClick className="h-3.5 w-3.5 text-indigo-500 flex-shrink-0 animate-bounce" />
-                    <span className="text-xs font-semibold text-indigo-600 tracking-wide animate-typewriter">Tap a number below to select it</span>
-                  </div>
-                  {displayNumbers.map(n => {
-                    const reservedByMe = n.status === 'reserved' && n.reservedBy === user?.id;
-                    return (
-                      <NumberRow
-                        key={n.id}
-                        number={n}
-                        selected={selectedNumberId === n.id}
-                        selectable={isSelectable(n)}
-                        isReservedByMe={reservedByMe}
-                        onSelect={onSelect}
-                      />
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-sm text-gray-400 text-center py-4">
-                  No numbers found for "{searchTerm}" in {selectedCategory}
-                </p>
-              )
-            )}
-          </div>
-        </>
+        </div>
       )}
+
     </div>
   );
 }

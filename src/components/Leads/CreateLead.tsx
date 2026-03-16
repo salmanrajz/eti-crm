@@ -632,6 +632,12 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
     );
   }, [formData.productType]);
 
+  const maxNumbersReached = useMemo(() => {
+    if (isNoNumberProduct) return false;
+    const realNumbersCount = selectedPlans.filter(p => !p.numberId?.startsWith('virtual-')).length;
+    return realNumbersCount >= 5;
+  }, [isNoNumberProduct, selectedPlans]);
+
   useEffect(() => {
     if (!isEditing && !user?.teamId) {
       toast.error('You must be assigned to a team to create leads');
@@ -827,6 +833,15 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
       hasError = true;
     }
     if (hasError) return;
+
+    // Enforce maximum of 5 numbers per lead (for number-based products)
+    if (!isNoNumberProduct) {
+      const realNumbersCount = selectedPlans.filter(p => !p.numberId?.startsWith('virtual-')).length;
+      if (realNumbersCount >= 5) {
+        toast.error('You can attach a maximum of 5 numbers to a lead.');
+        return;
+      }
+    }
 
     // Extract plan name from value if it contains plan ID (format: "planId|planName" or "category|planName|index")
     const planName = currentPlan.includes('|') 
@@ -2182,12 +2197,14 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                       <button
                         type="button"
                         onClick={() => setShowNumberPool(true)}
-                        disabled={isCoordinatorEditing}
+                        disabled={isCoordinatorEditing || maxNumbersReached}
                         className="w-full py-3 rounded-xl border-2 border-dashed border-indigo-300 text-sm font-medium text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50/60 disabled:opacity-40 transition-all flex items-center justify-center gap-2"
                       >
                         <Phone className="w-4 h-4" />
                         {selectedPlans.length > 0
-                          ? `Add ${selectedPlans.length + 1}${selectedPlans.length === 0 ? 'st' : selectedPlans.length === 1 ? 'nd' : selectedPlans.length === 2 ? 'rd' : 'th'} Number`
+                          ? (maxNumbersReached
+                            ? 'Maximum 5 numbers reached'
+                            : `Add ${selectedPlans.length + 1}${selectedPlans.length === 0 ? 'st' : selectedPlans.length === 1 ? 'nd' : selectedPlans.length === 2 ? 'rd' : 'th'} Number`)
                           : isEditing ? 'Add Another Number' : 'Search & Select a Number'}
                       </button>
                     ) : (
@@ -2358,10 +2375,10 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
                     <button
                       type="button"
                       onClick={() => setShowNumberPool(true)}
-                      disabled={isCoordinatorEditing}
+                      disabled={isCoordinatorEditing || maxNumbersReached}
                       className="w-full py-2 rounded-xl border border-dashed border-gray-300 text-xs font-medium text-gray-500 hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-40 transition-all"
                     >
-                      + Add another number
+                      {maxNumbersReached ? 'Maximum 5 numbers reached' : '+ Add another number'}
                     </button>
                   )}
                 </div>

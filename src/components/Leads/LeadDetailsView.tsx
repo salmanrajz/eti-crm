@@ -1041,16 +1041,6 @@ Language: ${lead.language || 'N/A'}`;
   }, []);
 
   useEffect(() => {
-    // Auto scroll to chat box only on page refresh (initial mount)
-    // Use hasScrolledOnMountRef to ensure it only happens once per page load
-    if (!hasScrolledOnMountRef.current && chatBoxRef.current) {
-      chatBoxRef.current.scrollIntoView({ behavior: 'smooth' });
-      hasScrolledOnMountRef.current = true;
-    }
-  }, []);
-
-
-  useEffect(() => {
     if (lead.verificationMedia) {
       const transformedMedia = lead.verificationMedia.map(media => {
         if (typeof media === 'string') {

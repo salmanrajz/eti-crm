@@ -228,26 +228,22 @@ export function Reports() {
   const [groupP2pActivations, setGroupP2pActivations] = useState<Record<string, number>>({});
 
   useEffect(() => {
-    loadTeams();
-    loadTeamAgentCounts();
-  }, []);
-
-  useEffect(() => {
-    loadGroupAliases();
+    Promise.all([loadTeams(), loadTeamAgentCounts(), loadGroupAliases()]);
   }, []);
 
   useEffect(() => {
     if (teams.length > 0) {
       if (view === 'daily') {
+        // loadDailyMetrics now also computes monthly category activations internally
         loadDailyMetrics(selectedDate);
-        loadMonthlyCategoryActivations(selectedDate); // Load monthly category activations for daily report
       } else {
-        loadMonthlyMetrics(selectedMonth);
-        loadGroupTargets(selectedMonth);
-        loadTeamTargets(selectedMonth);
+        Promise.all([
+          loadMonthlyMetrics(selectedMonth),
+          loadGroupTargets(selectedMonth),
+          loadTeamTargets(selectedMonth),
+        ]);
       }
     }
-    // Reset expanded group when switching views
     setExpandedGroup(null);
   }, [view, selectedDate, selectedMonth, teams]);
 
@@ -299,16 +295,20 @@ export function Reports() {
     try {
       const monthStr = format(month, 'yyyy-MM');
       const targets: Record<string, number> = {};
-      
-      // Load team targets for all teams
-      for (const team of teams) {
-        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
-        const teamTargetDoc = await getDoc(teamTargetRef);
-        if (teamTargetDoc.exists()) {
-          targets[team.id] = teamTargetDoc.data()?.target || 0;
+
+      const results = await Promise.all(
+        teams.map(team =>
+          getDoc(doc(db, 'teamTargets', `${team.id}_${monthStr}`))
+            .then(snap => ({ teamId: team.id, snap }))
+        )
+      );
+
+      results.forEach(({ teamId, snap }) => {
+        if (snap.exists()) {
+          targets[teamId] = snap.data()?.target || 0;
         }
-      }
-      
+      });
+
       setTeamTargets(targets);
     } catch (error) {
       console.error('Error loading team targets:', error);
@@ -600,6 +600,9 @@ export function Reports() {
       });
 
       setDailyMetrics(metrics);
+
+      // Reuse the already-fetched leads for monthly category activations
+      computeMonthlyCategoryActivations(allLeads, date);
     } catch (error) {
       console.error('Error loading daily metrics:', error);
       toast.error('Failed to load daily metrics');
@@ -730,47 +733,30 @@ export function Reports() {
     setGroupP2pActivations(p2pCounts);
   };
 
-  const loadMonthlyCategoryActivations = async (date: Date) => {
-    try {
-      // Get the current month from the date
-      const month = startOfMonth(date);
-      const start = startOfMonth(month);
-      const end = endOfMonth(month);
-      
-      const leadsQuery = query(collection(db, 'leads'));
-      const leadsSnapshot = await getDocs(leadsQuery);
-      const allLeads = leadsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
-      })) as Lead[];
+  // Computes monthly category activations from an already-fetched leads array.
+  // Previously this did its own getDocs(collection('leads')) — a full duplicate read.
+  const computeMonthlyCategoryActivations = (allLeads: Lead[], date: Date) => {
+    const month = startOfMonth(date);
+    const start = startOfMonth(month);
+    const end = endOfMonth(month);
 
-      const categoryCounts: Record<string, number> = {};
-      
-      // Initialize all categories to 0
-      CATEGORIES.forEach(cat => {
-        categoryCounts[cat] = 0;
-      });
+    const categoryCounts: Record<string, number> = {};
+    CATEGORIES.forEach(cat => { categoryCounts[cat] = 0; });
 
-      // Filter activated leads for the current month
-      const monthActivated = allLeads.filter(lead => {
+    allLeads
+      .filter(lead => {
         if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
         const activatedAt = getActivatedAt(lead);
         return activatedAt !== null && activatedAt >= start && activatedAt <= end;
-      });
-
-      // Count activations per category
-      monthActivated.forEach(lead => {
+      })
+      .forEach(lead => {
         (lead.plans || []).forEach(plan => {
           const cat = normalizeCategory(plan.category);
           categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
         });
       });
 
-      setMonthlyCategoryActivations(categoryCounts);
-    } catch (error) {
-      console.error('Error loading monthly category activations:', error);
-    }
+    setMonthlyCategoryActivations(categoryCounts);
   };
 
   const loadMonthlyMetrics = async (month: Date) => {
@@ -875,14 +861,15 @@ export function Reports() {
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadGroupAliases(); // Reload aliases in case they were updated
+    await loadGroupAliases();
     if (view === 'daily') {
       await loadDailyMetrics(selectedDate);
-      await loadMonthlyCategoryActivations(selectedDate); // Reload monthly category activations
     } else {
-      await loadMonthlyMetrics(selectedMonth);
-      await loadGroupTargets(selectedMonth);
-      await loadTeamTargets(selectedMonth);
+      await Promise.all([
+        loadMonthlyMetrics(selectedMonth),
+        loadGroupTargets(selectedMonth),
+        loadTeamTargets(selectedMonth),
+      ]);
     }
     setRefreshing(false);
     toast.success('Report refreshed');
@@ -891,19 +878,22 @@ export function Reports() {
   const loadTeamPerformance = async (teamId: string) => {
     setLoadingTeamPerformance(true);
     try {
-      // Get team info
-      const teamDoc = await getDoc(doc(db, 'teams', teamId));
-      if (!teamDoc.exists()) {
+      const [teamDocSnap, teamMembersSnapshot, teamLeadsSnapshot] = await Promise.all([
+        getDoc(doc(db, 'teams', teamId)),
+        getDocs(query(collection(db, 'users'), where('teamId', '==', teamId))),
+        getDocs(query(collection(db, 'leads'), where('teamId', '==', teamId))),
+      ]);
+
+      if (!teamDocSnap.exists()) {
         toast.error('Team not found');
         setLoadingTeamPerformance(false);
         return;
       }
 
-      const teamData = teamDoc.data() as Team;
+      const teamData = teamDocSnap.data() as Team;
       const teamName = teamData.name || 'Unknown Team';
       const managerId = teamData.managerId;
 
-      // Get manager name
       let managerName = 'No Manager Assigned';
       if (managerId) {
         const managerDoc = await getDoc(doc(db, 'users', managerId));
@@ -912,9 +902,6 @@ export function Reports() {
         }
       }
 
-      // Get team members
-      const teamMembersQuery = query(collection(db, 'users'), where('teamId', '==', teamId));
-      const teamMembersSnapshot = await getDocs(teamMembersQuery);
       const teamMembers = teamMembersSnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
@@ -922,9 +909,6 @@ export function Reports() {
 
       const agents = teamMembers.filter(m => m.role === 'agent');
 
-      // Get leads for this team
-      const teamLeadsQuery = query(collection(db, 'leads'), where('teamId', '==', teamId));
-      const teamLeadsSnapshot = await getDocs(teamLeadsQuery);
       const teamLeads = teamLeadsSnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data(),
@@ -1022,37 +1006,35 @@ export function Reports() {
     setIsLoadingAgentDetails(true);
 
     try {
-      // Get performance data for the last 6 months
-      const performanceData: AgentPerformanceData[] = [];
-      for (let i = 5; i >= 0; i--) {
-        const month = subMonths(teamPerformanceMonth, i);
+      const months = Array.from({ length: 6 }, (_, i) => subMonths(teamPerformanceMonth, 5 - i));
+
+      const targetDocs = await Promise.all(
+        months.map(month =>
+          getDoc(doc(db, 'agentTargets', `${agent.id}_${format(month, 'yyyy-MM')}`))
+        )
+      );
+
+      const performanceData: AgentPerformanceData[] = months.map((month, idx) => {
         const startDate = startOfMonth(month);
         const endDate = endOfMonth(month);
 
-        // Get agent's leads for the month
         const agentLeads = teamLeadsForPerformance.filter(lead => {
           if (lead.agentId !== agent.id || (lead.status !== 'activated' && lead.status !== 'activated_non_verified')) return false;
           const activatedAt = getActivatedAt(lead);
           return activatedAt !== null && activatedAt >= startDate && activatedAt <= endDate;
         });
 
-        // Calculate total activated numbers
         const activatedNumbers = agentLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
+        const target = targetDocs[idx].exists() ? targetDocs[idx].data()?.target || 0 : 0;
 
-        // Get target for the month
-        const monthStr = format(month, 'yyyy-MM');
-        const targetRef = doc(db, 'agentTargets', `${agent.id}_${monthStr}`);
-        const targetDoc = await getDoc(targetRef);
-        const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
-
-        performanceData.push({
+        return {
           month: format(month, 'MMM yyyy'),
           totalLeads: agentLeads.length,
           activated: activatedNumbers,
           target,
           achievement: target > 0 ? (activatedNumbers / target) * 100 : 0
-        });
-      }
+        };
+      });
 
       // Update the modal with the loaded data
       setSelectedAgentDetails(prev => ({

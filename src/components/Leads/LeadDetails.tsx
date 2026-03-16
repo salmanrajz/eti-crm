@@ -208,6 +208,8 @@ export function LeadDetails() {
   const [currentlyPlaying, setCurrentlyPlaying] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement>(null);
+  const chatFormRef = useRef<HTMLFormElement>(null);
   const [showVerifyConfirm, setShowVerifyConfirm] = useState(false);
   const [pendingVerifierUpdates, setPendingVerifierUpdates] = useState<Partial<Lead> | null>(null);
   const [changeList, setChangeList] = useState<Array<{ field: string; original: string; edited: string }>>([]);
@@ -218,24 +220,72 @@ export function LeadDetails() {
   const [recordingElapsed, setRecordingElapsed] = useState<number>(0);
   const [fileSizeError, setFileSizeError] = useState<string | null>(null);
   const [userDetails, setUserDetails] = useState<Record<string, { name: string }>>({});
+  // Ref-based cache of already-fetched user IDs.
+  // Using a ref (not state) so the onSnapshot callback always sees the latest value
+  // without stale-closure issues — state captured inside onSnapshot is frozen at setup time.
+  const fetchedUserIdsRef = useRef<Set<string>>(new Set());
   const [previewFile, setPreviewFile] = useState<{ file: File; type: ChatMessage['mediaType']; previewUrl: string } | null>(null);
   const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
   const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
+  const [showChatPanel, setShowChatPanel] = useState(true);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
-    // Defer to ensure DOM is painted
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior });
-    }, 0);
+  const scrollChatToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+    const run = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    const runSmooth = () => {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    };
+    // Defer until after React has committed and the browser has laid out (so scrollHeight is correct)
+    const afterLayout = (fn: () => void) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(fn);
+      });
+    };
+    if (behavior === 'smooth') {
+      afterLayout(runSmooth);
+    } else {
+      afterLayout(run);
+    }
   };
 
   useEffect(() => {
     if (!id) return;
     loadLead();
-    loadMessages().then(() => scrollToBottom('auto')); // jump to latest on initial load
+    // subscribeToMessages fires immediately with the full initial dataset (like getDocs),
+    // so loadMessages() was a redundant duplicate read. Removed — one less Firestore query.
     const unsubscribe = subscribeToMessages();
     return () => unsubscribe();
   }, [id]);
+
+  // When chat panel is open, hide mobile bottom nav in web by adding a body class
+  useEffect(() => {
+    if (showChatPanel) {
+      document.body.classList.add('chat-panel-open');
+    } else {
+      document.body.classList.remove('chat-panel-open');
+    }
+    return () => {
+      document.body.classList.remove('chat-panel-open');
+    };
+  }, [showChatPanel]);
+
+  // Auto-scroll chat panel to bottom on load and whenever messages change
+  const lastMessageId = messages.length > 0 ? messages[messages.length - 1]?.id : null;
+  useEffect(() => {
+    if (!showChatPanel || messages.length === 0 || !lead) return;
+    scrollChatToBottom('auto');
+    const t1 = setTimeout(() => scrollChatToBottom('auto'), 80);
+    const t2 = setTimeout(() => scrollChatToBottom('auto'), 250);
+    const t3 = setTimeout(() => scrollChatToBottom('auto'), 600);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [showChatPanel, messages.length, lastMessageId, lead]);
 
   // Cleanup recording and preview on unmount
   useEffect(() => {
@@ -275,57 +325,34 @@ export function LeadDetails() {
         const startDate = leadData.startDate?.toDate?.() || leadData.startDate || new Date();
         const createdAt = leadData.createdAt?.toDate?.() || leadData.createdAt || new Date();
         const updatedAt = leadData.updatedAt?.toDate?.() || leadData.updatedAt || new Date();
-        
-        // Fetch manager data if managerId exists
+
+        // Fetch manager, agent and team IN PARALLEL — previously these were 3 sequential
+        // awaits (each waiting for the prior), adding up to 3 extra round-trips of latency.
         let managerData = null;
         let resolvedAgentName = '';
         let resolvedTeamName = '';
 
-        if (leadData.managerId) {
-          try {
-            const managerRef = doc(db, 'users', leadData.managerId);
-            const managerDoc = await getDoc(managerRef);
-            if (managerDoc.exists()) {
-              managerData = {
-                id: managerDoc.id,
-                ...managerDoc.data()
-              };
-            }
-          } catch (error) {
-            console.error('Error fetching manager data:', error);
-          }
-        }
+        const [managerDoc, agentDoc, teamDoc] = await Promise.all([
+          leadData.managerId
+            ? getDoc(doc(db, 'users', leadData.managerId)).catch(() => null)
+            : Promise.resolve(null),
+          leadData.agentId
+            ? getDoc(doc(db, 'users', leadData.agentId)).catch((e) => { console.error('Error fetching agent data for lead:', id, e); return null; })
+            : Promise.resolve(null),
+          leadData.teamId
+            ? getDoc(doc(db, 'teams', leadData.teamId)).catch((e) => { console.error('Error fetching team data for lead:', id, e); return null; })
+            : Promise.resolve(null),
+        ]);
 
-        // Fetch agent name from users collection
-        if (leadData.agentId) {
-          try {
-            const agentRef = doc(db, 'users', leadData.agentId);
-            const agentDoc = await getDoc(agentRef);
-            if (agentDoc.exists()) {
-              const agentData = agentDoc.data() as any;
-              resolvedAgentName =
-                agentData.name ||
-                agentData.fullName ||
-                agentData.displayName ||
-                '';
-            }
-          } catch (error) {
-            console.error('Error fetching agent data for lead:', id, error);
-          }
+        if (managerDoc?.exists()) {
+          managerData = { id: managerDoc.id, ...managerDoc.data() };
         }
-
-        // Fetch team name from teams collection
-        if (leadData.teamId) {
-          try {
-            const teamRef = doc(db, 'teams', leadData.teamId);
-            const teamDoc = await getDoc(teamRef);
-            if (teamDoc.exists()) {
-              const teamData = teamDoc.data() as any;
-              resolvedTeamName = teamData.name || '';
-            }
-          } catch (error) {
-            console.error('Error fetching team data for lead:', id, error);
-          }
+        if (agentDoc?.exists()) {
+          const agentData = agentDoc.data() as any;
+          resolvedAgentName = agentData.name || agentData.fullName || agentData.displayName || '';
+        }
+        if (teamDoc?.exists()) {
+          resolvedTeamName = (teamDoc.data() as any).name || '';
         }
         
         const lead = {
@@ -398,67 +425,6 @@ export function LeadDetails() {
     }
   }
 
-  async function loadMessages() {
-    if (!id) return;
-    
-    try {
-      const messagesQuery = query(
-        collection(db, 'chatMessages'),
-        where('leadId', '==', id),
-        orderBy('createdAt', 'asc')
-      );
-      
-      const querySnapshot = await getDocs(messagesQuery);
-      const messagesData = querySnapshot.docs.map(doc => {
-        const data = doc.data();
-        const createdAt = data.createdAt?.toDate?.() || data.createdAt || new Date();
-        // Ensure createdAt is a valid Date object
-        const validDate = createdAt instanceof Date && !isNaN(createdAt.getTime()) 
-          ? createdAt 
-          : new Date();
-        return {
-        id: doc.id,
-          ...data,
-          createdAt: validDate
-        };
-      }) as ChatMessage[];
-      
-      setMessages(messagesData);
-      
-      // Fetch user details for all unique users in messages
-      const uniqueUserIds = [...new Set(messagesData.map(msg => msg.userId))];
-      const userDetailsPromises = uniqueUserIds.map(async (userId) => {
-        if (!userDetails[userId]) {
-          try {
-            const userDoc = await getDoc(doc(db, 'users', userId));
-            if (userDoc.exists()) {
-              const userData = userDoc.data();
-              return {
-                id: userId,
-                name: userData.name || userData.fullName || userData.displayName || 'Unknown User'
-              };
-            }
-          } catch (error) {
-            console.error('Error fetching user details:', error);
-          }
-        }
-        return null;
-      });
-
-      const newUserDetails = await Promise.all(userDetailsPromises);
-      const validUserDetails = newUserDetails.filter((detail): detail is { id: string; name: string } => detail !== null);
-      
-      setUserDetails(prev => ({
-        ...prev,
-        ...Object.fromEntries(validUserDetails.map(detail => [detail.id, { name: detail.name }]))
-      }));
-      
-      scrollToBottom('auto');
-    } catch (error) {
-      console.error('Error loading messages:', error);
-      toast.error('Failed to load chat messages');
-    }
-  }
 
   function subscribeToMessages() {
     if (!id) return () => {};
@@ -469,58 +435,62 @@ export function LeadDetails() {
       orderBy('createdAt', 'asc')
     );
 
+    let isFirstEvent = true; // scroll to bottom only on the initial snapshot
+
     return onSnapshot(q, async (snapshot) => {
-      const messagesData = snapshot.docs.map(doc => {
-        const data = doc.data();
+      const messagesData = snapshot.docs.map(d => {
+        const data = d.data();
         const createdAt = data.createdAt?.toDate?.() || data.createdAt || new Date();
-        // Ensure createdAt is a valid Date object
-        const validDate = createdAt instanceof Date && !isNaN(createdAt.getTime()) 
-          ? createdAt 
-          : new Date();
-        return {
-        id: doc.id,
-          ...data,
-          createdAt: validDate
-        };
+        const validDate = createdAt instanceof Date && !isNaN(createdAt.getTime())
+          ? createdAt : new Date();
+        return { id: d.id, ...data, createdAt: validDate };
       }) as ChatMessage[];
-      
-      setMessages(() => {
-        // Don't auto-scroll when new messages arrive - only scroll on initial load
-        // This prevents interrupting the user if they're reading older messages
-        return messagesData;
-      });
-      
-      // Fetch user details for any new users in messages
-      const uniqueUserIds = [...new Set(messagesData.map(msg => msg.userId))];
-      const userDetailsPromises = uniqueUserIds.map(async (userId) => {
-        if (!userDetails[userId]) {
-                      try {
+
+      setMessages(messagesData);
+
+      // Scroll to bottom on initial load (replaces the removed loadMessages call)
+      if (isFirstEvent) {
+        isFirstEvent = false;
+        scrollChatToBottom('auto');
+      }
+
+      // Only fetch user details for IDs not yet in the ref-based cache.
+      // Previously this used `userDetails` state which was stale (frozen at {} when
+      // subscribeToMessages was called), causing ALL user names to be re-fetched on
+      // every single new message. The ref is always fresh regardless of closure age.
+      const unseenIds = [...new Set(messagesData.map(msg => msg.userId))]
+        .filter(uid => !fetchedUserIdsRef.current.has(uid));
+
+      if (unseenIds.length === 0) return;
+
+      // Mark as in-flight immediately so concurrent events don't double-fetch
+      unseenIds.forEach(uid => fetchedUserIdsRef.current.add(uid));
+
+      const fetched = await Promise.all(
+        unseenIds.map(async (userId) => {
+          try {
             const userDoc = await getDoc(doc(db, 'users', userId));
             if (userDoc.exists()) {
               const userData = userDoc.data();
-              return {
-                id: userId,
-                name: userData.name || userData.fullName || userData.displayName || 'Unknown User'
-              };
+              return { id: userId, name: userData.name || userData.fullName || userData.displayName || 'Unknown User' };
             }
-          } catch (error) {
-            console.error('Error fetching user details:', error);
+          } catch {
+            // remove from cache so a retry is possible next event
+            fetchedUserIdsRef.current.delete(userId);
           }
-        }
-        return null;
-      });
+          return null;
+        })
+      );
 
-      const newUserDetails = await Promise.all(userDetailsPromises);
-      const validUserDetails = newUserDetails.filter((detail): detail is { id: string; name: string } => detail !== null);
-      
-      if (validUserDetails.length > 0) {
+      const valid = fetched.filter((d): d is { id: string; name: string } => d !== null);
+      if (valid.length > 0) {
         setUserDetails(prev => ({
           ...prev,
-          ...Object.fromEntries(validUserDetails.map(detail => [detail.id, { name: detail.name }]))
+          ...Object.fromEntries(valid.map(d => [d.id, { name: d.name }])),
         }));
-          }
-        });
       }
+    });
+  }
       
   async function addChatEntry(params: { messageText?: string; mediaUrl?: string; mediaType?: ChatMessage['mediaType']; durationMs?: number }) {
     const { messageText, mediaUrl, mediaType, durationMs } = params;
@@ -598,7 +568,7 @@ export function LeadDetails() {
       
       // Auto-scroll to bottom after message is saved
       setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        scrollChatToBottom('smooth');
       }, 100);
 
       // Send notifications in background (non-blocking)
@@ -684,7 +654,7 @@ export function LeadDetails() {
     
     // Auto-scroll to bottom after sending
     setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollChatToBottom('smooth');
     }, 100);
   }
 
@@ -1446,7 +1416,7 @@ export function LeadDetails() {
     
     // Scroll to bottom
     setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollChatToBottom('smooth');
     }, 100);
     
     // For non-audio media, show loading state on button
@@ -1835,28 +1805,45 @@ export function LeadDetails() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-2 px-0 sm:px-4 md:px-6 lg:px-8">
+    <div
+      className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-2 px-0 sm:px-4 md:px-6 lg:px-8"
+      style={{
+        paddingTop: 'max(0.5rem, env(safe-area-inset-top, 0px))',
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      }}
+    >
       <div className="w-full max-w-6xl mx-auto">
-        <div className="mb-4 px-2 sm:px-0">
-          <div className="flex items-center justify-between">
+          <div className="mb-4 px-2 sm:px-0">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             <button
               onClick={() => navigate('/dashboard/leads')}
-              className="inline-flex items-center px-2 py-1 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              className="inline-flex items-center min-h-[44px] px-3 py-2 text-xs sm:text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 touch-manipulation"
             >
-              <ArrowLeft className="h-3 w-3 mr-1" />
-              Back to Leads
+              <ArrowLeft className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 flex-shrink-0" />
+              <span className="whitespace-nowrap">Back to Leads</span>
             </button>
-            <div className="flex-1 text-center mx-4 hidden sm:block">
-              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Lead Details</h1>
-              <p className="mt-1 sm:mt-2 text-sm sm:text-base text-gray-600">View and manage lead information</p>
+            <div className="flex-1 text-center mx-2 sm:mx-4 min-w-0 hidden sm:block">
+              <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 truncate">Lead Details</h1>
+              <p className="mt-0.5 sm:mt-1 text-xs sm:text-sm md:text-base text-gray-600">View and manage lead information</p>
             </div>
-        <button
-              onClick={() => navigate('/dashboard')}
-              className="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-        >
-              <ArrowLeft className="h-3 w-3 mr-1" />
-              Back to Dashboard
-        </button>
+            <div className="flex items-center gap-2">
+              {lead && (
+                <button
+                  onClick={() => setShowChatPanel(true)}
+                  className="inline-flex items-center min-h-[44px] px-3 py-2 text-xs sm:text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 touch-manipulation"
+                >
+                  <MessageSquare className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 flex-shrink-0" />
+                  <span className="whitespace-nowrap">Chat</span>
+                </button>
+              )}
+              <button
+                onClick={() => navigate('/dashboard')}
+                className="inline-flex items-center min-h-[44px] px-3 py-2 text-xs sm:text-sm font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 touch-manipulation"
+              >
+                <ArrowLeft className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 flex-shrink-0" />
+                <span className="whitespace-nowrap">Back to Dashboard</span>
+              </button>
+            </div>
           </div>
       </div>
 
@@ -2055,31 +2042,55 @@ export function LeadDetails() {
             </div>
           )}
 
-        {/* Chat Section - Show for all leads, but read-only for rejected and activated leads */}
-          {lead && (
-          <div className="bg-white rounded-lg shadow-lg overflow-hidden">
-            <div className="px-3 sm:px-6 py-3 sm:py-4 border-b border-gray-200">
-              <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <MessageSquare className="h-5 w-5 text-indigo-600 mr-2" />
-                <h2 className="text-lg font-medium text-gray-900">Chat</h2>
-                </div>
+        {/* Lead Chat - Right-side popup panel (responsive + safe areas) */}
+      {lead && showChatPanel && (
+        <>
+          <div
+            className="fixed inset-0 z-[100]"
+            aria-hidden="true"
+            onClick={() => setShowChatPanel(false)}
+          />
+          <div
+             className="fixed right-0 top-auto bottom-0 h-[58vh] sm:h-[60vh] md:h-[62vh] w-[min(96vw,360px)] sm:w-full sm:min-w-[360px] sm:max-w-lg md:max-w-xl bg-white shadow-2xl z-[101] flex flex-col overflow-hidden border-l border-gray-200 rounded-tl-xl sm:rounded-l-xl"
+
+            style={{
+              paddingTop: 'env(safe-area-inset-top, 0px)',
+              paddingRight: 'env(safe-area-inset-right, 0px)',
+              maxHeight: '100dvh',
+            }}
+          >
+            <div className="px-2 sm:px-3 py-1.5 sm:py-2 border-b border-gray-200 flex items-center justify-between flex-shrink-0 gap-1.5 min-h-0">
+              <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                <MessageSquare className="h-4 w-4 text-indigo-600 flex-shrink-0" />
+                <h2 className="text-sm font-medium text-gray-900 truncate">Chat</h2>
                 {lead.status === 'rejected' && (
-                  <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
-                    Read-only (Lead Rejected)
+                  <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded flex-shrink-0 whitespace-nowrap">
+                    Read-only
                   </span>
                 )}
                 {lead.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin' && (
-                  <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
-                    Read-only (Lead Activated)
+                  <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded flex-shrink-0 whitespace-nowrap">
+                    Read-only
                   </span>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() => setShowChatPanel(false)}
+                className="flex-shrink-0 inline-flex items-center justify-center px-3 min-w-[40px] min-h-[40px] rounded-lg bg-red-500 hover:bg-red-600 active:bg-red-700 text-white transition-colors touch-manipulation"
+                aria-label="Close chat"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
 
-            <div className="h-96 overflow-y-auto p-3 sm:p-4 space-y-4">
+            <div
+              ref={chatScrollContainerRef}
+              className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 space-y-3 sm:space-y-4 overscroll-behavior-contain"
+              style={{ WebkitOverflowScrolling: 'touch' as React.CSSProperties['WebkitOverflowScrolling'] }}
+            >
               {messages.length === 0 ? (
-                <div className="text-center text-gray-500 py-8">
+                <div className="text-center text-gray-500 py-8 px-4 text-sm sm:text-base">
                   No messages yet. Start the conversation!
                 </div>
               ) : (
@@ -2089,9 +2100,9 @@ export function LeadDetails() {
                     return (
                       <div
                         key={message.id}
-                        className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'}`}
+                        className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'} min-w-0`}
                       >
-                        <div className="max-w-[85%]">
+                        <div className="max-w-[85%] min-w-0">
                           <div className="text-xs font-medium mb-1 text-gray-700">
                             {message.userId === 'system'
                               ? 'System'
@@ -2126,16 +2137,16 @@ export function LeadDetails() {
                   return (
                   <div
                     key={message.id}
-                    className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'}`}
+                    className={`flex ${message.userId === user?.id ? 'justify-end' : 'justify-start'} min-w-0`}
                   >
                     <div
-                      className={`max-w-[85%] rounded-lg px-4 py-2 ${
+                      className={`max-w-[85%] min-w-0 rounded-xl sm:rounded-lg px-3 py-2 sm:px-4 ${
                         message.userId === user?.id
                           ? 'bg-indigo-600 text-white'
                           : 'bg-gray-100 text-gray-900'
                       }`}
                     >
-                      <div className="text-xs font-medium mb-1">
+                      <div className="text-[11px] sm:text-xs font-medium mb-1">
                           {message.userId === 'system'
                             ? 'System'
                             : message.userId === user?.id 
@@ -2145,7 +2156,7 @@ export function LeadDetails() {
                                 : message.userRole}
                       </div>
                         {message.message && (
-                      <div className="text-sm whitespace-pre-wrap break-words">{message.message}</div>
+                      <div className="text-[15px] sm:text-sm whitespace-pre-wrap break-words leading-snug">{message.message}</div>
                         )}
                         {message.mediaUrl && (
                           <div className="mt-2 space-y-2">
@@ -2232,9 +2243,9 @@ export function LeadDetails() {
             {/* Media Preview - Show before sending */}
             {previewFile && (
               <div className="border-t border-gray-200 bg-gray-50 px-3 sm:px-4 py-3 sm:py-4">
-                <div className="flex items-start gap-3">
+                <div className="flex flex-col gap-3">
                   {/* Preview content */}
-                  <div className="flex-1 min-w-0">
+                  <div className="min-w-0">
                     <div className="text-xs text-gray-500 font-medium mb-2">Preview attachment</div>
                     {previewFile.type === 'image' && (
                       <div className="relative inline-block max-w-full rounded-lg overflow-hidden border border-gray-300 bg-white shadow-sm">
@@ -2273,39 +2284,58 @@ export function LeadDetails() {
                         </div>
                       </div>
                     )}
-                    <div className="text-xs text-gray-600 mt-2 break-words">{previewFile.file.name}</div>
+                    <div className="text-xs text-gray-600 mt-2 break-words truncate max-w-full">{previewFile.file.name}</div>
                   </div>
-                  {/* Remove button */}
-                  <button
-                    type="button"
-                    onClick={removePreview}
-                    className="flex-shrink-0 p-2 rounded-lg hover:bg-gray-200 active:bg-gray-300 transition-colors touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center"
-                    title="Remove preview"
-                    aria-label="Remove preview"
-                  >
-                    <X className="h-5 w-5 sm:h-4 sm:w-4 text-gray-600" />
-                  </button>
+                  {/* Buttons at bottom */}
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={removePreview}
+                      className="p-2 rounded-lg hover:bg-gray-200 active:bg-gray-300 transition-colors touch-manipulation min-w-[40px] min-h-[40px] flex items-center justify-center"
+                      title="Remove preview"
+                      aria-label="Remove preview"
+                    >
+                      <X className="h-5 w-5 sm:h-4 sm:w-4 text-gray-600" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chatFormRef.current?.requestSubmit()}
+                      disabled={sendingMessage || uploadingMedia || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors touch-manipulation min-h-[40px]"
+                      title="Send attachment"
+                    >
+                      {uploadingMedia || sendingMessage ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <>
+                          <Send className="h-4 w-4" />
+                          <span>Send</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
 
-            <div className="border-t border-gray-200 bg-white">
-              {/* Mobile-optimized chat input */}
-              <form onSubmit={sendMessage} className="flex flex-col gap-2 p-2 sm:p-3 sm:gap-2">
-                {/* Recording UI - Full width on mobile */}
+            <div
+              className="border-t border-gray-200 bg-white flex-shrink-0"
+              style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom, 0px))' }}
+            >
+              <form ref={chatFormRef} onSubmit={sendMessage} className="flex flex-col gap-2 p-2 sm:p-3">
                 {recording && (
-                  <div className="flex items-center gap-2 w-full bg-red-50 rounded-lg p-2 sm:p-3 border border-red-200">
+                  <div className="flex items-center gap-2 w-full bg-red-50 rounded-xl p-3 border border-red-200">
                     <div className="flex flex-col gap-1.5 flex-1 min-w-0">
                       <canvas
                         ref={waveformCanvasRef}
                         width={600}
                         height={100}
-                        className="h-12 sm:h-10 w-full rounded"
+                        className="h-10 w-full rounded"
                       />
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs sm:text-sm text-red-600 font-semibold flex items-center gap-1.5">
-                          <div className="h-2 w-2 bg-red-600 rounded-full animate-pulse"></div>
-                          Recording... {Math.floor(recordingElapsed / 1000)}s
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs sm:text-sm text-red-600 font-semibold flex items-center gap-1.5 min-w-0">
+                          <span className="h-2 w-2 bg-red-600 rounded-full animate-pulse flex-shrink-0" />
+                          <span className="truncate">Recording… {Math.floor(recordingElapsed / 1000)}s</span>
                         </span>
                         <button
                           type="button"
@@ -2313,37 +2343,28 @@ export function LeadDetails() {
                             e.preventDefault();
                             cancelRecording();
                           }}
-                          className="inline-flex items-center justify-center px-3 py-1.5 sm:px-2 sm:py-1 rounded-lg border border-red-300 bg-red-100 text-red-700 hover:bg-red-200 active:bg-red-300 transition-colors touch-manipulation min-h-[44px] sm:min-h-[36px]"
+                          className="flex-shrink-0 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-red-300 bg-red-100 text-red-700 hover:bg-red-200 active:bg-red-300 transition-colors touch-manipulation min-h-[44px]"
                           title="Cancel recording"
                         >
-                          <Trash2 className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
-                          <span className="ml-1.5 sm:hidden text-xs font-medium">Cancel</span>
+                          <Trash2 className="h-4 w-4" />
+                          <span className="text-xs font-medium">Cancel</span>
                         </button>
                       </div>
                     </div>
                   </div>
                 )}
 
-                {/* Input and action buttons row */}
-                <div className="flex items-end gap-2">
-                  {/* Text input - optimized for mobile */}
-                  <div className="relative flex-1 min-w-0">
+                <div className="flex flex-row items-center gap-1.5">
+                  <div className="flex-1 min-w-0">
                     <textarea
                       rows={1}
-                      className="w-full rounded-xl border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 text-base sm:text-sm disabled:bg-gray-100 disabled:cursor-not-allowed resize-none py-2.5 sm:py-2 px-3 sm:px-3 min-h-[44px] sm:min-h-[38px] max-h-[120px] sm:max-h-[100px] leading-relaxed touch-manipulation"
-                      placeholder={
-                        lead?.status === 'rejected' 
-                          ? 'Cannot send messages to rejected leads' 
-                          : lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin'
-                          ? 'Cannot send messages to activated leads'
-                          : 'Type a message...'
-                      }
+                      placeholder=""
+                      className="w-full rounded-lg border border-gray-300 bg-gray-50/50 shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 focus:bg-white text-sm disabled:bg-gray-100 disabled:cursor-not-allowed resize-none py-1.5 px-3 h-9 min-h-[2.25rem] max-h-[96px] leading-snug touch-manipulation box-border"
                       value={newMessage}
                       onChange={(e) => {
                         setNewMessage(e.target.value);
-                        // Auto-resize textarea
                         e.target.style.height = 'auto';
-                        e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
+                        e.target.style.height = `${Math.min(e.target.scrollHeight, 112)}px`;
                       }}
                       disabled={lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') || sendingMessage || uploadingMedia || recording}
                       onKeyDown={(e) => {
@@ -2352,30 +2373,22 @@ export function LeadDetails() {
                           sendMessage(e);
                         }
                       }}
+                      aria-label="Message"
                     />
-                    {/* Mobile hint text */}
-                    {!newMessage && !recording && (
-                      <div className="absolute bottom-1 right-2 text-xs text-gray-400 pointer-events-none hidden sm:block">
-                        💡 Audio, images, PDFs (max 3MB)
-                      </div>
-                    )}
                   </div>
 
-                  {/* Action buttons - optimized touch targets for mobile */}
                   {!recording && (
                     <>
-                      {/* Attach file button - larger on mobile */}
                       <button
                         type="button"
                         disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
                         onClick={() => fileInputRef.current?.click()}
-                        className="inline-flex items-center justify-center px-3.5 py-3 sm:px-3 sm:py-2 rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[40px] sm:min-h-[40px] shadow-sm"
-                        title="Attach file (images, videos, PDFs)"
+                        className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-lg border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors touch-manipulation"
+                        title="Attach file"
+                        aria-label="Attach file"
                       >
-                        <Paperclip className="h-5 w-5 sm:h-4 sm:w-4" />
+                        <Paperclip className="h-5 w-5" />
                       </button>
-
-                      {/* Voice note button - larger on mobile */}
                       <button
                         type="button"
                         disabled={uploadingMedia || sendingMessage || lead?.status === 'rejected' || (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin')}
@@ -2383,45 +2396,42 @@ export function LeadDetails() {
                           e.preventDefault();
                           startRecording();
                         }}
-                        className="inline-flex items-center justify-center px-3.5 py-3 sm:px-3 sm:py-2 rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[40px] sm:min-h-[40px] shadow-sm"
+                        className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-lg border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors touch-manipulation"
                         title="Record voice note"
+                        aria-label="Record voice note"
                       >
-                        <Mic className="h-5 w-5 sm:h-4 sm:w-4" />
+                        <Mic className="h-5 w-5" />
                       </button>
                     </>
                   )}
 
-                  {/* Send button - larger and more prominent on mobile */}
                   <button
                     type="submit"
-                  disabled={
-                    lead?.status === 'rejected' ||
-                    (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') ||
-                    sendingMessage ||
-                    uploadingMedia ||
-                    (!newMessage.trim() && !recording && !previewFile)
-                  }
+                    disabled={
+                      lead?.status === 'rejected' ||
+                      (lead?.status === 'activated' && user?.role !== 'coordinator' && user?.role !== 'admin') ||
+                      sendingMessage ||
+                      uploadingMedia ||
+                      (!newMessage.trim() && !recording && !previewFile)
+                    }
                     onClick={(e) => {
                       if (recording) {
                         e.preventDefault();
                         stopRecording();
                       }
                     }}
-                    className="inline-flex items-center justify-center px-4 py-3 sm:px-4 sm:py-2 border border-transparent text-sm font-medium rounded-xl shadow-md text-white bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all touch-manipulation min-w-[44px] min-h-[44px] sm:min-w-[40px] sm:min-h-[40px]"
+                    className="flex-shrink-0 inline-flex items-center justify-center gap-1.5 px-5 h-9 sm:px-4 sm:h-10 rounded-lg border border-transparent text-white bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors touch-manipulation"
+                    aria-label="Send"
                   >
                     {uploadingMedia || sendingMessage ? (
-                      <span className="flex items-center gap-2">
-                        <Loader2 className="h-5 w-5 sm:h-4 sm:w-4 animate-spin" />
-                        <span className="hidden sm:inline">Sending...</span>
-                      </span>
+                      <Loader2 className="h-5 w-5 animate-spin" />
                     ) : recording ? (
-                      <span className="flex items-center gap-2">
-                        <Square className="h-5 w-5 sm:h-4 sm:w-4" />
-                        <span className="hidden sm:inline">Stop & Send</span>
-                        <span className="sm:hidden">Stop</span>
-                      </span>
+                      <Square className="h-5 w-5" />
                     ) : (
-                      <Send className="h-5 w-5 sm:h-4 sm:w-4" />
+                      <>
+                        <Send className="h-5 w-5" />
+                        <span className="hidden xs:inline text-xs font-medium">Send</span>
+                      </>
                     )}
                   </button>
                 </div>
@@ -2437,7 +2447,8 @@ export function LeadDetails() {
               </form>
             </div>
           </div>
-          )}
+        </>
+      )}
         </div>
       </div>
 

@@ -41,7 +41,6 @@ import { db } from '../../lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { Upload, X, CheckCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import { uploadVerificationFileToAzure } from '../../utils/azureUpload';
 
 interface MediaUploadProps {
   leadId: string;
@@ -80,7 +79,7 @@ export function MediaUpload({ leadId, onUploadComplete, onUploadingChange, onUpl
     try {
       const totalBytes = files.reduce((sum, f) => sum + f.size, 0) || 1;
       let uploadedBytes = 0;
-      const mediaFiles: Array<{ url: string; type: 'image' | 'video' | 'audio' | 'pdf'; name: string; azureUrl?: string | null }> = [];
+      const mediaFiles: Array<{ url: string; type: 'image' | 'video' | 'audio' | 'pdf'; name: string }> = [];
 
       for (const file of files) {
         const isPdf = file.type === 'application/pdf';
@@ -108,17 +107,7 @@ export function MediaUpload({ leadId, onUploadComplete, onUploadingChange, onUpl
           );
         });
 
-        const azureResult = await uploadVerificationFileToAzure(leadId, file).catch((error) => {
-          console.error('Azure upload failed for file:', file.name, error);
-          return null;
-        });
-
-        mediaFiles.push({
-          url,
-          type: fileType,
-          name: file.name,
-          azureUrl: azureResult?.url || undefined,
-        });
+        mediaFiles.push({ url, type: fileType, name: file.name });
       }
 
       if (mediaFiles.some((file) => !file.url)) {

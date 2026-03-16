@@ -42,7 +42,7 @@ import { generateDeviceFingerprint } from '../../utils/deviceFingerprint';
 import { isDeviceTrusted } from '../../services/trustedDeviceService';
 import { logUserSessionAction, getUserAgentInfo, getDeviceInfo } from '../../utils/userSessionLogging';
 import { checkAndLogUnclosedSession } from '../../utils/sessionTracker';
-//import { numberPoolPreloader } from '../../services/numberPoolPreloader';
+import { initializePushNotifications, removePushToken } from '../../utils/pushNotifications';
 
 /**
  * ===============================================================================
@@ -216,12 +216,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               // Device trust check failed - log but don't prevent login
               console.warn('[AuthProvider] Device trust check failed:', trustError);
             }
+
+            // Initialize FCM push notifications (fire-and-forget, never blocks login)
+            initializePushNotifications(firebaseUser.uid);
           } else {
             // Only admins can create users now
             await auth.signOut();
             toast.error('User account not found. Please contact an administrator.');
           }
         } else {
+          // Remove FCM push token before clearing user state
+          const logoutUser = useAuthStore.getState().user;
+          if (logoutUser) {
+            removePushToken(logoutUser.id);
+          }
+
           // Log session end on logout (before clearing user state)
           const currentUser = useAuthStore.getState().user;
           if (currentUser) {

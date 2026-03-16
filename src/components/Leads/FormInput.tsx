@@ -44,13 +44,15 @@ interface FormInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 export function FormInput({ label, icon: Icon, error, hint, className, ...props }: FormInputProps) {
+  const isDateOrTime = props.type === 'date' || props.type === 'time';
+
   return (
     <div className="space-y-2">
       <label htmlFor={props.id} className="block text-sm font-medium text-gray-700">
         {label} {props.required && <span className="text-red-500">*</span>}
       </label>
       <div className="relative">
-        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none z-10">
           <Icon className="h-4 w-4 sm:h-5 sm:w-5 text-gray-400" />
         </div>
         <input
@@ -60,8 +62,10 @@ export function FormInput({ label, icon: Icon, error, hint, className, ...props 
               ? 'border-red-300 focus:border-red-500 focus:ring-red-500' 
               : 'border-gray-300 focus:border-indigo-500 focus:ring-indigo-500',
             props.disabled && 'bg-gray-100 cursor-not-allowed opacity-60',
+            isDateOrTime && '[&::-webkit-date-and-time-value]:text-left [&::-webkit-calendar-picker-indicator]:opacity-60 [&::-webkit-calendar-picker-indicator]:cursor-pointer appearance-none bg-white',
             className
           )}
+          style={isDateOrTime ? { WebkitAppearance: 'none', MozAppearance: 'none' } : undefined}
           {...props}
         />
       </div>

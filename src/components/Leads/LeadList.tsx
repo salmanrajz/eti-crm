@@ -3459,16 +3459,17 @@ export function LeadList() {
                         {getStatusIcon(lead.status)}
                         {getStatusDisplayText(lead.status)}
                       </motion.span>
-                      {lead.status === 'later' && (lead as any).scheduledFor && (
-                        <span className="inline-flex items-center gap-1 text-[11px] text-orange-600 font-medium mt-0.5">
-                          <Clock className="h-3 w-3 flex-shrink-0" />
-                          {(() => {
-                            const raw = (lead as any).scheduledFor;
-                            const d = raw?.toDate ? raw.toDate() : new Date(raw);
-                            return format(d, 'dd MMM yyyy');
-                          })()}
-                        </span>
-                      )}
+                      {lead.status === 'later' && (lead as any).scheduledFor && (() => {
+                        const raw = (lead as any).scheduledFor;
+                        const d = raw?.toDate ? raw.toDate() : new Date(raw);
+                        if (!d || isNaN(d.getTime())) return null;
+                        return (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-orange-600 font-medium mt-0.5">
+                            <Clock className="h-3 w-3 flex-shrink-0" />
+                            {format(d, 'dd MMM yyyy')}
+                          </span>
+                        );
+                      })()}
                         {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || leadStrikes[lead.id] > 0) && (
                           <div className="flex items-center gap-1.5 mt-1 flex-nowrap shrink-0">
                             {((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) && (
@@ -3698,16 +3699,17 @@ export function LeadList() {
                               {getStatusIcon(lead.status)}
                           <span className="ml-0.5">{getStatusDisplayText(lead.status)}</span>
                             </motion.span>
-                            {lead.status === 'later' && (lead as any).scheduledFor && (
-                              <span className="inline-flex items-center gap-0.5 text-[10px] text-orange-600 font-medium">
-                                <Clock className="h-2.5 w-2.5 flex-shrink-0" />
-                                {(() => {
-                                  const raw = (lead as any).scheduledFor;
-                                  const d = raw?.toDate ? raw.toDate() : new Date(raw);
-                                  return format(d, 'dd MMM yyyy');
-                                })()}
-                              </span>
-                            )}
+                            {lead.status === 'later' && (lead as any).scheduledFor && (() => {
+                              const raw = (lead as any).scheduledFor;
+                              const d = raw?.toDate ? raw.toDate() : new Date(raw);
+                              if (!d || isNaN(d.getTime())) return null;
+                              return (
+                                <span className="inline-flex items-center gap-0.5 text-[10px] text-orange-600 font-medium">
+                                  <Clock className="h-2.5 w-2.5 flex-shrink-0" />
+                                  {format(d, 'dd MMM yyyy')}
+                                </span>
+                              );
+                            })()}
                               {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || leadStrikes[lead.id] > 0) && (
                                 <div className="flex items-center gap-1 mt-0.5 flex-nowrap shrink-0">
                                   {((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) && (
