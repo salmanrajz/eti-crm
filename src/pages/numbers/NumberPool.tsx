@@ -826,7 +826,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     { key: 'passcode', label: 'Passcode' },
     { key: 'status', label: 'Status' },
     { key: 'group', label: 'Group' },
-    { key: 'reservedBy', label: 'Reserved By' }
+    { key: 'reservedBy', label: 'Reserved By' },
+    { key: 'reservationCount', label: 'Reservation Count' },
+    { key: 'createdAt', label: 'Date Created' }
   ] as const;
   const [selectedExportFields, setSelectedExportFields] = useState<string[]>(exportFields.map(f => f.key));
   
@@ -967,6 +969,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         teamVisibility: 'Team Visibility',
         visibleToFreelancers: 'Visible To Freelancers',
         reservedBy: 'Reserved By',
+        reservationCount: 'Reservation Count',
+        createdAt: 'Date Created',
         reservedAt: 'Reserved At',
         expiresAt: 'Expires At',
         claimingAgentId: 'Claiming Agent',
@@ -991,7 +995,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const data = rows.map(row => {
         const out: Record<string, any> = {};
         selectedExportFields.forEach(key => {
+          if (key === 'createdAt') {
+            const raw = row[key];
+            const d: Date | null = raw?.toDate instanceof Function ? raw.toDate() : raw instanceof Date ? raw : null;
+            out[headerMap[key] || key] = d ? `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}` : '';
+          } else {
           out[headerMap[key] || key] = formatVal(row[key]);
+          }
         });
         return out;
       });
@@ -1539,7 +1549,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const originalUnfilteredResults = (fullSearchResultsRef.current as any)?.originalUnfilteredResults || fullSearchResultsRef.current;
       
       const cachedSetIsComplete = originalUnfilteredResults.length < SEARCH_LIMIT;
-
+      
       if (lastSearchTerm && termAtStart.includes(lastSearchTerm) && originalUnfilteredResults.length > 0 && cachedSetIsComplete) {
         // Parse search terms (handle multi-term searches like "999 0" or "050 14JANSILG1" or "999 silver")
         const searchTerms = termAtStart.split(/\s+/).filter(t => t.length > 0);
@@ -4077,7 +4087,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               }
             }
           }
-
+          
           // Check if user already has a pending claim
           const existingClaim = claims.find((claim: any) => claim.userId === user.id && claim.status === 'pending');
           if (existingClaim) {
@@ -5042,71 +5052,73 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </div>
           </motion.div>
 
-          {/* Reserved Numbers Section */}
+          {/* Reserved Numbers Section - ultra compact on phones */}
           {reservedNumbers.length > 0 && (
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5, delay: 0.1 }}
-            className="mt-6 mb-12"
+              className="mt-3 mb-6"
             >
-              <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
-                <div className="px-8 py-6 bg-gradient-to-r from-indigo-500 to-purple-600">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xl font-bold text-white">Your Reserved Numbers</h3>
-                      <p className="mt-1 text-indigo-100 text-sm">Numbers currently reserved by you</p>
-            </div>
-                    <div className="p-2 bg-white/10 rounded-lg">
-                      <Hash className="h-6 w-6 text-white" />
-          </div>
-        </div>
-              </div>
-                <div className="p-6">
-                <div className="space-y-4">
+              <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100 text-[11px] sm:text-sm">
+                {/* Desktop header only – phones get ultra-slim section without heading */}
+                <div className="hidden sm:flex items-center justify-between px-8 py-6 bg-gradient-to-r from-indigo-500 to-purple-600">
+                  <div>
+                    <h3 className="text-xl font-bold text-white">Your Reserved Numbers</h3>
+                    <p className="mt-0.5 text-sm text-indigo-100">Numbers currently reserved by you</p>
+                  </div>
+                  <div className="p-2 bg-white/10 rounded-lg">
+                    <Hash className="h-6 w-6 text-white" />
+                  </div>
+                </div>
+
+                {/* Slim body (phones) / normal padding (desktop) */}
+                <div className="p-2.5 sm:p-6">
+                <div className="space-y-2.5 sm:space-y-4">
                     {reservedNumbers.map((number, index) => (
                       <motion.div
                         key={number.id}
                         initial={{ opacity: 0, y: 20 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.3, delay: index * 0.1 }}
-                      className="bg-white rounded-lg p-4 sm:p-5 shadow-sm hover:shadow-md transition-all duration-300 border border-gray-100 w-full"
+                        transition={{ duration: 0.25, delay: index * 0.05 }}
+                      className="bg-white rounded-lg p-2.5 sm:p-5 shadow-sm hover:shadow-md transition-all duration-300 border border-gray-100 w-full"
                       >
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                        <div className="flex items-center justify-between gap-2 sm:gap-4">
                         <div className="flex items-center space-x-3 sm:space-x-4">
           <div>
-                            <h4 className="text-xl sm:text-2xl font-bold font-mono tracking-wide text-gray-900">{number.number}</h4>
-                            <span className="text-xs sm:text-sm text-gray-500">{number.category}</span>
+                            <h4 className="text-base sm:text-2xl font-bold font-mono tracking-wide text-gray-900">{number.number}</h4>
+                            <span className="text-[10px] sm:text-sm text-gray-500">{number.category}</span>
                       </div>
                           </div>
 
-                        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
-                          <div className="flex items-center space-x-2 bg-gradient-to-br from-indigo-50 to-indigo-100 rounded-lg px-3 py-2">
-                            <Clock className="h-4 w-4 sm:h-5 sm:w-5 text-indigo-600" />
+                          <div className="flex flex-nowrap items-center gap-2 sm:flex-wrap sm:gap-4">
+                          <div className="flex items-center space-x-1.5 bg-indigo-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
+                            <Clock className="h-3 w-3 sm:h-5 sm:w-5 text-indigo-600" />
                             <div>
-                              <p className="text-xs text-indigo-600 font-medium">Reserve Count</p>
-                              <p className="text-sm sm:text-base font-semibold text-indigo-700">
+                              <p className="text-[10px] sm:text-xs text-indigo-600 font-medium leading-tight">Reserve</p>
+                              <p className="text-[11px] sm:text-sm font-semibold text-indigo-700 leading-tight">
                                 {number.reservationCount || 0}
                               </p>
                             </div>
                           </div>
                           
-                          <div className="flex items-center space-x-2 bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg px-3 py-2">
-                            <UserCheck className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600" />
+                          <div className="flex items-center space-x-1.5 bg-purple-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
+                            <UserCheck className="h-3 w-3 sm:h-5 sm:w-5 text-purple-600" />
                             <div>
-                              <p className="text-xs text-purple-600 font-medium">Claims in Queue</p>
-                              <p className="text-sm sm:text-base font-semibold text-purple-700">
+                              <p className="text-[10px] sm:text-xs text-purple-600 font-medium leading-tight">Queue</p>
+                              <p className="text-[11px] sm:text-sm font-semibold text-purple-700 leading-tight">
                                 {number.claimQueue?.length || 0}
                               </p>
                             </div>
                           </div>
 
                           {reservationCountdowns[number.id] && (
-                            <div className="flex items-center space-x-2 bg-gradient-to-br from-green-50 to-green-100 rounded-lg px-3 py-2">
-                              <Clock className="h-4 w-4 sm:h-5 sm:w-5 text-green-600" />
+                            <div className="flex items-center space-x-1.5 bg-green-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
+                              <Clock className="h-3 w-3 sm:h-5 sm:w-5 text-green-600" />
                               <div>
-                                <p className="text-xs text-green-600 font-medium">Expires In</p>
-                                <p className="text-sm sm:text-base font-semibold text-green-700">
+                                <p className="text-[10px] sm:text-xs text-green-600 font-medium leading-tight">Expires</p>
+                                <p className="text-[11px] sm:text-sm font-semibold text-green-700 leading-tight">
                                   {formatReservationCountdown(reservationCountdowns[number.id])}
                                 </p>
                               </div>
@@ -5114,17 +5126,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                           )}
 
                           {number.claimingAgentId && claimCountdowns[number.id] && (
-                            <div className="flex items-center space-x-2 bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg px-3 py-2">
-                              <Zap className="h-4 w-4 sm:h-5 sm:w-5 text-blue-600" />
+                            <div className="flex items-center space-x-1.5 bg-blue-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
+                              <Zap className="h-3 w-3 sm:h-5 sm:w-5 text-blue-600" />
                               <div>
-                                <p className="text-xs text-blue-600 font-medium">Claim Timer</p>
-                                <p className="text-sm sm:text-base font-semibold text-blue-700">
+                                <p className="text-[10px] sm:text-xs text-blue-600 font-medium leading-tight">Claim</p>
+                                <p className="text-[11px] sm:text-sm font-semibold text-blue-700 leading-tight">
                                   {formatCountdown(claimCountdowns[number.id])}
                                 </p>
                               </div>
                             </div>
                           )}
 
+                          </div>
+                        </div>
+
+                        <div className="w-full sm:w-auto sm:ml-2">
                           <motion.button
                             whileHover={{ scale: isReleasing ? 1 : 1.02 }}
                             whileTap={{ scale: isReleasing ? 1 : 0.98 }}
@@ -6253,7 +6269,38 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         ) : (
         <>
         {/* ── Mobile card list (phones only) ──────────────────────────────── */}
-        <div className="block sm:hidden divide-y divide-gray-100">
+        <div className="block sm:hidden border border-gray-100 rounded-2xl bg-white overflow-hidden shadow-sm">
+          {/* Slim mobile header to mirror desktop table */}
+          <div className="bg-gradient-to-r from-gray-50 to-gray-100 px-2.5 py-1.5 border-b border-gray-100">
+            <div className="flex items-center text-[10px] font-semibold text-gray-500 uppercase tracking-[0.14em]">
+              {/* Bulk select checkbox column (only when bulk copy mode is on) */}
+              {bulkCopyMode && (
+                <div className="w-6 flex-shrink-0 flex items-center justify-center">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 transition-colors"
+                    checked={
+                      selectedNumbers.length > 0 &&
+                      selectedNumbers.length === paginatedNumbers.length
+                    }
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        selectAllVisible();
+                      } else {
+                        setSelectedNumbers([]);
+                      }
+                    }}
+                  />
+                </div>
+              )}
+              <div className="w-6 flex-shrink-0 text-center">#</div>
+              <div className="w-24 flex-shrink-0 text-center">Number</div>
+              <div className="flex-1 min-w-0 text-center">Status</div>
+              <div className="w-20 flex-shrink-0 text-center">Actions</div>
+            </div>
+          </div>
+
+          <div className="divide-y divide-gray-100">
           {paginatedNumbers.map((number, index) => {
             const isBeingClaimed = number.status === 'reserved' && number.claimingAgentId;
             const getStatusStyle = (status: NumberStatus) =>
@@ -6373,41 +6420,65 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             );
 
             return (
-              <div key={number.id} className="flex items-stretch gap-2 px-2.5 py-2 bg-white active:bg-gray-50 transition-colors border-b border-gray-100">
-                {/* Left: serial number */}
-                <div className="flex flex-col items-center justify-center w-5 flex-shrink-0 pt-0.5">
-                  <span className="text-[10px] text-gray-400 leading-none">{serialNumber}</span>
+              <div
+                key={number.id}
+                className="flex items-stretch gap-2 px-2.5 py-2 bg-white active:bg-gray-50 transition-colors"
+              >
+                {/* First column: virtual serial number only */}
+                <div className="flex flex-col items-center justify-center w-6 flex-shrink-0">
+                  <span className="text-[11px] font-semibold text-gray-500 leading-none">
+                    {serialNumber}
+                  </span>
                 </div>
 
-                {/* Middle: two rows of info */}
-                <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
-                  {/* Row 1: number · status · category */}
-                  <div className="flex flex-wrap items-center gap-1">
-                    <span className={clsx(
-                      'font-mono text-sm font-bold tracking-wide px-2 py-0.5 rounded-md flex-shrink-0',
+                {/* Second column: number + group/code */}
+                <div className="flex flex-col items-start justify-center w-24 flex-shrink-0">
+                  <span
+                    className={clsx(
+                      'font-mono text-sm font-bold tracking-wide px-2 py-0.5 rounded-md',
                       (number.status === 'activated' || number.struckThrough)
                         ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
                         : number.status === 'reserved'
                         ? `${STATUS_STYLES.reserved.bg} text-gray-800`
                         : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`,
                       (number as any).isDeleted && 'line-through'
-                    )}>
-                      {number.number}
-                    </span>
-                    <span className={clsx(
-                      'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0',
-                      (() => {
-                        const cat = (number.category || '') as string;
-                        const c = cat.toLowerCase();
-                        if (c === 'platinum') return 'bg-purple-100 text-purple-700';
-                        if (c === 'gold plus') return 'bg-amber-100 text-amber-700';
-                        if (c === 'gold') return 'bg-yellow-100 text-yellow-700';
-                        if (c === 'silver plus') return 'bg-blue-200 text-blue-800';
-                        if (c === 'silver') return 'bg-blue-100 text-blue-700';
-                        if (c === 'standard') return 'bg-gray-100 text-gray-600';
-                        return 'bg-gray-100 text-gray-600';
-                      })()
-                    )}>
+                    )}
+                  >
+                    {number.number}
+                  </span>
+                  <div className="mt-1 flex items-center gap-1 whitespace-nowrap">
+                    {number.group && (
+                      <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded font-medium">
+                        {number.group}
+                      </span>
+                    )}
+                    {number.code && (
+                      <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+                        {number.code}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Middle: category + status + R/C/S + timer/agent/passcode */}
+                <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
+                  <div className="flex flex-wrap items-center gap-1.5 justify-center sm:justify-start">
+                    <span
+                      className={clsx(
+                        'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0',
+                        (() => {
+                          const cat = (number.category || '') as string;
+                          const c = cat.toLowerCase();
+                          if (c === 'platinum') return 'bg-purple-100 text-purple-700';
+                          if (c === 'gold plus') return 'bg-amber-100 text-amber-700';
+                          if (c === 'gold') return 'bg-yellow-100 text-yellow-700';
+                          if (c === 'silver plus') return 'bg-fuchsia-100 text-fuchsia-700';
+                          if (c === 'silver') return 'bg-blue-100 text-blue-700';
+                          if (c === 'standard') return 'bg-gray-100 text-gray-600';
+                          return 'bg-gray-100 text-gray-600';
+                        })()
+                      )}
+                    >
                       <Tag className="h-2.5 w-2.5" />
                       {(() => {
                         const cat = (number.category || '') as string;
@@ -6421,48 +6492,61 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         return cat;
                       })()}
                     </span>
-                    <span className={clsx(
-                      'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium flex-shrink-0',
-                      number.status === 'reserved' ? `${STATUS_STYLES.reserved.bg} ${STATUS_STYLES.reserved.text}` : `${statusStyle?.bg || STATUS_STYLES.open.bg} ${statusStyle?.text || STATUS_STYLES.open.text}`
-                    )}>
+                    <span
+                      className={clsx(
+                        'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium flex-shrink-0',
+                        number.status === 'reserved'
+                          ? `${STATUS_STYLES.reserved.bg} ${STATUS_STYLES.reserved.text}`
+                          : `${statusStyle?.bg || STATUS_STYLES.open.bg} ${statusStyle?.text || STATUS_STYLES.open.text}`
+                      )}
+                    >
                       <StatusIcon className="h-2.5 w-2.5" />
-                      {number.status === 'reserved' ? 'Reserved' : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                      {number.status === 'reserved'
+                        ? 'Reserved'
+                        : number.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                     </span>
                   </div>
-                  {/* Row 2: group · code · R/C/S · timer · agent */}
-                  <div className="flex flex-wrap items-center gap-1">
-                    {number.group && <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded font-medium">{number.group}</span>}
-                    {number.code && <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">{number.code}</span>}
+
+                  <div className="flex flex-wrap items-center gap-1 justify-center sm:justify-start">
                     <span className="text-[10px] text-gray-400">
                       R:{number.reservationCount || 0} C:{number.claimQueue?.length || 0}
                       {(() => {
                         const sc = ((number as any).claims || []).filter((c: any) => c.status === 'pending').length;
-                        return sc > 0 ? <span className="text-red-500 font-semibold"> S:{sc}</span> : <> S:0</>;
+                        return sc > 0 ? (
+                          <span className="text-red-500 font-semibold"> S:{sc}</span>
+                        ) : (
+                          <> S:0</>
+                        );
                       })()}
                     </span>
                     {number.status === 'reserved' && timeLeft && timeLeft > 0 && (
                       <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded border border-green-100">
-                        <Clock className="h-2.5 w-2.5" />{formatReservationCountdown(timeLeft)}
+                        <Clock className="h-2.5 w-2.5" />
+                        {formatReservationCountdown(timeLeft)}
                       </span>
                     )}
                     {canViewAdminColumns && number.status !== 'open' && (number.reservedBy || number.claimingAgentId) && (
-                      <AgentTeamInfo agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string} leadId={number.leadId} />
+                      <AgentTeamInfo
+                        agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string}
+                        leadId={number.leadId}
+                      />
+                    )}
+                    {canViewAdminColumns && (
+                      <span className="text-[10px] text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded">
+                        {number.passcode || '-'}
+                      </span>
                     )}
                   </div>
-                  {canViewAdminColumns && (
-                    <div className="text-[10px] text-gray-600 mt-0.5">
-                      {number.passcode || '-'}
-                    </div>
-                  )}
                 </div>
 
-                {/* Right: action buttons spanning both rows */}
-                <div className="flex-shrink-0 w-20">
+                {/* Right: action buttons column */}
+                <div className="flex-shrink-0 w-20 flex items-center justify-end">
                   {actionButtons}
                 </div>
               </div>
             );
           })}
+          </div>
         </div>
 
         {/* ── Desktop table (sm and above) ──────────────────────────────────── */}
@@ -7271,7 +7355,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 {strikeBlockedSameTeam ? (
                   <>
                     {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
-                      <span className="text-amber-700 font-medium">
+                  <span className="text-amber-700 font-medium">
                         {sameTeamBlockMode === 'teamStrike' ? (
                           <>
                             This number is already struck by{' '}
@@ -7295,7 +7379,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             . You cannot strike this number.
                           </>
                         )}
-                      </span>
+                  </span>
                     ) : (
                       <span className="text-amber-700 font-medium">
                         {sameTeamBlockMode === 'reservedOwner' && (
