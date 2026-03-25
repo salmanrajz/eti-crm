@@ -52,6 +52,9 @@ export const getFirebaseConfig = () => {
   return config;
 };
 
+// VAPID key for FCM Web Push (from Firebase Console -> Cloud Messaging -> Web Push certificates)
+export const VAPID_KEY: string = import.meta.env.VITE_FIREBASE_VAPID_KEY || 'BJmdPGahm1QX6lA_ejiN8HtHHPC6HDhdS81imLuNrPT6XZwjEgFVo7GR2Nu07d99dHoK8bnlrxojBVCom8Zxgdc';
+
 // Obfuscated configuration getter
 export const getSecureConfig = () => {
   try {

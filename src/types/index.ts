@@ -230,7 +230,6 @@ interface VerificationMedia {
   url: string;
   type: 'image' | 'video' | 'audio' | 'pdf';
   name: string;
-  azureUrl?: string;
 }
 
 export interface Lead {

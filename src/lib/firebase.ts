@@ -118,10 +118,23 @@ export const functions = (() => {
   return _functions;
 })();
 
-// Firebase Cloud Messaging is not currently used in this application
-// Removed to prevent "unsupported browser" errors that were blocking login
-// If push notifications are needed in the future, messaging can be re-enabled
-// with proper browser compatibility checks
+// Firebase Cloud Messaging — lazy-initialized with browser compatibility guard
+import { getMessaging, isSupported as isMessagingSupported } from 'firebase/messaging';
+
+let _messaging: ReturnType<typeof getMessaging> | null = null;
+export async function getMessagingInstance() {
+  if (_messaging) return _messaging;
+  try {
+    const supported = await isMessagingSupported();
+    if (!supported) return null;
+    _messaging = getMessaging(app);
+    return _messaging;
+  } catch {
+    return null;
+  }
+}
+
+export { app as firebaseApp };
 
 // ===============================================================================
 // PRE-CONFIGURED CLOUD FUNCTIONS
