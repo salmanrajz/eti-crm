@@ -619,28 +619,51 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     const currentMonthStart = startOfMonth(month);
     const currentMonthEnd = endOfMonth(month);
 
-    const getActivatedAt = (lead: any): Date | null => {
-      const raw = lead?.activatedAt || lead?.updatedAt;
+    const toDate = (raw: any): Date | null => {
       if (!raw) return null;
-      if (typeof raw.toDate === 'function') {
+
+      // Firestore Timestamp
+      if (typeof raw?.toDate === 'function') {
         const d = raw.toDate();
         return isNaN(d.getTime()) ? null : d;
       }
-      if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+
+      // Plain Date
+      if (raw instanceof Date) {
+        return isNaN(raw.getTime()) ? null : raw;
+      }
+
+      // Cached Timestamp shape (lost prototype) e.g. { seconds, nanoseconds }
+      const seconds =
+        typeof raw?.seconds === 'number'
+          ? raw.seconds
+          : typeof raw?._seconds === 'number'
+            ? raw._seconds
+            : null;
+      const nanoseconds =
+        typeof raw?.nanoseconds === 'number'
+          ? raw.nanoseconds
+          : typeof raw?._nanoseconds === 'number'
+            ? raw._nanoseconds
+            : null;
+
+      if (seconds != null) {
+        const nano = nanoseconds != null ? nanoseconds : 0;
+        const d = new Date(seconds * 1000 + nano / 1e6);
+        return isNaN(d.getTime()) ? null : d;
+      }
+
+      // ISO string / number fallback
       const d = new Date(raw);
       return isNaN(d.getTime()) ? null : d;
     };
 
+    const getActivatedAt = (lead: any): Date | null => {
+      return toDate(lead?.activatedAt || lead?.updatedAt);
+    };
+
     const getVerifiedAt = (lead: any): Date | null => {
-      const raw = lead?.verifiedAt;
-      if (!raw) return null;
-      if (typeof raw.toDate === 'function') {
-        const d = raw.toDate();
-        return isNaN(d.getTime()) ? null : d;
-      }
-      if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
-      const d = new Date(raw);
-      return isNaN(d.getTime()) ? null : d;
+      return toDate(lead?.verifiedAt);
     };
 
     // Filter leads for current month by activatedAt (fallback updatedAt) - for other metrics
