@@ -41,25 +41,25 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from 'react';
 import { collection, query, getDocs, where, orderBy, doc, getDoc, updateDoc, addDoc, onSnapshot, serverTimestamp, deleteDoc, limit, writeBatch, setDoc, deleteField } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions } from '../../lib/firebase';
 import { User, Team, Lead, NumberPool } from '../../types';
-import { AdminManagerPhoneNumbers } from '../settings/AdminManagerPhoneNumbers';
-import { PlanManagement } from '../admin/PlanManagement';
-import { DNCManagement } from '../admin/DNCManagement';
-import { TrustedDevicesAdmin } from '../admin/TrustedDevicesAdmin';
-import { WhatsAppSettings } from '../admin/WhatsAppSettings';
-import { BulkDNCImport } from '../admin/BulkDNCImport';
-import { BulkDeleteNumbers } from '../admin/BulkDeleteNumbers';
-import { AddToDeletedNumbers } from '../admin/AddToDeletedNumbers';
-import { BulkNumberSearch } from '../admin/BulkNumberSearch';
-import { BulkDeletedNumberSearch } from '../admin/BulkDeletedNumberSearch';
-import { BulkActivateNumbers } from '../admin/BulkActivateNumbers';
-import { BulkRestoreNumbers } from '../admin/BulkRestoreNumbers';
-import { CustomerLinkTracking } from '../admin/CustomerLinkTracking';
-import { DownloadVerificationMedia } from '../admin/DownloadVerificationMedia';
+const AdminManagerPhoneNumbers = lazy(() => import('../settings/AdminManagerPhoneNumbers').then((m) => ({ default: m.AdminManagerPhoneNumbers })));
+const PlanManagement = lazy(() => import('../admin/PlanManagement').then((m) => ({ default: m.PlanManagement })));
+const DNCManagement = lazy(() => import('../admin/DNCManagement').then((m) => ({ default: m.DNCManagement })));
+const TrustedDevicesAdmin = lazy(() => import('../admin/TrustedDevicesAdmin').then((m) => ({ default: m.TrustedDevicesAdmin })));
+const WhatsAppSettings = lazy(() => import('../admin/WhatsAppSettings').then((m) => ({ default: m.WhatsAppSettings })));
+const BulkDNCImport = lazy(() => import('../admin/BulkDNCImport').then((m) => ({ default: m.BulkDNCImport })));
+const BulkDeleteNumbers = lazy(() => import('../admin/BulkDeleteNumbers').then((m) => ({ default: m.BulkDeleteNumbers })));
+const AddToDeletedNumbers = lazy(() => import('../admin/AddToDeletedNumbers').then((m) => ({ default: m.AddToDeletedNumbers })));
+const BulkNumberSearch = lazy(() => import('../admin/BulkNumberSearch').then((m) => ({ default: m.BulkNumberSearch })));
+const BulkDeletedNumberSearch = lazy(() => import('../admin/BulkDeletedNumberSearch').then((m) => ({ default: m.BulkDeletedNumberSearch })));
+const BulkActivateNumbers = lazy(() => import('../admin/BulkActivateNumbers').then((m) => ({ default: m.BulkActivateNumbers })));
+const BulkRestoreNumbers = lazy(() => import('../admin/BulkRestoreNumbers').then((m) => ({ default: m.BulkRestoreNumbers })));
+const CustomerLinkTracking = lazy(() => import('../admin/CustomerLinkTracking').then((m) => ({ default: m.CustomerLinkTracking })));
+const DownloadVerificationMedia = lazy(() => import('../admin/DownloadVerificationMedia').then((m) => ({ default: m.DownloadVerificationMedia })));
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { format, subMonths, startOfMonth, endOfMonth, formatDistanceToNow } from 'date-fns';
 import { 
@@ -649,10 +649,14 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       return activatedAt && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
     });
 
-    // Filter leads verified in current month by verifiedAt
-    const currentMonthVerifiedLeads = allLeads.filter(lead => {
+    // Verified (Monthly): only leads where verifiedAt falls in the selected month
+    const currentMonthVerifiedLeads = allLeads.filter((lead) => {
       const verifiedAt = getVerifiedAt(lead);
-      return verifiedAt && verifiedAt >= currentMonthStart && verifiedAt <= currentMonthEnd;
+      return (
+        verifiedAt != null &&
+        verifiedAt >= currentMonthStart &&
+        verifiedAt <= currentMonthEnd
+      );
     });
 
     // Historical verified count: any lead that has ever been verified
@@ -702,183 +706,11 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
     loadGroupTargetsForMonth(date);
     // Recompute activations after month change - use teamLeads from state
     computeGroupActivations(teamLeads, date);
-    // Reload team metrics for the new month
-    loadTeamMetricsForMonth(date);
     // Recalculate main metrics for the new month
     recalculateMetricsForMonth(date, teamLeads);
   };
 
-  // ✅ PERFORMANCE: Load team metrics for specific month with caching
-  const loadTeamMetricsForMonth = useCallback(async (month: Date) => {
-    try {
-      const monthStr = format(month, 'yyyy-MM');
-      const cacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
-      
-      // Check cache first
-      const cachedTeamMetrics = getCachedData(cacheKey);
-      if (cachedTeamMetrics) {
-        setTeamMetrics(cachedTeamMetrics);
-        
-        // Check if teamId is in URL params and select the team
-        const teamIdFromUrl = searchParams.get('teamId');
-        if (teamIdFromUrl && cachedTeamMetrics) {
-          const team = cachedTeamMetrics.find((t: TeamMetrics) => t.teamId === teamIdFromUrl);
-          if (team) {
-            setSelectedTeam(team);
-          }
-        }
-        
-        return;
-      }
-
-      // Load fresh data
-      const [teamsSnapshot, usersSnapshot] = await Promise.all([
-        getDocs(query(collection(db, 'teams'))),
-        getDocs(query(collection(db, 'users'), where('role', 'in', ['agent', 'manager', 'freelancer'])))
-      ]);
-      
-      const teams = teamsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        name: doc.data().name || 'Unknown Team',
-        teamName: doc.data().name || doc.data().teamName || 'Unknown Team',
-        managerId: doc.data().managerId || '',
-        createdAt: doc.data().createdAt?.toDate(),
-        updatedAt: doc.data().updatedAt?.toDate()
-      })) as Team[];
-
-      const allUsers = usersSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as User[];
-
-      const usersMap = new Map(allUsers.map(user => [user.id, user]));
-      const currentMonthStart = startOfMonth(month);
-      const currentMonthEnd = endOfMonth(month);
-
-      const teamMetricsPromises = teams.map(async team => {
-        // Load team target from Firestore
-        const monthStr = format(month, 'yyyy-MM');
-        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
-        const teamTargetDoc = await getDoc(teamTargetRef);
-        const teamTarget = teamTargetDoc.exists() ? teamTargetDoc.data()?.target || undefined : undefined;
-        
-        const teamMetric: TeamMetrics = {
-          teamId: team.id,
-          teamName: team.name,
-          managerName: 'No Manager Assigned',
-          totalLeads: 0,
-          pendingVerification: 0,
-          verified: 0,
-          rejected: 0,
-          activated: 0,
-          pendingAssignment: 0,
-          assigned: 0,
-          agents: [],
-          teamTarget: teamTarget  // Add team target to the metric
-        };
-
-        const teamMembers = allUsers.filter(user => user.teamId === team.id);
-
-        if (team.managerId) {
-          const manager = usersMap.get(team.managerId);
-          if (manager) {
-            teamMetric.managerName = manager.name;
-          }
-        }
-
-        const teamLeadsForTeam = teamLeads.filter(lead => lead.teamId === team.id);
-        teamMetric.totalLeads = teamLeadsForTeam.length;
-        
-        const teamActivatedLeads = teamLeadsForTeam.filter(lead => 
-          (lead.status === 'activated' || lead.status === 'activated_non_verified') && 
-          lead.updatedAt && 
-          lead.updatedAt >= currentMonthStart && 
-          lead.updatedAt <= currentMonthEnd
-        );
-        
-        teamMetric.activated = teamActivatedLeads.reduce((count, lead) => {
-          return count + (lead.plans?.length || 0);
-        }, 0);
-
-        teamLeadsForTeam.forEach(lead => {
-          if (lead.status === 'pending_verification') teamMetric.pendingVerification++;
-          if (lead.status === 'verified') teamMetric.verified++;
-          if (lead.status === 'rejected') teamMetric.rejected++;
-          if (lead.status === 'pending_assignment') teamMetric.pendingAssignment++;
-          if (lead.status === 'assigned') teamMetric.assigned++;
-        });
-
-        const agentMetrics = await Promise.all(teamMembers.map(async member => {
-          if (member.role !== 'agent') return null;
-
-          const monthStr = format(month, 'yyyy-MM');
-          const targetRef = doc(db, 'agentTargets', `${member.id}_${monthStr}`);
-          const targetDoc = await getDoc(targetRef);
-          const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
-
-          const agentLeads = teamLeadsForTeam.filter(lead => lead.agentId === member.id);
-          const verified = agentLeads.filter(lead => lead.status === 'verified').length;
-          
-          const agentActivatedLeads = agentLeads.filter(lead => 
-            (lead.status === 'activated' || lead.status === 'activated_non_verified') && 
-            lead.updatedAt && 
-            lead.updatedAt >= currentMonthStart && 
-            lead.updatedAt <= currentMonthEnd
-          );
-          
-          const activated = agentActivatedLeads.reduce((count, lead) => {
-            return count + (lead.plans?.length || 0);
-          }, 0);
-
-          return {
-            id: member.id,
-            name: member.name,
-            role: member.role,
-            totalLeads: agentLeads.length,
-            verified,
-            activated,
-            target,
-            achievement: target > 0 ? (activated / target) * 100 : 0
-          };
-        }));
-
-        teamMetric.agents = agentMetrics.filter((agent): agent is NonNullable<typeof agent> => agent !== null);
-        return teamMetric;
-      });
-
-      const resolvedTeamMetrics = await Promise.all(teamMetricsPromises);
-      const sortedTeamMetrics = [...resolvedTeamMetrics].sort((a, b) => {
-        const nameA = a.teamName || 'Unknown Team';
-        const nameB = b.teamName || 'Unknown Team';
-        const prefixA = nameA.replace(/\d+/g, '').toLowerCase();
-        const prefixB = nameB.replace(/\d+/g, '').toLowerCase();
-        if (prefixA !== prefixB) {
-          return prefixA.localeCompare(prefixB, undefined, { numeric: true, sensitivity: 'base' });
-        }
-        const numA = parseInt((nameA.match(/\d+/) || ['0'])[0], 10);
-        const numB = parseInt((nameB.match(/\d+/) || ['0'])[0], 10);
-        if (numA !== numB) return numA - numB;
-        return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
-      });
-
-      setTeamMetrics(sortedTeamMetrics);
-      setCachedData(cacheKey, sortedTeamMetrics);
-      
-      // Check if teamId is in URL params and select the team
-      const teamIdFromUrl = searchParams.get('teamId');
-      if (teamIdFromUrl && sortedTeamMetrics) {
-        const team = sortedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
-        if (team) {
-          setSelectedTeam(team);
-        }
-      }
-    } catch (error) {
-    }
-  }, [teamLeads]);
-
-  // Note: Team metrics are now loaded by the main data loading function
-  // loadTeamMetricsForMonth is only called when user changes the month via handleMonthChange
+  // Team metrics feature removed for faster dashboard load.
 
   // ✅ PERFORMANCE: Compute group activations function
   // Matches the logic from Reports.tsx exactly
@@ -1030,24 +862,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
   async function loadAdminData(forceRefresh = false) {
     // ✅ PERFORMANCE: Check cache first
     if (!forceRefresh) {
-      const cachedMetrics = getCachedData(ADMIN_CACHE_KEY);
       const cachedLeads = getCachedData(ADMIN_LEADS_CACHE_KEY);
-      const cachedTeamMetrics = getCachedData(ADMIN_TEAM_METRICS_CACHE_KEY);
-      
-      if (cachedMetrics && cachedLeads && cachedTeamMetrics) {
-        setMetrics(cachedMetrics);
+      if (cachedLeads) {
         setTeamLeads(cachedLeads);
-        setTeamMetrics(cachedTeamMetrics);
-        
-        // Check if teamId is in URL params and select the team
-        const teamIdFromUrl = searchParams.get('teamId');
-        if (teamIdFromUrl && cachedTeamMetrics) {
-          const team = cachedTeamMetrics.find((t: TeamMetrics) => t.teamId === teamIdFromUrl);
-          if (team) {
-            setSelectedTeam(team);
-          }
-        }
-        
+        // Recompute metrics from leads to avoid stale cached metric cards.
+        recalculateMetricsForMonth(selectedMonth, cachedLeads as Lead[]);
+        setTeamMetrics([]);
         setLoading(false);
         return;
       }
@@ -1072,205 +892,16 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       // Compute group activations for the selected month
       // IMPORTANT: Always compute from allLeads (full dataset) to ensure accuracy
       computeGroupActivations(allLeads, selectedMonth);
-
-      // Month boundaries for team metrics calculation
-      const currentMonthStart = startOfMonth(selectedMonth);
-      const currentMonthEnd = endOfMonth(selectedMonth);
-
-      // Optimize: Load teams and users in parallel
-      const [teamsSnapshot, usersSnapshot] = await Promise.all([
-        getDocs(query(collection(db, 'teams'))),
-        getDocs(query(collection(db, 'users'), where('role', 'in', ['agent', 'manager', 'freelancer'])))
-      ]);
-      
-      const teams = teamsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        name: doc.data().name || 'Unknown Team',
-        teamName: doc.data().name || doc.data().teamName || 'Unknown Team', // ✅ FIX: Ensure teamName is always defined
-        managerId: doc.data().managerId || '',
-        createdAt: doc.data().createdAt?.toDate(),
-        updatedAt: doc.data().updatedAt?.toDate()
-      })) as Team[];
-
-      const allUsers = usersSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as User[];
-
-      // Create a map for faster user lookups
-      const usersMap = new Map(allUsers.map(user => [user.id, user]));
-
-      const teamMetricsPromises = teams.map(async team => {
-        // Load team target for the selected month (ALWAYS fetch fresh from Firestore)
-        const monthStr = format(selectedMonth, 'yyyy-MM');
-        const teamTargetRef = doc(db, 'teamTargets', `${team.id}_${monthStr}`);
-        const teamTargetDoc = await getDoc(teamTargetRef);
-        const teamTarget = teamTargetDoc.exists() ? teamTargetDoc.data()?.target : undefined;
-        
-        const teamMetric: TeamMetrics = {
-          teamId: team.id,
-          teamName: team.name,
-          managerName: 'No Manager Assigned',
-          totalLeads: 0,
-          pendingVerification: 0,
-          verified: 0,
-          rejected: 0,
-          activated: 0,
-          pendingAssignment: 0,
-          assigned: 0,
-          teamTarget: teamTarget,
-          agents: []
-        };
-
-        // Optimize: Use pre-loaded users instead of making individual queries
-        const teamMembers = allUsers.filter(user => user.teamId === team.id);
-
-        // Get manager name from pre-loaded users
-        if (team.managerId) {
-          const manager = usersMap.get(team.managerId);
-          if (manager) {
-            teamMetric.managerName = manager.name;
-          }
-        }
-
-        // Calculate team metrics
-        const teamLeads = allLeads.filter(lead => lead.teamId === team.id);
-        teamMetric.totalLeads = teamLeads.length;
-        
-        // Calculate activated leads for the team in current month
-        // Properly handle Firestore timestamps by converting them to Date objects
-        const teamActivatedLeads = teamLeads.filter(lead => {
-          if ((lead.status !== 'activated' && lead.status !== 'activated_non_verified') || !lead.updatedAt) return false;
-          
-          // Convert Firestore timestamp to Date if needed
-          let updatedAtDate: Date;
-          if (lead.updatedAt instanceof Date) {
-            updatedAtDate = lead.updatedAt;
-          } else if (lead.updatedAt && typeof (lead.updatedAt as any).toDate === 'function') {
-            updatedAtDate = (lead.updatedAt as any).toDate();
-          } else {
-            updatedAtDate = new Date(lead.updatedAt);
-          }
-          
-          return updatedAtDate >= currentMonthStart && updatedAtDate <= currentMonthEnd;
-        });
-        
-        // Count total activations by summing up plans in each activated lead
-        teamMetric.activated = teamActivatedLeads.reduce((count, lead) => {
-          return count + (lead.plans?.length || 0);
-        }, 0);
-
-        // Calculate other team metrics
-        teamLeads.forEach(lead => {
-          if (lead.status === 'pending_verification') teamMetric.pendingVerification++;
-          // Historical verified count per team: any lead with verifiedAt
-          if ((lead as any).verifiedAt) {
-            teamMetric.verified++;
-          }
-          if (lead.status === 'rejected') teamMetric.rejected++;
-          if (lead.status === 'pending_assignment') teamMetric.pendingAssignment++;
-          if (lead.status === 'assigned') teamMetric.assigned++;
-        });
-
-        // Calculate agent metrics
-        const agentMetrics = await Promise.all(teamMembers.map(async member => {
-          if (member.role !== 'agent') return null;
-
-          // Get agent's target for the selected month
-          const monthStr = format(selectedMonth, 'yyyy-MM');
-          const targetRef = doc(db, 'agentTargets', `${member.id}_${monthStr}`);
-          const targetDoc = await getDoc(targetRef);
-          const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
-
-          // Get agent's leads
-          const agentLeads = allLeads.filter(lead => lead.agentId === member.id);
-          // Historical verified count per agent: any lead with verifiedAt
-          const verified = agentLeads.filter(
-            lead => (lead as any).verifiedAt
-          ).length;
-          
-          // Calculate activated leads for the agent in current month
-          // Properly handle Firestore timestamps by converting them to Date objects
-          const agentActivatedLeads = agentLeads.filter(lead => {
-            if ((lead.status !== 'activated' && lead.status !== 'activated_non_verified') || !lead.updatedAt) return false;
-            
-            // Convert Firestore timestamp to Date if needed
-            let updatedAtDate: Date;
-            if (lead.updatedAt instanceof Date) {
-              updatedAtDate = lead.updatedAt;
-            } else if (lead.updatedAt && typeof (lead.updatedAt as any).toDate === 'function') {
-              updatedAtDate = (lead.updatedAt as any).toDate();
-            } else {
-              updatedAtDate = new Date(lead.updatedAt);
-            }
-            
-            return updatedAtDate >= currentMonthStart && updatedAtDate <= currentMonthEnd;
-          });
-          
-          // Count total activations by summing up plans in each activated lead
-          const activated = agentActivatedLeads.reduce((count, lead) => {
-            return count + (lead.plans?.length || 0);
-          }, 0);
-
-          return {
-            id: member.id,
-            name: member.name,
-            role: member.role,
-            totalLeads: agentLeads.length,
-            verified,
-            activated,
-            target,
-            achievement: target > 0 ? (activated / target) * 100 : 0
-          };
-        }));
-
-        teamMetric.agents = agentMetrics.filter((agent): agent is NonNullable<typeof agent> => agent !== null);
-        return teamMetric;
-      });
-
-      const resolvedTeamMetrics = await Promise.all(teamMetricsPromises);
-      // Sort teams by name with numeric-aware ordering (e.g., ETS-1, ETS-2, ...)
-      const sortedTeamMetrics = [...resolvedTeamMetrics].sort((a, b) => {
-        // ✅ FIX: Add robust null/undefined checks for teamName
-        const nameA = a.teamName || 'Unknown Team';
-        const nameB = b.teamName || 'Unknown Team';
-
-        // Compare the non-numeric prefix first (case-insensitive)
-        const prefixA = nameA.replace(/\d+/g, '').toLowerCase();
-        const prefixB = nameB.replace(/\d+/g, '').toLowerCase();
-        if (prefixA !== prefixB) {
-          return prefixA.localeCompare(prefixB, undefined, { numeric: true, sensitivity: 'base' });
-        }
-
-        // If same prefix, compare numeric parts
-        const numA = parseInt((nameA.match(/\d+/) || ['0'])[0], 10);
-        const numB = parseInt((nameB.match(/\d+/) || ['0'])[0], 10);
-        if (numA !== numB) return numA - numB;
-
-        // Fallback to full name comparison
-        return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
-      });
-      setTeamMetrics(sortedTeamMetrics);
+      // Unblock initial dashboard render; detailed team metrics continue loading.
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
+      setTeamMetrics([]);
 
       // ✅ PERFORMANCE: Cache the data
       if (isMountedRef.current) {
-        setCachedData(ADMIN_CACHE_KEY, metrics);
         setCachedData(ADMIN_LEADS_CACHE_KEY, allLeads);
-        // Use month-specific cache key to match loadTeamMetricsForMonth
-        const monthStr = format(selectedMonth, 'yyyy-MM');
-        const teamMetricsCacheKey = `${ADMIN_TEAM_METRICS_CACHE_KEY}_${monthStr}`;
-        setCachedData(teamMetricsCacheKey, sortedTeamMetrics);
         lastLoadTimeRef.current = Date.now();
-        
-        // Check if teamId is in URL params and select the team
-        const teamIdFromUrl = searchParams.get('teamId');
-        if (teamIdFromUrl && sortedTeamMetrics) {
-          const team = sortedTeamMetrics.find(t => t.teamId === teamIdFromUrl);
-          if (team) {
-            setSelectedTeam(team);
-          }
-        }
       }
     } catch (error) {
       toast.error('Failed to load admin data');
@@ -1727,6 +1358,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
       setSelectedTeam(null);
     }
   };
+
+  const lazyModalFallback = (
+    <div className="p-8 flex items-center justify-center text-gray-500 text-sm">
+      Loading module...
+    </div>
+  );
 
   const stats = useMemo(() => [
     {
@@ -2861,15 +2498,15 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
           // Team Overview
           <div className="space-y-6">
             {/* Group Targets & Activations */}
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold text-gray-900">Group Targets & Activations ({format(selectedMonth, 'MMM yyyy')})</h3>
-                <div className="flex items-center gap-2">
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-3 sm:p-6">
+              <div className="flex items-center justify-between mb-3 sm:mb-4 gap-2">
+                <h3 className="text-base sm:text-xl font-bold text-gray-900">Group Targets & Activations ({format(selectedMonth, 'MMM yyyy')})</h3>
+                <div className="flex items-center gap-1.5 sm:gap-2">
                   {!editingGroups ? (
                     <button
                       type="button"
                       onClick={() => setEditingGroups(true)}
-                      className="inline-flex items-center px-3 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100"
+                      className="inline-flex items-center px-2.5 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100"
                     >
                       Edit
                     </button>
@@ -2887,14 +2524,14 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                       <button
                         onClick={async () => { await saveGroupTargets(); setEditingGroups(false); }}
                         disabled={savingGroupTargets}
-                        className="inline-flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                        className="inline-flex items-center px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
                       >
                         {savingGroupTargets ? 'Saving...' : 'Save'}
                       </button>
                       <button
                         type="button"
                         onClick={() => { setEditingGroups(false); loadGroupTargetsForMonth(selectedMonth); }}
-                        className="inline-flex items-center px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                        className="inline-flex items-center px-2.5 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
                       >
                         Cancel
                       </button>
@@ -2903,7 +2540,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 sm:gap-4">
                 {Object.keys(groupTargets.groups)
                   .sort()
                   .map((key) => {
@@ -2922,16 +2559,16 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                     } as any;
                     const theme = palette[label] || { card: 'from-gray-50 to-gray-100', accent: 'text-gray-700', bar: 'bg-indigo-500', icon: Target };
                     return (
-                      <div key={label} className={`bg-gradient-to-br ${theme.card} rounded-xl p-4 border border-gray-200 shadow-sm`}> 
-                        <div className="flex items-center justify-between mb-2">
+                      <div key={label} className={`bg-gradient-to-br ${theme.card} rounded-lg sm:rounded-xl p-2.5 sm:p-4 border border-gray-200 shadow-sm`}> 
+                        <div className="flex items-center justify-between mb-1.5 sm:mb-2">
                           <div className="flex items-center gap-2">
-                            <div className={`p-2 rounded-lg bg-white/70 ${theme.accent}`}>
-                              <Target className="w-4 h-4" />
+                            <div className={`p-1.5 sm:p-2 rounded-lg bg-white/70 ${theme.accent}`}>
+                              <Target className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                             </div>
-                            <div className={`text-sm font-semibold ${theme.accent}`}>{alias} Activation</div>
+                            <div className={`text-xs sm:text-sm font-semibold ${theme.accent}`}>{alias} Activation</div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-500">Target vs Achieved</span>
+                            <span className="hidden sm:inline text-xs text-gray-500">Target vs Achieved</span>
                             {editingGroups && (
                             <button
                               type="button"
@@ -2982,9 +2619,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                             </button> )}
                           </div>
                         </div>
-                        <div className="flex items-end justify-between mb-3">
+                        <div className="flex items-end justify-between mb-2 sm:mb-3">
                           <div>
-                            <div className="text-2xl font-bold text-gray-900">{achieved}</div>
+                            <div className="text-lg sm:text-2xl font-bold text-gray-900">{achieved}</div>
                             <div className="text-xs text-gray-600">Activated</div>
                           </div>
                           <div>
@@ -2995,28 +2632,28 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                                   min={0}
                                   value={target}
                                   onChange={(e) => setGroupTargets(prev => ({ ...prev, groups: { ...prev.groups, [label]: Number(e.target.value) } }))}
-                                  className="w-24 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                  className="w-20 sm:w-24 px-2 py-1 border border-gray-300 rounded text-xs sm:text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                                   placeholder="Target"
                                 />
                                 <div className="text-xs text-gray-500 mt-1 text-right">Target</div>
                               </>
                             ) : (
                               <div className="text-right">
-                                <div className="text-lg font-semibold text-gray-900">{target}</div>
+                                <div className="text-base sm:text-lg font-semibold text-gray-900">{target}</div>
                                 <div className="text-xs text-gray-500">Target</div>
                               </div>
                             )}
                           </div>
                         </div>
-                        <div className="w-full bg-gray-200 rounded-full h-2.5">
+                        <div className="w-full bg-gray-200 rounded-full h-2 sm:h-2.5">
                           <div
-                            className={`h-2.5 rounded-full transition-all ${theme.bar}`}
+                            className={`h-2 sm:h-2.5 rounded-full transition-all ${theme.bar}`}
                             style={{ width: `${achievement}%` }}
                           />
                         </div>
-                        <div className="mt-2 flex items-center justify-between text-xs">
+                        <div className="mt-1.5 sm:mt-2 flex items-center justify-between text-xs">
                           <span className="text-gray-600">Achievement</span>
-                          <span className={`px-2 py-0.5 rounded-full font-medium ${achievement >= 100 ? 'bg-green-100 text-green-700' : achievement >= 80 ? 'bg-blue-100 text-blue-700' : achievement >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>{Math.round(achievement)}%</span>
+                          <span className={`px-1.5 sm:px-2 py-0.5 rounded-full text-[11px] sm:text-xs font-medium ${achievement >= 100 ? 'bg-green-100 text-green-700' : achievement >= 80 ? 'bg-blue-100 text-blue-700' : achievement >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>{Math.round(achievement)}%</span>
                         </div>
                       </div>
                     );
@@ -3097,160 +2734,6 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {(teamMetrics || []).map((team) => {
-                // Use the pre-calculated teamMetric.activated instead of recalculating
-                const totalAchieved = team.activated || 0;
-                // Use team target if set by admin, otherwise fall back to sum of agent targets
-                const agentTargetSum = (team.agents || []).reduce((sum, agent) => sum + (agent.target || 0), 0);
-                const totalTarget = team.teamTarget !== undefined ? team.teamTarget : agentTargetSum;
-                
-                const averageActivationPerAgent = (team.agents || []).length > 0 
-                  ? (totalAchieved / (team.agents || []).length).toFixed(1) 
-                  : '0';
-
-                const achievementPercentage = totalTarget > 0 ? (totalAchieved / totalTarget) * 100 : 0;
-                const achievementColor = achievementPercentage >= 100 
-                  ? 'from-emerald-500 to-emerald-600'
-                  : achievementPercentage >= 80 
-                    ? 'from-blue-500 to-blue-600'
-                    : achievementPercentage >= 60 
-                      ? 'from-amber-500 to-amber-600'
-                      : 'from-red-500 to-red-600';
-
-                return (
-                  <div 
-                    key={team.teamId || `team-${team.teamName || 'unknown'}`}
-                    className="bg-white rounded-2xl shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden border border-gray-100"
-                  >
-                    <div className="p-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <div>
-                          <h3 className="text-xl font-bold text-gray-900">{team.teamName}</h3>
-                          <p className="text-sm text-gray-500">Managed by {team.managerName}</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Users className="w-5 h-5 text-gray-400" />
-                          <span className="text-sm font-medium text-gray-600">{(team.agents || []).length} Agents</span>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4 mb-6">
-                        <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-4 rounded-xl">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-sm font-medium text-purple-700">This Month</p>
-                            <div className="flex items-center gap-1">
-                              <Calendar className="w-4 h-4 text-purple-600" />
-                              <span className="text-xs font-medium text-purple-600 bg-purple-100 px-2 py-1 rounded-full">
-                                {format(selectedMonth, 'MMM')}
-                              </span>
-                            </div>
-                          </div>
-                          <p className="text-2xl font-bold text-purple-900">{totalAchieved}</p>
-                          <p className="text-xs text-purple-600 mt-1">Activations</p>
-                        </div>
-                        <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-sm font-medium text-green-700">Average Per Agent</p>
-                          </div>
-                          <p className="text-2xl font-bold text-green-900">{averageActivationPerAgent}</p>
-                          <p className="text-xs text-green-600 mt-1">Activations</p>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4">
-                        <div>
-                          <div className="flex justify-between text-sm mb-2">
-                            <span className="text-gray-600">Target Achievement</span>
-                            <span className="font-medium text-gray-900">
-                              {achievementPercentage.toFixed(1)}%
-                            </span>
-                          </div>
-                          <div className="w-full bg-gray-100 rounded-full h-2.5">
-                            <div
-                              className={`bg-gradient-to-r ${achievementColor} h-2.5 rounded-full transition-all duration-500`}
-                              style={{ width: `${Math.min(achievementPercentage, 100)}%` }}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-xl">
-                            <div className="flex items-center justify-between mb-2">
-                              <p className="text-sm font-medium text-blue-700">Team Target</p>
-                              {user?.role === 'admin' && (
-                                <button
-                                  onClick={() => {
-                                    const initialValue = team.teamTarget !== undefined ? team.teamTarget : 0;
-                                    setEditingTeamTarget(team.teamId);
-                                    setTeamTargetValue(initialValue);
-                                  }}
-                                  className="text-xs text-blue-600 hover:text-blue-800 font-medium"
-                                >
-                                  Edit
-                                </button>
-                              )}
-                            </div>
-                            {editingTeamTarget === team.teamId ? (
-                              <div className="space-y-3">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={teamTargetValue}
-                                  onChange={(e) => setTeamTargetValue(Number(e.target.value))}
-                                  className="w-full px-3 py-2 border border-blue-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                  autoFocus
-                                  onKeyPress={(e) => {
-                                    if (e.key === 'Enter') {
-                                      handleSaveTeamTarget(team.teamId);
-                                    }
-                                    if (e.key === 'Escape') {
-                                      setEditingTeamTarget(null);
-                                    }
-                                  }}
-                                />
-                                <div className="flex justify-end gap-2">
-                                  <button
-                                    onClick={() => setEditingTeamTarget(null)}
-                                    className="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-                                  >
-                                    Cancel
-                                  </button>
-                                  <button
-                                    onClick={() => handleSaveTeamTarget(team.teamId)}
-                                    disabled={savingTeamTarget}
-                                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                                  >
-                                    {savingTeamTarget ? 'Saving...' : 'Save'}
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="text-2xl font-bold text-blue-900">
-                                {team.teamTarget !== undefined ? team.teamTarget : 0}
-                              </p>
-                            )}
-                          </div>
-                          <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-xl">
-                            <div className="flex items-center justify-between mb-2">
-                              <p className="text-sm font-medium text-green-700">Total Achieved</p>
-                            </div>
-                            <p className="text-2xl font-bold text-green-900">{totalAchieved}</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => handleTeamClick(team)}
-                        className="mt-6 w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-2 px-4 rounded-xl hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 font-medium text-sm"
-                      >
-                        View Team Details
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
           </div>
         )}
       </div>
@@ -3312,12 +2795,12 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
 
       {/* Broadcast Poster Modal */}
       {posterModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-2 sm:p-4">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl overflow-hidden border border-gray-100 relative"
+            className="w-full max-w-3xl max-h-[92vh] sm:max-h-[90vh] bg-white rounded-2xl shadow-2xl overflow-hidden border border-gray-100 relative flex flex-col"
           >
             {/* Preview overlay on top layer */}
             {showPosterPreview && (
@@ -3365,14 +2848,14 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
             )}
 
-            <div className="bg-gradient-to-r from-indigo-600 via-purple-600 to-amber-500 px-6 py-4 flex items-center justify-between">
-              <div className="flex items-center gap-3">
+            <div className="bg-gradient-to-r from-indigo-600 via-purple-600 to-amber-500 px-4 sm:px-6 py-4 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <div className="p-2 bg-white/15 rounded-xl border border-white/10">
                   <Sparkles className="w-5 h-5 text-amber-200" />
                 </div>
-                <div>
+                <div className="min-w-0">
                   <p className="text-xs uppercase tracking-[0.25em] text-amber-200/80">Broadcast Poster</p>
-                  <h3 className="text-xl font-semibold text-white">Send Announcement</h3>
+                  <h3 className="text-lg sm:text-xl font-semibold text-white truncate">Send Announcement</h3>
                 </div>
               </div>
               <button
@@ -3383,7 +2866,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </button>
             </div>
 
-            <div className="p-6 space-y-4">
+            <div className="p-4 sm:p-6 space-y-4 overflow-y-auto">
               <div>
                 <label className="text-sm font-semibold text-gray-700">Title</label>
                 <input
@@ -3410,18 +2893,18 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
               </div>
 
               {/* Live Preview (toggle) */}
-              <div className="flex items-center justify-between">
+              <div className="space-y-3">
                 <p className="text-xs text-gray-500">This will appear to all users on next refresh until they click “I Acknowledge”.</p>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
                   <button
                     onClick={() => setPosterModalOpen(false)}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                    className="w-full sm:w-auto min-h-[44px] px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={() => setShowPosterPreview(!showPosterPreview)}
-                    className="px-4 py-2 text-sm font-medium text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors"
+                    className="w-full sm:w-auto min-h-[44px] px-4 py-2 text-sm font-medium text-indigo-700 bg-indigo-100 rounded-lg hover:bg-indigo-200 transition-colors"
                   >
                     {showPosterPreview ? 'Hide Preview' : 'Preview'}
                   </button>
@@ -3430,7 +2913,7 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                     whileTap={{ scale: isSendingPoster ? 1 : 0.98 }}
                     onClick={handleSendBroadcastPoster}
                     disabled={isSendingPoster}
-                    className="px-5 py-2.5 text-sm font-semibold rounded-lg text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 shadow-lg disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                    className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 text-sm font-semibold rounded-lg text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 shadow-lg disabled:opacity-60 disabled:cursor-not-allowed transition-all touch-manipulation"
                   >
                     {isSendingPoster ? 'Sending...' : 'Send to All'}
                   </motion.button>
@@ -3663,7 +3146,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 </p>
               </div>
               
-              <AdminManagerPhoneNumbers />
+              <Suspense fallback={lazyModalFallback}>
+                <AdminManagerPhoneNumbers />
+              </Suspense>
             </div>
           </div>
         </div>
@@ -3689,23 +3174,33 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 </p>
               </div>
               
-              <PlanManagement />
+              <Suspense fallback={lazyModalFallback}>
+                <PlanManagement />
+              </Suspense>
             </div>
           </div>
         </div>
       )}
 
       {/* DNC Management Modal */}
-      <DNCManagement 
-        isOpen={dncManagementOpen} 
-        onClose={() => setDncManagementOpen(false)} 
-      />
+      {dncManagementOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <DNCManagement
+            isOpen={dncManagementOpen}
+            onClose={() => setDncManagementOpen(false)}
+          />
+        </Suspense>
+      )}
 
           {/* Bulk DNC Import Modal */}
-          <BulkDNCImport 
-            isOpen={bulkImportOpen} 
-            onClose={() => setBulkImportOpen(false)} 
-          />
+          {bulkImportOpen && (
+            <Suspense fallback={lazyModalFallback}>
+              <BulkDNCImport
+                isOpen={bulkImportOpen}
+                onClose={() => setBulkImportOpen(false)}
+              />
+            </Suspense>
+          )}
 
       {/* Return Numbers Modal */}
       {bulkDeleteModalOpen && (
@@ -3720,7 +3215,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             </button>
             
             <div className="p-8">
-              <BulkDeleteNumbers />
+              <Suspense fallback={lazyModalFallback}>
+                <BulkDeleteNumbers />
+              </Suspense>
             </div>
           </div>
         </div>
@@ -3739,47 +3236,73 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             </button>
             
             <div className="p-8">
-              <AddToDeletedNumbers />
+              <Suspense fallback={lazyModalFallback}>
+                <AddToDeletedNumbers />
+              </Suspense>
             </div>
           </div>
         </div>
       )}
 
       {/* Bulk Number Search Modal */}
-      <BulkNumberSearch 
-        isOpen={bulkNumberSearchModalOpen} 
-        onClose={() => setBulkNumberSearchModalOpen(false)} 
-      />
+      {bulkNumberSearchModalOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <BulkNumberSearch
+            isOpen={bulkNumberSearchModalOpen}
+            onClose={() => setBulkNumberSearchModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Bulk Deleted Number Search Modal */}
-      <BulkDeletedNumberSearch
-        isOpen={bulkDeletedNumberSearchModalOpen}
-        onClose={() => setBulkDeletedNumberSearchModalOpen(false)}
-      />
+      {bulkDeletedNumberSearchModalOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <BulkDeletedNumberSearch
+            isOpen={bulkDeletedNumberSearchModalOpen}
+            onClose={() => setBulkDeletedNumberSearchModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Bulk Activate Numbers Modal */}
-      <BulkActivateNumbers
-        isOpen={bulkActivateModalOpen}
-        onClose={() => setBulkActivateModalOpen(false)}
-      />
+      {bulkActivateModalOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <BulkActivateNumbers
+            isOpen={bulkActivateModalOpen}
+            onClose={() => setBulkActivateModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Bulk Restore Numbers Modal */}
-      <BulkRestoreNumbers
-        isOpen={bulkRestoreModalOpen}
-        onClose={() => setBulkRestoreModalOpen(false)}
-      />
+      {bulkRestoreModalOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <BulkRestoreNumbers
+            isOpen={bulkRestoreModalOpen}
+            onClose={() => setBulkRestoreModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Customer Link Tracking Modal */}
-      <CustomerLinkTracking 
-        isOpen={customerLinkTrackingModalOpen} 
-        onClose={() => setCustomerLinkTrackingModalOpen(false)} 
-      />
+      {customerLinkTrackingModalOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <CustomerLinkTracking
+            isOpen={customerLinkTrackingModalOpen}
+            onClose={() => setCustomerLinkTrackingModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Download Verification Media Modal */}
-      <DownloadVerificationMedia 
-        isOpen={downloadVerificationMediaModalOpen} 
-        onClose={() => setDownloadVerificationMediaModalOpen(false)} 
-      />
+      {downloadVerificationMediaModalOpen && (
+        <Suspense fallback={lazyModalFallback}>
+          <DownloadVerificationMedia
+            isOpen={downloadVerificationMediaModalOpen}
+            onClose={() => setDownloadVerificationMediaModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Trusted Devices Management Modal */}
       {trustedDevicesModalOpen && (
@@ -3794,7 +3317,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
             </button>
             
             <div className="p-8">
-              <TrustedDevicesAdmin />
+              <Suspense fallback={lazyModalFallback}>
+                <TrustedDevicesAdmin />
+              </Suspense>
             </div>
           </div>
         </div>
@@ -3820,7 +3345,9 @@ export function AdminDashboard({ user }: AdminDashboardProps) {
                 </p>
               </div>
               
-              <WhatsAppSettings />
+              <Suspense fallback={lazyModalFallback}>
+                <WhatsAppSettings />
+              </Suspense>
             </div>
           </div>
         </div>

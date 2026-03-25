@@ -46,11 +46,11 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Toaster } from 'react-hot-toast';
-import { Users, PhoneCall, ClipboardList, Settings, Menu, X, UserCog, LogOut, Building2, Upload, LayoutDashboard, Bell, MessageSquare, Volume2, VolumeX, User, Phone, Hash, Activity, ChevronDown, Star, PlusCircle, Calendar } from 'lucide-react';
+import { Users, PhoneCall, ClipboardList, Settings, Menu, X, UserCog, LogOut, Building2, Upload, LayoutDashboard, Bell, MessageSquare, Volume2, VolumeX, User, Phone, Hash, Activity, ChevronDown, Star, PlusCircle, Calendar, Moon, Sun } from 'lucide-react';
 import { logUserSessionAction, getUserAgentInfo, getDeviceInfo } from '../../utils/userSessionLogging';
 import { initializeSessionTracking } from '../../utils/sessionTracker';
 import { Dialog, Transition } from '@headlessui/react';
@@ -67,7 +67,7 @@ import TranslationChat from '../TranslationChat';
 import { MARStrip } from '../MARStrip';
 import NoticeBoard from '../NoticeBoard';
 import { DNCCheckModal } from '../modals/DNCCheckModal';
-import { DNCManagement } from '../admin/DNCManagement';
+const DNCManagement = lazy(() => import('../admin/DNCManagement').then((m) => ({ default: m.DNCManagement })));
 import { clearAllStorage } from '../../utils/clearStorage';
 import { BroadcastPoster } from '../BroadcastPoster';
 
@@ -93,6 +93,18 @@ export function DashboardLayout() {
   const [isHovered, setIsHovered] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
+
+  // Universal dark mode
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    try { return localStorage.getItem('force_dark_mode') === '1'; } catch { return false; }
+  });
+
+  useEffect(() => {
+    try {
+      if (isDarkMode) localStorage.setItem('force_dark_mode', '1');
+      else localStorage.removeItem('force_dark_mode');
+    } catch {}
+  }, [isDarkMode]);
   
   // Notification system state
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -632,7 +644,26 @@ export function DashboardLayout() {
    * - Integrated modals and tools
    */
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gradient-to-br from-[#eff3ff] via-[#e4e7ff] to-[#fef6ff]">
+
+      {/* Universal dark-mode overlay — uses backdrop-filter so it inverts every
+          compositor layer (including framer-motion transform layers) at the GPU
+          compositing stage, which CSS filter on <html> cannot reach. */}
+      {isDarkMode && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2147483646,
+            backdropFilter: 'invert(1) hue-rotate(180deg)',
+            WebkitBackdropFilter: 'invert(1) hue-rotate(180deg)',
+            pointerEvents: 'none',
+            background: 'transparent',
+          }}
+        />
+      )}
+
       {/* Top Navigation */}
       <div className="fixed top-0 left-0 right-0 z-50">
         <div className="bg-white/80 backdrop-blur-lg border-b border-gray-200/80 shadow-sm">
@@ -777,6 +808,16 @@ export function DashboardLayout() {
 
             {/* Right side items */}
             <div className="flex items-center space-x-4 relative"> {/* <-- add relative here for user menu */}
+              {/* Dark mode toggle */}
+              <button
+                type="button"
+                onClick={() => setIsDarkMode(d => !d)}
+                className="p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-white/60 transition-colors"
+                aria-label="Toggle dark mode"
+              >
+                {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+
               {/* Delivery Schedule Button in header (hidden for agents, moved to sidebar) */}
               {user?.role !== 'agent' && (
               <button
@@ -1380,10 +1421,20 @@ export function DashboardLayout() {
       />
 
       {/* DNC Management Modal */}
-      <DNCManagement 
-        isOpen={dncManagementOpen} 
-        onClose={() => setDncManagementOpen(false)} 
-      />
+      {dncManagementOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+              <div className="bg-white rounded-xl px-5 py-4 text-sm text-gray-600 shadow-lg">Loading DNC Management...</div>
+            </div>
+          }
+        >
+          <DNCManagement
+            isOpen={dncManagementOpen}
+            onClose={() => setDncManagementOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Broadcast Poster (global premium announcement) */}
       <BroadcastPoster />

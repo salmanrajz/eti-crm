@@ -106,7 +106,7 @@ export const BroadcastPoster: React.FC = () => {
     <AnimatePresence>
       {visible && (
         <motion.div
-          className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/50 backdrop-blur-sm p-2 sm:p-4"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -114,14 +114,14 @@ export const BroadcastPoster: React.FC = () => {
         >
           {/* Curtain effect container */}
           <motion.div
-            className="relative w-[90vw] max-w-3xl"
+            className="relative w-full max-w-3xl"
             initial={{ scaleY: 0, opacity: 0 }}
             animate={{ scaleY: 1, opacity: 1, originY: 0 }}
             exit={{ scaleY: 0, opacity: 0, originY: 0 }}
             transition={{ duration: 0.5, ease: 'easeOut' }}
           >
             {/* Premium rust-inspired gradient poster (inverted & dimmed) */}
-            <div className="relative flex flex-col overflow-hidden rounded-3xl shadow-2xl border border-white/15 bg-gradient-to-br from-rose-800/90 via-orange-900/90 to-amber-900/90 text-white backdrop-blur-lg max-h-[90vh]">
+            <div className="relative flex flex-col overflow-hidden rounded-3xl shadow-2xl border border-white/15 bg-gradient-to-br from-rose-800/90 via-orange-900/90 to-amber-900/90 text-white backdrop-blur-lg max-h-[92vh] sm:max-h-[90vh]">
               {/* Glass overlay */}
               <div className="absolute inset-0 bg-white/5 backdrop-blur-sm pointer-events-none" />
               {/* Dimmed sparkle overlay */}
@@ -129,7 +129,7 @@ export const BroadcastPoster: React.FC = () => {
               <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_bottom_right,_rgba(255,191,160,0.06),_transparent_45%)]" />
 
               {/* Header - Fixed */}
-              <div className="relative z-10 flex-shrink-0 p-8 pb-4">
+              <div className="relative z-10 flex-shrink-0 p-5 sm:p-8 pb-4">
                 <button
                   onClick={() => {
                     setVisible(false);
@@ -156,24 +156,25 @@ export const BroadcastPoster: React.FC = () => {
                     {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
                   </p>
                   <div className="w-full max-w-sm h-0.5 bg-amber-200/70 mt-1 mb-2" />
-                  <h2 className="text-3xl font-semibold text-amber-200 drop-shadow mt-1">{title}</h2>
+                  <h2 className="text-2xl sm:text-3xl font-semibold text-amber-200 drop-shadow mt-1">{title}</h2>
                 </div>
               </div>
 
               {/* Scrollable Content Area */}
-              <div className="flex-1 overflow-y-auto px-8 py-4 relative z-10">
+              <div className="flex-1 overflow-y-auto px-5 sm:px-8 py-4 relative z-10">
                 <div className="text-sm text-gray-100 leading-relaxed whitespace-pre-line">
                   {message}
                 </div>
               </div>
 
               {/* Footer with Button - Fixed */}
-              <div className="flex-shrink-0 px-8 pb-8 pt-4 flex justify-end relative z-10 border-t border-white/10">
+              <div className="flex-shrink-0 px-5 sm:px-8 pb-5 sm:pb-8 pt-4 flex justify-end relative z-10 border-t border-white/10">
                 <motion.button
+                  type="button"
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.97 }}
                   onClick={handleAcknowledge}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-orange-400 to-amber-500 text-slate-900 font-semibold shadow-lg hover:shadow-xl transition-all"
+                  className="w-full sm:w-auto min-h-[46px] px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 via-orange-400 to-amber-500 text-slate-900 font-semibold shadow-lg hover:shadow-xl transition-all touch-manipulation"
                 >
                   I Acknowledge
                 </motion.button>
