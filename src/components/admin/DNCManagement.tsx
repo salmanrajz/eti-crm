@@ -381,18 +381,18 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.95 }}
-        className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col"
+        className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full mx-2 sm:mx-4 max-h-[92vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="bg-gradient-to-r from-red-500 to-red-600 p-6 text-white rounded-t-2xl">
+        <div className="bg-gradient-to-r from-red-500 to-red-600 p-4 sm:p-6 text-white rounded-t-2xl">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <div className="p-2 bg-white/20 rounded-xl">
                 <Shield className="h-6 w-6" />
               </div>
               <div>
-                <h2 className="text-xl font-bold">DNC Number Management</h2>
+                <h2 className="text-lg sm:text-xl font-bold">DNC Number Management</h2>
                 <p className="text-red-100 text-sm">Manage Do Not Call registry</p>
               </div>
             </div>
@@ -408,45 +408,41 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
           
           {/* Tabs - Only show for admins */}
           {user?.role === 'admin' && (
-            <div className="flex space-x-1 mt-4">
+            <div className="flex mt-4 gap-2 overflow-x-auto pb-1">
               <button
                 onClick={() => setActiveTab('dnc')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-2 ${
                   activeTab === 'dnc' 
                     ? 'bg-white/20 text-white' 
                     : 'text-red-100 hover:bg-white/10'
                 }`}
               >
-                <div className="flex items-center space-x-2">
-                  <Shield className="h-4 w-4" />
-                  <span>DNC Management</span>
-                </div>
+                <Shield className="h-3.5 w-3.5" />
+                <span>DNC</span>
               </button>
               <button
                 onClick={() => setActiveTab('logs')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-2 ${
                   activeTab === 'logs' 
                     ? 'bg-white/20 text-white' 
                     : 'text-red-100 hover:bg-white/10'
                 }`}
               >
-                <div className="flex items-center space-x-2">
-                  <Search className="h-4 w-4" />
-                  <span>WhatsApp Checker Log</span>
-                </div>
+                <Search className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Log</span>
+                <span className="sm:hidden">Logs</span>
               </button>
               <button
                 onClick={() => setActiveTab('api')}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-2 ${
                   activeTab === 'api' 
                     ? 'bg-white/20 text-white' 
                     : 'text-red-100 hover:bg-white/10'
                 }`}
               >
-                <div className="flex items-center space-x-2">
-                  <Globe className="h-4 w-4" />
-                  <span>API Configuration</span>
-                </div>
+                <Globe className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">API</span>
+                <span className="sm:hidden">API</span>
               </button>
             </div>
           )}
@@ -458,13 +454,13 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
           {activeTab === 'dnc' && (
             <>
               {/* Add New Number Section */}
-              <div className={`p-6 ${['admin', 'manager'].includes(user?.role || '') ? 'border-b border-gray-200' : ''} bg-gray-50`}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
+              <div className={`p-3 sm:p-6 ${['admin', 'manager'].includes(user?.role || '') ? 'border-b border-gray-200' : ''} bg-gray-50`}>
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900 mb-3">
               {['admin', 'manager'].includes(user?.role || '') ? 'Add Number to DNC' : 'Add Number to Do Not Call Registry'}
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
+                <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">
                   Phone Number *
                 </label>
                 <input
@@ -484,7 +480,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                   }}
                   placeholder="05XXXXXXXX"
                   maxLength={10}
-                  className={`w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 ${
+                  className={`w-full px-2.5 sm:px-3 py-1.5 sm:py-2 border rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 ${
                     validationError ? 'border-red-500 bg-red-50' : 'border-gray-300'
                   }`}
                 />
@@ -495,7 +491,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
+                <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">
                   Reason (Optional)
                 </label>
                 <input
@@ -503,14 +499,14 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                   value={newReason}
                   onChange={(e) => setNewReason(e.target.value)}
                   placeholder="Customer requested"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  className="w-full px-2.5 sm:px-3 py-1.5 sm:py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
                 />
               </div>
               <div className="flex items-end">
                 <button
                   onClick={handleAddToDNC}
                   disabled={isAdding}
-                  className="w-full bg-gradient-to-r from-red-500 to-red-600 text-white px-4 py-2 rounded-lg hover:from-red-600 hover:to-red-700 transition-all disabled:opacity-50 flex items-center justify-center space-x-2"
+                  className="w-full bg-gradient-to-r from-red-500 to-red-600 text-white px-3 py-2 rounded-lg hover:from-red-600 hover:to-red-700 transition-all disabled:opacity-50 flex items-center justify-center space-x-2 text-sm"
                 >
                   {isAdding ? (
                     <Clock className="h-4 w-4 animate-spin" />
@@ -596,9 +592,9 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
           {['admin', 'manager'].includes(user?.role || '') && (
             <div className="flex-1 overflow-hidden flex flex-col">
             {/* Search and Export */}
-            <div className="p-6 border-b border-gray-200 space-y-4">
+            <div className="p-3 sm:p-6 border-b border-gray-200 space-y-3 sm:space-y-4">
               {/* Search Bar */}
-              <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex flex-col sm:flex-row gap-2 sm:gap-4 items-stretch sm:items-end">
                 <div className="flex-1 relative">
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
                 <input
@@ -606,13 +602,13 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="Search by number or reason..."
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  className="w-full pl-10 pr-3 py-1.5 sm:py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
                 />
                 </div>
                 <button
                   onClick={() => exportToExcel(false)}
                   disabled={filteredNumbers.length === 0 || isExporting}
-                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 whitespace-nowrap"
+                  className="w-full sm:w-auto px-3 py-1.5 sm:py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2 whitespace-nowrap text-sm min-h-[38px] mt-1 sm:mt-0"
                   title="Export loaded DNC numbers to Excel"
                 >
                   <Download className="h-4 w-4" />
@@ -621,9 +617,9 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
               </div>
 
               {/* Date Range Export */}
-              <div className="flex flex-col sm:flex-row gap-4 items-end">
+              <div className="flex flex-col sm:flex-row gap-2 sm:gap-4 items-stretch sm:items-end">
                 <div className="flex-1">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">
                     Export by Date Range (Added Date)
                   </label>
                   <div className="flex gap-2">
@@ -632,7 +628,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                         type="date"
                         value={exportStartDate}
                         onChange={(e) => setExportStartDate(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                        className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
                         placeholder="Start Date"
                       />
                     </div>
@@ -641,7 +637,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                         type="date"
                         value={exportEndDate}
                         onChange={(e) => setExportEndDate(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                        className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
                         placeholder="End Date"
                       />
                     </div>
@@ -650,7 +646,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                 <button
                   onClick={() => exportToExcel(true)}
                   disabled={!exportStartDate || !exportEndDate || isExporting}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-2 whitespace-nowrap"
+                  className="w-full sm:w-auto px-3 py-1.5 sm:py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2 whitespace-nowrap text-sm min-h-[38px]"
                   title="Export DNC numbers by date range from Firebase"
                 >
                   <Download className="h-4 w-4" />
@@ -660,7 +656,7 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
             </div>
 
             {/* DNC Numbers List */}
-            <div className="flex-1 overflow-y-auto p-6">
+            <div className="flex-1 overflow-y-auto p-3 sm:p-6">
               {loading ? (
                 <div className="flex items-center justify-center h-32">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-600" />
@@ -680,13 +676,13 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: index * 0.05 }}
-                      className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow"
+                      className="bg-white border border-gray-200 rounded-lg p-3 sm:p-4 hover:shadow-md transition-shadow"
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex-1">
                           <div className="flex items-center space-x-3">
                             <div className="flex-shrink-0">
-                              <div className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
+                              <div className="w-7 h-7 sm:w-8 sm:h-8 bg-red-100 rounded-full flex items-center justify-center">
                                 <AlertTriangle className="h-4 w-4 text-red-600" />
                               </div>
                             </div>
@@ -960,26 +956,8 @@ export function DNCManagement({ isOpen, onClose }: DNCManagementProps) {
           )}
         </div>
 
-        {/* Footer */}
-        <div className="p-6 border-t border-gray-200 bg-gray-50 rounded-b-2xl">
-          <div className="flex items-center justify-between">
-            <div className="text-sm text-gray-600">
-              {activeTab === 'dnc' ? (
-                ['admin', 'manager'].includes(user?.role || '') ? `Showing ${filteredNumbers.length} DNC Numbers${hasMore ? ' (Load more to see all)' : ''}` : 'Add numbers to prevent future contact attempts'
-              ) : activeTab === 'logs' ? (
-                `Showing ${checkLogs.length} WhatsApp Check Logs${logsHasMore ? ' (Load more to see all)' : ''}`
-              ) : (
-                'API endpoint configuration for WhatsApp verification'
-              )}
-            </div>
-            <button
-              onClick={onClose}
-              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
-            >
-              Close
-            </button>
-          </div>
-        </div>
+        {/* Footer removed on mobile/phones to keep key actions visible.
+            Use the top-right X button to close the modal. */}
       </motion.div>
     </div>
   );
