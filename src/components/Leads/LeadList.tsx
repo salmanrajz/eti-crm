@@ -103,6 +103,18 @@ import { normalizeTimestamp, formatTimestamp, getTimestampForSort } from '../../
 import { logLeadAction } from '../../utils/leadLogging';
 import { getUserDetails } from '../../utils/dncService';
 
+// date-fns `format()` throws `RangeError: Invalid time value` if the Date is invalid.
+// Leads data can include cached/serialized timestamps, so we defensively normalize first.
+const formatSafe = (value: any, formatStr: string): string => {
+  const d = normalizeTimestamp(value);
+  if (!d) return 'N/A';
+  try {
+    return format(d, formatStr);
+  } catch {
+    return 'N/A';
+  }
+};
+
 // ✅ PERFORMANCE: Optimized load sizes for faster initial loading
 const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
 const PAGINATION_SIZE = (() => {
@@ -572,7 +584,7 @@ function StruckNumbersModal({ lead, onClose }: StruckNumbersModalProps) {
                                       </div>
                                     </div>
                                     <div className="text-xs text-gray-500 whitespace-nowrap flex-shrink-0">
-                                      {format(striker.claimedAt, 'd MMM, h:mm a')}
+                                    {formatSafe(striker.claimedAt, 'd MMM, h:mm a')}
                                     </div>
                                   </div>
                                 </motion.div>
@@ -3365,7 +3377,7 @@ export function LeadList() {
                         {/* Date with Icon */}
                         <div className="flex items-center text-xs text-gray-500">
                             <Calendar className="h-3 w-3 mr-1.5" />
-                            {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
+                            {formatSafe(lead.createdAt, 'MMM d, yyyy h:mm a')}
                           </div>
                         {/* Agent Name (for managers) */}
                         {isManager() && (lead as any).agentName && (
@@ -3682,7 +3694,7 @@ export function LeadList() {
                           {/* Date with Icon */}
                           <div className="flex items-center text-[11px] text-gray-500">
                             <Calendar className="h-3 w-3 mr-1 flex-shrink-0" />
-                            <span>{format(lead.createdAt, 'MMM d, yyyy')} at {format(lead.createdAt, 'h:mm a')}</span>
+                            <span>{formatSafe(lead.createdAt, 'MMM d, yyyy')} at {formatSafe(lead.createdAt, 'h:mm a')}</span>
                             </div>
                             </div>
                           </div>
