@@ -187,7 +187,35 @@ export function QuickNumberSelect({
 
       // 3) single token firebase
       if (tokens.length === 1) {
-        const singleResults = await searchFirebaseBySingleToken(tokens[0], cat).catch(() => []);
+        const singleToken = tokens[0];
+
+        // Full-number searches with initials (for example 0569865000) should
+        // hit an exact number lookup first instead of falling through to the
+        // slower token/prefix path.
+        if (/^0\d{9}$/.test(singleToken)) {
+          const exactSnap = await getDocs(
+            query(
+              collection(db, 'numberPool'),
+              where('number', '==', singleToken),
+              limit(SEARCH_LIMIT)
+            )
+          ).catch(() => null);
+
+          if (exactSnap && !exactSnap.empty) {
+            const exactResults = (exactSnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[])
+              .filter(n =>
+                (!cat || n.category === cat) &&
+                ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
+              );
+
+            if (exactResults.length) {
+              await addStatusChecks(filterByVisibility(exactResults));
+              return;
+            }
+          }
+        }
+
+        const singleResults = await searchFirebaseBySingleToken(singleToken, cat).catch(() => []);
         if (singleResults.length) { await addStatusChecks(filterByVisibility(singleResults)); return; }
       }
 
