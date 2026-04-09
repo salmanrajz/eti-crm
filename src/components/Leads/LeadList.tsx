@@ -584,7 +584,7 @@ function StruckNumbersModal({ lead, onClose }: StruckNumbersModalProps) {
                                       </div>
                                     </div>
                                     <div className="text-xs text-gray-500 whitespace-nowrap flex-shrink-0">
-                                    {formatSafe(striker.claimedAt, 'd MMM, h:mm a')}
+                                      {formatSafe(striker.claimedAt, 'd MMM, h:mm a')}
                                     </div>
                                   </div>
                                 </motion.div>
@@ -1855,7 +1855,9 @@ export function LeadList() {
 
     return !!(
       lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
+      lead.selectedNumber?.toLowerCase().includes(normalizedSearch) ||
       lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+      lead.agentName?.toLowerCase().includes(normalizedSearch) ||
       lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
       lead.plans?.some((plan: any) =>
         plan.number?.toLowerCase().includes(normalizedSearch) ||
@@ -1928,6 +1930,22 @@ export function LeadList() {
       );
     }
 
+    // Query 4: selectedNumber — root-level indexed field (exact & prefix match)
+    if (isNumeric && cleanTerm.length >= 3) {
+      // Exact match
+      queries.push(
+        getDocs(query(leadsRef, ...roleConstraints, where('selectedNumber', '==', cleanTerm), limit(FAST_LIMIT)))
+          .then(snap => { snap.docs.forEach(d => { if (!results.has(d.id)) results.set(d.id, transformDoc(d) as any); }); })
+          .catch(() => {})
+      );
+      // Prefix match (e.g. typing "0503")
+      queries.push(
+        getDocs(query(leadsRef, ...roleConstraints, where('selectedNumber', '>=', cleanTerm), where('selectedNumber', '<=', cleanTerm + '\uf8ff'), orderBy('selectedNumber'), limit(FAST_LIMIT)))
+          .then(snap => { snap.docs.forEach(d => { if (!results.has(d.id)) results.set(d.id, transformDoc(d) as any); }); })
+          .catch(() => {})
+      );
+    }
+
     // Wait for all targeted queries (with a tight timeout so we don't block)
     await Promise.race([
       Promise.allSettled(queries),
@@ -1994,7 +2012,7 @@ export function LeadList() {
         batchConstraints.push(limit(BATCH_SIZE));
 
         const q = query(baseQuery, ...batchConstraints);
-        const snapshot = await getDocs(q);
+      const snapshot = await getDocs(q);
 
         if (snapshot.empty) {
           hasMore = false;
@@ -2026,7 +2044,7 @@ export function LeadList() {
 
       // Deduplicate by id
       const finalSeenIds = new Set<string>();
-      searchResults = searchResults.filter(lead => {
+          searchResults = searchResults.filter(lead => {
         if (finalSeenIds.has(lead.id)) return false;
         finalSeenIds.add(lead.id);
         return true;
@@ -2145,10 +2163,11 @@ export function LeadList() {
         lead.status?.toLowerCase().includes(normalizedSearch) ||
         lead.status?.replace(/_/g, ' ').toLowerCase().includes(normalizedSearch) ||
         (statusSearchLabel && (statusSearchLabel.includes(normalizedSearch) || normalizedSearch.includes(statusSearchLabel)));
-
+      
       const matchesSearch = !normalizedSearch || (
         lead.customerNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.customerName?.toLowerCase().includes(normalizedSearch) ||
+        (lead as any).agentName?.toLowerCase().includes(normalizedSearch) ||
         lead.leadNumber?.toLowerCase().includes(normalizedSearch) ||
         lead.plans?.some(plan => 
           plan.number?.toLowerCase().includes(normalizedSearch) ||
@@ -2936,7 +2955,7 @@ export function LeadList() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto">
           {/* Page Header Skeleton */}
           <div className="mb-6 sm:mb-10">
@@ -3031,7 +3050,7 @@ export function LeadList() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 pt-0 pb-4 sm:pb-12 px-3 sm:px-4 lg:px-8">
+    <div className="min-h-screen pt-0 pb-4 sm:pb-12 px-3 sm:px-4 lg:px-8">
       {/* Delete Confirmation Dialog */}
       <AnimatePresence>
       {showDeleteDialog && (
@@ -3251,10 +3270,10 @@ export function LeadList() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.15 }}
-          className="mt-4 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl overflow-hidden border border-white/50"
+          className="mt-4 bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100"
         >
           {/* Table Headers - Desktop Only */}
-          <div className="hidden sm:block relative px-6 py-5 bg-gradient-to-br from-indigo-50/90 via-purple-50/90 to-pink-50/90 backdrop-blur-sm border-b border-indigo-100/50">
+          <div className="hidden sm:block relative px-6 py-5 bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 border-b border-indigo-100">
             <div className="grid grid-cols-12 gap-3">
               <div className="col-span-3 relative">
                 {/* Serial Number Header - Absolute positioned at extreme left edge with 2mm padding, vertically centered */}
@@ -3377,7 +3396,7 @@ export function LeadList() {
                         {/* Date with Icon */}
                         <div className="flex items-center text-xs text-gray-500">
                             <Calendar className="h-3 w-3 mr-1.5" />
-                            {formatSafe(lead.createdAt, 'MMM d, yyyy h:mm a')}
+                            {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
                           </div>
                         {/* Agent Name (for managers) */}
                         {isManager() && (lead as any).agentName && (
@@ -3509,27 +3528,27 @@ export function LeadList() {
                                 <Settings className="h-3.5 w-3.5" />
                               </button>
                             )}
-                            {leadStrikes[lead.id] > 0 && (
-                              <motion.div
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                whileHover={isAdmin() ? { scale: 1.05 } : {}}
-                                whileTap={isAdmin() ? { scale: 0.95 } : {}}
-                                onClick={isAdmin() ? () => {
-                                  setSelectedLeadForStruckNumbers(lead);
-                                  setShowStruckNumbersModal(true);
-                                } : undefined}
-                                className={clsx(
+                      {leadStrikes[lead.id] > 0 && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          whileHover={isAdmin() ? { scale: 1.05 } : {}}
+                          whileTap={isAdmin() ? { scale: 0.95 } : {}}
+                          onClick={isAdmin() ? () => {
+                            setSelectedLeadForStruckNumbers(lead);
+                            setShowStruckNumbersModal(true);
+                          } : undefined}
+                          className={clsx(
                                   "inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-700 border border-red-200 whitespace-nowrap flex-shrink-0",
-                                  isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
-                                )}
-                              >
+                            isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
+                          )}
+                        >
                                 <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
-                                {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
-                              </motion.div>
+                          {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
+                        </motion.div>
                             )}
                           </div>
-                        )}
+                      )}
                         {lead.status === 'assigned' && (() => {
                           const duration = getAssignmentDuration(lead);
                           if (duration) {
@@ -3694,7 +3713,7 @@ export function LeadList() {
                           {/* Date with Icon */}
                           <div className="flex items-center text-[11px] text-gray-500">
                             <Calendar className="h-3 w-3 mr-1 flex-shrink-0" />
-                            <span>{formatSafe(lead.createdAt, 'MMM d, yyyy')} at {formatSafe(lead.createdAt, 'h:mm a')}</span>
+                            <span>{format(lead.createdAt, 'MMM d, yyyy')} at {format(lead.createdAt, 'h:mm a')}</span>
                             </div>
                             </div>
                           </div>
@@ -3749,22 +3768,22 @@ export function LeadList() {
                                       <Settings className="h-3 w-3" />
                                     </button>
                                   )}
-                                  {leadStrikes[lead.id] > 0 && (
-                                    <motion.div
-                                      initial={{ opacity: 0, scale: 0.9 }}
-                                      animate={{ opacity: 1, scale: 1 }}
-                                      onClick={isAdmin() ? () => {
-                                        setSelectedLeadForStruckNumbers(lead);
-                                        setShowStruckNumbersModal(true);
-                                      } : undefined}
-                                      className={clsx(
+                              {leadStrikes[lead.id] > 0 && (
+                                <motion.div
+                                  initial={{ opacity: 0, scale: 0.9 }}
+                                  animate={{ opacity: 1, scale: 1 }}
+                                  onClick={isAdmin() ? () => {
+                                    setSelectedLeadForStruckNumbers(lead);
+                                    setShowStruckNumbersModal(true);
+                                  } : undefined}
+                                  className={clsx(
                                         "inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-100 text-red-700 border border-red-200 whitespace-nowrap flex-shrink-0",
-                                        isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
-                                      )}
-                                    >
+                                    isAdmin() && "cursor-pointer hover:bg-red-200 transition-colors"
+                                  )}
+                                >
                                       <AlertCircle className="h-2 w-2 mr-0.5 flex-shrink-0" />
-                                      {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
-                                    </motion.div>
+                                  {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
+                                </motion.div>
                                   )}
                                 </div>
                               )}
@@ -3779,7 +3798,7 @@ export function LeadList() {
                                 <Clock className="h-2 w-2 mr-0.5" />
                                 Pending Verification at Location
                               </motion.span>
-                            )}
+                              )}
                               {/* Countdown Timer / At Risk Indicator */}
                               {(lead.status === 'verified' || lead.status === 'follow_up') && (() => {
                                 const elapsed = statusTimers[lead.id] ?? getStatusTimeElapsed(lead);
