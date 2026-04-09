@@ -309,6 +309,10 @@ const CLAIM_OPERATION_TIMEOUT = 10000; // 10 seconds timeout for claim operation
  */
 const SEARCH_LIMIT = 2000;
 
+const getSearchSourceCategory = (category?: string | null) => {
+  return category && category !== 'all' ? category : 'all';
+};
+
 /**
  * Status styling configuration for number status badges
  * Defines colors, icons, and gradients for each number status
@@ -843,8 +847,25 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
   
-  // Track the search term currently being processed to prevent race conditions
+  // Track the full search signature currently being processed to prevent
+  // race conditions when the term stays the same but filters change.
   const currentSearchTermRef = useRef<string>('');
+
+  const buildSearchSignature = useCallback((
+    term: string,
+    category: string | null = selectedCategory,
+    group: string | null = selectedGroup,
+    initials: string | null = selectedInitials,
+    endsWith: boolean = endsWithToggle
+  ) => {
+    return [
+      term.trim(),
+      category || '',
+      group || '',
+      initials || '',
+      endsWith ? '1' : '0'
+    ].join('::');
+  }, [selectedCategory, selectedGroup, selectedInitials, endsWithToggle]);
 
   const toggleExportField = (key: string) => {
     setSelectedExportFields(prev =>
@@ -1262,6 +1283,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       setSearchResults([]);
       setIsSearching(false);
       fullSearchResultsRef.current = [];
+      currentSearchTermRef.current = '';
       // Reset search pagination state
       setSearchCurrentPage(1);
       setSearchTotalPages(0);
@@ -1287,6 +1309,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const lastGroup = (fullSearchResultsRef.current as any).lastGroup;
     const lastInitials = (fullSearchResultsRef.current as any).lastInitials;
     const lastEndsWithToggle = (fullSearchResultsRef.current as any).lastEndsWithToggle;
+    const cachedSourceCategory =
+      (fullSearchResultsRef.current as any).lastSourceCategory ||
+      getSearchSourceCategory(lastCategory);
+    const targetSourceCategory = getSearchSourceCategory(selectedCategory);
     
     // Determine if search term or any filter changed
     // Always compare trimmed values — lastSearchTerm is stored trimmed and debouncedSearchTerm
@@ -1326,9 +1352,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // filter cached results in memory instead of doing a new Firebase search
     // This applies to ALL filters: category, group, and initials
     if (hasCachedResults && !searchTermChanged && !endsWithToggleChanged && (categoryChanged || groupChanged || initialsChanged)) {
+      // If the cached Firestore result set came from a specific category query,
+      // we cannot safely switch to a different category purely in memory.
+      if (categoryChanged && cachedSourceCategory !== 'all' && cachedSourceCategory !== targetSourceCategory) {
+        setSearchCurrentPage(1);
+        performSearch();
+        return;
+      }
+
       // Get the full unfiltered results from cache
       // We need to check if we have the original unfiltered results stored
       const originalUnfilteredResults = (fullSearchResultsRef.current as any).originalUnfilteredResults || fullSearchResultsRef.current;
+      const cachedSearchHasMore = Boolean((fullSearchResultsRef.current as any).lastSearchHasMore);
+      const cachedSetMayBeIncomplete = cachedSearchHasMore || originalUnfilteredResults.length >= SEARCH_LIMIT;
       
       // Start with the original unfiltered results
       let filteredResults = [...originalUnfilteredResults];
@@ -1347,15 +1383,27 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       if (selectedInitials) {
         filteredResults = filteredResults.filter(n => (n.number || '').startsWith(selectedInitials));
       }
+
+      // Rare but important: if a filter change yields zero results from a partial
+      // cached search set, do not trust the in-memory zero. Fall back to the
+      // normal search path so Firestore can return matches that were outside the
+      // previous limited sample.
+      if (filteredResults.length === 0 && cachedSetMayBeIncomplete) {
+        setSearchCurrentPage(1);
+        performSearch();
+        return;
+      }
       
       // Update cached results - store both filtered and original unfiltered
       fullSearchResultsRef.current = filteredResults;
       (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
-      (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm;
+      (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm.trim();
       (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
       (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
       (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
       (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+      (fullSearchResultsRef.current as any).lastSearchHasMore = cachedSearchHasMore;
+      (fullSearchResultsRef.current as any).lastSourceCategory = cachedSourceCategory;
       
       // Reset to page 1 when filter changes
       setSearchCurrentPage(1);
@@ -1531,11 +1579,32 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const performSearch = useCallback(async (loadMore: boolean = false) => {
     // Capture the search term at the start of this search operation
     const termAtStart = debouncedSearchTerm.trim();
+    const searchSignatureAtStart = buildSearchSignature(
+      termAtStart,
+      selectedCategory,
+      selectedGroup,
+      selectedInitials,
+      endsWithToggle
+    );
     
     const lastSearchTerm = (fullSearchResultsRef.current as any)?.lastSearchTerm;
+    const lastCategory = (fullSearchResultsRef.current as any)?.lastCategory;
+    const lastGroup = (fullSearchResultsRef.current as any)?.lastGroup;
+    const lastInitials = (fullSearchResultsRef.current as any)?.lastInitials;
+    const lastEndsWithToggle = (fullSearchResultsRef.current as any)?.lastEndsWithToggle;
+    const lastSourceCategory =
+      (fullSearchResultsRef.current as any)?.lastSourceCategory ||
+      getSearchSourceCategory(lastCategory);
+    const targetSourceCategory = getSearchSourceCategory(selectedCategory);
     // True when we have already searched for this exact term (even if Firestore returned 0 docs).
     // Dropping the `length > 0` guard prevents re-querying Firestore for a term we know returns nothing.
-    const hasResultsForThisTerm = lastSearchTerm === termAtStart && termAtStart !== '';
+    const hasResultsForThisSearch =
+      lastSearchTerm === termAtStart &&
+      lastCategory === selectedCategory &&
+      lastGroup === selectedGroup &&
+      lastInitials === selectedInitials &&
+      lastEndsWithToggle === endsWithToggle &&
+      termAtStart !== '';
     
     // OPTIMIZATION: Try in-memory filtering if we have existing results and the new term is a
     // refinement (superset) of the previous term.
@@ -1550,7 +1619,23 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       
       const cachedSetIsComplete = originalUnfilteredResults.length < SEARCH_LIMIT;
       
-      if (lastSearchTerm && termAtStart.includes(lastSearchTerm) && originalUnfilteredResults.length > 0 && cachedSetIsComplete) {
+      
+      const lastTermWasShortNumeric =
+        lastSearchTerm &&
+        lastSearchTerm.length < 3 &&
+        /^\d+$/.test(lastSearchTerm);
+      const currentTermIsLongerNumeric =
+        /^\d+$/.test(termAtStart) && termAtStart.length >= 3;
+      const strategiesIncompatible = lastTermWasShortNumeric && currentTermIsLongerNumeric;
+
+      if (
+        !strategiesIncompatible &&
+        lastSearchTerm &&
+        termAtStart.includes(lastSearchTerm) &&
+        originalUnfilteredResults.length > 0 &&
+        cachedSetIsComplete &&
+        (lastSourceCategory === 'all' || lastSourceCategory === targetSourceCategory)
+      ) {
         // Parse search terms (handle multi-term searches like "999 0" or "050 14JANSILG1" or "999 silver")
         const searchTerms = termAtStart.split(/\s+/).filter(t => t.length > 0);
         
@@ -1601,8 +1686,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         // If the filter returns 0, fall through to Firestore — the cached set may not contain
         // all matching documents (e.g. the number just became available, or the cache was stale).
         if (filteredResults.length > 0) {
-          // Mark this search term as being processed
-          currentSearchTermRef.current = termAtStart;
+          // Mark this search state as being processed
+          currentSearchTermRef.current = searchSignatureAtStart;
           
           // Store results
           fullSearchResultsRef.current = filteredResults;
@@ -1612,6 +1697,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
           (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
           (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+          (fullSearchResultsRef.current as any).lastSearchHasMore = false;
+          (fullSearchResultsRef.current as any).lastSourceCategory = lastSourceCategory;
           
           // Paginate results
           const pageForNewSearch = 1;
@@ -1642,13 +1729,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // 1. Debouncing already prevents rapid calls
     // 2. Race condition protection handles stale results
     // 3. Multiple searches for the same term are harmless (race condition protection will handle it)
-    if (!loadMore && hasResultsForThisTerm && termAtStart !== '') {
-      return; // Already have results for this term, skip
+    if (!loadMore && hasResultsForThisSearch && termAtStart !== '') {
+      return; // Already have results for this search state, skip
     }
     
-    // Mark this search term as being processed
+    // Mark this full search state as being processed
     if (!loadMore) {
-      currentSearchTermRef.current = termAtStart;
+      currentSearchTermRef.current = searchSignatureAtStart;
     }
     
     if (loadMore) {
@@ -1670,7 +1757,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         
         // Run main search and secondary searches (deleted/activated) in PARALLEL for speed
         const endsWithFlag = endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim());
-        const mainSearchPromise = unifiedSearch.search(debouncedSearchTerm, {
+        const mainSearchPromise = unifiedSearch.search(termAtStart, {
           category: searchCategory,
           limit: SEARCH_LIMIT,
         startAfter: loadMore ? searchLastDoc : null,
@@ -1687,8 +1774,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         if (!loadMore) {
           const [mainResult, deletedResult, activatedResult] = await Promise.all([
             mainSearchPromise,
-            searchDeletedNumbers(debouncedSearchTerm, searchCategory, endsWithFlag),
-            searchActivatedNumbers(debouncedSearchTerm, searchCategory, endsWithFlag)
+            searchDeletedNumbers(termAtStart, searchCategory, endsWithFlag),
+            searchActivatedNumbers(termAtStart, searchCategory, endsWithFlag)
           ]);
           result = mainResult;
           deletedResults = deletedResult;
@@ -1697,12 +1784,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           result = await mainSearchPromise;
         }
         
-        // Avoid race conditions: only apply if term hasn't changed
-      // Check both the trimmed version and the original to handle whitespace differences
-      const currentTerm = debouncedSearchTerm.trim();
-      
-      // Only process results if this search is still relevant (term hasn't changed)
-      if (termAtStart === currentTerm && termAtStart !== '') {
+        // Only process results if this full search state is still current.
+      if (currentSearchTermRef.current === searchSignatureAtStart && termAtStart !== '') {
           let filteredResults = filterByVisibility(result.data);
           
           // Add deleted numbers to results (they already have status 'returned')
@@ -1754,11 +1837,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           // Store original unfiltered results for future in-memory filtering
           (fullSearchResultsRef.current as any).originalUnfilteredResults = combinedOriginalResults;
           // Preserve search metadata for pagination checks
-          (fullSearchResultsRef.current as any).lastSearchTerm = currentTerm;
+          (fullSearchResultsRef.current as any).lastSearchTerm = termAtStart;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
           (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
           (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+          (fullSearchResultsRef.current as any).lastSearchHasMore = result.hasMore && newUniqueResults.length > 0;
+          (fullSearchResultsRef.current as any).lastSourceCategory = searchCategory;
           
           // Update pagination
           const startIndex = (searchCurrentPage - 1) * pageSize;
@@ -1781,23 +1866,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           }, 0);
         } else {
           // New search - replace results
-          // Double-check term hasn't changed before applying results
-          const finalCheckTerm = debouncedSearchTerm.trim();
-          const currentRefTerm = currentSearchTermRef.current;
-          
           // Only apply results if:
-          // 1. The term hasn't changed (termAtStart === finalCheckTerm)
-          // 2. The ref still matches this term (termAtStart === currentRefTerm)
+          // 1. The ref still matches this exact search state
           // This prevents stale searches from overwriting newer results
-          if (termAtStart === finalCheckTerm && termAtStart === currentRefTerm && termAtStart !== '') {
+          if (currentSearchTermRef.current === searchSignatureAtStart && termAtStart !== '') {
           fullSearchResultsRef.current = filteredResults;
             // Store original unfiltered results for future in-memory filtering
             (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
-            (fullSearchResultsRef.current as any).lastSearchTerm = finalCheckTerm;
+            (fullSearchResultsRef.current as any).lastSearchTerm = termAtStart;
           (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
           (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
           (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
           (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+          (fullSearchResultsRef.current as any).lastSearchHasMore = result.hasMore;
+          (fullSearchResultsRef.current as any).lastSourceCategory = searchCategory;
           
           // For new searches, always start at page 1
           const pageForNewSearch = 1;
@@ -1821,46 +1903,27 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         setSearchLastDoc(result.lastDoc);
         setSearchHasMore(result.hasMore);
           }
-          // If term changed during search, don't apply results - keep showing previous results
-        }
-      } else {
-        // Search term changed during async operation - don't apply stale results
-        // The new search will handle updating results when it completes
-        // Don't clear existing results here to avoid showing empty state
-        // Clear the ref so a new search for the changed term can proceed
-        if (termAtStart !== debouncedSearchTerm.trim()) {
-          currentSearchTermRef.current = '';
-        }
-        }
-      } catch (error) {
-        console.error('Search error:', error);
-        // Only show error if this search term is still current
-        if (termAtStart === debouncedSearchTerm.trim()) {
-        toast.error('Search failed');
-        }
-        // Clear the ref on error so user can retry
-        currentSearchTermRef.current = '';
-      } finally {
-        // Only clear loading state if this search term is still current
-        const finalTerm = debouncedSearchTerm.trim();
-        if (termAtStart === finalTerm || termAtStart === '') {
-          setIsSearching(false);
-        setIsLoadingMore(false);
-          // Keep ref set to current term if search completed successfully
-          if (termAtStart === finalTerm && finalTerm !== '') {
-            // Ref already set, keep it
-          } else {
-            // Clear ref if search was cancelled or term is empty
-            currentSearchTermRef.current = '';
-          }
-        } else {
-          // Term changed during search - clear loading state and ref
-          setIsSearching(false);
-          setIsLoadingMore(false);
-          currentSearchTermRef.current = '';
+          // If search state changed during async work, don't apply stale results.
         }
       }
-  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers]);
+      } catch (error) {
+        console.error('Search error:', error);
+        // Only show error if this exact search state is still current
+        if (currentSearchTermRef.current === searchSignatureAtStart) {
+        toast.error('Search failed');
+        }
+      } finally {
+        // Only clear loading state if this search state is still current.
+        // If a newer search started, let that search own the loading flags.
+        if (currentSearchTermRef.current === searchSignatureAtStart || termAtStart === '') {
+          setIsSearching(false);
+        setIsLoadingMore(false);
+          if (termAtStart === '') {
+            currentSearchTermRef.current = '';
+          }
+        }
+      }
+  }, [buildSearchSignature, debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers]);
 
   // Load stats for total pages (OPTIMIZED) - Mobile performance
   useEffect(() => {
@@ -2961,6 +3024,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const lastGroup = (full as any).lastGroup;
     const lastInitials = (full as any).lastInitials;
     const lastEndsWithToggle = (full as any).lastEndsWithToggle;
+    const lastSearchHasMore = (full as any).lastSearchHasMore;
+    const lastSourceCategory = (full as any).lastSourceCategory;
     const originalUnfilteredResults = (full as any).originalUnfilteredResults;
 
     const sortedFull = computeSorted(full);
@@ -2969,6 +3034,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     (sortedFull as any).lastGroup = lastGroup;
     (sortedFull as any).lastInitials = lastInitials;
     (sortedFull as any).lastEndsWithToggle = lastEndsWithToggle;
+    (sortedFull as any).lastSearchHasMore = lastSearchHasMore;
+    (sortedFull as any).lastSourceCategory = lastSourceCategory;
     // Re-sort the originalUnfilteredResults too, so any future in-memory filter
     // starts from the correctly sorted full set.
     if (originalUnfilteredResults) {
@@ -5063,14 +5130,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100 text-[11px] sm:text-sm">
                 {/* Desktop header only – phones get ultra-slim section without heading */}
                 <div className="hidden sm:flex items-center justify-between px-8 py-6 bg-gradient-to-r from-indigo-500 to-purple-600">
-                  <div>
-                    <h3 className="text-xl font-bold text-white">Your Reserved Numbers</h3>
+                    <div>
+                      <h3 className="text-xl font-bold text-white">Your Reserved Numbers</h3>
                     <p className="mt-0.5 text-sm text-indigo-100">Numbers currently reserved by you</p>
-                  </div>
-                  <div className="p-2 bg-white/10 rounded-lg">
-                    <Hash className="h-6 w-6 text-white" />
-                  </div>
-                </div>
+            </div>
+                    <div className="p-2 bg-white/10 rounded-lg">
+                      <Hash className="h-6 w-6 text-white" />
+          </div>
+        </div>
 
                 {/* Slim body (phones) / normal padding (desktop) */}
                 <div className="p-2.5 sm:p-6">
@@ -6308,6 +6375,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             const statusStyle = getStatusStyle(number.status);
             const StatusIcon = statusStyle?.icon || CheckCircle2;
             const serialNumber = (displayPagination.currentPage - 1) * pageSize + index + 1;
+            const claimWaitMs = computeUserWaitMs(number);
 
             let timeLeft = reservationCountdowns[number.id];
             if (!timeLeft && number.expiresAt) {
@@ -6519,6 +6587,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         );
                       })()}
                     </span>
+                    {claimWaitMs && claimWaitMs > 0 && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">
+                        <Zap className="h-2.5 w-2.5" />
+                        {formatCountdown(claimWaitMs)}
+                      </span>
+                    )}
                     {number.status === 'reserved' && timeLeft && timeLeft > 0 && (
                       <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded border border-green-100">
                         <Clock className="h-2.5 w-2.5" />
