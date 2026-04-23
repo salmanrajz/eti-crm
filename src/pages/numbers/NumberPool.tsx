@@ -1384,11 +1384,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         filteredResults = filteredResults.filter(n => (n.number || '').startsWith(selectedInitials));
       }
 
-      // Rare but important: if a filter change yields zero results from a partial
-      // cached search set, do not trust the in-memory zero. Fall back to the
-      // normal search path so Firestore can return matches that were outside the
-      // previous limited sample.
-      if (filteredResults.length === 0 && cachedSetMayBeIncomplete) {
+      // If the cached result set might be incomplete (hit the 2000-doc limit or
+      // lastSearchHasMore was true), we cannot trust in-memory filtering to give
+      // accurate counts — even if it produced some results.  For example, a 2000-doc
+      // "050" cache might contain only 180 of the 500 "054"-prefixed numbers that
+      // actually match; returning 180 silently would be misleading.
+      // Always fall back to Firestore for any filter change on a partial cache so
+      // the user sees the true, complete result set for the new filter combination.
+      if (cachedSetMayBeIncomplete) {
         setSearchCurrentPage(1);
         performSearch();
         return;
@@ -1579,6 +1582,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const performSearch = useCallback(async (loadMore: boolean = false) => {
     // Capture the search term at the start of this search operation
     const termAtStart = debouncedSearchTerm.trim();
+    const termLower = termAtStart.toLowerCase();
+    const normalizedTerm = termLower.replace(/\s+/g, '');
+    const isLeavingSoonSearch =
+      termLower.includes('leaving soon') ||
+      normalizedTerm.includes('leavingsoon') ||
+      normalizedTerm === 'leaving';
     const searchSignatureAtStart = buildSearchSignature(
       termAtStart,
       selectedCategory,
@@ -1619,14 +1628,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       
       const cachedSetIsComplete = originalUnfilteredResults.length < SEARCH_LIMIT;
       
-      
+      // Short numeric terms (< 3 digits) use an ends-with Firebase strategy (last2Digits field)
+      // rather than a prefix/range query. The resulting cache therefore does NOT contain all
+      // numbers that start with those digits — only numbers that END with them. Reusing that
+      // cache for a longer numeric refinement (e.g. "05" → "0507") would silently return only
+      // the handful of results that happen to contain "0507" inside the ends-with result set,
+      // instead of doing a fresh prefix search that finds every number starting with "0507".
       const lastTermWasShortNumeric =
         lastSearchTerm &&
         lastSearchTerm.length < 3 &&
         /^\d+$/.test(lastSearchTerm);
       const currentTermIsLongerNumeric =
         /^\d+$/.test(termAtStart) && termAtStart.length >= 3;
-      const strategiesIncompatible = lastTermWasShortNumeric && currentTermIsLongerNumeric;
+      // When the ends-with toggle is active, every distinct term targets a completely
+      // different Firebase result set — numbers ending with "050" have no superset/subset
+      // relationship with numbers ending with "0500". In-memory narrowing is therefore
+      // always wrong for ends-with refinements regardless of term length.
+      const bothUseEndsWithToggle = endsWithToggle && lastEndsWithToggle === true;
+      const strategiesIncompatible =
+        (lastTermWasShortNumeric && currentTermIsLongerNumeric) ||
+        bothUseEndsWithToggle;
 
       if (
         !strategiesIncompatible &&
@@ -1738,6 +1759,84 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       currentSearchTermRef.current = searchSignatureAtStart;
     }
     
+    // Special search mode for Leaving Soon flag.
+    // Query Firestore directly so results are not limited to currently loaded in-memory rows.
+    if (!loadMore && termAtStart !== '' && isLeavingSoonSearch) {
+      currentSearchTermRef.current = searchSignatureAtStart;
+      setIsSearching(true);
+      try {
+        const terms = termLower.split(/\s+/).filter(Boolean);
+        const nonFlagTerms = terms.filter(t => t !== 'leaving' && t !== 'soon' && t !== 'leavingsoon');
+
+        const leavingSoonConstraints: any[] = [where('leavingSoon', '==', true)];
+        if (selectedCategory && selectedCategory !== 'all') {
+          leavingSoonConstraints.push(where('category', '==', selectedCategory));
+        }
+        if (selectedGroup) {
+          leavingSoonConstraints.push(where('group', '==', selectedGroup));
+        }
+        leavingSoonConstraints.push(orderBy('number'));
+        leavingSoonConstraints.push(limit(SEARCH_LIMIT));
+
+        const leavingSoonQuery = query(collection(db, 'numberPool'), ...leavingSoonConstraints);
+        const leavingSoonSnapshot = await getDocs(leavingSoonQuery);
+        const leavingSoonNumbers = leavingSoonSnapshot.docs.map(docSnap => {
+          const data = docSnap.data() as any;
+          return {
+            id: docSnap.id,
+            ...data,
+            createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt,
+            lastStatusChange: data.lastStatusChange?.toDate ? data.lastStatusChange.toDate() : data.lastStatusChange,
+            reservedAt: data.reservedAt?.toDate ? data.reservedAt.toDate() : data.reservedAt,
+            expiresAt: data.expiresAt?.toDate ? data.expiresAt.toDate() : data.expiresAt,
+            claimingStartedAt: data.claimingStartedAt?.toDate ? data.claimingStartedAt.toDate() : data.claimingStartedAt,
+            claimingExpiresAt: data.claimingExpiresAt?.toDate ? data.claimingExpiresAt.toDate() : data.claimingExpiresAt,
+          } as NumberPoolType;
+        });
+
+        let filteredResults = filterByVisibility(leavingSoonNumbers);
+
+        if (nonFlagTerms.length > 0) {
+          filteredResults = filteredResults.filter((n: NumberPoolType) => {
+            const haystack = `${n.number || ''} ${n.category || ''} ${n.code || ''} ${n.group || ''} ${n.status || ''}`.toLowerCase();
+            return nonFlagTerms.every(t => haystack.includes(t));
+          });
+        }
+
+        if (selectedInitials) {
+          filteredResults = filteredResults.filter((n: NumberPoolType) => (n.number || '').startsWith(selectedInitials));
+        }
+
+        fullSearchResultsRef.current = filteredResults;
+        (fullSearchResultsRef.current as any).originalUnfilteredResults = filteredResults;
+        (fullSearchResultsRef.current as any).lastSearchTerm = termAtStart;
+        (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+        (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
+        (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
+        (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+        (fullSearchResultsRef.current as any).lastSearchHasMore = false;
+        (fullSearchResultsRef.current as any).lastSourceCategory = getSearchSourceCategory(selectedCategory);
+
+        const pageForNewSearch = 1;
+        const startIndex = (pageForNewSearch - 1) * pageSize;
+        const endIndex = startIndex + pageSize;
+        const paginatedResults = filteredResults.slice(startIndex, endIndex);
+        const calculatedTotalPages = Math.ceil(filteredResults.length / pageSize);
+
+        setSearchResults(paginatedResults);
+        setSearchTotalPages(calculatedTotalPages);
+        setSearchTotalItems(filteredResults.length);
+        setSearchHasNextPage(endIndex < filteredResults.length);
+        setSearchHasPreviousPage(false);
+        setSearchCurrentPage(1);
+        setSearchLastDoc(null);
+        setSearchHasMore(false);
+      } finally {
+        setIsSearching(false);
+      }
+      return;
+    }
+
     if (loadMore) {
       setIsLoadingMore(true);
     } else {
@@ -1756,7 +1855,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const searchCategory = (selectedCategory && selectedCategory !== 'all') ? selectedCategory : 'all';
         
         // Run main search and secondary searches (deleted/activated) in PARALLEL for speed
-        const endsWithFlag = endsWithToggle && /^\d{2,5}$/.test(debouncedSearchTerm.trim());
+        const endsWithFlag = endsWithToggle && /^\d{2,5}$/.test(termAtStart);
         const mainSearchPromise = unifiedSearch.search(termAtStart, {
           category: searchCategory,
           limit: SEARCH_LIMIT,
@@ -1923,7 +2022,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           }
         }
       }
-  }, [buildSearchSignature, debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers]);
+  }, [buildSearchSignature, debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers, filterByVisibility]);
 
   // Load stats for total pages (OPTIMIZED) - Mobile performance
   useEffect(() => {
@@ -2251,6 +2350,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     setBulkCopyMode(false);
     toast.success(`${selectedNumbers.length} number${selectedNumbers.length > 1 ? 's' : ''} added to notepad`);
   }, [selectedNumbers]);
+
 
   /**
    * Handle textarea input with smart line break after 10 digits
@@ -2956,12 +3056,22 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
     // Search filter (only when actively searching, not for category changes)
     if (searchTerm && debouncedSearchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      const matches =
-        number.number.toLowerCase().includes(searchLower) ||
-        number.category.toLowerCase().includes(searchLower) ||
-        number.code.toLowerCase().includes(searchLower);
-      if (!matches) return false;
+      const searchLower = debouncedSearchTerm.trim().toLowerCase();
+      const normalizedSearch = searchLower.replace(/\s+/g, '');
+      const isLeavingSoonSearch =
+        searchLower.includes('leaving soon') ||
+        normalizedSearch.includes('leavingsoon') ||
+        normalizedSearch === 'leaving';
+
+      if (isLeavingSoonSearch) {
+        if (!(number as any).leavingSoon) return false;
+      } else {
+        const matches =
+          number.number.toLowerCase().includes(searchLower) ||
+          number.category.toLowerCase().includes(searchLower) ||
+          number.code.toLowerCase().includes(searchLower);
+        if (!matches) return false;
+      }
     }
 
     // Prefix/initials filter (e.g., 050/054/056)
@@ -6526,6 +6636,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       </span>
                     )}
                   </div>
+                  {(number as any).leavingSoon && (
+                    <div className="mt-0.5">
+                      <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                        Leaving Soon
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Middle: category + status + R/C/S + timer/agent/passcode */}
@@ -6762,19 +6879,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         {serialNumber}
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
-          <div
-            className={clsx(
-              "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
-              (number.status === 'activated' || number.struckThrough)
-                ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
-                : number.status === 'reserved'
-                ? `${STATUS_STYLES.reserved.bg} text-gray-800`
-                : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`,
-              (number as any).isDeleted && 'line-through'
+          <div className="relative flex flex-col items-start">
+            <div
+              className={clsx(
+                "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
+                (number.status === 'activated' || number.struckThrough)
+                  ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
+                  : number.status === 'reserved'
+                  ? `${STATUS_STYLES.reserved.bg} text-gray-800`
+                  : `${statusStyle?.bg || STATUS_STYLES.open.bg} text-gray-800`,
+                (number as any).isDeleted && 'line-through'
+              )}
+            >
+              {number.number}
+            </div>
+            {(number as any).leavingSoon && (
+              <div className="absolute top-full mt-0.5 left-0 inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                Leaving Soon
+              </div>
             )}
-          >
-            {number.number}
-        </div>
+          </div>
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
         <motion.span
