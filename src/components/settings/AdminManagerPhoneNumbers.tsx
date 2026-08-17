@@ -2,9 +2,8 @@ import { useState, useEffect } from 'react';
 import { collection, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
-import { Plus, Trash2, Users, Search, XCircle, Shield, UserCog, MessageCircle } from 'lucide-react';
+import { Plus, Trash2, Users, Search, XCircle, Shield, UserCog } from 'lucide-react';
 import { CoordinatorType } from '../../types';
-import { AdminToolSheet } from '../admin/AdminToolSheet';
 
 interface User {
   id: string;
@@ -19,12 +18,7 @@ interface User {
 
 type RoleFilter = 'all' | 'admin' | 'coordinator' | 'manager';
 
-interface AdminManagerPhoneNumbersProps {
-  isOpen: boolean;
-  onClose: () => void;
-}
-
-export function AdminManagerPhoneNumbers({ isOpen, onClose }: AdminManagerPhoneNumbersProps) {
+export function AdminManagerPhoneNumbers() {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -34,8 +28,8 @@ export function AdminManagerPhoneNumbers({ isOpen, onClose }: AdminManagerPhoneN
   const [isRemovingPhone, setIsRemovingPhone] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isOpen) loadUsers();
-  }, [isOpen]);
+    loadUsers();
+  }, []);
 
   const loadUsers = async () => {
     try {
@@ -278,15 +272,7 @@ export function AdminManagerPhoneNumbers({ isOpen, onClose }: AdminManagerPhoneN
   };
 
   return (
-    <AdminToolSheet
-      isOpen={isOpen}
-      onClose={onClose}
-      title="WhatsApp Numbers"
-      subtitle="Notification numbers for admins, coordinators, and managers"
-      icon={MessageCircle}
-      headerClassName="bg-emerald-600"
-      wide
-    >
+    <>
       {loading ? (
         <div className="space-y-3">
           {[1, 2, 3, 4].map((i) => (
@@ -447,6 +433,6 @@ export function AdminManagerPhoneNumbers({ isOpen, onClose }: AdminManagerPhoneN
           )}
         </div>
       )}
-    </AdminToolSheet>
+    </>
   );
 }
