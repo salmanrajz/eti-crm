@@ -1,4 +1,6 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { AnimatePresence } from 'framer-motion';
+import { useEffect } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { Login } from '../pages/Login';
 import { Dashboard } from '../pages/Dashboard';
@@ -20,7 +22,7 @@ import { AgentPerformance } from '../components/dashboards/AgentPerformance';
 import { TeamPerformance } from '../components/dashboards/TeamPerformance';
 import { ManagerDashboard } from '../components/dashboards/ManagerDashboard';
 import { ModernLoading } from '../components/ModernLoading';
-import { useMinimumLoading } from '../hooks/useMinimumLoading';
+import { useMinimumLoading, useSplashHold, dismissInitialSplash } from '../hooks/useMinimumLoading';
 import { NumberLogsDashboard } from '../components/dashboards/NumberLogsDashboard';
 import { LeadLogsDashboard } from '../components/dashboards/LeadLogsDashboard';
 import { UserSessionLogsDashboard } from '../components/dashboards/UserSessionLogsDashboard';
@@ -34,14 +36,22 @@ export function AppRoutes() {
   
   // Reduce minimum loading time to 800ms to prevent issues with Firebase init delays
   const showLoading = useMinimumLoading(loading, 800);
+  const splashHold = useSplashHold();
 
-  // Skip loading animation on customer portal
-  if (showLoading && !isCustomerPortal) {
-    return <ModernLoading />;
-  }
+  const showLoadingScreen = (showLoading || splashHold) && !isCustomerPortal;
+
+  useEffect(() => {
+    if (!showLoadingScreen) dismissInitialSplash();
+  }, [showLoadingScreen]);
 
   return (
-    <Routes>
+    <>
+      {/* Loading overlay sits on top while app content renders beneath */}
+      <AnimatePresence>
+        {showLoadingScreen && <ModernLoading key="loader" />}
+      </AnimatePresence>
+
+      <Routes>
       <Route
         path="/login"
         element={user ? <Navigate to="/dashboard" replace /> : <Login />}
@@ -167,5 +177,6 @@ export function AppRoutes() {
       {/* Catch-all route: redirect any unmatched paths to dashboard */}
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
+    </>
   );
 }

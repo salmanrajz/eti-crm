@@ -53,19 +53,19 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc, setDoc } from 'firebase/firestore';
-import { db, createStrikeAlertBroadcastFunction } from '../../lib/firebase';
+import { collection, query, where, getDocs, updateDoc, doc, serverTimestamp, increment, orderBy, onSnapshot, writeBatch, getDoc, addDoc, runTransaction, limit, deleteDoc, setDoc } from 'firebase/firestore';
+import { db, createStrikeAlertBroadcastFunction, releaseNumberWithPendingStrikesFunction } from '../../lib/firebase';
 // IndexedDB helpers intentionally not used for search to keep direct Firestore fetches fast
 import { NumberPoolPagination, paginationUtils } from '../../utils/pagination';
 import { numberPoolManager } from '../../utils/numberPoolManager';
-import { unifiedSearch } from '../../utils/unifiedSearch';
+import { unifiedSearch, resolveExactNumberPoolStatus } from '../../utils/unifiedSearch';
 import { useAuthStore } from '../../store/authStore';
 import { NumberPool as NumberPoolType, NumberStatus, ActivatedNumber } from '../../types';
 import { toast } from 'react-hot-toast';
 import { useSearchParams } from 'react-router-dom';
-import { useDebounce } from '../../hooks/useDebounce';
 import { logNumberAction } from '../../utils/numberLogging';
 import { resolveUserName } from '../../utils/numberLogging';
+import { isStrikeNumberStatus, isClaimHeldStatus, getStrikeWindowMs, DEFAULT_STRIKE_WINDOW_MS, strikeTimerFieldsForNumberStatus, computeStrikeExpiresAt, msUntilEffectiveStrikeExecute, isStrikeOffHours, STRIKE_OFF_HOURS_MESSAGE, effectiveStrikeExecuteAt } from '../../utils/strikeQueue';
 import { numberPoolStatsService } from '../../services/numberPoolStatsService';
 import { 
   AlertCircle, 
@@ -132,7 +132,7 @@ import { ChatBox } from '../../components/ChatBox';
  * @param agentId - ID of the agent to display information for
  * @param leadId - Optional lead ID to fetch agent info from if agentId is not available
  */
-const AgentTeamInfo = ({ agentId, leadId }: { agentId?: string; leadId?: string }) => {
+const AgentTeamInfo = ({ agentId, leadId, compact = false, plain = false }: { agentId?: string; leadId?: string; compact?: boolean; plain?: boolean }) => {
   const [agentInfo, setAgentInfo] = useState<{ name: string; teamName: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const { user, isAdmin, isCoordinator } = useAuthStore();
@@ -195,6 +195,19 @@ const AgentTeamInfo = ({ agentId, leadId }: { agentId?: string; leadId?: string 
   }, [agentId, leadId, isAdmin, user?.role]);
 
   if (loading) {
+    if (compact) {
+      if (plain) {
+        return <div className="text-[10px] text-gray-400 leading-tight">Loading...</div>;
+      }
+
+      return (
+        <div className="flex min-w-0 items-center gap-1 rounded-md bg-gray-50 px-1.5 py-1">
+          <div className="h-3 w-3 shrink-0 rounded bg-gray-200 animate-pulse"></div>
+          <div className="h-2.5 w-20 rounded bg-gray-200 animate-pulse"></div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex items-center space-x-2">
         <div className="h-4 w-4 bg-gray-200 rounded animate-pulse"></div>
@@ -204,7 +217,36 @@ const AgentTeamInfo = ({ agentId, leadId }: { agentId?: string; leadId?: string 
   }
 
   if (!agentInfo) {
+    if (compact) {
+      return <div className="text-[10px] text-gray-400 leading-none">-</div>;
+    }
     return <div className="text-sm text-gray-400">-</div>;
+  }
+
+  if (compact) {
+    if (plain) {
+      return (
+        <div className="min-w-0 max-w-full text-center leading-tight">
+          <div className="truncate text-[10px] font-semibold text-gray-700">
+            {agentInfo.name}
+          </div>
+          <div className="mt-0.5 truncate text-[9px] font-medium text-gray-500">
+            {agentInfo.teamName}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="min-w-0 max-w-full rounded-md border border-indigo-100 bg-indigo-50/60 px-1.5 py-1 text-center leading-tight">
+        <div className="truncate text-[10px] font-semibold text-indigo-700">
+          {agentInfo.name}
+        </div>
+        <div className="mt-0.5 truncate text-[9px] font-medium text-gray-500">
+          {agentInfo.teamName}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -260,6 +302,19 @@ const CATEGORIES = ['Standard', 'Silver', 'Silver plus', 'Gold', 'Gold plus', 'P
  * Available number groups in the system
  */
 const GROUPS = ['G1', 'G2', 'G3'] as const;
+const EXPORT_GROUPS = ['G1', 'G2', 'G3', 'G4', 'G5'] as const;
+
+const EXPORT_STATUSES: NumberStatus[] = [
+  'open',
+  'reserved',
+  'pending_verification',
+  'verified',
+  'assigned',
+  'activated',
+  'activated_non_verified',
+  'follow_up',
+  'later',
+];
 
 /**
  * Available number initials in the system
@@ -275,6 +330,56 @@ const PAGE_SIZES = [10, 20, 40, 80, 120] as const;
  * Maximum time (15 minutes) for number claims before auto-release
  */
 const CLAIM_TIMEOUT = 15 * 60 * 1000; // 15 minutes in milliseconds
+
+const getClaimWaiters = (number: NumberPoolType, claimingAgentId?: string | null) => {
+  const claimingId = claimingAgentId ?? number.claimingAgentId;
+  return (number.claimQueue || []).filter((c: any) => c?.agentId && c.agentId !== claimingId);
+};
+
+const getActiveClaimCount = (number: NumberPoolType) => {
+  const claimingId = number.claimingAgentId;
+  const waiterIds = new Set(getClaimWaiters(number, claimingId).map((c: any) => c.agentId));
+  return (claimingId ? 1 : 0) + waiterIds.size;
+};
+
+const getUserQueueNo = (number: NumberPoolType, userId?: string) => {
+  if (!userId) return null;
+  if (number.claimingAgentId === userId) return 1;
+  const waiterIndex = getClaimWaiters(number).findIndex((c: any) => c.agentId === userId);
+  if (waiterIndex < 0) return null;
+  return (number.claimingAgentId ? 1 : 0) + waiterIndex + 1;
+};
+
+const strikeClaimedAtMs = (raw: unknown) => {
+  if (!raw) return 0;
+  if (typeof (raw as any)?.toDate === 'function') return (raw as any).toDate().getTime();
+  if (raw instanceof Date) return raw.getTime();
+  if (typeof raw === 'object' && raw && 'seconds' in (raw as object)) {
+    return Number((raw as { seconds: number }).seconds) * 1000;
+  }
+  const parsed = new Date(raw as any).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getUserStrikeQueueNo = (number: NumberPoolType, userId?: string) => {
+  if (!userId) return null;
+  const pending = ((number as any).claims || [])
+    .filter((claim: any) => claim.status === 'pending' && claim.userId)
+    .sort((a: any, b: any) => strikeClaimedAtMs(a.claimedAt) - strikeClaimedAtMs(b.claimedAt));
+  const index = pending.findIndex((claim: any) => claim.userId === userId);
+  if (index < 0) return null;
+  return index + 1;
+};
+
+const getDisplayQueueNo = (number: NumberPoolType, userId?: string) => {
+  return getUserQueueNo(number, userId) ?? getUserStrikeQueueNo(number, userId);
+};
+
+const userCanCancelClaim = (number: NumberPoolType, userId?: string) => {
+  if (!userId) return false;
+  if (number.claimingAgentId === userId) return true;
+  return (number.claimQueue || []).some((c: any) => c.agentId === userId);
+};
 
 /**
  * Maximum number of concurrent reservations per user
@@ -311,6 +416,38 @@ const SEARCH_LIMIT = 2000;
 
 const getSearchSourceCategory = (category?: string | null) => {
   return category && category !== 'all' ? category : 'all';
+};
+
+type NumberWithCollection = NumberPoolType & {
+  isDeleted?: boolean;
+  isActivated?: boolean;
+  sourceCollection?: 'numberPool' | 'deletedNumbers' | 'activatedNumbers';
+};
+
+const getNumberSourceCollection = (
+  number: NumberWithCollection
+): 'numberPool' | 'deletedNumbers' | 'activatedNumbers' => {
+  if (number.sourceCollection) return number.sourceCollection;
+  if (number.isDeleted) return 'deletedNumbers';
+  if (number.isActivated) return 'activatedNumbers';
+  return 'numberPool';
+};
+
+const NUMBER_COLLECTION_LABELS: Record<'numberPool' | 'deletedNumbers' | 'activatedNumbers', string> = {
+  numberPool: 'Number Pool',
+  deletedNumbers: 'Return Numbers',
+  activatedNumbers: 'Active Numbers',
+};
+
+const AdminNumberCollectionLabel = ({ number }: { number: NumberWithCollection }) => {
+  const collection = getNumberSourceCollection(number);
+  if (collection === 'numberPool') return null;
+
+  return (
+    <div className="mt-0.5 text-[9px] leading-none font-medium text-indigo-600">
+      {NUMBER_COLLECTION_LABELS[collection]}
+    </div>
+  );
 };
 
 /**
@@ -466,13 +603,19 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // ===============================================================================
   
   // Robust permission check: Explicitly excludes agents from admin/coordinator features
+  // Non–all-group coordinators (e.g. G1/G2/G3) cannot edit numbers
   const canEditNumbers = useCallback(() => {
-    // Explicitly check that user is NOT an agent
     if (!user || isAgent()) {
       return false;
     }
-    // Only allow admin or coordinator
-    return isAdmin() || isCoordinator();
+    if (isAdmin()) {
+      return true;
+    }
+    if (isCoordinator()) {
+      const coordinatorType = (user.coordinatorType ?? 'all').toString().toLowerCase();
+      return coordinatorType === 'all';
+    }
+    return false;
   }, [user, isAdmin, isCoordinator, isAgent]);
 
   // Helper for UI visibility - memoized for performance
@@ -522,6 +665,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [searchResults, setSearchResults] = useState<NumberPoolType[]>([]);
   // Store full filtered search results to avoid re-searching when only pageSize changes
   const fullSearchResultsRef = useRef<NumberPoolType[]>([]);
+  const secondarySearchesInFlightRef = useRef<Map<string, Promise<{
+    deletedResults: NumberPoolType[];
+    activatedResults: NumberPoolType[];
+  }>>>(new Map());
   const recoveryAttemptedRef = useRef(false);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -560,6 +707,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [numberToReserve, setNumberToReserve] = useState<NumberPoolType | null>(null);
   const [showReserveLimitDialog, setShowReserveLimitDialog] = useState(false);
   const [showReservationLimitClaimDialog, setShowReservationLimitClaimDialog] = useState(false);
+  const [showDailyClaimLimitDialog, setShowDailyClaimLimitDialog] = useState(false);
   const [showNumberActiveDialog, setShowNumberActiveDialog] = useState(false);
   const [activeNumberInfo, setActiveNumberInfo] = useState<{number: string, etiStatus: number, message: string} | null>(null);
   const [showReserveConflictDialog, setShowReserveConflictDialog] = useState(false);
@@ -568,6 +716,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [showMyClaimsDialog, setShowMyClaimsDialog] = useState(false);
   const [showClaimDialog, setShowClaimDialog] = useState(false);
   const [numberToClaim, setNumberToClaim] = useState<NumberPoolType | null>(null);
+  const [claimActionMode, setClaimActionMode] = useState<'strike' | 'claim'>('claim');
   const [strikeBlockedSameTeam, setStrikeBlockedSameTeam] = useState(false);
   const [sameTeamBlockAgentName, setSameTeamBlockAgentName] = useState<string | null>(null);
   const [sameTeamBlockMode, setSameTeamBlockMode] = useState<'strikeLead' | 'reservedOwner' | 'teamClaim' | 'teamStrike' | null>(null);
@@ -578,27 +727,99 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   const [claimTimer, setClaimTimer] = useState<NodeJS.Timeout | null>(null);
   const [claimCountdowns, setClaimCountdowns] = useState<Record<string, number>>({});
   const [reservationCountdowns, setReservationCountdowns] = useState<Record<string, number>>({});
+  const [strikeCountdowns, setStrikeCountdowns] = useState<Record<string, number>>({});
+  const [strikeWindowMs, setStrikeWindowMs] = useState(DEFAULT_STRIKE_WINDOW_MS);
+  const isValidDuration = (ms: unknown): ms is number => typeof ms === 'number' && Number.isFinite(ms) && ms > 0;
+  const remainingMsFromTimestamp = (raw: unknown, now: number) => {
+    if (!raw) return undefined;
+    let expiresAt: number;
+    if (typeof (raw as any)?.toDate === 'function') {
+      expiresAt = (raw as any).toDate().getTime();
+    } else if (raw instanceof Date) {
+      expiresAt = raw.getTime();
+    } else if (typeof raw === 'object' && raw && 'seconds' in (raw as object)) {
+      expiresAt = Number((raw as { seconds: number }).seconds) * 1000;
+    } else {
+      expiresAt = new Date(raw as any).getTime();
+    }
+    if (Number.isNaN(expiresAt)) return undefined;
+    return Math.max(0, expiresAt - now);
+  };
+  const claimedAtMs = (raw: unknown) => {
+    if (!raw) return 0;
+    if (typeof (raw as any)?.toDate === 'function') return (raw as any).toDate().getTime();
+    if (raw instanceof Date) return raw.getTime();
+    if (typeof raw === 'object' && raw && 'seconds' in (raw as object)) {
+      return Number((raw as { seconds: number }).seconds) * 1000;
+    }
+    const parsed = new Date(raw as any).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
   const computeUserWaitMs = useCallback(
     (number: NumberPoolType) => {
-      const position = number.claimQueue?.findIndex((c: any) => c?.agentId === user?.id) ?? -1;
-      const activeRemaining =
-        claimCountdowns[number.id] ??
-        (number.claimingExpiresAt
-          ? Math.max(0, new Date(number.claimingExpiresAt as any).getTime() - Date.now())
-          : undefined);
+      const parsedClaimingExpiresAt = number.claimingExpiresAt
+        ? new Date(number.claimingExpiresAt as any).getTime()
+        : NaN;
+      const dateRemaining = Number.isFinite(parsedClaimingExpiresAt)
+        ? Math.max(0, parsedClaimingExpiresAt - Date.now())
+        : undefined;
+      const countdownRemaining = claimCountdowns[number.id];
+      const activeRemaining = isValidDuration(countdownRemaining) ? countdownRemaining : dateRemaining;
 
-      if (position >= 0) {
-        const base = activeRemaining ?? CLAIM_TIMEOUT;
-        return base + Math.max(0, position) * CLAIM_TIMEOUT;
+      if (!isClaimHeldStatus(number.status)) {
+        return null;
       }
 
       if (number.claimingAgentId === user?.id) {
         return activeRemaining ?? null;
       }
 
+      const waiterIndex = user?.id
+        ? getClaimWaiters(number).findIndex((c: any) => c.agentId === user.id)
+        : -1;
+      if (waiterIndex >= 0) {
+        const firstClaimerRemaining = activeRemaining ?? CLAIM_TIMEOUT;
+        return firstClaimerRemaining + (waiterIndex + 1) * CLAIM_TIMEOUT;
+      }
+
       return activeRemaining ?? null;
     },
     [claimCountdowns, user?.id]
+  );
+  const computeStrikeWaitMs = useCallback(
+    (number: NumberPoolType) => {
+      const pending = (number.claims || [])
+        .filter((claim: any) => claim.status === 'pending' && claim.userId)
+        .sort((a: any, b: any) => claimedAtMs(a.claimedAt) - claimedAtMs(b.claimedAt));
+      if (pending.length === 0) return null;
+
+      const raw = (number as any).strikeExpiresAt;
+      let expiresAt: Date | null = null;
+      if (raw) {
+        if (typeof (raw as any)?.toDate === 'function') expiresAt = (raw as any).toDate();
+        else if (raw instanceof Date) expiresAt = raw;
+        else expiresAt = new Date(raw as any);
+        if (expiresAt && Number.isNaN(expiresAt.getTime())) expiresAt = null;
+      }
+
+      // Prefer live countdown, then clamp into UAE business hours (10:00–19:00)
+      const countdownRemaining = strikeCountdowns[number.id];
+      let executeRemaining: number | null = null;
+      if (isValidDuration(countdownRemaining) && expiresAt) {
+        const effective = effectiveStrikeExecuteAt(expiresAt);
+        executeRemaining = effective
+          ? Math.max(0, effective.getTime() - Date.now())
+          : countdownRemaining;
+      } else {
+        executeRemaining = msUntilEffectiveStrikeExecute(expiresAt);
+      }
+      if (!isValidDuration(executeRemaining)) return null;
+
+      const position = user?.id ? pending.findIndex((claim: any) => claim.userId === user.id) : -1;
+      if (position <= 0) return executeRemaining;
+      return (executeRemaining as number) + position * strikeWindowMs;
+    },
+    [strikeCountdowns, strikeWindowMs, user?.id]
   );
   const [showChat, setShowChat] = useState(false);
   const [selectedNumberForChat, setSelectedNumberForChat] = useState<NumberPoolType | null>(null);
@@ -644,6 +865,36 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       .replace(/_/g, ' ')
       .replace(/\b\w/g, letter => letter.toUpperCase());
   }, []);
+
+  const normalizeSearchTermForPhone = useCallback((term: string) => {
+    const cleanTerm = term.trim();
+    if (!cleanTerm) return cleanTerm;
+
+    // Keep codes and multi-term searches intact (e.g. 14JANSILG1, "590 050").
+    if (/[a-zA-Z]/.test(cleanTerm) || /\s/.test(cleanTerm)) {
+      return cleanTerm;
+    }
+
+    const digitsOnly = cleanTerm.replace(/\D/g, '');
+    if (!digitsOnly) return cleanTerm;
+
+    // Number-pool collections store UAE mobile numbers in local form (05xxxxxxxx).
+    // Accept international searches such as 971566777847 and +971566777847 too.
+    if (/^9715\d{8}$/.test(digitsOnly)) {
+      return `0${digitsOnly.slice(3)}`;
+    }
+
+    // Allow searching local 8-digit numbers by assuming UAE mobile prefix "05".
+    if (/^\d{8}$/.test(digitsOnly)) {
+      return `05${digitsOnly}`;
+    }
+    return digitsOnly;
+  }, []);
+
+  const extractPhoneNumbersFromSearch = useCallback((value: string) => {
+    const matches = value.match(/(?:\+?9715\d{8}|05\d{8})/g) || [];
+    return [...new Set(matches.map(normalizeSearchTermForPhone))];
+  }, [normalizeSearchTermForPhone]);
   
   // ===============================================================================
   // PERFORMANCE OPTIMIZATION STATE
@@ -693,6 +944,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
     return Array.from(map.values());
   }, [flattenSources, myBeingClaimedNumbers, user?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getStrikeWindowMs().then((ms) => {
+      if (!cancelled && ms > 0) setStrikeWindowMs(ms);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Fetch "Being claimed" numbers directly from Firestore for the current user
   useEffect(() => {
@@ -823,6 +1084,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // Export numbers (admin)
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportingNumbers, setExportingNumbers] = useState(false);
+  const [exportCategories, setExportCategories] = useState<string[]>([]);
+  const [exportGroups, setExportGroups] = useState<string[]>([]);
+  const [exportStatuses, setExportStatuses] = useState<string[]>([]);
   const exportFields = [
     { key: 'number', label: 'Number' },
     { key: 'category', label: 'Category' },
@@ -830,9 +1094,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     { key: 'passcode', label: 'Passcode' },
     { key: 'status', label: 'Status' },
     { key: 'group', label: 'Group' },
+    { key: 'exchange', label: 'Exchange' },
     { key: 'reservedBy', label: 'Reserved By' },
     { key: 'reservationCount', label: 'Reservation Count' },
-    { key: 'createdAt', label: 'Date Created' }
+    { key: 'createdAt', label: 'Date Created' },
+    { key: 'createdTime', label: 'Created Time' }
   ] as const;
   const [selectedExportFields, setSelectedExportFields] = useState<string[]>(exportFields.map(f => f.key));
   
@@ -840,9 +1106,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
   // UTILITY FUNCTIONS AND REFS
   // ===============================================================================
   
-  // Debounced search term for performance optimization
-  // Debounce search input to 800ms to allow users to complete typing
-  const debouncedSearchTerm = useDebounce(searchTerm, 350);
+  // Debounce typing so each keystroke does not hit Firestore. Paste (or any jump of
+  // 4+ characters) applies immediately so a pasted number is not delayed 350ms.
+  const searchTermForDebounceRef = useRef(searchTerm);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(searchTerm);
+  useEffect(() => {
+    const previousTerm = searchTermForDebounceRef.current;
+    searchTermForDebounceRef.current = searchTerm;
+    const isPasteLike = Math.abs(searchTerm.length - previousTerm.length) >= 4;
+    if (isPasteLike) {
+      setDebouncedSearchTerm(searchTerm);
+      return;
+    }
+    const handle = window.setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
+    return () => window.clearTimeout(handle);
+  }, [searchTerm]);
 
   // Realtime subscriptions for search-visible documents cleanup
   const searchVisibleUnsubsRef = useRef<Map<string, () => void>>(new Map());
@@ -872,6 +1150,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       prev.includes(key)
         ? prev.filter(k => k !== key)
         : [...prev, key]
+    );
+  };
+
+  const toggleExportFilter = (
+    value: string,
+    setFilter: React.Dispatch<React.SetStateAction<string[]>>
+  ) => {
+    setFilter(previous =>
+      previous.includes(value)
+        ? previous.filter(item => item !== value)
+        : [...previous, value]
     );
   };
 
@@ -974,8 +1263,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     try {
       const snapshot = await getDocs(collection(db, 'numberPool'));
       const rows = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as any[];
-      if (!rows.length) {
-        toast.error('No numbers to export');
+      const filteredRows = rows.filter(row =>
+        (exportCategories.length === 0 || exportCategories.some(category => row.category?.toLowerCase() === category.toLowerCase())) &&
+        (exportGroups.length === 0 || exportGroups.includes(row.group)) &&
+        (exportStatuses.length === 0 || exportStatuses.includes(row.status))
+      );
+
+      if (!filteredRows.length) {
+        toast.error('No numbers match the selected export filters');
         setExportingNumbers(false);
         return;
       }
@@ -987,11 +1282,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         passcode: 'Passcode',
         status: 'Status',
         group: 'Group',
+        exchange: 'Exchange',
         teamVisibility: 'Team Visibility',
         visibleToFreelancers: 'Visible To Freelancers',
         reservedBy: 'Reserved By',
         reservationCount: 'Reservation Count',
         createdAt: 'Date Created',
+        createdTime: 'Created Time',
         reservedAt: 'Reserved At',
         expiresAt: 'Expires At',
         claimingAgentId: 'Claiming Agent',
@@ -1013,13 +1310,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         return val;
       };
 
-      const data = rows.map(row => {
+      const data = filteredRows.map(row => {
         const out: Record<string, any> = {};
         selectedExportFields.forEach(key => {
-          if (key === 'createdAt') {
-            const raw = row[key];
+          if (key === 'createdAt' || key === 'createdTime') {
+            const raw = row.createdAt;
             const d: Date | null = raw?.toDate instanceof Function ? raw.toDate() : raw instanceof Date ? raw : null;
-            out[headerMap[key] || key] = d ? `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}` : '';
+            out[headerMap[key] || key] = d
+              ? key === 'createdAt'
+                ? `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`
+                : `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`
+              : '';
           } else {
           out[headerMap[key] || key] = formatVal(row[key]);
           }
@@ -1267,6 +1568,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           unsub();
       }
       searchUnsubs.clear();
+      secondarySearchesInFlightRef.current.clear();
       
       if (claimTimer) {
         clearTimeout(claimTimer);
@@ -1303,8 +1605,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // "hasCachedResults" means we have already executed a Firestore query for this exact term
     // (the result may legitimately be an empty array for a term that matches nothing).
     // Using length > 0 was wrong: it caused repeated Firestore reads for 0-result searches.
+    const extractedSearchNumbers = extractPhoneNumbersFromSearch(debouncedSearchTerm);
+    const normalizedSearchTerm = extractedSearchNumbers.length > 1
+      ? extractedSearchNumbers.join(' ')
+      : normalizeSearchTermForPhone(debouncedSearchTerm);
     const lastSearchTerm = (fullSearchResultsRef.current as any).lastSearchTerm;
-    const hasCachedResults = lastSearchTerm !== undefined && lastSearchTerm === debouncedSearchTerm.trim();
+    const hasCachedResults = lastSearchTerm !== undefined && lastSearchTerm === normalizedSearchTerm;
     const lastCategory = (fullSearchResultsRef.current as any).lastCategory;
     const lastGroup = (fullSearchResultsRef.current as any).lastGroup;
     const lastInitials = (fullSearchResultsRef.current as any).lastInitials;
@@ -1317,7 +1623,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     // Determine if search term or any filter changed
     // Always compare trimmed values — lastSearchTerm is stored trimmed and debouncedSearchTerm
     // may contain leading/trailing whitespace that should be ignored.
-    const searchTermChanged = debouncedSearchTerm.trim() !== lastSearchTerm;
+    const searchTermChanged = normalizedSearchTerm !== lastSearchTerm;
     const categoryChanged = selectedCategory !== lastCategory;
     const groupChanged = selectedGroup !== lastGroup;
     const initialsChanged = selectedInitials !== lastInitials;
@@ -1400,7 +1706,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // Update cached results - store both filtered and original unfiltered
       fullSearchResultsRef.current = filteredResults;
       (fullSearchResultsRef.current as any).originalUnfilteredResults = originalUnfilteredResults;
-      (fullSearchResultsRef.current as any).lastSearchTerm = debouncedSearchTerm.trim();
+      (fullSearchResultsRef.current as any).lastSearchTerm = normalizedSearchTerm;
       (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
       (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
       (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
@@ -1438,7 +1744,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       }
       performSearch();
     }
-  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, endsWithToggle]);
+  }, [debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, endsWithToggle, normalizeSearchTermForPhone, extractPhoneNumbersFromSearch]);
 
   // Perform search function - accessible for "Load More" button
   // Helper function to search deletedNumbers collection (admin and coordinator)
@@ -1494,8 +1800,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           ...data,
           id: doc.id,
           status: 'returned' as NumberStatus,
-          isDeleted: true // Flag to identify deleted numbers
-        } as NumberPoolType & { isDeleted?: boolean };
+          isDeleted: true,
+          sourceCollection: 'deletedNumbers' as const,
+        } as NumberPoolType & { isDeleted?: boolean; sourceCollection?: 'deletedNumbers' };
       });
 
       return deletedNumbers;
@@ -1504,7 +1811,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // If query fails (e.g., missing index), return empty array
       return [];
     }
-  }, [isAdmin]);
+  }, [isAdmin, isCoordinator]);
 
   // Helper function to search activatedNumbers collection (admin and coordinator only)
   const searchActivatedNumbers = useCallback(async (searchTerm: string, category: string, endsWith: boolean) => {
@@ -1567,8 +1874,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           ...data,
           id: doc.id,
           status: 'activated' as NumberStatus,
-          isActivated: true // Flag to identify activated numbers
-        } as NumberPoolType & { isActivated?: boolean };
+          isActivated: true,
+          sourceCollection: 'activatedNumbers' as const,
+        } as NumberPoolType & { isActivated?: boolean; sourceCollection?: 'activatedNumbers' };
       });
 
       return activatedNumbers;
@@ -1581,13 +1889,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   const performSearch = useCallback(async (loadMore: boolean = false) => {
     // Capture the search term at the start of this search operation
-    const termAtStart = debouncedSearchTerm.trim();
+    const pastedNumbers = extractPhoneNumbersFromSearch(debouncedSearchTerm);
+    const isBulkNumberSearch = pastedNumbers.length > 1;
+    const termAtStart = isBulkNumberSearch
+      ? pastedNumbers.join(' ')
+      : normalizeSearchTermForPhone(debouncedSearchTerm);
     const termLower = termAtStart.toLowerCase();
     const normalizedTerm = termLower.replace(/\s+/g, '');
     const isLeavingSoonSearch =
       termLower.includes('leaving soon') ||
       normalizedTerm.includes('leavingsoon') ||
       normalizedTerm === 'leaving';
+    const isExchangeSearch = normalizedTerm.includes('exchange');
     const searchSignatureAtStart = buildSearchSignature(
       termAtStart,
       selectedCategory,
@@ -1595,6 +1908,75 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       selectedInitials,
       endsWithToggle
     );
+
+    if (isBulkNumberSearch && !loadMore) {
+      currentSearchTermRef.current = searchSignatureAtStart;
+      setIsSearching(true);
+      setSearchLastDoc(null);
+      setSearchHasMore(false);
+
+      try {
+        const searchCategory = (selectedCategory && selectedCategory !== 'all') ? selectedCategory : 'all';
+        const resultsByNumber = await Promise.all(pastedNumbers.map(async (number) => {
+          const [mainResult, deletedResults, activatedResults] = await Promise.all([
+            unifiedSearch.search(number, {
+              category: searchCategory,
+              limit: 10,
+              includeStale: false
+            }),
+            searchDeletedNumbers(number, searchCategory, false),
+            searchActivatedNumbers(number, searchCategory, false)
+          ]);
+
+          return [
+            ...filterByVisibility(mainResult.data),
+            ...deletedResults,
+            ...activatedResults
+          ];
+        }));
+
+        if (currentSearchTermRef.current !== searchSignatureAtStart) return;
+
+        const uniqueResults = Array.from(
+          new Map(
+            resultsByNumber
+              .flat()
+              .map(number => [`${number.id}:${(number as any).isDeleted ? 'deleted' : (number as any).isActivated ? 'activated' : 'pool'}`, number])
+          ).values()
+        );
+
+        const filteredResults = uniqueResults.filter(number =>
+          (!selectedGroup || number.group === selectedGroup) &&
+          (!selectedInitials || (number.number || '').startsWith(selectedInitials))
+        );
+
+        fullSearchResultsRef.current = filteredResults;
+        (fullSearchResultsRef.current as any).originalUnfilteredResults = filteredResults;
+        (fullSearchResultsRef.current as any).lastSearchTerm = termAtStart;
+        (fullSearchResultsRef.current as any).lastCategory = selectedCategory;
+        (fullSearchResultsRef.current as any).lastGroup = selectedGroup;
+        (fullSearchResultsRef.current as any).lastInitials = selectedInitials;
+        (fullSearchResultsRef.current as any).lastEndsWithToggle = endsWithToggle;
+        (fullSearchResultsRef.current as any).lastSearchHasMore = false;
+        (fullSearchResultsRef.current as any).lastSourceCategory = searchCategory;
+
+        setSearchResults(filteredResults.slice(0, pageSize));
+        setSearchTotalPages(Math.ceil(filteredResults.length / pageSize));
+        setSearchTotalItems(filteredResults.length);
+        setSearchHasNextPage(filteredResults.length > pageSize);
+        setSearchHasPreviousPage(false);
+        setSearchCurrentPage(1);
+      } catch (error) {
+        console.error('Bulk number search error:', error);
+        toast.error('Bulk number search failed');
+      } finally {
+        if (currentSearchTermRef.current === searchSignatureAtStart) {
+          setIsSearching(false);
+          setIsLoadingMore(false);
+        }
+      }
+      return;
+    }
     
     const lastSearchTerm = (fullSearchResultsRef.current as any)?.lastSearchTerm;
     const lastCategory = (fullSearchResultsRef.current as any)?.lastCategory;
@@ -1759,28 +2141,30 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       currentSearchTermRef.current = searchSignatureAtStart;
     }
     
-    // Special search mode for Leaving Soon flag.
+    // Special search mode for Leaving Soon and Exchange flags.
     // Query Firestore directly so results are not limited to currently loaded in-memory rows.
-    if (!loadMore && termAtStart !== '' && isLeavingSoonSearch) {
+    if (!loadMore && termAtStart !== '' && (isLeavingSoonSearch || isExchangeSearch)) {
       currentSearchTermRef.current = searchSignatureAtStart;
       setIsSearching(true);
       try {
         const terms = termLower.split(/\s+/).filter(Boolean);
-        const nonFlagTerms = terms.filter(t => t !== 'leaving' && t !== 'soon' && t !== 'leavingsoon');
+        const nonFlagTerms = terms.filter(t => t !== 'leaving' && t !== 'soon' && t !== 'leavingsoon' && t !== 'exchange');
 
-        const leavingSoonConstraints: any[] = [where('leavingSoon', '==', true)];
+        const flagConstraints: any[] = [
+          where(isExchangeSearch ? 'exchange' : 'leavingSoon', '==', true)
+        ];
         if (selectedCategory && selectedCategory !== 'all') {
-          leavingSoonConstraints.push(where('category', '==', selectedCategory));
+          flagConstraints.push(where('category', '==', selectedCategory));
         }
         if (selectedGroup) {
-          leavingSoonConstraints.push(where('group', '==', selectedGroup));
+          flagConstraints.push(where('group', '==', selectedGroup));
         }
-        leavingSoonConstraints.push(orderBy('number'));
-        leavingSoonConstraints.push(limit(SEARCH_LIMIT));
+        flagConstraints.push(orderBy('number'));
+        flagConstraints.push(limit(SEARCH_LIMIT));
 
-        const leavingSoonQuery = query(collection(db, 'numberPool'), ...leavingSoonConstraints);
-        const leavingSoonSnapshot = await getDocs(leavingSoonQuery);
-        const leavingSoonNumbers = leavingSoonSnapshot.docs.map(docSnap => {
+        const flagQuery = query(collection(db, 'numberPool'), ...flagConstraints);
+        const flagSnapshot = await getDocs(flagQuery);
+        const flagNumbers = flagSnapshot.docs.map(docSnap => {
           const data = docSnap.data() as any;
           return {
             id: docSnap.id,
@@ -1794,7 +2178,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           } as NumberPoolType;
         });
 
-        let filteredResults = filterByVisibility(leavingSoonNumbers);
+        let filteredResults = filterByVisibility(flagNumbers);
 
         if (nonFlagTerms.length > 0) {
           filteredResults = filteredResults.filter((n: NumberPoolType) => {
@@ -1856,6 +2240,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         
         // Run main search and secondary searches (deleted/activated) in PARALLEL for speed
         const endsWithFlag = endsWithToggle && /^\d{2,5}$/.test(termAtStart);
+        const exactStatusTerm = resolveExactNumberPoolStatus(termAtStart);
+        // Status-only terms belong on numberPool. Skip deleted/activated scans except
+        // "activated", which still needs the activatedNumbers collection.
+        const skipSecondaryCollections =
+          (Boolean(exactStatusTerm) && exactStatusTerm !== 'activated') ||
+          (
+            /^\d{4,9}$/.test(termAtStart) &&
+            !termAtStart.startsWith('05') &&
+            !termAtStart.startsWith('971')
+          );
         const mainSearchPromise = unifiedSearch.search(termAtStart, {
           category: searchCategory,
           limit: SEARCH_LIMIT,
@@ -1870,15 +2264,36 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         let activatedResults: NumberPoolType[] = [];
         let result: Awaited<ReturnType<typeof unifiedSearch.search>>;
 
-        if (!loadMore) {
-          const [mainResult, deletedResult, activatedResult] = await Promise.all([
+        if (!loadMore && !skipSecondaryCollections) {
+          const secondarySearchKey = [
+            termAtStart,
+            searchCategory,
+            endsWithFlag ? 'ends' : 'contains',
+            user?.role || '',
+            user?.id || ''
+          ].join('::');
+          let secondarySearchPromise = secondarySearchesInFlightRef.current.get(secondarySearchKey);
+
+          if (!secondarySearchPromise) {
+            secondarySearchPromise = Promise.all([
+              searchDeletedNumbers(termAtStart, searchCategory, endsWithFlag),
+              searchActivatedNumbers(termAtStart, searchCategory, endsWithFlag)
+            ]).then(([nextDeletedResults, nextActivatedResults]) => ({
+              deletedResults: nextDeletedResults,
+              activatedResults: nextActivatedResults
+            })).finally(() => {
+              secondarySearchesInFlightRef.current.delete(secondarySearchKey);
+            });
+            secondarySearchesInFlightRef.current.set(secondarySearchKey, secondarySearchPromise);
+          }
+
+          const [mainResult, secondaryResult] = await Promise.all([
             mainSearchPromise,
-            searchDeletedNumbers(termAtStart, searchCategory, endsWithFlag),
-            searchActivatedNumbers(termAtStart, searchCategory, endsWithFlag)
+            secondarySearchPromise
           ]);
           result = mainResult;
-          deletedResults = deletedResult;
-          activatedResults = activatedResult;
+          deletedResults = secondaryResult.deletedResults;
+          activatedResults = secondaryResult.activatedResults;
         } else {
           result = await mainSearchPromise;
         }
@@ -2022,7 +2437,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           }
         }
       }
-  }, [buildSearchSignature, debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers, filterByVisibility]);
+  }, [buildSearchSignature, debouncedSearchTerm, selectedCategory, selectedGroup, selectedInitials, searchCurrentPage, pageSize, searchLastDoc, endsWithToggle, searchDeletedNumbers, searchActivatedNumbers, filterByVisibility, user?.id, user?.role, normalizeSearchTermForPhone, extractPhoneNumbersFromSearch]);
 
   // Load stats for total pages (OPTIMIZED) - Mobile performance
   useEffect(() => {
@@ -2090,7 +2505,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     const qPrimary = query(
       collection(db, 'numberPool'),
       where('reservedBy', '==', user.id),
-      where('status', '==', 'reserved'),
+      where('status', 'in', ['reserved', 'non_verified']),
       orderBy('reservedAt', 'desc'),
       limit(20) // Reduced from 40 for mobile performance
     );
@@ -2126,7 +2541,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const qFallback = query(
           collection(db, 'numberPool'),
           where('reservedBy', '==', user.id),
-          where('status', '==', 'reserved'),
+          where('status', 'in', ['reserved', 'non_verified']),
           limit(20) // Reduced from 40 for mobile performance
         );
         fallbackCleanup = onSnapshot(qFallback, (snap) => {
@@ -2529,6 +2944,33 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     }
   }, [showEditDialog]);
 
+  const buildNumberUpdateDetails = (oldData: Record<string, any>, newData: Record<string, any>) => {
+    const labels: Record<string, string> = {
+      number: 'Number',
+      category: 'Category',
+      code: 'Code',
+      group: 'Group',
+      passcode: 'Passcode',
+      teamVisibility: 'Team visibility',
+      status: 'Status'
+    };
+
+    const changes = Object.keys(newData)
+      .filter((key) => oldData[key] !== newData[key])
+      .map((key) => {
+        if (key === 'passcode') {
+          return `${labels[key]} changed`;
+        }
+        const oldValue = oldData[key] || 'empty';
+        const newValue = newData[key] || 'empty';
+        return `${labels[key] || key}: ${oldValue} → ${newValue}`;
+      });
+
+    return changes.length > 0
+      ? `Updated number details: ${changes.join('; ')}`
+      : `Updated number: no visible field changes`;
+  };
+
   const handleUpdateNumber = async () => {
     // Explicit permission check at function start - explicitly exclude agents
     if (!canEditNumbers()) {
@@ -2776,6 +3218,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         teamVisibility: editingNumber.teamVisibility,
         status: editingNumber.status
       };
+
+      const newLogData = {
+        number: num,
+        category: cat,
+        code,
+        group: group.trim(),
+        passcode: canEditNumbers() ? editPoolPasscode.trim() : editingNumber.passcode,
+        teamVisibility: canEditNumbers() ? (editPoolTeamVisibility.trim() || null) : editingNumber.teamVisibility,
+        status: editPoolStatus
+      };
       
       await updateDoc(doc(db, 'numberPool', editingNumber.id), numberData);
       
@@ -2785,8 +3237,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         num,
         'updated',
         oldData,
-        numberData,
-        `Updated number: ${editingNumber.number} → ${num}`
+        newLogData,
+        buildNumberUpdateDetails(oldData, newLogData)
       );
       
       toast.success('Number updated successfully!');
@@ -2840,6 +3292,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const now = Date.now();
       const newClaimCountdowns: Record<string, number> = {};
       const newReservationCountdowns: Record<string, number> = {};
+      const newStrikeCountdowns: Record<string, number> = {};
 
       // Combine all sources: current page numbers, reserved section numbers, search results, and "being claimed" numbers
       const mergedMap = new Map<string, NumberPoolType>();
@@ -2852,7 +3305,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       mergedMap.forEach((number) => {
         // Handle claim countdowns
         const claimingRaw = (number as any)?.claimingExpiresAt;
-        if (claimingRaw) {
+        if (isClaimHeldStatus(number.status) && claimingRaw) {
           const claimingExpiresAt: Date = typeof claimingRaw?.toDate === 'function'
             ? claimingRaw.toDate()
             : (claimingRaw instanceof Date ? claimingRaw : new Date(claimingRaw));
@@ -2860,18 +3313,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             const timeLeft = Math.max(0, claimingExpiresAt.getTime() - now);
             if (timeLeft > 0) newClaimCountdowns[number.id] = timeLeft;
           }
-        } else if (number.claimQueue && number.claimQueue.length > 0) {
-          // If not actively claiming but there is a queue, show timer based on position (15 min slots)
-          const position = number.claimQueue.findIndex((c: any) => c.agentId === user?.id);
-          if (position >= 0) {
-            const timeLeft = Math.max(0, CLAIM_TIMEOUT * (position + 1));
-            newClaimCountdowns[number.id] = timeLeft;
-          }
         }
 
         // Handle reservation countdowns
         const reservationRaw = (number as any)?.expiresAt;
-        if (reservationRaw && number.status === 'reserved') {
+        if (reservationRaw && isClaimHeldStatus(number.status)) {
           let reservationExpiresAt: Date;
           
           // Handle different date formats
@@ -2899,10 +3345,26 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             }
           }
         }
+
+        const hasPendingStrike = (number.claims || []).some((claim: any) => claim.status === 'pending');
+        const strikeRaw = (number as any)?.strikeExpiresAt;
+        if (hasPendingStrike && strikeRaw) {
+          let expiresAt: Date | null = null;
+          if (typeof (strikeRaw as any)?.toDate === 'function') expiresAt = (strikeRaw as any).toDate();
+          else if (strikeRaw instanceof Date) expiresAt = strikeRaw;
+          else expiresAt = new Date(strikeRaw as any);
+          if (expiresAt && !Number.isNaN(expiresAt.getTime())) {
+            const strikeLeft = msUntilEffectiveStrikeExecute(expiresAt, new Date(now));
+            if (isValidDuration(strikeLeft)) {
+              newStrikeCountdowns[number.id] = strikeLeft as number;
+            }
+          }
+        }
       });
 
       setClaimCountdowns(newClaimCountdowns);
       setReservationCountdowns(newReservationCountdowns);
+      setStrikeCountdowns(newStrikeCountdowns);
     }, 1000);
 
     return () => clearInterval(interval);
@@ -3062,9 +3524,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         searchLower.includes('leaving soon') ||
         normalizedSearch.includes('leavingsoon') ||
         normalizedSearch === 'leaving';
+      const isExchangeSearch = normalizedSearch.includes('exchange');
 
-      if (isLeavingSoonSearch) {
-        if (!(number as any).leavingSoon) return false;
+      if (isLeavingSoonSearch || isExchangeSearch) {
+        if (isLeavingSoonSearch && !(number as any).leavingSoon) return false;
+        if (isExchangeSearch && !(number as any).exchange) return false;
       } else {
         const matches =
           number.number.toLowerCase().includes(searchLower) ||
@@ -3234,6 +3698,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return;
     }
 
+    const hasActiveSearchInput = searchTerm.trim() !== '' || debouncedSearchTerm.trim() !== '';
+    if (hasActiveSearchInput || isSearching || isDebouncing) {
+      recoveryAttemptedRef.current = false;
+      return;
+    }
+
     if (!loading && displayNumbers.length === 0 && (statsTotalItems > 0)) {
       const currentState = numberPoolManager.getState();
       // Don't recover if we just reset or are initializing
@@ -3266,7 +3736,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // Reset recovery flag if conditions change
       recoveryAttemptedRef.current = false;
     }
-  }, [loading, displayNumbers.length, statsTotalItems, selectedCategory, selectedGroup, selectedInitials, pageSize, user?.id, user?.role]);
+  }, [loading, displayNumbers.length, statsTotalItems, selectedCategory, selectedGroup, selectedInitials, pageSize, user?.id, user?.role, searchTerm, debouncedSearchTerm, isSearching, isDebouncing]);
 
   // Use displayNumbers instead of paginatedNumbers for the new pagination system
   const paginatedNumbers = displayNumbers;
@@ -3286,7 +3756,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const capCheckQuery = query(
           collection(db, 'numberPool'),
           where('reservedBy', '==', user.id),
-          where('status', '==', 'reserved'),
+          where('status', 'in', ['reserved', 'non_verified']),
           limit(MAX_RESERVATIONS)
         );
         const capSnap = await getDocs(capCheckQuery);
@@ -3516,6 +3986,39 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     setIsReleasing(true);
 
     try {
+      // Pending strikes: server-only handoff (first striker reserved, rest → claim queue).
+      // No frontend timers — expiresAt / claimingExpiresAt are set by the Cloud Function.
+      const pendingStrikes = ((selectedNumber as any).claims || []).filter(
+        (c: any) => c.status === 'pending' && c.userId
+      );
+      if (pendingStrikes.length > 0) {
+        setShowReleaseDialog(false);
+        try {
+          const result = await releaseNumberWithPendingStrikesFunction({ numberId: selectedNumber.id });
+          const data = (result?.data || {}) as {
+            handedOff?: boolean;
+            reason?: string;
+          };
+          if (data.handedOff) {
+            setReservedNumbers((prev) => prev.filter((n) => n.id !== selectedNumber.id));
+            setHasReservation(false);
+            await refreshNumberData(selectedNumber.id);
+            toast.success('Number released — transferred to first striker');
+            return;
+          }
+          // No handoff (e.g. lead blocked) — fall through to normal release only if still owner
+          if (data.reason === 'lead_blocked') {
+            toast.error('Cannot release while the lead is assigned or activated.');
+            return;
+          }
+          // no_pending_strikes race — continue with normal path using fresh data
+        } catch (handoffError) {
+          console.error('Error releasing number with pending strikes:', handoffError);
+          toast.error('Failed to transfer number to striker. Please try again.');
+          return;
+        }
+      }
+
       // Update local state immediately
       const updatedNumber: NumberPoolType = {
         ...selectedNumber,
@@ -3571,7 +4074,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           originalReservedAt: undefined,
           originalExpiresAt: undefined,
           // Update claim queue
-          claimQueue: nextClaim ? claimQueue.filter(claim => claim.agentId !== selectedNumber.claimingAgentId) : []
+          claimQueue: nextClaim ? claimQueue.filter(claim => claim.agentId !== selectedNumber.claimingAgentId) : [],
+          reservationCount: (selectedNumber.reservationCount || 0) + 1
         };
 
         setNumbers(prev => prev.map(n => 
@@ -3608,7 +4112,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           originalReservedAt: null,
           originalExpiresAt: null,
           // Update claim queue
-          claimQueue: nextClaim ? claimQueue.filter(claim => claim.agentId !== selectedNumber.claimingAgentId) : []
+          claimQueue: nextClaim ? claimQueue.filter(claim => claim.agentId !== selectedNumber.claimingAgentId) : [],
+          reservationCount: increment(1)
         });
 
         // Log the release and transfer action
@@ -3742,7 +4247,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       const updatedClaims = claims.map((c: any) =>
         c.userId === user.id && c.status === 'pending' ? { ...c, status: 'cancelled' as const } : c
       );
-      await updateDoc(numberRef, { claims: updatedClaims });
+      const stillPending = updatedClaims.some((c: any) => c.status === 'pending');
+      await updateDoc(numberRef, {
+        claims: updatedClaims,
+        ...(stillPending ? {} : { strikeExpiresAt: null }),
+      });
       toast.success('Strike cancelled');
       await logNumberAction(
         number.id,
@@ -3766,7 +4275,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
     if (!user?.id) return;
     const claimQueue = number.claimQueue || [];
     const inQueue = claimQueue.some((c: any) => c.agentId === user.id);
-    if (!inQueue) return;
+    const isActiveClaimer = number.claimingAgentId === user.id;
+    if (!inQueue && !isActiveClaimer) return;
     if (cancellingNumbers.has(number.id)) return;
     setCancellingNumbers(prev => new Set(prev).add(number.id));
     try {
@@ -4056,12 +4566,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
    * Optimized claim function with debouncing and loading states
    * Handles number claiming with rate limiting and UI feedback
    */
-  const handleClaim = useCallback(async (number: NumberPoolType) => {
+  const handleClaim = useCallback(async (number: NumberPoolType, preferredMode?: 'strike' | 'claim') => {
     if (!user?.id) return;
 
-    // Per-user daily claim limit (resets at UAE midnight)
+    // Per-user daily claim/strike limit (resets at UAE midnight)
     if (userClaimCount >= MAX_CLAIMS_PER_24H) {
-      toast.error(`Daily claim limit reached (${MAX_CLAIMS_PER_24H} per day)`);
+      console.warn('[Strike] blocked: daily claim limit', {
+        userClaimCount,
+        max: MAX_CLAIMS_PER_24H,
+      });
+      setShowDailyClaimLimitDialog(true);
       return;
     }
     
@@ -4100,20 +4614,43 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       };
 
       // If status is no longer valid for claim/strike, stop here
-      const isStrikeFlow = ['assigned', 'verified', 'follow_up'].includes(latestNumber.status);
-      const isClaimFlow = latestNumber.status === 'reserved';
-      if (!isStrikeFlow && !isClaimFlow) {
+      const canStrike = isStrikeNumberStatus(latestNumber.status);
+      const canClaim = isClaimHeldStatus(latestNumber.status);
+      if (!canStrike && !canClaim) {
         toast.error('This number is not available for claiming or striking right now.');
         return;
       }
 
+      const resolvedMode: 'strike' | 'claim' =
+        preferredMode === 'strike' && canStrike
+          ? 'strike'
+          : preferredMode === 'claim' && canClaim
+            ? 'claim'
+            : canStrike && !canClaim
+              ? 'strike'
+              : canClaim && !canStrike
+                ? 'claim'
+                : preferredMode === 'strike'
+                  ? 'strike'
+                  : 'claim';
+
+      if (resolvedMode === 'strike' && !canStrike) {
+        toast.error('This number is not available for striking right now.');
+        return;
+      }
+      if (resolvedMode === 'claim' && !canClaim) {
+        toast.error('This number is not available for claiming right now.');
+        return;
+      }
+
+      setClaimActionMode(resolvedMode);
       // Use the fresh number everywhere (dialog + confirmClaim)
       setNumberToClaim(latestNumber);
 
       // Same-team (center) restriction:
       // - STRIKE: block when lead belongs to same team (uses lead.agentId)
       // - CLAIM (reserved): block when the reserving agent is from same team (uses reservedBy)
-      if (isStrikeFlow && user.role === 'agent' && (latestNumber as any).leadId && user.teamId) {
+      if (resolvedMode === 'strike' && user.role === 'agent' && (latestNumber as any).leadId && user.teamId) {
         try {
           const leadDoc = await getDoc(doc(db, 'leads', (latestNumber as any).leadId));
           if (leadDoc.exists()) {
@@ -4137,7 +4674,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
       // One-strike-per-team rule (pre-dialog check):
       // If any pending claim in the strikes array already belongs to a same-team agent, block.
-      if (isStrikeFlow && user.role === 'agent' && user.teamId) {
+      if (resolvedMode === 'strike' && user.role === 'agent' && user.teamId) {
         const existingClaims: any[] = latestData.claims || [];
         const pendingClaims = existingClaims.filter((c: any) => c.status === 'pending' && c.userId !== user.id);
         for (const claim of pendingClaims) {
@@ -4158,7 +4695,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         }
       }
 
-      if (isClaimFlow && user.role === 'agent' && (latestNumber as any).reservedBy && user.teamId) {
+      if (resolvedMode === 'claim' && user.role === 'agent' && (latestNumber as any).reservedBy && user.teamId) {
         try {
           const ownerUserDoc = await getDoc(doc(db, 'users', (latestNumber as any).reservedBy));
           if (ownerUserDoc.exists()) {
@@ -4210,7 +4747,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
         const numberRef = doc(db, 'numberPool', numberToClaim.id);
       
       // For numbers with specific statuses (STRIKE functionality)
-      if (['assigned', 'verified', 'follow_up'].includes(numberToClaim.status)) {
+      if (claimActionMode === 'strike') {
         const now = new Date();
         
         // Get current number data first
@@ -4279,14 +4816,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           };
 
         const updatedClaims = [...claims, newClaim];
-
-        // Update in Firebase - FIXED: Simple update instead of transaction
-        await updateDoc(numberRef, {
+        const hadPendingStrike = claims.some((claim: any) => claim.status === 'pending');
+        const strikeUpdate: Record<string, unknown> = {
             lastClaimedAt: now,
             claimedAt: now,
-          claims: updatedClaims,  // FIXED: Direct array instead of arrayUnion
+          claims: updatedClaims,
             claimCount: (numberData.claimCount || 0) + 1
-          });
+          };
+        if (!hadPendingStrike) {
+          strikeUpdate.strikeExpiresAt = computeStrikeExpiresAt(await getStrikeWindowMs());
+        }
+
+        await updateDoc(numberRef, strikeUpdate);
 
           // Log the strike action (fire-and-forget so UI stays fast)
           void logNumberAction(
@@ -4317,7 +4858,10 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   ...n,
                   claimedAt: now,
                 claims: updatedClaims,
-                  claimCount: (n.claimCount || 0) + 1
+                  claimCount: (n.claimCount || 0) + 1,
+                  ...(strikeUpdate.strikeExpiresAt
+                    ? { strikeExpiresAt: strikeUpdate.strikeExpiresAt as Date }
+                    : {}),
                 }
               : n
           ));
@@ -4472,9 +5016,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       // Success - close dialog and show success message (no await so Processing ends immediately)
       setShowClaimDialog(false);
       void refreshNumberData(numberToClaim.id);
-      toast.success(['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) 
-        ? 'Number Striked successfully' 
-        : 'Number claimed successfully');
+      toast.success(
+        claimActionMode === 'strike'
+          ? (isStrikeOffHours()
+              ? `Strike recorded. ${STRIKE_OFF_HOURS_MESSAGE}`
+              : 'Number Striked successfully')
+          : 'Number claimed successfully',
+        claimActionMode === 'strike' && isStrikeOffHours() ? { duration: 7000 } : undefined
+      );
       claimSucceeded = true;
 
     } catch (error: any) {
@@ -4508,13 +5057,17 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
     const handleClaimTimeout = async (number: NumberPoolType) => {
       try {
-        // Trigger real-time claim expiry by updating the document
         const numberRef = doc(db, 'numberPool', number.id);
-        
-        // Update the document to trigger the real-time Cloud Function
+        const latestSnap = await getDoc(numberRef);
+        if (!latestSnap.exists() || latestSnap.data()?.status !== 'reserved') {
+          return;
+        }
+        if (!latestSnap.data()?.claimingExpiresAt) {
+          return;
+        }
+
         await updateDoc(numberRef, {
           claimExpiryTrigger: serverTimestamp(),
-          // Add performance tracking
           clientTriggeredAt: new Date().toISOString(),
           triggerSource: 'client_timer'
         });
@@ -4555,7 +5108,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             claimingAgentId: claimQueue.length > 1 ? claimQueue[1].agentId : null,
             claimingStartedAt: claimQueue.length > 1 ? serverTimestamp() : null,
             claimingExpiresAt: claimQueue.length > 1 ? newExpiresAt : null,
-            claimQueue: claimQueue.slice(1) // Remove the first claim from queue
+            claimQueue: claimQueue.slice(1), // Remove the first claim from queue
+            reservationCount: increment(1)
           };
 
           await updateDoc(numberRef, updateData);
@@ -4610,14 +5164,16 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           });
         }
       } else {
-        // For any other status change, clear the claim queue and stop timers
+        // Preserve strike queue; only pause/restart the strike timer by status rules
+        const strikeWindowMs = await getStrikeWindowMs();
         await updateDoc(numberRef, {
           status: newStatus,
           lastStatusChange: serverTimestamp(),
           claimingAgentId: null,
           claimingStartedAt: null,
           claimingExpiresAt: null,
-          claimQueue: []
+          claimQueue: [],
+          ...strikeTimerFieldsForNumberStatus(newStatus, number, strikeWindowMs),
         });
 
         if (claimTimer) {
@@ -4631,14 +5187,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
   // Format countdown time
   const formatCountdown = (ms: number) => {
+    if (!isValidDuration(ms)) return '-';
     const totalSeconds = Math.ceil(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`;
+    }
     return `${minutes}m ${seconds}s`;
   };
 
   // Format reservation countdown time (shows hours and minutes)
   const formatReservationCountdown = (ms: number) => {
+    if (!isValidDuration(ms)) return '-';
     const totalSeconds = Math.ceil(ms / 1000);
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -4650,6 +5212,30 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
       return `${minutes}m ${seconds}s`;
     } else {
       return `${seconds}s`;
+    }
+  };
+
+  const formatDeletedAtDate = (deletedAt: any): string => {
+    if (!deletedAt) return '';
+    try {
+      let date: Date | null = null;
+      if (typeof deletedAt?.toDate === 'function') {
+        date = deletedAt.toDate();
+      } else if (deletedAt instanceof Date) {
+        date = deletedAt;
+      } else if (deletedAt?.seconds) {
+        date = new Date(deletedAt.seconds * 1000);
+      } else if (typeof deletedAt === 'string' || typeof deletedAt === 'number') {
+        const parsed = new Date(deletedAt);
+        if (!Number.isNaN(parsed.getTime())) date = parsed;
+      }
+      if (!date) return '';
+      const dd = String(date.getDate()).padStart(2, '0');
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      const yyyy = date.getFullYear();
+      return `${dd}/${mm}/${yyyy}`;
+    } catch {
+      return '';
     }
   };
 
@@ -5252,7 +5838,13 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                 {/* Slim body (phones) / normal padding (desktop) */}
                 <div className="p-2.5 sm:p-6">
                 <div className="space-y-2.5 sm:space-y-4">
-                    {reservedNumbers.map((number, index) => (
+                    {reservedNumbers.map((number, index) => {
+                      const isNonVerified = number.status === 'non_verified';
+                      const pendingStrikes = ((number as any).claims || []).filter(
+                        (c: any) => c.status === 'pending'
+                      ).length;
+                      const strikeWaitMs = computeStrikeWaitMs(number);
+                      return (
                       <motion.div
                         key={number.id}
                         initial={{ opacity: 0, y: 20 }}
@@ -5265,7 +5857,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         <div className="flex items-center space-x-3 sm:space-x-4">
           <div>
                             <h4 className="text-base sm:text-2xl font-bold font-mono tracking-wide text-gray-900">{number.number}</h4>
-                            <span className="text-[10px] sm:text-sm text-gray-500">{number.category}</span>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] sm:text-sm text-gray-500">{number.category}</span>
+                              {isNonVerified && (
+                                <span className="text-[10px] sm:text-xs font-semibold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">
+                                  Non Verified
+                                </span>
+                              )}
+                            </div>
                       </div>
                           </div>
 
@@ -5290,7 +5889,29 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             </div>
                           </div>
 
-                          {reservationCountdowns[number.id] && (
+                          <div className={clsx(
+                            "flex items-center space-x-1.5 rounded-md px-2 py-1 sm:px-3 sm:py-2",
+                            pendingStrikes > 0 ? "bg-red-50" : "bg-gray-50"
+                          )}>
+                            <AlertTriangle className={clsx(
+                              "h-3 w-3 sm:h-5 sm:w-5",
+                              pendingStrikes > 0 ? "text-red-600" : "text-gray-400"
+                            )} />
+                            <div>
+                              <p className={clsx(
+                                "text-[10px] sm:text-xs font-medium leading-tight",
+                                pendingStrikes > 0 ? "text-red-600" : "text-gray-500"
+                              )}>Strikes</p>
+                              <p className={clsx(
+                                "text-[11px] sm:text-sm font-semibold leading-tight",
+                                pendingStrikes > 0 ? "text-red-700" : "text-gray-600"
+                              )}>
+                                {pendingStrikes}
+                              </p>
+                            </div>
+                          </div>
+
+                          {!isNonVerified && isValidDuration(reservationCountdowns[number.id]) && (
                             <div className="flex items-center space-x-1.5 bg-green-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
                               <Clock className="h-3 w-3 sm:h-5 sm:w-5 text-green-600" />
                               <div>
@@ -5302,7 +5923,21 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                             </div>
                           )}
 
-                          {number.claimingAgentId && claimCountdowns[number.id] && (
+                          {isValidDuration(strikeWaitMs) && (
+                            <div className="flex items-center space-x-1.5 bg-red-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
+                              <Clock className="h-3 w-3 sm:h-5 sm:w-5 text-red-600" />
+                              <div>
+                                <p className="text-[10px] sm:text-xs text-red-600 font-medium leading-tight">
+                                  {isNonVerified ? 'Time Left' : 'Strike'}
+                                </p>
+                                <p className="text-[11px] sm:text-sm font-semibold text-red-700 leading-tight tabular-nums">
+                                  {formatCountdown(strikeWaitMs)}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          {!isNonVerified && number.claimingAgentId && isValidDuration(claimCountdowns[number.id]) && (
                             <div className="flex items-center space-x-1.5 bg-blue-50 rounded-md px-2 py-1 sm:px-3 sm:py-2">
                               <Zap className="h-3 w-3 sm:h-5 sm:w-5 text-blue-600" />
                               <div>
@@ -5343,7 +5978,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         </div>
                     </div>
                       </motion.div>
-                  ))}
+                      );
+                    })}
                 </div>
               </div>
           </div>
@@ -5366,7 +6002,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               </div>
               <input
                 type="text"
-                placeholder="Search numbers or codes..."
+                placeholder="Search numbers or codes, or paste multiple numbers..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => {
@@ -6486,6 +7122,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             const StatusIcon = statusStyle?.icon || CheckCircle2;
             const serialNumber = (displayPagination.currentPage - 1) * pageSize + index + 1;
             const claimWaitMs = computeUserWaitMs(number);
+            const strikeWaitMs = computeStrikeWaitMs(number);
+            const myQueueNo = getDisplayQueueNo(number, user?.id);
 
             let timeLeft = reservationCountdowns[number.id];
             if (!timeLeft && number.expiresAt) {
@@ -6522,11 +7160,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     {reservingNumbers.has(number.id) ? 'Reserving…' : checkingReserveId === number.id ? 'Checking…' : 'Reserve'}
                   </motion.button>
                 )}
-                {user?.role === 'agent' && ['assigned','verified','follow_up'].includes(number.status) &&
+                {user?.role === 'agent' && isStrikeNumberStatus(number.status) &&
                   number.reservedBy !== user?.id &&
                   !((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') &&
                   !agentLeadNumberIds.has(number.id) && (
-                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleClaim(number)}
+                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleClaim(number, 'strike')}
                     disabled={claimingNumbers.has(number.id) || openingStrikeModalId === number.id}
                     className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
                       (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-gradient-to-r from-amber-50 to-orange-50 text-amber-600 border-amber-100 active:from-amber-100')}>
@@ -6534,20 +7172,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     {claimingNumbers.has(number.id) ? 'Striking…' : openingStrikeModalId === number.id ? 'Checking…' : 'Strike'}
                   </motion.button>
                 )}
-                {user?.role === 'agent' && ['pending_verification','assigned','verified','follow_up'].includes(number.status) &&
+                {user?.role === 'agent' && isStrikeNumberStatus(number.status) &&
                   ((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') && (
                   <span className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs border border-gray-200 w-full">
                     <CheckCircle2 className="h-3.5 w-3.5" />Striked
                   </span>
                 )}
-                {user?.role === 'agent' && number.status === 'reserved' && number.reservedBy !== user?.id && number.claimingAgentId !== user?.id && (
+                {user?.role === 'agent' && isClaimHeldStatus(number.status) && number.reservedBy !== user?.id && number.claimingAgentId !== user?.id && (
                   reservedNumbers.length >= MAX_RESERVATIONS ? (
                     <button type="button" onClick={() => setShowReservationLimitClaimDialog(true)}
                       className="inline-flex items-center justify-center p-2 rounded-lg bg-amber-50 text-amber-600 border border-amber-200 w-full">
                       <AlertTriangle className="h-3.5 w-3.5" />
                     </button>
                   ) : isWithinClaimWindow && (number.claimQueue?.length || 0) < 3 && !userClaimLimitReached ? (
-                    <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleClaim(number)}
+                    <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleClaim(number, 'claim')}
                       disabled={claimingNumbers.has(number.id) || number.claimQueue?.some((c: any) => c.agentId === user?.id)}
                       className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
                         claimingNumbers.has(number.id) || number.claimQueue?.some((c: any) => c.agentId === user?.id)
@@ -6565,26 +7203,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     {isReleasing ? 'Releasing…' : 'Release'}
                   </motion.button>
                 )}
-                {user?.role === 'agent' && ['pending_verification','assigned','verified','follow_up'].includes(number.status) &&
+                {user?.role === 'agent' && isStrikeNumberStatus(number.status) &&
                   ((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') && (
                   <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleCancelStrike(number)} disabled={cancellingNumbers.has(number.id)}
                     className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 border border-red-100 disabled:opacity-50 w-full">
                     {cancellingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}Cancel
                   </motion.button>
                 )}
-                {user?.role === 'agent' && number.status === 'reserved' && number.reservedBy !== user?.id &&
-                  (number.claimQueue || []).some((c: any) => c.agentId === user?.id) && (
+                {user?.role === 'agent' && isClaimHeldStatus(number.status) && number.reservedBy !== user?.id &&
+                  userCanCancelClaim(number, user?.id) && (
                   <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleCancelQueue(number)} disabled={cancellingNumbers.has(number.id)}
                     className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 border border-red-100 disabled:opacity-50 w-full">
                     {cancellingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}Cancel
-                  </motion.button>
-                )}
-                {(isAdmin() || (number.claimingAgentId && (user?.id === number.claimingAgentId || user?.id === number.reservedBy))) && (
-                  <motion.button whileTap={{ scale: 0.97 }} onClick={() => handleOpenChat(number)} disabled={chattingNumbers.has(number.id)}
-                    className={clsx('inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all w-full',
-                      chattingNumbers.has(number.id) ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-gradient-to-r from-green-50 to-emerald-50 text-green-600 border-green-100 active:from-green-100')}>
-                    {chattingNumbers.has(number.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageSquare className="h-3.5 w-3.5" />}
-                    {chattingNumbers.has(number.id) ? 'Opening…' : 'Chat'}
                   </motion.button>
                 )}
                 {(number.group?.includes('G4') || number.group?.includes('G5')) && ['open','reserved'].includes(number.status) && renderStatusCheck(number)}
@@ -6614,7 +7244,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   <span
                     className={clsx(
                       'font-mono text-sm font-bold tracking-wide px-2 py-0.5 rounded-md',
-                      (number.status === 'activated' || number.struckThrough)
+                      (number as any).exchange
+                        ? 'bg-red-100 text-red-800'
+                        : (number.status === 'activated' || number.struckThrough)
                         ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
                         : number.status === 'reserved'
                         ? `${STATUS_STYLES.reserved.bg} text-gray-800`
@@ -6624,6 +7256,12 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   >
                     {number.number}
                   </span>
+                  {isAdmin() && <AdminNumberCollectionLabel number={number} />}
+                  {(number as any).isDeleted && formatDeletedAtDate((number as any).deletedAt) && (
+                    <div className="mt-0.5 text-[9px] leading-none text-gray-400">
+                      {formatDeletedAtDate((number as any).deletedAt)}
+                    </div>
+                  )}
                   <div className="mt-1 flex items-center gap-1 whitespace-nowrap">
                     {number.group && (
                       <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded font-medium">
@@ -6636,11 +7274,18 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       </span>
                     )}
                   </div>
-                  {(number as any).leavingSoon && (
-                    <div className="mt-0.5">
-                      <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
-                        Leaving Soon
-                      </span>
+                  {((number as any).leavingSoon || (number as any).exchange) && (
+                    <div className="mt-0.5 flex flex-wrap gap-1">
+                      {(number as any).leavingSoon && (
+                        <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                          Leaving Soon
+                        </span>
+                      )}
+                      {(number as any).exchange && (
+                        <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                          Exchange
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -6694,7 +7339,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
 
                   <div className="flex flex-wrap items-center gap-1 justify-center sm:justify-start">
                     <span className="text-[10px] text-gray-400">
-                      R:{number.reservationCount || 0} C:{number.claimQueue?.length || 0}
+                      R:{number.reservationCount || 0} C:{getActiveClaimCount(number)}
                       {(() => {
                         const sc = ((number as any).claims || []).filter((c: any) => c.status === 'pending').length;
                         return sc > 0 ? (
@@ -6704,28 +7349,45 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                         );
                       })()}
                     </span>
-                    {claimWaitMs && claimWaitMs > 0 && (
+                    {isValidDuration(claimWaitMs) && (
                       <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">
                         <Zap className="h-2.5 w-2.5" />
                         {formatCountdown(claimWaitMs)}
                       </span>
                     )}
-                    {number.status === 'reserved' && timeLeft && timeLeft > 0 && (
+                    {isValidDuration(strikeWaitMs) && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-red-700 bg-red-50 px-1.5 py-0.5 rounded border border-red-100" title="Strike timer">
+                        <Clock className="h-2.5 w-2.5" />
+                        {formatCountdown(strikeWaitMs)}
+                      </span>
+                    )}
+                    {number.status === 'reserved' && isValidDuration(timeLeft) && (
                       <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-green-700 bg-green-50 px-1.5 py-0.5 rounded border border-green-100">
                         <Clock className="h-2.5 w-2.5" />
                         {formatReservationCountdown(timeLeft)}
                       </span>
                     )}
-                    {canViewAdminColumns && number.status !== 'open' && (number.reservedBy || number.claimingAgentId) && (
-                      <AgentTeamInfo
-                        agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string}
-                        leadId={number.leadId}
-                      />
+                    {myQueueNo !== null && (
+                      <div className="w-full min-w-0 basis-full flex justify-center sm:justify-start">
+                        <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                          Your Queue No {myQueueNo}
+                        </span>
+                      </div>
                     )}
                     {canViewAdminColumns && (
                       <span className="text-[10px] text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded">
                         {number.passcode || '-'}
                       </span>
+                    )}
+                    {canViewAdminColumns && number.status !== 'open' && (number.reservedBy || number.claimingAgentId || number.originalAgentId || number.leadId) && (
+                      <div className="w-full min-w-0 basis-full px-1">
+                        <AgentTeamInfo
+                          agentId={(number.reservedBy || number.claimingAgentId || number.originalAgentId) as string}
+                          leadId={number.leadId}
+                          compact
+                          plain
+                        />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -6883,7 +7545,9 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             <div
               className={clsx(
                 "text-lg sm:text-xl font-mono tracking-wide px-3 py-2 rounded-lg shadow-sm",
-                (number.status === 'activated' || number.struckThrough)
+                (number as any).exchange
+                  ? 'bg-red-100 text-red-800'
+                  : (number.status === 'activated' || number.struckThrough)
                   ? 'bg-red-100 text-red-800 line-through decoration-red-600 decoration-2'
                   : number.status === 'reserved'
                   ? `${STATUS_STYLES.reserved.bg} text-gray-800`
@@ -6893,9 +7557,24 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             >
               {number.number}
             </div>
-            {(number as any).leavingSoon && (
-              <div className="absolute top-full mt-0.5 left-0 inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
-                Leaving Soon
+            {isAdmin() && <AdminNumberCollectionLabel number={number} />}
+            {(number as any).isDeleted && formatDeletedAtDate((number as any).deletedAt) && (
+              <div className="mt-0.5 text-[9px] leading-none text-gray-400">
+                {formatDeletedAtDate((number as any).deletedAt)}
+              </div>
+            )}
+            {((number as any).leavingSoon || (number as any).exchange) && (
+              <div className="absolute top-full mt-0.5 left-0 flex flex-wrap gap-1">
+                {(number as any).leavingSoon && (
+                  <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                    Leaving Soon
+                  </span>
+                )}
+                {(number as any).exchange && (
+                  <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                    Exchange
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -6955,16 +7634,34 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
           <div className="mt-0.5 flex items-center gap-2 text-[11px] min-w-[150px] justify-center">
             {(() => {
               const waitMs = computeUserWaitMs(number);
-              return waitMs ? <span className="tabular-nums">({formatCountdown(waitMs)})</span> : null;
+              const strikeWaitMs = computeStrikeWaitMs(number);
+              if (isValidDuration(waitMs)) {
+                return <span className="tabular-nums">({formatCountdown(waitMs)})</span>;
+              }
+              if (isValidDuration(strikeWaitMs)) {
+                return <span className="tabular-nums text-red-600 font-semibold">({formatCountdown(strikeWaitMs)})</span>;
+              }
+              return null;
             })()}
             <span>(R: {number.reservationCount || 0})</span>
-            <span>(C: {number.claimQueue?.length || 0})</span>
+            <span>(C: {getActiveClaimCount(number)})</span>
             {(() => {
               const claims = (number as any).claims || [];
               const strikeCount = claims.filter((c: any) => c.status === 'pending').length;
               return <span title={strikeCount > 0 ? `${strikeCount} agent(s) struck` : ''} className={strikeCount > 0 ? 'text-red-600 font-semibold' : ''}>(S: {strikeCount})</span>;
             })()}
           </div>
+          {(() => {
+            const queueNo = getDisplayQueueNo(number, user?.id);
+            if (queueNo === null) return null;
+            return (
+              <div className="mt-1 w-full flex justify-center">
+                <span className="inline-flex items-center rounded bg-red-100 px-1 py-[1px] text-[9px] font-semibold text-red-700 border border-red-200 leading-none">
+                  Your Queue No {queueNo}
+                </span>
+              </div>
+            );
+          })()}
         </motion.span>
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
@@ -6994,7 +7691,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               }
             }
             
-            return timeLeft && timeLeft > 0 ? (
+            return isValidDuration(timeLeft) ? (
               <div className="flex items-center">
                 <div className="flex items-center space-x-2 bg-gradient-to-br from-green-50 to-green-100 rounded-lg px-3 py-2">
                   <Clock className="h-4 w-4 text-green-600" />
@@ -7051,16 +7748,14 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.button>
           )}
           {/* Strike button - Only visible to agents */}
-          {user?.role === 'agent' && (number.status === 'assigned' || 
-            number.status === 'verified' || 
-            number.status === 'follow_up') && 
+          {user?.role === 'agent' && isStrikeNumberStatus(number.status) && 
                             number.reservedBy !== user?.id && 
                             !((number as any).claims || []).some((claim: any) => claim.userId === user?.id && claim.status === 'pending') &&
                             !agentLeadNumberIds.has(number.id) && (
             <motion.button
                               whileHover={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 1.05 }}
                               whileTap={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 0.92 }}
-                              onClick={() => handleClaim(number)}
+                              onClick={() => handleClaim(number, 'strike')}
                               disabled={claimingNumbers.has(number.id) || openingStrikeModalId === number.id}
               className={clsx(
                 "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
@@ -7078,10 +7773,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.button>
           )}
           {/* Striked status - Only visible to agents */}
-          {user?.role === 'agent' && (number.status === 'pending_verification' || 
-            number.status === 'assigned' || 
-            number.status === 'verified' || 
-            number.status === 'follow_up') && 
+          {user?.role === 'agent' && isStrikeNumberStatus(number.status) && 
                             ((number as any).claims || []).some((claim: any) => claim.userId === user?.id && claim.status === 'pending') && (
             <motion.span
               className="inline-flex items-center px-3 py-1.5 bg-gradient-to-r from-gray-50 to-gray-100 text-gray-600 rounded-lg ring-1 ring-gray-100 relative z-20"
@@ -7091,7 +7783,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.span>
           )}
           {/* Claim button or reservation-limit warning - Only visible to agents */}
-          {user?.role === 'agent' && number.status === 'reserved' && 
+          {user?.role === 'agent' && isClaimHeldStatus(number.status) && 
                            number.reservedBy !== user?.id && 
                            number.claimingAgentId !== user?.id && (
             reservedNumbers.length >= MAX_RESERVATIONS ? (
@@ -7109,7 +7801,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             <motion.button
                               whileHover={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 1.05 }}
                               whileTap={{ scale: (claimingNumbers.has(number.id) || openingStrikeModalId === number.id) ? 1 : 0.95 }}
-                              onClick={() => handleClaim(number)}
+                              onClick={() => handleClaim(number, 'claim')}
               className={clsx(
                 "inline-flex items-center px-3 py-1.5 rounded-lg transition-all duration-200 group ring-1 relative z-20",
                                 (claimingNumbers.has(number.id) || openingStrikeModalId === number.id)
@@ -7166,7 +7858,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.button>
           )}
           {/* Cancel: cancel my strike */}
-          {user?.role === 'agent' && (number.status === 'pending_verification' || number.status === 'assigned' || number.status === 'verified' || number.status === 'follow_up') &&
+          {user?.role === 'agent' && isStrikeNumberStatus(number.status) &&
             ((number as any).claims || []).some((c: any) => c.userId === user?.id && c.status === 'pending') && (
             <motion.button
               whileHover={{ scale: cancellingNumbers.has(number.id) ? 1 : 1.05 }}
@@ -7180,8 +7872,8 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
             </motion.button>
           )}
           {/* Cancel: leave claim queue */}
-          {user?.role === 'agent' && number.status === 'reserved' && number.reservedBy !== user?.id &&
-            (number.claimQueue || []).some((c: any) => c.agentId === user?.id) && (
+          {user?.role === 'agent' && isClaimHeldStatus(number.status) && number.reservedBy !== user?.id &&
+            userCanCancelClaim(number, user?.id) && (
             <motion.button
               whileHover={{ scale: cancellingNumbers.has(number.id) ? 1 : 1.05 }}
               whileTap={{ scale: cancellingNumbers.has(number.id) ? 1 : 0.95 }}
@@ -7475,7 +8167,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                               {n.group && <span className="text-[11px] px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">{n.group}</span>}
                             </div>
                             <div className="text-xs text-purple-700">Queue size: {queueSize}</div>
-                            {timeLeft != null && (
+                            {isValidDuration(timeLeft) && (
                               <div className="text-[11px] text-purple-700 mt-1">
                                 Remaining: {formatCountdown(timeLeft)}
                               </div>
@@ -7531,20 +8223,20 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               <div className="flex items-center justify-center mb-6">
                 <div className={clsx(
                   "p-3 rounded-full",
-                  ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                  claimActionMode === 'strike'
                     ? "bg-amber-100"
                     : "bg-blue-100"
                 )}>
                   <AlertCircle className={clsx(
                     "h-8 w-8",
-                    ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                    claimActionMode === 'strike'
                       ? "text-amber-600"
                       : "text-blue-600"
                   )} />
                 </div>
               </div>
               <h3 className="text-xl font-semibold text-gray-900 text-center mb-2">
-                {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                {claimActionMode === 'strike'
                   ? "Strike Number"
                   : "Claim Number"
                 }
@@ -7552,7 +8244,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               <p className="text-gray-500 text-center mb-6">
                 {strikeBlockedSameTeam ? (
                   <>
-                    {['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
+                    {claimActionMode === 'strike' ? (
                   <span className="text-amber-700 font-medium">
                         {sameTeamBlockMode === 'teamStrike' ? (
                           <>
@@ -7610,7 +8302,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       </span>
                     )}
                   </>
-                ) : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status) ? (
+                ) : claimActionMode === 'strike' ? (
                   <>
                     Are you sure you want to strike the number {numberToClaim.number}?
                     <br />
@@ -7618,6 +8310,11 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       This will notify the current agent that you are interested in this number.
                       The agent will be notified of your strike.
                     </span>
+                    {isStrikeOffHours() && (
+                      <span className="text-sm mt-3 block text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 font-medium">
+                        {STRIKE_OFF_HOURS_MESSAGE}
+                      </span>
+                    )}
                   </>
                 ) : (
                   <>
@@ -7651,7 +8348,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                       "px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors flex items-center",
                       claimingNumbers.has(numberToClaim.id)
                         ? "bg-gray-400 cursor-not-allowed"
-                        : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                        : claimActionMode === 'strike'
                         ? "bg-amber-600 hover:bg-amber-700"
                         : "bg-blue-600 hover:bg-blue-700"
                     )}
@@ -7661,7 +8358,7 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                     )}
                     {claimingNumbers.has(numberToClaim.id)
                       ? 'Processing...'
-                      : ['pending_verification', 'assigned', 'verified', 'follow_up'].includes(numberToClaim.status)
+                      : claimActionMode === 'strike'
                       ? "Strike"
                       : "Claim"
                     }
@@ -7771,6 +8468,37 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
               <div className="flex justify-center">
                 <button
                   onClick={() => setShowReservationLimitClaimDialog(false)}
+                  className="px-6 py-3 text-base font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Daily claim/strike limit dialog */}
+        {showDailyClaimLimitDialog && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 max-w-lg w-full mx-4 shadow-xl transform transition-all">
+              <div className="flex items-center justify-center mb-6">
+                <div className="p-4 rounded-full bg-amber-100">
+                  <AlertTriangle className="h-10 w-10 text-amber-600" />
+                </div>
+              </div>
+              <h3 className="text-2xl font-semibold text-gray-900 text-center mb-4">
+                Daily Limit Reached
+              </h3>
+              <p className="text-lg text-gray-600 text-center mb-4 leading-relaxed">
+                You have used all {MAX_CLAIMS_PER_24H} claims/strikes for today
+                ({userClaimCount}/{MAX_CLAIMS_PER_24H}).
+              </p>
+              <p className="text-base text-gray-500 text-center mb-8">
+                The limit resets at midnight UAE time. Try again tomorrow.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setShowDailyClaimLimitDialog(false)}
                   className="px-6 py-3 text-base font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors"
                 >
                   OK
@@ -8788,6 +9516,108 @@ export function NumberPool({ onNumberSelect, selectedCategory: propSelectedCateg
                   {field.label}
                 </label>
               ))}
+            </div>
+
+            <div className="space-y-3 border-t border-gray-100 pt-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-700">Filter exported numbers</p>
+                <button
+                  type="button"
+                  className="text-xs text-indigo-600 underline"
+                  onClick={() => {
+                    setExportCategories([]);
+                    setExportGroups([]);
+                    setExportStatuses([]);
+                  }}
+                  disabled={exportingNumbers}
+                >
+                  Clear filters
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">Select one or more values. No selection means all values.</p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <fieldset>
+                  <div className="mb-1 flex items-center justify-between">
+                    <legend className="text-sm font-medium text-gray-700">Category</legend>
+                    <button
+                      type="button"
+                      onClick={() => setExportCategories([...CATEGORIES])}
+                      disabled={exportingNumbers}
+                      className="text-[11px] text-indigo-600 underline disabled:opacity-50"
+                    >
+                      Select all
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {CATEGORIES.map(category => (
+                      <label key={category} className="flex items-center gap-1.5 text-xs text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={exportCategories.includes(category)}
+                          onChange={() => toggleExportFilter(category, setExportCategories)}
+                          disabled={exportingNumbers}
+                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        {category}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset>
+                  <div className="mb-1 flex items-center justify-between">
+                    <legend className="text-sm font-medium text-gray-700">Group</legend>
+                    <button
+                      type="button"
+                      onClick={() => setExportGroups([...EXPORT_GROUPS])}
+                      disabled={exportingNumbers}
+                      className="text-[11px] text-indigo-600 underline disabled:opacity-50"
+                    >
+                      Select all
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {EXPORT_GROUPS.map(group => (
+                      <label key={group} className="flex items-center gap-1.5 text-xs text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={exportGroups.includes(group)}
+                          onChange={() => toggleExportFilter(group, setExportGroups)}
+                          disabled={exportingNumbers}
+                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        {group}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset>
+                  <div className="mb-1 flex items-center justify-between">
+                    <legend className="text-sm font-medium text-gray-700">Status</legend>
+                    <button
+                      type="button"
+                      onClick={() => setExportStatuses([...EXPORT_STATUSES])}
+                      disabled={exportingNumbers}
+                      className="text-[11px] text-indigo-600 underline disabled:opacity-50"
+                    >
+                      Select all
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-2 gap-y-1">
+                    {EXPORT_STATUSES.map(status => (
+                      <label key={status} className="flex items-center gap-1.5 text-xs text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={exportStatuses.includes(status)}
+                          onChange={() => toggleExportFilter(status, setExportStatuses)}
+                          disabled={exportingNumbers}
+                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span>{status.replace(/_/g, ' ')}</span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              </div>
             </div>
 
             <div className="flex items-center justify-between text-xs text-gray-500">

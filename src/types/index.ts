@@ -155,6 +155,8 @@ export interface NumberPool {
   last4Digits?: string; // Last 4 digits for "ends with" search
   last5Digits?: string; // Last 5 digits for "ends with" search
   struckThrough?: boolean; // Indicates if number should be displayed with strike-through (active number)
+  leavingSoon?: boolean; // Flag for numbers that will leave soon
+  exchange?: boolean; // Flag for numbers marked for exchange
 }
 
 export interface NumberPoolType {
@@ -180,6 +182,7 @@ export interface NumberPoolType {
   originalExpiresAt?: Date;
   lastClaimedAt?: Date;
   claimedAt?: Date;
+  strikeExpiresAt?: Date;
   leadId?: string; // Lead ID when number is assigned to a lead
   claims?: Array<{
     userId: string;
@@ -195,6 +198,8 @@ export interface NumberPoolType {
   last4Digits?: string; // Last 4 digits for "ends with" search
   last5Digits?: string; // Last 5 digits for "ends with" search
   struckThrough?: boolean; // Indicates if number should be displayed with strike-through (active number)
+  leavingSoon?: boolean; // Flag for numbers that will leave soon
+  exchange?: boolean; // Flag for numbers marked for exchange
 }
 
 /**
@@ -295,7 +300,22 @@ export interface Lead {
     status: string;
     /** Etisalat SR number per plan (when lead has multiple plans) */
     etisalatSrNumber?: string;
+    /** Number was pulled by strike; keep plan and show the number struck through */
+    numberStruckThrough?: boolean;
   }[];
+  awaitingNumbers?: {
+    numberId: string;
+    number: string;
+    plan?: string;
+    category?: string;
+    group?: string;
+    type?: string;
+    detachedAt?: Date;
+    detachedReason?: string;
+  }[];
+  awaitingNumberIds?: string[];
+  /** Lead status before strike moved it to awaiting_for_number */
+  statusBeforeAwaiting?: string;
   verificationMedia: (string | VerificationMedia)[];
   customerNumbers?: CustomerNumber[];
   etisalatLeadId?: string;

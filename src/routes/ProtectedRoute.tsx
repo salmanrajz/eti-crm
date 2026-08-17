@@ -4,12 +4,10 @@ import { useAuthStore } from '../store/authStore';
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuthStore();
 
+  // The app splash already covers auth startup. A second spinner here made
+  // loading look like it restarted once the splash faded.
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
-      </div>
-    );
+    return null;
   }
 
   if (!user) {
