@@ -23,6 +23,7 @@ import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firesto
 import { db } from '../lib/firebase';
 import { Lead, CoordinatorType } from '../types';
 import { getWhatsAppCredentials } from './configService';
+import { getLeadDashboardUrl } from './leadUrl';
 
 /**
  * Send a plain text WhatsApp message using the same credentials as lead chatbox
@@ -222,7 +223,7 @@ export async function sendChatMessageWhatsAppNotification(
 
 🧑‍💼 Agent Name: ${agentName}
 
-🔗 Lead URL: ${window.location.origin}/dashboard/leads/${latestLead.id}`;
+🔗 Lead URL: ${getLeadDashboardUrl(latestLead.id)}`;
 
     // Get WhatsApp credentials from Firebase
     const whatsappCredentials = await getWhatsAppCredentials();

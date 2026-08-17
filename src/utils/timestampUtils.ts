@@ -144,6 +144,21 @@ export function formatTimestamp(date: Date | null, formatStr: string = 'MMM d, y
 }
 
 /**
+ * Formats a timestamp in the user's local timezone.
+ * WhatsApp conversations should show the real local time verifier/customer sees.
+ */
+export function formatLocalTimestamp(date: Date | null, formatStr: string = 'MMM d, yyyy hh:mm a'): string {
+  if (!date || isNaN(date.getTime())) return '';
+
+  try {
+    return format(date, formatStr);
+  } catch (error) {
+    console.warn('Error formatting local timestamp:', error, date);
+    return date.toLocaleString();
+  }
+}
+
+/**
  * Gets timestamp in milliseconds for sorting
  * 
  * @param date - Date object or null
@@ -153,4 +168,3 @@ export function getTimestampForSort(date: Date | null): number {
   if (!date) return 0;
   return date.getTime();
 }
-

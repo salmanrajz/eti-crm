@@ -46,7 +46,8 @@ import {
   Timestamp,
   doc,
   getDoc,
-  onSnapshot
+  onSnapshot,
+  writeBatch
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 
@@ -160,6 +161,11 @@ export const logUserSessionAction = async (
     metadata?: any;
   }
 ): Promise<void> => {
+  // Admin sessions are excluded from User Session Logs
+  if (userRole === 'admin') {
+    return;
+  }
+
   try {
     const logData = cleanDataForFirebase({
       userId,
@@ -233,14 +239,36 @@ export const fetchUserSessionLogs = async (
     q = query(q, limit(limitCount));
 
     const snapshot = await getDocs(q);
-    return snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as UserSessionLog[];
+    return snapshot.docs
+      .map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }))
+      .filter(log => (log as UserSessionLog).userRole !== 'admin') as UserSessionLog[];
   } catch (error) {
     console.error('Error fetching user session logs:', error);
     return [];
   }
+};
+
+/**
+ * Delete multiple user session logs by ID (admin only)
+ */
+export const deleteUserSessionLogs = async (logIds: string[]): Promise<number> => {
+  if (logIds.length === 0) return 0;
+
+  const BATCH_SIZE = 500;
+  let deleted = 0;
+
+  for (let i = 0; i < logIds.length; i += BATCH_SIZE) {
+    const batch = writeBatch(db);
+    const chunk = logIds.slice(i, i + BATCH_SIZE);
+    chunk.forEach((id) => batch.delete(doc(db, 'user_session_logs', id)));
+    await batch.commit();
+    deleted += chunk.length;
+  }
+
+  return deleted;
 };
 
 /**

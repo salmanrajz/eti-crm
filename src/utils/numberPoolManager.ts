@@ -370,17 +370,17 @@ class NumberPoolManager {
         isLoading: false
       });
 
-      // No caching with memory-only mode
-
-      // Set up page-specific real-time listener
-      this.setupPageListener();
-      
-      // Set up user-scoped listeners
-      if (userId) {
-        this.setupUserListeners(userId);
-      }
-
       this.isInitialized = true;
+
+      // Attach listeners after the first page is visible so they do not compete with the load.
+      const listenerUserId = userId;
+      queueMicrotask(() => {
+        if (this.isDestroyed || this.currentUserId !== listenerUserId) return;
+        this.setupPageListener();
+        if (listenerUserId) {
+          this.setupUserListeners(listenerUserId);
+        }
+      });
 
     } catch (error: any) {
       console.error('[NumberPoolManager] Error initializing NumberPool:', error);
@@ -626,7 +626,7 @@ class NumberPoolManager {
 
     // 0) Category or Status searches (no n-grams)
     const categories = ['standard', 'silver', 'silver plus', 'gold', 'gold plus', 'platinum'];
-    const statuses = ['open', 'reserved', 'pending_verification', 'verified', 'assigned', 'activated', 'follow_up', 'rejected', 'claimed', 'non_verified'];
+    const statuses = ['open', 'reserved', 'pending_verification', 'verified', 'assigned', 'activated', 'follow_up', 'later', 'rejected', 'claimed', 'non_verified'];
 
     // Category exact match (case-insensitive)
     if (categories.includes(lower)) {

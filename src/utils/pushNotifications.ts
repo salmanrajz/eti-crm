@@ -12,20 +12,7 @@ async function registerFCMServiceWorker() {
   if (!('serviceWorker' in navigator)) return null;
 
   const config = getFirebaseConfig();
-  const configB64 = btoa(JSON.stringify(config));
-
-  const swUrl = `/firebase-messaging-sw.js?config=${encodeURIComponent(configB64)}`;
-
-  const existingRegs = await navigator.serviceWorker.getRegistrations();
-  for (const reg of existingRegs) {
-    if (reg.active?.scriptURL?.includes('firebase-messaging-sw.js')) {
-      if (reg.active.scriptURL.includes('config=')) {
-        return reg;
-      }
-      await reg.unregister();
-      break;
-    }
-  }
+  const swUrl = '/firebase-messaging-sw.js';
 
   const reg = await navigator.serviceWorker.register(swUrl);
   await navigator.serviceWorker.ready;

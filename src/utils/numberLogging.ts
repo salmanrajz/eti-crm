@@ -44,7 +44,8 @@ import {
   getDocs,
   Timestamp,
   doc,
-  getDoc
+  getDoc,
+  writeBatch
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuthStore } from '../store/authStore';
@@ -256,6 +257,26 @@ export const fetchNumberLogs = async (
 };
 
 /**
+ * Delete multiple number logs by ID (admin only)
+ */
+export const deleteNumberLogs = async (logIds: string[]): Promise<number> => {
+  if (logIds.length === 0) return 0;
+
+  const BATCH_SIZE = 500;
+  let deleted = 0;
+
+  for (let i = 0; i < logIds.length; i += BATCH_SIZE) {
+    const batch = writeBatch(db);
+    const chunk = logIds.slice(i, i + BATCH_SIZE);
+    chunk.forEach((id) => batch.delete(doc(db, 'number_logs', id)));
+    await batch.commit();
+    deleted += chunk.length;
+  }
+
+  return deleted;
+};
+
+/**
  * Get action color for UI display
  */
 export const getActionColor = (action: NumberLogAction): string => {
@@ -390,11 +411,60 @@ export const resolveLeadNumber = async (leadId: string): Promise<string> => {
 };
 
 /**
+ * Resolve team ID to team name
+ */
+export const resolveTeamName = async (teamId: string): Promise<string> => {
+  try {
+    const teamDoc = await getDoc(doc(db, 'teams', teamId));
+    if (teamDoc.exists()) {
+      const teamData = teamDoc.data();
+      return teamData.name || teamId;
+    }
+    return teamId;
+  } catch (error) {
+    return teamId;
+  }
+};
+
+/**
+ * Convert Firestore/live/cached timestamp shapes into a Date.
+ * Cached Firestore timestamps lose their toDate() method after JSON.stringify.
+ */
+export const normalizeNumberLogTimestamp = (timestamp: any): Date | null => {
+  if (!timestamp) return null;
+
+  if (timestamp instanceof Date) {
+    return isNaN(timestamp.getTime()) ? null : timestamp;
+  }
+
+  if (typeof timestamp.toDate === 'function') {
+    const date = timestamp.toDate();
+    return isNaN(date.getTime()) ? null : date;
+  }
+
+  if (typeof timestamp.toMillis === 'function') {
+    const date = new Date(timestamp.toMillis());
+    return isNaN(date.getTime()) ? null : date;
+  }
+
+  const seconds = timestamp.seconds ?? timestamp._seconds;
+  if (typeof seconds === 'number') {
+    const nanoseconds = timestamp.nanoseconds ?? timestamp._nanoseconds ?? 0;
+    const date = new Date((seconds * 1000) + Math.floor(nanoseconds / 1000000));
+    return isNaN(date.getTime()) ? null : date;
+  }
+
+  const date = new Date(timestamp);
+  return isNaN(date.getTime()) ? null : date;
+};
+
+/**
  * Format timestamp for display
  */
 export const formatTimestamp = (timestamp: any): string => {
   if (!timestamp) return 'Unknown';
-  const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  const date = normalizeNumberLogTimestamp(timestamp);
+  if (!date) return 'Unknown';
   return date.toLocaleString('en-US', {
     year: 'numeric',
     month: 'short',
@@ -439,15 +509,16 @@ export const formatDataValueWithUserNames = async (value: any, key: string): Pro
     return null; // Return null to indicate this field should be filtered out
   }
   
-  // Special handling: format claimQueue as a readable list
-  if (key === 'claimQueue' && Array.isArray(value)) {
+  // Special handling: format claim arrays as a readable list
+  if ((key === 'claimQueue' || key === 'claims') && Array.isArray(value)) {
     if (value.length === 0) return 'empty';
 
     const parts: string[] = [];
-    for (const entry of value) {
-      const agentId = entry?.agentId;
+    for (const [index, entry] of value.entries()) {
+      const agentId = entry?.agentId || entry?.userId;
       const claimedAt = entry?.claimedAt;
-      let displayName = String(agentId || 'Unknown');
+      const status = entry?.status;
+      let displayName = String(agentId || `Claim ${index + 1}`);
 
       if (agentId) {
         try {
@@ -459,10 +530,11 @@ export const formatDataValueWithUserNames = async (value: any, key: string): Pro
       }
 
       const timeStr = claimedAt ? formatDataValue(claimedAt) : 'unknown time';
-      parts.push(`${displayName} at ${timeStr}`);
+      const statusStr = status ? ` (${String(status)})` : '';
+      parts.push(`${displayName}${statusStr} at ${timeStr}`);
     }
 
-    return parts.join(', ');
+    return parts.join('; ');
   }
   
   // Resolve leadId to leadNumber
@@ -471,6 +543,17 @@ export const formatDataValueWithUserNames = async (value: any, key: string): Pro
       try {
         const leadNumber = await resolveLeadNumber(value);
         return leadNumber !== value ? leadNumber : value;
+      } catch {
+        return value;
+      }
+    }
+  }
+
+  // Resolve team visibility ID to team name
+  if (key === 'teamVisibility') {
+    if (typeof value === 'string' && value) {
+      try {
+        return await resolveTeamName(value);
       } catch {
         return value;
       }

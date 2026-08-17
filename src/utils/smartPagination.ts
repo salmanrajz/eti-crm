@@ -165,8 +165,29 @@ export class SmartPagination<T> {
       throw new Error('Page number must be greater than 0');
     }
 
-    // Always update total count first to ensure accurate pagination
-    await this.updateTotalCount();
+    // Always update total count to ensure accurate pagination.
+    // For page 1, run it in parallel with the page fetch so the list is not blocked
+    // behind the stats/count round-trip.
+    const countPromise = this.updateTotalCount();
+
+    if (pageNumber === 1) {
+      const q = query(this.buildBaseQuery(), limit(this.options.pageSize));
+      const [snapshot] = await Promise.all([getDocs(q), countPromise]);
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as T[];
+
+      const firstDoc = snapshot.docs[0] || null;
+      const lastDoc = snapshot.docs[snapshot.docs.length - 1] || null;
+      this.cacheCursor(1, firstDoc, lastDoc);
+      this.currentPage = 1;
+
+      return {
+        data,
+        hasNextPage: this.totalPages > 1,
+        hasPreviousPage: false
+      };
+    }
+
+    await countPromise;
 
     // Allow navigation to any positive page number - Firebase will handle empty results
     // This prevents issues with cached/stale totalPages values
@@ -181,23 +202,6 @@ export class SmartPagination<T> {
     }
 
     this.currentPage = pageNumber;
-
-    // Handle first page
-    if (pageNumber === 1) {
-      const q = query(this.buildBaseQuery(), limit(this.options.pageSize));
-      const snapshot = await getDocs(q);
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as T[];
-      
-      const firstDoc = snapshot.docs[0] || null;
-      const lastDoc = snapshot.docs[snapshot.docs.length - 1] || null;
-      this.cacheCursor(1, firstDoc, lastDoc);
-
-      return {
-        data,
-        hasNextPage: this.totalPages > 1,
-        hasPreviousPage: false
-      };
-    }
 
     // Handle last page: only fetch the remaining items (e.g. 5 when total=125, pageSize=120)
     // Using limitToLast(pageSize) would return the last 120 docs and duplicate most of page 1

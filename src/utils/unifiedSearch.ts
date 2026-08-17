@@ -51,6 +51,38 @@ interface SearchOptions {
   includeStale?: boolean; // Kept for API compatibility, but always returns fresh data
   endsWith?: boolean; // When true, search only for numbers ending with the search term
   statusFilter?: string; // Filter by status (e.g., 'open' for customer portal)
+  /** Called as each parallel Firebase query completes (first page only). */
+  onProgress?: (result: SearchResult) => void;
+}
+
+/** Full status names only (no short prefixes like "res" / "follow"). */
+const EXACT_STATUS_ALIASES: Record<string, string> = {
+  open: 'open',
+  reserved: 'reserved',
+  pending_verification: 'pending_verification',
+  pendingverification: 'pending_verification',
+  verified: 'verified',
+  assigned: 'assigned',
+  activated: 'activated',
+  activated_non_verified: 'activated_non_verified',
+  activatednonverified: 'activated_non_verified',
+  follow_up: 'follow_up',
+  followup: 'follow_up',
+  later: 'later',
+  rejected: 'rejected',
+  claimed: 'claimed',
+  non_verified: 'non_verified',
+  nonverified: 'non_verified',
+  returned: 'returned',
+  being_claimed: 'being_claimed',
+  beingclaimed: 'being_claimed'
+};
+
+export function resolveExactNumberPoolStatus(term: string): string | null {
+  const lower = term.trim().toLowerCase();
+  if (!lower) return null;
+  const compact = lower.replace(/[\s-]/g, '');
+  return EXACT_STATUS_ALIASES[lower] || EXACT_STATUS_ALIASES[compact] || null;
 }
 
 /**
@@ -58,6 +90,7 @@ interface SearchOptions {
  */
 export class UnifiedSearch {
   private static instance: UnifiedSearch;
+  private inFlightSearches = new Map<string, Promise<SearchResult>>();
 
   static getInstance(): UnifiedSearch {
     if (!UnifiedSearch.instance) {
@@ -75,22 +108,142 @@ export class UnifiedSearch {
     searchTerm: string,
     options: SearchOptions = {}
   ): Promise<SearchResult> {
-    const { category = 'all', limit: maxResults = 200, startAfter: cursorDoc, endsWith = false, statusFilter } = options;
+    const {
+      category = 'all',
+      limit: maxResults = 200,
+      startAfter: cursorDoc,
+      endsWith = false,
+      statusFilter,
+      onProgress
+    } = options;
     const rawTerm = searchTerm.trim();
 
     if (!rawTerm) {
       return { data: [], totalItems: 0, source: 'firebase', isComplete: true, hasMore: false, lastDoc: null };
     }
 
+    const inFlightKey = [
+      rawTerm,
+      category,
+      maxResults,
+      cursorDoc?.id || '',
+      endsWith ? 'ends' : 'contains',
+      statusFilter || ''
+    ].join('::');
+
+    const existingSearch = this.inFlightSearches.get(inFlightKey);
+    if (existingSearch) {
+      return existingSearch;
+    }
+
+    const searchPromise = this.runSearch(
+      rawTerm,
+      category,
+      maxResults,
+      cursorDoc,
+      endsWith,
+      statusFilter,
+      onProgress
+    ).finally(() => {
+      this.inFlightSearches.delete(inFlightKey);
+    });
+
+    this.inFlightSearches.set(inFlightKey, searchPromise);
+    return searchPromise;
+  }
+
+  private async performExactNumberSearch(
+    rawTerm: string,
+    category: string,
+    maxResults: number,
+    statusFilter?: string
+  ): Promise<SearchResult> {
+    let base = query(collection(db, 'numberPool'));
+    if (category !== 'all') {
+      base = query(base, where('category', '==', category));
+    }
+    if (statusFilter) {
+      base = query(base, where('status', '==', statusFilter));
+    }
+
+    const snap = await getDocs(query(base, where('number', '==', rawTerm), limit(Math.min(maxResults, 20))));
+    const data = snap.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as NumberPool));
+
+    return {
+      data,
+      totalItems: data.length,
+      source: 'firebase',
+      isComplete: true,
+      hasMore: false,
+      lastDoc: snap.docs[snap.docs.length - 1] || null
+    };
+  }
+
+  private async runSearch(
+    rawTerm: string,
+    category: string,
+    maxResults: number,
+    cursorDoc: QueryDocumentSnapshot | null | undefined,
+    endsWith: boolean,
+    statusFilter?: string,
+    onProgress?: (result: SearchResult) => void
+  ): Promise<SearchResult> {
+
     // If "ends with" toggle is enabled, use ends-with search
     if (endsWith) {
       const result = await this.performEndsWithSearch(rawTerm, category, maxResults, cursorDoc, statusFilter);
+      if (onProgress && !cursorDoc) {
+        onProgress(result);
+      }
       return result;
     }
 
     // Parse multiple search terms (separated by spaces)
     // Example: "050 04DECGOLG3" -> ["050", "04DECGOLG3"]
     const searchTerms = rawTerm.split(/\s+/).filter(t => t.length > 0);
+
+    // Exact status terms (e.g. "later", "reserved") must query status only.
+    // Otherwise they look like codes and trigger a huge code-prefix scan.
+    if (searchTerms.length === 1 && resolveExactNumberPoolStatus(rawTerm)) {
+      return this.performFastFirebaseSearch(
+        rawTerm.toLowerCase(),
+        rawTerm,
+        category,
+        maxResults,
+        cursorDoc,
+        statusFilter,
+        onProgress
+      );
+    }
+
+    // Mid-number fragments (e.g. pasted "590590") do not match prefix search because
+    // pool numbers start with 05x. Typing finds them because a 3-digit token search
+    // is refined in memory; paste must use the same substring/token strategy.
+    if (
+      searchTerms.length === 1 &&
+      /^\d{4,9}$/.test(searchTerms[0]) &&
+      !searchTerms[0].startsWith('05') &&
+      !searchTerms[0].startsWith('971')
+    ) {
+      return this.performNumericSubstringSearch(
+        searchTerms,
+        category,
+        maxResults,
+        cursorDoc,
+        statusFilter
+      );
+    }
+
+    // Full local numbers are unique — exact equality is enough and much faster
+    // than prefix + token + code scans.
+    if (searchTerms.length === 1 && /^05\d{8}$/.test(searchTerms[0]) && !cursorDoc) {
+      return this.performExactNumberSearch(
+        searchTerms[0],
+        category,
+        maxResults,
+        statusFilter
+      );
+    }
     
     // If multiple terms, check if all are numeric
     if (searchTerms.length > 1) {
@@ -120,15 +273,26 @@ export class UnifiedSearch {
     // If it's a code search, use dedicated code search function
     if (isCodeSearch) {
       const result = await this.performCodeSearch(rawTerm, category, maxResults, cursorDoc, statusFilter);
-      // If code search found results, return them
       if (result.data.length > 0) {
         return result;
       }
-      // If no results from code search, fall through to regular search as backup
+      // Real codes mix letters and digits. Falling through would re-scan thousands
+      // of code documents and still return nothing useful.
+      if (hasNumbers && hasLetters) {
+        return result;
+      }
     }
     
     // Otherwise use existing fast search with cursor support
-    const result = await this.performFastFirebaseSearch(term, rawTerm, category, maxResults, cursorDoc, statusFilter);
+    const result = await this.performFastFirebaseSearch(
+      term,
+      rawTerm,
+      category,
+      maxResults,
+      cursorDoc,
+      statusFilter,
+      onProgress
+    );
 
     return result;
   }
@@ -446,6 +610,32 @@ export class UnifiedSearch {
   }
 
   /**
+   * Prefixes that contain a digit fragment but are missed by last-7 numberTokens.
+   * UAE numbers start with 050 / 054 / 056, so a run like "666" can sit at the
+   * start of the number (666…) or inside the operator prefix (05666…, 050666…).
+   */
+  private getUaeEmbeddedDigitPrefixes(term: string): string[] {
+    if (!/^\d{3,6}$/.test(term)) return [];
+
+    const operatorPrefixes = ['050', '054', '056'];
+    const prefixes = new Set<string>([term]);
+
+    for (const operatorPrefix of operatorPrefixes) {
+      prefixes.add(operatorPrefix + term);
+      const maxOverlap = Math.min(operatorPrefix.length, term.length) - 1;
+      for (let overlap = 1; overlap <= maxOverlap; overlap++) {
+        if (operatorPrefix.slice(-overlap) === term.slice(0, overlap)) {
+          prefixes.add(operatorPrefix + term.slice(overlap));
+        }
+      }
+    }
+
+    return Array.from(prefixes).filter(
+      (prefix, _index, all) => !all.some(other => other !== prefix && prefix.startsWith(other))
+    );
+  }
+
+  /**
    * Performs optimized NUMERIC-ONLY substring search
    * Used when ALL search terms are numeric but not all are 3-digit
    * Only searches the 'number' field (faster than multi-column)
@@ -626,6 +816,7 @@ export class UnifiedSearch {
         'followup': 'follow_up',
         'follow-up': 'follow_up',
         'follow': 'follow_up',
+        'later': 'later',
         'non_verified': 'non_verified',
         'nonverified': 'non_verified',
         'non-verified': 'non_verified',
@@ -1048,9 +1239,22 @@ export class UnifiedSearch {
     category: string,
     maxResults: number,
     cursorDoc: QueryDocumentSnapshot | null | undefined = null,
-    statusFilter?: string
+    statusFilter?: string,
+    onProgress?: (result: SearchResult) => void
   ): Promise<SearchResult> {
     const results = new Map<string, NumberPool>();
+    const emitProgress = () => {
+      if (!onProgress || cursorDoc != null) return;
+      const snapshot = Array.from(results.values());
+      onProgress({
+        data: snapshot,
+        totalItems: snapshot.length,
+        source: 'firebase',
+        isComplete: false,
+        hasMore: primaryHasMore || snapshot.length >= maxResults,
+        lastDoc: primaryLastDoc
+      });
+    };
     
     // Track pagination state (accessible throughout function)
     let primaryLastDoc: QueryDocumentSnapshot | null = null;
@@ -1064,7 +1268,7 @@ export class UnifiedSearch {
     // Check if this is an "ends with" search (2, 3, 4, or 5 digits)
     const isEndsWithSearch = isNumeric && (rawTerm.length === 2 || rawTerm.length === 3 || rawTerm.length === 4 || rawTerm.length === 5);
     const endsWithField = rawTerm.length === 2 ? 'last2Digits' : rawTerm.length === 3 ? 'last3Digits' : rawTerm.length === 4 ? 'last4Digits' : rawTerm.length === 5 ? 'last5Digits' : null;
-      
+
     // Check if search term is a pattern with wildcards (x or X)
     const isPattern = /[xX]/.test(term);
     let patternRegex: RegExp | null = null;
@@ -1103,6 +1307,7 @@ export class UnifiedSearch {
       'followup': 'follow_up',
       'follow-up': 'follow_up',
       'follow': 'follow_up',
+      'later': 'later',
       'non_verified': 'non_verified',
       'nonverified': 'non_verified',
       'non-verified': 'non_verified',
@@ -1134,6 +1339,11 @@ export class UnifiedSearch {
         matchedStatus = statusTerms[statusKey];
       }
     }
+    const exactStatus = resolveExactNumberPoolStatus(rawTerm);
+    if (exactStatus) {
+      matchedStatus = exactStatus;
+    }
+    const isExactStatusSearch = Boolean(exactStatus);
 
     try {
       // Build base query with category filter if needed
@@ -1298,39 +1508,121 @@ export class UnifiedSearch {
           };
         }
       } else {
-        // First page: Run all strategies in parallel for comprehensive results
+        // First page: Run applicable strategies in parallel (skip irrelevant queries for speed)
       const queries: Promise<void>[] = [];
+        const FIRESTORE_BATCH_SIZE = 40;
+        const enqueueQuery = (work: Promise<void>) => {
+          queries.push(work.finally(() => emitProgress()));
+        };
+        /** Merge docs one at a time so UI can show each result as it arrives. */
+        const mergeDocsOneByOne = async (docs: QueryDocumentSnapshot[]) => {
+          for (let i = 0; i < docs.length; i++) {
+            if (results.size >= maxResults) {
+              primaryHasMore = true;
+              break;
+            }
+            const doc = docs[i];
+            results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+            primaryLastDoc = doc;
+            emitProgress();
+            if (onProgress && i < docs.length - 1) {
+              await new Promise<void>(resolve => setTimeout(resolve, 0));
+            }
+          }
+        };
+        /** Paginate large ordered queries; emit after every document when streaming. */
+        const streamOrderedQuery = (
+          buildBatchQuery: (
+            batchLimit: number,
+            cursor: QueryDocumentSnapshot | null
+          ) => ReturnType<typeof query>
+        ): Promise<void> => {
+          if (!onProgress) {
+            return getDocs(buildBatchQuery(maxResults + 1, null))
+              .then(async snap => {
+                const docs = snap.docs;
+                if (docs.length > maxResults) {
+                  primaryHasMore = true;
+                  docs.pop();
+                }
+                await mergeDocsOneByOne(docs);
+              })
+              .catch(() => {});
+          }
 
-        // Strategy 0: "Ends with" search (HIGHEST PRIORITY for 2-4 digit numeric terms)
-        if (isEndsWithSearch && endsWithField) {
-          queries.push(
+          return (async () => {
+            let cursor: QueryDocumentSnapshot | null = null;
+            while (results.size < maxResults) {
+              const room = maxResults - results.size;
+              const batchLimit = Math.min(FIRESTORE_BATCH_SIZE, room + 1);
+              const snap = await getDocs(buildBatchQuery(batchLimit, cursor));
+              const docs = snap.docs;
+              if (docs.length === 0) break;
+
+              const hasMoreInBatch = docs.length > room;
+              const docsToProcess = hasMoreInBatch ? docs.slice(0, room) : docs;
+              await mergeDocsOneByOne(docsToProcess);
+
+              if (docsToProcess.length > 0) {
+                cursor = docsToProcess[docsToProcess.length - 1];
+              }
+
+              if (hasMoreInBatch || results.size >= maxResults) {
+                if (hasMoreInBatch || docs.length >= batchLimit) {
+                  primaryHasMore = true;
+                }
+                break;
+              }
+              if (docs.length < batchLimit) break;
+            }
+          })().catch(() => {});
+        };
+        const isPureNumeric = /^\d+$/.test(rawTerm);
+        // Exact status search: only the status query. Extra strategies (especially
+        // code prefix with limit*10) do not change intended results and are very slow.
+        if (isExactStatusSearch && matchedStatus) {
+          enqueueQuery(
             getDocs(
               query(
                 base,
-                where(endsWithField, '==', rawTerm),
+                where('status', '==', matchedStatus),
                 orderBy('number'),
                 limit(maxResults + 1)
               )
             )
-            .then(snap => {
-              const docs = snap.docs;
-              
-              // Check if we have more results
-              if (docs.length > maxResults) {
-                primaryHasMore = true;
-                docs.pop(); // Remove the extra doc
+              .then(snap => {
+                const docs = snap.docs;
+                if (docs.length > maxResults) {
+                  primaryHasMore = true;
+                  docs.pop();
+                }
+                if (docs.length > 0) {
+                  primaryLastDoc = docs[docs.length - 1];
+                }
+                docs.forEach(doc => {
+                  results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+                });
+              })
+              .catch(() => {})
+          );
+          await Promise.allSettled(queries);
+          // Skip remaining strategies for this first-page path
+        } else {
+        // Strategy 0: "Ends with" search (HIGHEST PRIORITY for 2-4 digit numeric terms)
+        if (isEndsWithSearch && endsWithField) {
+          enqueueQuery(
+            streamOrderedQuery((batchLimit, cursor) => {
+              let endsWithQuery = query(
+                base,
+                where(endsWithField, '==', rawTerm),
+                orderBy('number'),
+                limit(batchLimit)
+              );
+              if (cursor) {
+                endsWithQuery = query(endsWithQuery, startAfter(cursor));
               }
-              
-              // Store lastDoc for "Load More"
-              if (docs.length > 0) {
-                primaryLastDoc = docs[docs.length - 1];
-              }
-              
-              docs.forEach(doc => {
-                results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
-              });
+              return endsWithQuery;
             })
-            .catch(() => {})
           );
         }
 
@@ -1344,7 +1636,7 @@ export class UnifiedSearch {
             searchTokens.push(fixedDigits.slice(-2));
             
             searchTokens.forEach(token => {
-              queries.push(
+              enqueueQuery(
                 getDocs(query(base, where('numberTokens', 'array-contains', token), limit(maxResults * 5)))
                   .then(snap => {
                     snap.docs.forEach(doc => {
@@ -1362,7 +1654,7 @@ export class UnifiedSearch {
 
         // Strategy 1: Status search (PRIMARY for status terms - will be used for pagination)
         if (matchedStatus) {
-      queries.push(
+      enqueueQuery(
             getDocs(
               query(
                 base,
@@ -1394,7 +1686,7 @@ export class UnifiedSearch {
         }
 
         // Strategy 2: Exact number match
-      queries.push(
+      enqueueQuery(
           getDocs(query(base, where('number', '==', rawTerm), limit(maxResults)))
           .then(snap => {
             snap.docs.forEach(doc => {
@@ -1404,18 +1696,20 @@ export class UnifiedSearch {
           .catch(() => {})
       );
 
-        // Strategy 3: Exact code match
-        queries.push(
-          getDocs(query(base, where('code', '==', rawTerm), limit(maxResults)))
-            .then(snap => {
-              snap.docs.forEach(doc => {
-                if (results.size < maxResults) {
-            results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
-                }
-          });
-            })
-            .catch(() => {})
-        );
+        // Strategy 3: Exact code match (skip for pure numeric — cannot match code field)
+        if (!isPureNumeric) {
+          enqueueQuery(
+            getDocs(query(base, where('code', '==', rawTerm), limit(maxResults)))
+              .then(snap => {
+                snap.docs.forEach(doc => {
+                  if (results.size < maxResults) {
+                    results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+                  }
+                });
+              })
+              .catch(() => {})
+          );
+        }
 
         // Strategy 3.5: Code search (PRIMARY for code terms - will be used for pagination)
         // CASE-INSENSITIVE with SUBSTRING matching: Fetch larger dataset and filter in memory
@@ -1427,7 +1721,7 @@ export class UnifiedSearch {
           
           // Query starting from prefix (more efficient than full term)
           // Use a large limit to get all matches (case-insensitive substring filter in memory)
-          queries.push(
+          enqueueQuery(
             getDocs(
               query(
                 base,
@@ -1475,41 +1769,59 @@ export class UnifiedSearch {
 
         // Strategy 4: Prefix search (PRIMARY for numeric terms - will be used for pagination)
         if (isNumeric && term.length >= 3) {
-          queries.push(
-            getDocs(
-              query(
+          enqueueQuery(
+            streamOrderedQuery((batchLimit, cursor) => {
+              let prefixQuery = query(
                 base,
                 orderBy('number'),
                 startAt(term),
                 endAt(term + '\uf8ff'),
-                limit(maxResults + 1) // Fetch one extra to check if there are more
-              )
-            )
-              .then(snap => {
-                const docs = snap.docs;
-                
-                // Check if we have more results
-                if (docs.length > maxResults) {
-                  primaryHasMore = true;
-                  docs.pop();
-                }
-                
-                // Store lastDoc for "Load More"
-                if (docs.length > 0) {
-                  primaryLastDoc = docs[docs.length - 1];
-                }
-                
-                docs.forEach(doc => {
-                  results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
-                });
-              })
-              .catch(() => {})
+                limit(batchLimit)
+              );
+              if (cursor) {
+                prefixQuery = query(prefixQuery, startAfter(cursor));
+              }
+              return prefixQuery;
+            })
           );
         }
 
+        // 3-digit fragments in the UAE prefix are not stored in last-7 numberTokens.
+        // Also query numbers starting with 666 and numbers like 05666… / 050666… / 054666….
+        if (/^\d{3}$/.test(normalized)) {
+          const embeddedPrefixes = this.getUaeEmbeddedDigitPrefixes(normalized)
+            .filter(prefix => prefix !== normalized);
+          embeddedPrefixes.forEach(prefix => {
+            enqueueQuery(
+              getDocs(
+                query(
+                  base,
+                  orderBy('number'),
+                  startAt(prefix),
+                  endAt(prefix + '\uf8ff'),
+                  limit(maxResults + 1)
+                )
+              )
+                .then(snap => {
+                  snap.docs.forEach(doc => {
+                    if (results.size >= maxResults) {
+                      primaryHasMore = true;
+                      return;
+                    }
+                    const numberStr = (doc.data().number || '').toString();
+                    if (numberStr.includes(normalized)) {
+                      results.set(doc.id, { id: doc.id, ...doc.data() } as NumberPool);
+                    }
+                  });
+                })
+                .catch(() => {})
+            );
+          });
+        }
+
         // Strategy 5: Pattern-based search for numbers ending with "999"
-        if (!isPattern && isNumeric && normalized.length >= 2 && normalized.length <= 6) {
-          queries.push(
+        if (!isPattern && isNumeric && !isPureNumeric && normalized.length >= 2 && normalized.length <= 6 && normalized.includes('999')) {
+          enqueueQuery(
             getDocs(
               query(
                 base,
@@ -1534,9 +1846,9 @@ export class UnifiedSearch {
           );
         }
 
-        // Strategy 6: Token-based search
-        if (normalized.length >= 3) {
-        queries.push(
+        // Strategy 6: Token-based search (numberTokens stores 3-digit tokens only)
+        if (/^\d{3}$/.test(normalized)) {
+        enqueueQuery(
           getDocs(
               query(
                 base,
@@ -1553,13 +1865,10 @@ export class UnifiedSearch {
             })
             .catch(() => {})
         );
-  }
+        }
 
-        // Wait for all parallel queries to complete
-      await Promise.race([
-        Promise.allSettled(queries),
-        new Promise<void>(resolve => setTimeout(resolve, 3000))
-      ]);
+        await Promise.allSettled(queries);
+        }
       }
 
 
@@ -1599,7 +1908,7 @@ export class UnifiedSearch {
     // Post-process: If search term looks like a status but we didn't get exact match,
     // filter results by status field containing the term
     if (!matchedStatus && normalized.length >= 3) {
-      const statusKeywords = ['verif', 'reserv', 'pend', 'assign', 'activ', 'reject', 'follow', 'progress', 'review'];
+      const statusKeywords = ['verif', 'reserv', 'pend', 'assign', 'activ', 'reject', 'follow', 'later', 'progress', 'review'];
       const looksLikeStatus = statusKeywords.some(keyword => normalized.includes(keyword));
       
       if (looksLikeStatus) {
@@ -1631,15 +1940,14 @@ export class UnifiedSearch {
    * Search is always fresh, no cache to clear
    */
   clearCache(): void {
-    // No cache to clear - search is always fresh
+    this.inFlightSearches.clear();
   }
 
   /**
-   * No-op for backward compatibility
-   * Search is always fresh, no cache to clear
+   * No-op for backward compatibility — search always hits Firestore.
    */
   clearCacheForTerm(_term: string, _category: string = 'all'): void {
-    // No cache to clear - search is always fresh
+    // Search is always fresh
   }
 }
 
