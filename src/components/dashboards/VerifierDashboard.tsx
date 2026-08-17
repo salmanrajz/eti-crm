@@ -1210,6 +1210,12 @@ export function VerifierDashboard({ user }: VerifierDashboardProps) {
         });
       }
 
+        allLeads.sort((a, b) => {
+          const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt || 0).getTime();
+          const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt || 0).getTime();
+          return timeA - timeB;
+        });
+
         setVerificationLeads(allLeads);
         setLoading(false);
       } catch (error) {

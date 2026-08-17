@@ -544,15 +544,15 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
         onClick={() => setShowDialog(true)}
-        className="inline-flex items-center justify-center px-3 sm:px-4 py-2 sm:py-2.5 bg-gradient-to-br from-emerald-500/10 to-teal-500/10 backdrop-blur-sm border border-emerald-100/50 rounded-xl shadow-lg shadow-emerald-500/10 hover:shadow-xl hover:shadow-emerald-500/20 transition-all duration-300 group"
+        className="inline-flex h-11 w-full items-center justify-center rounded-lg border border-emerald-100/50 bg-gradient-to-br from-emerald-500/10 to-teal-500/10 px-3 py-1.5 shadow-md shadow-emerald-500/10 backdrop-blur-sm transition-all duration-300 hover:shadow-lg hover:shadow-emerald-500/20 group xl:w-auto"
       >
         <div className="flex items-center">
-          <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-1.5 rounded-lg mr-2 group-hover:scale-110 transition-transform duration-300">
-            <Link2 className="w-3 h-3 sm:w-4 sm:h-4 text-white" />
+          <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-1.5 rounded-md mr-2 group-hover:scale-110 transition-transform duration-300">
+            <Link2 className="w-3 h-3 text-white" />
           </div>
           <div className="text-left">
-            <span className="block text-xs font-semibold text-gray-900">Customer Link</span>
-            <span className="hidden sm:block text-[10px] text-gray-600">Generate portal link</span>
+            <span className="block text-[11px] font-semibold leading-tight text-gray-900">Customer Link</span>
+            <span className="hidden sm:block text-[9px] leading-tight text-gray-600">Generate portal link</span>
           </div>
         </div>
       </motion.button>
@@ -1106,4 +1106,3 @@ export function AgentLinkGenerator({ agentId, agentName }: AgentLinkGeneratorPro
     </>
   );
 }
-

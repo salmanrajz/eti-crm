@@ -53,14 +53,13 @@ export default function PayrollButton({ role, user }: PayrollButtonProps) {
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
         onClick={() => setIsPayrollOpen(true)}
-        className="group relative inline-flex items-center gap-1.5 sm:gap-3 px-2 py-1 sm:px-6 sm:py-3 bg-gradient-to-r from-blue-500 to-cyan-600 text-white rounded-2xl font-medium shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-300 border-0 overflow-hidden"
+        className="inline-flex h-9 items-center gap-1.5 rounded-full border border-sky-200/55 bg-sky-50/35 px-3 text-xs font-semibold text-sky-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.55),0_8px_20px_rgba(15,23,42,0.06)] backdrop-blur-xl transition-all duration-200 hover:-translate-y-0.5 hover:border-sky-300/70 hover:bg-sky-50/55 hover:shadow-md"
         >
-          <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-cyan-700 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-          <div className="relative flex items-center gap-1.5 sm:gap-3">
-            <div className="p-0.5 sm:p-1.5 bg-white/20 rounded sm:rounded-lg backdrop-blur-sm">
-              <DollarSign className="h-2.5 w-2.5 sm:h-5 sm:w-5" />
+          <div className="flex items-center gap-1.5">
+            <div className="rounded-full bg-sky-500 p-1 text-white shadow-sm">
+              <DollarSign className="h-3.5 w-3.5" />
             </div>
-          <span className="text-xs sm:text-sm font-semibold">Payroll System</span>
+          <span>Payroll System</span>
           </div>
       </motion.button>
 <PayrollSystem

@@ -103,6 +103,85 @@ import { normalizeTimestamp, formatTimestamp, getTimestampForSort } from '../../
 import { logLeadAction } from '../../utils/leadLogging';
 import { getUserDetails } from '../../utils/dncService';
 
+// ✅ PERFORMANCE: Optimized load sizes for faster initial loading
+const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
+const PAGINATION_SIZE = 100; // Load 100 more leads per "Load More" click
+const INITIAL_LOAD_TIMEOUT_MS = 8000;
+
+type LeadListViewState = {
+  searchTerm: string;
+  statusFilter: string;
+  dateRange: { from?: string; to?: string };
+  currentPage: number;
+  itemsPerPage: number;
+  sortField: string;
+  sortDirection: 'asc' | 'desc';
+};
+
+const getLeadListStateKey = () => {
+  const userId = useAuthStore.getState().user?.id || 'anon';
+  return `leadListViewState_${userId}`;
+};
+
+const loadLeadListViewState = (): Partial<LeadListViewState> => {
+  try {
+    const raw = sessionStorage.getItem(getLeadListStateKey());
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+let leadSearchSessionCache: { userId: string; term: string; results: Lead[] } | null = null;
+
+const getLeadSearchSessionCache = (term: string): Lead[] | null => {
+  const userId = useAuthStore.getState().user?.id || 'anon';
+  const normalized = term.trim().toLowerCase();
+  if (!normalized || !leadSearchSessionCache) return null;
+  if (leadSearchSessionCache.userId !== userId) return null;
+  if (leadSearchSessionCache.term !== normalized) return null;
+  return leadSearchSessionCache.results;
+};
+
+const setLeadSearchSessionCache = (term: string, results: Lead[]) => {
+  const normalized = term.trim().toLowerCase();
+  if (!normalized) {
+    leadSearchSessionCache = null;
+    return;
+  }
+  leadSearchSessionCache = {
+    userId: useAuthStore.getState().user?.id || 'anon',
+    term: normalized,
+    results,
+  };
+};
+const LEAD_ENRICH_TIMEOUT_MS = 2500;
+
+// ✅ PERFORMANCE: Debounce configuration for real-time updates
+const DEBOUNCE_DELAY = 200; // 200ms debounce for real-time updates (reduced for faster response)
+
+const withTimeout = async <T,>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T
+): Promise<T> => {
+  let timeoutId: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>(resolve => {
+        timeoutId = setTimeout(() => resolve(fallback), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+};
+
 // date-fns `format()` throws `RangeError: Invalid time value` if the Date is invalid.
 // Leads data can include cached/serialized timestamps, so we defensively normalize first.
 const formatSafe = (value: any, formatStr: string): string => {
@@ -115,15 +194,19 @@ const formatSafe = (value: any, formatStr: string): string => {
   }
 };
 
-// ✅ PERFORMANCE: Optimized load sizes for faster initial loading
-const INITIAL_LOAD_SIZE = 200; // Always load 200 leads initially
-const PAGINATION_SIZE = (() => {
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  return isMobile ? 20 : 50; // Optimized for better performance
-})();
-
-// ✅ PERFORMANCE: Debounce configuration for real-time updates
-const DEBOUNCE_DELAY = 200; // 200ms debounce for real-time updates (reduced for faster response)
+const getLeadDisplayPlans = (lead: Lead) => {
+  if (lead.plans && lead.plans.length > 0) return lead.plans;
+  return ((lead as any).awaitingNumbers || []).map((entry: any) => ({
+    numberId: entry.numberId,
+    number: entry.number,
+    plan: entry.plan || '',
+    category: entry.category || '',
+    group: entry.group,
+    type: entry.type || '',
+    status: '',
+    numberStruckThrough: true,
+  }));
+};
 
 // ✅ ENHANCED: Separate cache instances for different data types with localStorage support
 import { PerformanceCache } from '../../utils/cache';
@@ -522,7 +605,7 @@ function StruckNumbersModal({ lead, onClose }: StruckNumbersModalProps) {
                           <span className="text-xs font-semibold text-orange-600">Last Claim</span>
                         </div>
                         <div className="text-xs font-bold text-orange-700">
-                          {lastClaimTime ? format(lastClaimTime, 'd MMM, h:mm a') : 'N/A'}
+                          {formatSafe(lastClaimTime, 'd MMM, h:mm a')}
                         </div>
                       </div>
                     </div>
@@ -612,9 +695,22 @@ export function LeadList() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [isMobile] = useState(() => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [firebaseSearchResults, setFirebaseSearchResults] = useState<Lead[]>([]);
+  const savedListView = useMemo(() => loadLeadListViewState(), []);
+  const [searchTerm, setSearchTerm] = useState(() => savedListView.searchTerm || '');
+  const [statusFilter, setStatusFilter] = useState<string>(() => {
+    const statusFromUrl = new URLSearchParams(window.location.search).get('status');
+    if (statusFromUrl) {
+      return statusFromUrl === 'pending_coordinator' ? 'assigned_to_cord' : statusFromUrl;
+    }
+    return savedListView.statusFilter || 'all';
+  });
+  const [firebaseSearchResults, setFirebaseSearchResults] = useState<Lead[]>(() => {
+    const term = savedListView.searchTerm || '';
+    return term.trim() ? (getLeadSearchSessionCache(term) || []) : [];
+  });
+  const skipCachedSearchRef = useRef(
+    Boolean(savedListView.searchTerm?.trim() && getLeadSearchSessionCache(savedListView.searchTerm || '') !== null)
+  );
   const [isSearchingFirebase, setIsSearchingFirebase] = useState(false);
   const [isSearchPending, setIsSearchPending] = useState(false);
   const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
@@ -624,18 +720,26 @@ export function LeadList() {
   const [showDeleteConfirmDialog, setShowDeleteConfirmDialog] = useState(false);
   const [deleteConfirmNumber, setDeleteConfirmNumber] = useState('');
   const [isDeletingLead, setIsDeletingLead] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [currentPage, setCurrentPage] = useState(() => savedListView.currentPage || 1);
+  const [itemsPerPage, setItemsPerPage] = useState(() => savedListView.itemsPerPage || 10);
   const [hasMore, setHasMore] = useState(true);
   const [lastDoc, setLastDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
   const { user, isAdmin, isManager, isVerifier, isAgent, isCoordinator } = useAuthStore();
   const [searchParams] = useSearchParams();
-  const [sortField, setSortField] = useState<string>('createdAt');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [sortField, setSortField] = useState<string>(() => savedListView.sortField || 'createdAt');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>(() => savedListView.sortDirection || 'desc');
   const [dateRange, setDateRange] = useState<{
     from?: string;
     to?: string;
-  }>({});
+  }>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fromDate = params.get('from');
+    const toDate = params.get('to');
+    if (fromDate || toDate) {
+      return { from: fromDate || undefined, to: toDate || undefined };
+    }
+    return savedListView.dateRange || {};
+  });
   const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
   const [showWhatsAppChat, setShowWhatsAppChat] = useState(false);
   const [selectedLeadForChat, setSelectedLeadForChat] = useState<Lead | null>(null);
@@ -651,6 +755,9 @@ export function LeadList() {
   const [isUpdatingGroup, setIsUpdatingGroup] = useState(false);
   const [statusTimers, setStatusTimers] = useState<Record<string, number>>({});
   const [leadStrikes, setLeadStrikes] = useState<Record<string, number>>({});
+  const [leadStrikeExpiresAt, setLeadStrikeExpiresAt] = useState<Record<string, number>>({});
+  const [strikeCountdownNow, setStrikeCountdownNow] = useState(() => Date.now());
+  const [numberFlags, setNumberFlags] = useState<Record<string, { leavingSoon: boolean; exchange: boolean }>>({});
   const [showStruckNumbersModal, setShowStruckNumbersModal] = useState(false);
   const [selectedLeadForStruckNumbers, setSelectedLeadForStruckNumbers] = useState<Lead | null>(null);
   const [showEtisalatSrModal, setShowEtisalatSrModal] = useState(false);
@@ -721,6 +828,31 @@ export function LeadList() {
     return `${minutes}m`;
   }, []);
 
+  const formatStrikeCountdown = useCallback((ms: number): string => {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }, []);
+
+  const canShowLeadStrikeBadge = useCallback((status?: string) => {
+    return status !== 'awaiting_for_number';
+  }, []);
+
+  const canShowLeadStrikeCountdown = useCallback((status?: string) => {
+    return status !== 'assigned' && status !== 'activated' && status !== 'activated_non_verified' && status !== 'awaiting_for_number';
+  }, []);
+
+  const getLeadStrikeRemainingMs = useCallback((leadId: string) => {
+    const expiresAt = leadStrikeExpiresAt[leadId];
+    if (!expiresAt) return null;
+    const remaining = expiresAt - strikeCountdownNow;
+    return remaining > 0 ? remaining : null;
+  }, [leadStrikeExpiresAt, strikeCountdownNow]);
+
   // Calculate time elapsed since status changed to verified/follow_up
   const getStatusTimeElapsed = useCallback((lead: Lead): number | null => {
     if (lead.status !== 'verified' && lead.status !== 'follow_up') {
@@ -753,6 +885,7 @@ export function LeadList() {
       });
 
       setStatusTimers(newTimers);
+      setStrikeCountdownNow(Date.now());
     }, 1000);
 
     return () => clearInterval(interval);
@@ -761,6 +894,23 @@ export function LeadList() {
   // ✅ PERFORMANCE: Debounced update mechanism to prevent excessive re-renders
   const debouncedUpdateRef = useRef<NodeJS.Timeout | null>(null);
   const pendingUpdateRef = useRef<Lead[] | null>(null);
+  const loadWatchdogRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearLoadWatchdog = useCallback(() => {
+    if (loadWatchdogRef.current) {
+      clearTimeout(loadWatchdogRef.current);
+      loadWatchdogRef.current = null;
+    }
+  }, []);
+
+  const startLoadWatchdog = useCallback(() => {
+    clearLoadWatchdog();
+    loadWatchdogRef.current = setTimeout(() => {
+      setLoading(false);
+      setLoadingMore(false);
+      toast.error('Lead list is taking too long to load. Showing the latest available data.');
+    }, INITIAL_LOAD_TIMEOUT_MS);
+  }, [clearLoadWatchdog]);
 
   // ✅ PERFORMANCE: Debounced update function to prevent excessive re-renders
   // skipDebounce: true for immediate update (initial load), false for debounced (real-time updates)
@@ -794,10 +944,12 @@ export function LeadList() {
     }, DEBOUNCE_DELAY);
   }, []);
 
-  // Fetch strikes count for leads
+  // Fetch strikes and number flags for the leads currently shown in the list.
   const fetchLeadStrikes = useCallback(async (leadsToCheck: Lead[]) => {
     try {
       const strikesMap: Record<string, number> = {};
+      const flagsMap: Record<string, { leavingSoon: boolean; exchange: boolean }> = {};
+      const strikeExpiresMap: Record<string, number> = {};
       
       // Collect all unique numberIds from all leads with lead mapping
       const numberToLeadsMap = new Map<string, string[]>(); // numberId -> leadIds[]
@@ -816,6 +968,8 @@ export function LeadList() {
 
       if (numberToLeadsMap.size === 0) {
         setLeadStrikes({});
+        setNumberFlags({});
+        setLeadStrikeExpiresAt({});
         return;
       }
 
@@ -846,11 +1000,39 @@ export function LeadList() {
             const claims = numberData.claims || [];
             const pendingClaims = claims.filter((claim: any) => claim.status === 'pending');
             const strikesCount = pendingClaims.length;
+
+            if (numberData.leavingSoon || numberData.exchange) {
+              flagsMap[numberDoc.id] = {
+                leavingSoon: Boolean(numberData.leavingSoon),
+                exchange: Boolean(numberData.exchange)
+              };
+            }
+
+            let strikeExpiresMs: number | null = null;
+            const rawExpiry = numberData.strikeExpiresAt;
+            if (rawExpiry) {
+              if (typeof rawExpiry.toDate === 'function') {
+                strikeExpiresMs = rawExpiry.toDate().getTime();
+              } else if (rawExpiry instanceof Date) {
+                strikeExpiresMs = rawExpiry.getTime();
+              } else if (typeof rawExpiry.seconds === 'number') {
+                strikeExpiresMs = rawExpiry.seconds * 1000;
+              } else {
+                const parsed = new Date(rawExpiry).getTime();
+                strikeExpiresMs = Number.isFinite(parsed) ? parsed : null;
+              }
+            }
             
             // Map strikes to all leads that use this number
             const leadIds = numberToLeadsMap.get(numberDoc.id) || [];
             leadIds.forEach(leadId => {
               strikesMap[leadId] = (strikesMap[leadId] || 0) + strikesCount;
+              if (strikesCount > 0 && strikeExpiresMs) {
+                const current = strikeExpiresMap[leadId];
+                if (!current || strikeExpiresMs < current) {
+                  strikeExpiresMap[leadId] = strikeExpiresMs;
+                }
+              }
             });
           });
         } else {
@@ -860,6 +1042,8 @@ export function LeadList() {
       });
 
       setLeadStrikes(strikesMap);
+      setNumberFlags(flagsMap);
+      setLeadStrikeExpiresAt(strikeExpiresMap);
     } catch (error) {
       console.error('Error fetching lead strikes:', error);
     }
@@ -872,25 +1056,40 @@ export function LeadList() {
     return `leads_${user?.id}_${user?.role}_${user?.teamId || 'no-team'}_${coordinatorType}${dateRangeKey}`;
   }, [user?.id, user?.role, user?.teamId, user?.coordinatorType, dateRange.from, dateRange.to]);
 
-  // Add effect to handle URL parameters
+  // URL params override saved filters only when they are actually present
   useEffect(() => {
     const statusFromUrl = searchParams.get('status');
     const fromDate = searchParams.get('from');
     const toDate = searchParams.get('to');
-    
+
     if (statusFromUrl) {
-      setStatusFilter(statusFromUrl);
+      setStatusFilter(statusFromUrl === 'pending_coordinator' ? 'assigned_to_cord' : statusFromUrl);
     }
-    
+
     if (fromDate || toDate) {
       setDateRange({
         from: fromDate || undefined,
         to: toDate || undefined
       });
-    } else {
-      setDateRange({});
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    try {
+      const nextState: LeadListViewState = {
+        searchTerm,
+        statusFilter,
+        dateRange,
+        currentPage,
+        itemsPerPage,
+        sortField,
+        sortDirection,
+      };
+      sessionStorage.setItem(getLeadListStateKey(), JSON.stringify(nextState));
+    } catch {
+      // Ignore storage quota / private mode errors
+    }
+  }, [searchTerm, statusFilter, dateRange, currentPage, itemsPerPage, sortField, sortDirection]);
 
   useEffect(() => {
     if (!user) {
@@ -912,8 +1111,13 @@ export function LeadList() {
   }, [user, cacheKey]);
 
 
-  // Reset to first page when filters change
+  // Reset to first page when filters change, but not on the initial restore from session
+  const skipPageResetRef = useRef(true);
   useEffect(() => {
+    if (skipPageResetRef.current) {
+      skipPageResetRef.current = false;
+      return;
+    }
     setCurrentPage(1);
   }, [searchTerm, statusFilter, itemsPerPage, dateRange]);
 
@@ -971,6 +1175,7 @@ export function LeadList() {
         } else {
           // No cached data, set loading state
           setLoading(true);
+          startLoadWatchdog();
         }
       }
 
@@ -978,6 +1183,7 @@ export function LeadList() {
         // Only set loading if we don't have cached data (cached data already sets loading to false)
         if (!leadsCache.get(cacheKey)) {
           setLoading(true);
+          startLoadWatchdog();
         }
         // ✅ PERFORMANCE: Track loading time
         dashboardPerf.measureQuery('leadsList', { userId: user.id, role: user.role });
@@ -1032,7 +1238,12 @@ export function LeadList() {
           try {
             // ✅ PERFORMANCE: Process data efficiently with early filtering
             const maxDocs = isMobile ? Math.min(snapshot.docs.length, 100) : snapshot.docs.length;
-            let leadsData = snapshot.docs.slice(0, maxDocs).map(doc => {
+            const visibleDocs = snapshot.docs.slice(0, maxDocs);
+            const effectiveLastDoc = visibleDocs[visibleDocs.length - 1] || null;
+            const effectiveHasMore =
+              snapshot.docs.length > maxDocs || snapshot.docs.length === loadSize;
+
+            let leadsData = visibleDocs.map(doc => {
               const data = doc.data();
               // Helper to convert Firestore timestamp to Date
               const convertTimestamp = (ts: any): Date | undefined => {
@@ -1081,7 +1292,11 @@ export function LeadList() {
 
             // ✅ PERFORMANCE: Only process if data has actually changed
             if (leadsData.length > 0) {
-              const leadsWithInfo = await processLeadsWithInfo(leadsData);
+              const leadsWithInfo = await withTimeout(
+                processLeadsWithInfo(leadsData),
+                LEAD_ENRICH_TIMEOUT_MS,
+                leadsData
+              );
 
               // ✅ PERFORMANCE: Update cache efficiently
             const serializedLeads = leadsWithInfo.map(lead => ({
@@ -1096,15 +1311,16 @@ export function LeadList() {
 
             leadsCache.set(cacheKey, {
               leads: serializedLeads,
-              lastDoc: snapshot.docs[snapshot.docs.length - 1],
-              hasMore: snapshot.docs.length === loadSize
+              // Use the last visible doc as cursor; prevents skipping docs on mobile capped initial render
+              lastDoc: effectiveLastDoc,
+              hasMore: effectiveHasMore
             });
 
               // ✅ PERFORMANCE: Immediate update for first snapshot, debounced for subsequent updates
               debouncedUpdateLeads(
                 leadsWithInfo,
-                snapshot.docs[snapshot.docs.length - 1] || null,
-                snapshot.docs.length === loadSize,
+                effectiveLastDoc,
+                effectiveHasMore,
                 isFirstSnapshot // Skip debounce for first snapshot (instant display)
               );
               
@@ -1114,6 +1330,7 @@ export function LeadList() {
               }
             }
             
+            clearLoadWatchdog();
             setLoading(false);
 
             // End performance measurement
@@ -1124,6 +1341,9 @@ export function LeadList() {
           } catch (error) {
             console.error('Error processing leads snapshot:', error);
             toast.error('Failed to process leads data');
+            clearLoadWatchdog();
+            setLoading(false);
+            setLoadingMore(false);
           }
         }, (error) => {
           // ✅ FIX: Handle permission errors gracefully during logout
@@ -1134,12 +1354,18 @@ export function LeadList() {
               leadsUnsubscribeRef.current();
               leadsUnsubscribeRef.current = null;
             }
+            clearLoadWatchdog();
+            setLoading(false);
+            setLoadingMore(false);
             return;
           }
           
           console.error('Error in leads listener:', error);
           activeListeners.delete(baseListenerKey);
           toast.error('Failed to load leads');
+          clearLoadWatchdog();
+          setLoading(false);
+          setLoadingMore(false);
         });
 
         // Store listener for cleanup
@@ -1177,7 +1403,11 @@ export function LeadList() {
           leadsData = leadsData.filter(lead => lead.agentId === user.id);
         }
 
-        const leadsWithInfo = await processLeadsWithInfo(leadsData);
+        const leadsWithInfo = await withTimeout(
+          processLeadsWithInfo(leadsData),
+          LEAD_ENRICH_TIMEOUT_MS,
+          leadsData
+        );
         setLeads(prev => [...prev, ...leadsWithInfo]);
       setLastDoc(snapshot.docs[snapshot.docs.length - 1] || null);
       setHasMore(snapshot.docs.length === loadSize);
@@ -1187,10 +1417,11 @@ export function LeadList() {
     } catch (error) {
       console.error('Error loading leads:', error);
       toast.error('Failed to load leads');
+      clearLoadWatchdog();
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [user, cacheKey, lastDoc, isVerifier, isManager, dateRange]);
+  }, [user, cacheKey, lastDoc, isVerifier, isManager, dateRange, clearLoadWatchdog, startLoadWatchdog]);
 
   // Add focus event to refresh data when user navigates back to leads page
   useEffect(() => {
@@ -1745,6 +1976,7 @@ export function LeadList() {
         clearTimeout(debouncedUpdateRef.current);
         debouncedUpdateRef.current = null;
       }
+      clearLoadWatchdog();
       
       // ✅ FIX: Cleanup listeners when component unmounts or user changes
       if (leadsUnsubscribeRef.current) {
@@ -1773,7 +2005,7 @@ export function LeadList() {
       // ✅ OPTIMIZED: DON'T clear cache on unmount for better performance with optimized cache
       // Cache will naturally expire after optimized duration, keeping it for fast remounts
     };
-  }, [user?.id, user?.role, isMobile]);
+  }, [user?.id, user?.role, isMobile, clearLoadWatchdog]);
 
   // Helper: transform a Firestore doc snapshot into a lead object
   const transformDoc = useCallback((doc: QueryDocumentSnapshot<DocumentData>) => {
@@ -1829,6 +2061,7 @@ export function LeadList() {
     if (status === 'assigned_to_cord') return 'assigned to activation';
     if (status === 'assigned') return 'processed with etisalat';
     if (status === 'non_verified') return 'non verified';
+    if (status === 'activated_non_verified') return 'active non verified';
     if (status === 'follow_up') return 'follow-up';
     return status.replace(/_/g, ' ').toLowerCase();
   }, []);
@@ -1959,6 +2192,7 @@ export function LeadList() {
   const searchFirebase = useCallback(async (searchTerm: string) => {
     if (!user || !searchTerm.trim()) {
       setFirebaseSearchResults([]);
+      setLeadSearchSessionCache('', []);
       return;
     }
 
@@ -1975,6 +2209,7 @@ export function LeadList() {
       if (filteredFastResults.length > 0) {
         const enrichedFast = await processLeadsWithInfo(filteredFastResults);
         setFirebaseSearchResults(enrichedFast);
+        setLeadSearchSessionCache(searchTerm, enrichedFast);
         setIsSearchPending(false);
       }
 
@@ -2056,6 +2291,7 @@ export function LeadList() {
       // Process with agent/team info
       const enrichedResults = await processLeadsWithInfo(searchResults);
       setFirebaseSearchResults(enrichedResults);
+      setLeadSearchSessionCache(searchTerm, enrichedResults);
     } catch (error) {
       console.error('Firebase search error:', error);
       setFirebaseSearchResults([]);
@@ -2238,7 +2474,19 @@ export function LeadList() {
       setIsSearchPending(false);
       setFirebaseSearchResults([]);
       setIsSearchingFirebase(false);
+      setLeadSearchSessionCache('', []);
       return;
+    }
+
+    if (skipCachedSearchRef.current) {
+      skipCachedSearchRef.current = false;
+      const cached = getLeadSearchSessionCache(searchTerm);
+      if (cached) {
+        setFirebaseSearchResults(cached);
+        setIsSearchPending(false);
+        setIsSearchingFirebase(false);
+        return;
+      }
     }
 
     // Show searching indicator immediately when user types
@@ -2246,12 +2494,9 @@ export function LeadList() {
 
     const debounceTimer = setTimeout(() => {
       if (searchTerm.trim()) {
-        // Always search Firebase when there's a search term to get ALL matching leads
-        // This ensures we find all leads with the same number, not just those in the loaded set
-        // isSearchingFirebase will be set to true in searchFirebase function
           searchFirebase(searchTerm);
       }
-    }, 300); // Debounce Firebase search (reduced for faster response)
+    }, 300);
 
     return () => {
       clearTimeout(debounceTimer);
@@ -2306,6 +2551,78 @@ export function LeadList() {
         } catch {
           return 0;
         }
+      };
+
+      const getVerificationMediaLinks = (lead: Lead): string => {
+        const media = (lead as any).verificationMedia;
+        if (!Array.isArray(media) || media.length === 0) return 'N/A';
+
+        const links = media
+          .map((item: any) => {
+            if (typeof item === 'string') return item.trim();
+            if (item && typeof item === 'object' && typeof item.url === 'string') {
+              return item.url.trim();
+            }
+            return '';
+          })
+          .filter((url: string) => url.length > 0);
+
+        return links.length > 0 ? links.join('\n') : 'N/A';
+      };
+
+      const getVerificationMediaTypes = (lead: Lead): string => {
+        const media = (lead as any).verificationMedia;
+        if (!Array.isArray(media) || media.length === 0) return 'N/A';
+
+        const inferTypeFromUrl = (url: string): 'audio' | 'image' | 'other' => {
+          const normalized = url.toLowerCase();
+          if (
+            normalized.endsWith('.jpg') ||
+            normalized.endsWith('.jpeg') ||
+            normalized.endsWith('.png') ||
+            normalized.endsWith('.gif') ||
+            normalized.endsWith('.webp')
+          ) {
+            return 'image';
+          }
+          if (
+            normalized.endsWith('.mp3') ||
+            normalized.endsWith('.wav') ||
+            normalized.endsWith('.m4a') ||
+            normalized.endsWith('.aac') ||
+            normalized.endsWith('.ogg')
+          ) {
+            return 'audio';
+          }
+          return 'other';
+        };
+
+        const types = new Set<string>();
+
+        media.forEach((item: any) => {
+          if (typeof item === 'string') {
+            types.add(inferTypeFromUrl(item.trim()));
+            return;
+          }
+
+          if (item && typeof item === 'object') {
+            const rawType = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+            if (rawType === 'audio' || rawType === 'image') {
+              types.add(rawType);
+              return;
+            }
+            if (rawType.length > 0) {
+              types.add('other');
+              return;
+            }
+            if (typeof item.url === 'string' && item.url.trim().length > 0) {
+              types.add(inferTypeFromUrl(item.url.trim()));
+            }
+          }
+        });
+
+        if (types.size === 0) return 'N/A';
+        return Array.from(types).sort().join(', ');
       };
 
       enrichedLeads.forEach((lead) => {
@@ -2366,6 +2683,8 @@ export function LeadList() {
           'Language': lead.language || 'N/A',
           'Advance Payment': lead.advancePayment ? 'Yes' : 'No',
           'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No',
+            'Verification Media Type': getVerificationMediaTypes(lead),
+            'Verification Media Links': getVerificationMediaLinks(lead),
           // Hidden sort key for activation date ordering
           _activationSortKey: sortKey
           });
@@ -2422,6 +2741,8 @@ export function LeadList() {
               'Language': lead.language || 'N/A',
               'Advance Payment': lead.advancePayment ? 'Yes' : 'No',
               'Has Emirates ID': lead.hasEmirateId ? 'Yes' : 'No',
+              'Verification Media Type': getVerificationMediaTypes(lead),
+              'Verification Media Links': getVerificationMediaLinks(lead),
               // Hidden sort key for activation date ordering
               _activationSortKey: sortKey
             });
@@ -2475,7 +2796,9 @@ export function LeadList() {
         { wch: 10 },  // Gender
         { wch: 12 },  // Language
         { wch: 15 },  // Advance Payment
-        { wch: 15 }   // Has Emirates ID
+        { wch: 15 },  // Has Emirates ID
+        { wch: 22 },  // Verification Media Type
+        { wch: 60 }   // Verification Media Links
       ];
       ws['!cols'] = colWidths;
 
@@ -2753,6 +3076,8 @@ export function LeadList() {
       fetchLeadStrikes(currentLeads);
     } else {
       setLeadStrikes({});
+      setNumberFlags({});
+      setLeadStrikeExpiresAt({});
     }
   }, [currentLeadsIdsString, fetchLeadStrikes, currentLeads.length]);
 
@@ -2794,6 +3119,8 @@ export function LeadList() {
         return 'bg-cyan-100 text-cyan-800';
       case 'non_verified':
         return 'bg-amber-100 text-amber-800';
+      case 'awaiting_for_number':
+        return 'bg-orange-100 text-orange-800';
       default:
         return 'bg-gray-100 text-gray-800';
     }
@@ -2839,6 +3166,8 @@ export function LeadList() {
     }
     // Handle other statuses
     if (status === 'non_verified') return 'Non Verified';
+    if (status === 'activated_non_verified') return 'Active Non Verified';
+    if (status === 'awaiting_for_number') return 'Awaiting Number';
     if (status === 'follow_up') return 'Follow-up';
     return status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
   }, []);
@@ -3140,18 +3469,6 @@ export function LeadList() {
           </p>
         </div>
           <div className="flex-shrink-0 flex items-center gap-2">
-          {isAdmin() && selectedLeads.length > 0 && (
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-              onClick={() => setShowDeleteDialog(true)}
-                className="inline-flex items-center px-3 py-1.5 sm:px-4 sm:py-2 border border-transparent text-xs sm:text-sm font-medium rounded-lg text-white bg-red-600 hover:bg-red-700 shadow-lg hover:shadow-xl transition-all duration-200"
-            >
-                <Trash2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2" />
-                <span className="hidden sm:inline">Delete Selected ({selectedLeads.length})</span>
-                <span className="sm:hidden">Delete ({selectedLeads.length})</span>
-              </motion.button>
-          )}
           {(user?.role === 'agent' || (isManager() && user?.managedTeams && user.managedTeams.length > 0)) && (
               <motion.div
                 whileHover={{ scale: 1.02 }}
@@ -3235,11 +3552,13 @@ export function LeadList() {
                   <option value="verified">Verified</option>
                   <option value="rejected">Rejected</option>
                   <option value="follow_up">Follow Up</option>
+                  <option value="later">Later</option>
                   <option value="activated">Activated</option>
+                  <option value="activated_non_verified">Active Non Verified</option>
                   <option value="assigned">Assigned</option>
-                  <option value="pending_assignment">Pending Assignment</option>
-                  <option value="pending_coordinator">Pending Coordinator</option>
+                  <option value="assigned_to_cord">Assigned to Activation</option>
                   <option value="non_verified">Non Verified</option>
+                  <option value="awaiting_for_number">Awaiting Number</option>
                 </select>
                 <div className="absolute inset-y-0 right-0 flex items-center pr-3 sm:pr-4 pointer-events-none">
                   <ChevronDown className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-gray-400" />
@@ -3338,13 +3657,10 @@ export function LeadList() {
               <span className="text-sm font-medium text-indigo-700">Searching leads...</span>
             </motion.div>
           )}
-          <AnimatePresence>
+          <>
             {currentLeads.map((lead, index) => (
               <motion.div
                 key={lead.id}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: index * 0.1 }}
                 className={clsx(
                   "group hover:bg-gradient-to-r hover:from-indigo-50/50 hover:to-purple-50/50 transition-all duration-200 relative",
                   (lead as any).verificationMethod === 'whatsapp' && "bg-gradient-to-r from-emerald-50/50 to-transparent",
@@ -3396,7 +3712,7 @@ export function LeadList() {
                         {/* Date with Icon */}
                         <div className="flex items-center text-xs text-gray-500">
                             <Calendar className="h-3 w-3 mr-1.5" />
-                            {format(lead.createdAt, 'MMM d, yyyy h:mm a')}
+                            {formatSafe(lead.createdAt, 'MMM d, yyyy h:mm a')}
                           </div>
                         {/* Agent Name (for managers) */}
                         {isManager() && (lead as any).agentName && (
@@ -3411,8 +3727,7 @@ export function LeadList() {
                     {/* Selected Numbers */}
                     <div className="col-span-2 -ml-3">
                       <div className="flex flex-col space-y-2">
-                        {(lead.plans && lead.plans.length > 0)
-                          ? lead.plans.map((plan, planIndex) => {
+                        {getLeadDisplayPlans(lead).map((plan, planIndex) => {
                               // Get Etisalat ID for this specific plan
                               const planEtisalatId = (plan as any).etisalatLeadId || 
                                 ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
@@ -3426,7 +3741,7 @@ export function LeadList() {
                                 >
                                   <div className="flex items-center space-x-2">
                         <Hash className="h-4 w-4 text-indigo-500" />
-                        <span className="text-sm font-medium text-gray-700">
+                        <span className={`text-sm font-medium ${plan.numberStruckThrough ? 'text-red-800 line-through decoration-red-600 decoration-2' : 'text-gray-700'}`}>
                                       {plan.number || ''}
                                       {plan.group && (
                                         <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-700">
@@ -3440,28 +3755,37 @@ export function LeadList() {
                                       Etisalat ID: {planEtisalatId}
                             </span>
                                   )}
+                                  {numberFlags[plan.numberId] && (
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                      {numberFlags[plan.numberId].leavingSoon && (
+                                        <span className="inline-flex items-center rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
+                                          Leaving Soon
+                                        </span>
+                                      )}
+                                      {numberFlags[plan.numberId].exchange && (
+                                        <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                                          Exchange
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
                           </div>
                               );
-                            })
-                          : <span className="text-sm font-medium text-gray-700"></span>
-                        }
+                            })}
                       </div>
                     </div>
 
                     {/* Plan Details */}
                     <div className="col-span-4">
                       <div className="flex flex-col space-y-2">
-                        {(lead.plans && lead.plans.length > 0)
-                          ? lead.plans.map((plan, planIndex) => (
+                        {getLeadDisplayPlans(lead).map((plan, planIndex) => (
                               <div key={planIndex} className="flex items-center space-x-2 bg-gradient-to-br from-gray-50 to-gray-100 px-3 py-1.5 rounded-lg shadow-sm">
                           <Package className="h-4 w-4 text-indigo-500" />
                           <span className="text-sm font-medium text-gray-700">
                                   {plan.plan || ''}
                           </span>
                         </div>
-                            ))
-                          : <span className="text-sm font-medium text-gray-700"></span>
-                        }
+                            ))}
                         {/* Pending Verification at Location Indicator */}
                         {((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && lead.status !== 'rejected' && (
                           <motion.div
@@ -3501,8 +3825,8 @@ export function LeadList() {
                           </span>
                         );
                       })()}
-                        {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || leadStrikes[lead.id] > 0) && (
-                          <div className="flex items-center gap-1.5 mt-1 flex-nowrap shrink-0">
+                        {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || (canShowLeadStrikeBadge(lead.status) && leadStrikes[lead.id] > 0)) && (
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap shrink-0">
                             {((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) && (
                               <button
                                 type="button"
@@ -3528,7 +3852,8 @@ export function LeadList() {
                                 <Settings className="h-3.5 w-3.5" />
                               </button>
                             )}
-                      {leadStrikes[lead.id] > 0 && (
+                      {canShowLeadStrikeBadge(lead.status) && leadStrikes[lead.id] > 0 && (
+                        <>
                         <motion.div
                           initial={{ opacity: 0, scale: 0.9 }}
                           animate={{ opacity: 1, scale: 1 }}
@@ -3546,6 +3871,17 @@ export function LeadList() {
                                 <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
                           {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
                         </motion.div>
+                        {canShowLeadStrikeCountdown(lead.status) && (() => {
+                          const remaining = getLeadStrikeRemainingMs(lead.id);
+                          if (!remaining) return null;
+                          return (
+                            <span className="inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold bg-red-50 text-red-700 border border-red-200 whitespace-nowrap flex-shrink-0">
+                              <Clock className="h-3 w-3 mr-1 flex-shrink-0" />
+                              {formatStrikeCountdown(remaining)}
+                            </span>
+                          );
+                        })()}
+                        </>
                             )}
                           </div>
                       )}
@@ -3647,21 +3983,6 @@ export function LeadList() {
                             <Settings className="h-4 w-4" />
                           </motion.button>
                         )}
-                        {isAdmin() && (
-                          <motion.button
-                            whileHover={{ scale: 1.02, y: -1 }}
-                            whileTap={{ scale: 0.98 }}
-                            onClick={() => {
-                              setSelectedLeadForDelete(lead);
-                              setDeleteConfirmNumber('');
-                              setShowDeleteConfirmDialog(true);
-                            }}
-                            title="Delete Lead"
-                            className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-red-50/80 text-red-700 border border-red-100 hover:bg-red-50 hover:border-red-200 transition-all duration-200"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </motion.button>
-                        )}
                       <motion.div
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
@@ -3713,7 +4034,7 @@ export function LeadList() {
                           {/* Date with Icon */}
                           <div className="flex items-center text-[11px] text-gray-500">
                             <Calendar className="h-3 w-3 mr-1 flex-shrink-0" />
-                            <span>{format(lead.createdAt, 'MMM d, yyyy')} at {format(lead.createdAt, 'h:mm a')}</span>
+                            <span>{formatSafe(lead.createdAt, 'MMM d, yyyy')} at {formatSafe(lead.createdAt, 'h:mm a')}</span>
                             </div>
                             </div>
                           </div>
@@ -3741,8 +4062,8 @@ export function LeadList() {
                                 </span>
                               );
                             })()}
-                              {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || leadStrikes[lead.id] > 0) && (
-                                <div className="flex items-center gap-1 mt-0.5 flex-nowrap shrink-0">
+                              {(((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) || (canShowLeadStrikeBadge(lead.status) && leadStrikes[lead.id] > 0)) && (
+                                <div className="flex items-center gap-1 mt-0.5 flex-wrap shrink-0">
                                   {((lead.status === 'activated' || lead.status === 'activated_non_verified') && isCoordinator() && isAllGroupsCoordinator) && (
                                     <button
                                       type="button"
@@ -3768,7 +4089,8 @@ export function LeadList() {
                                       <Settings className="h-3 w-3" />
                                     </button>
                                   )}
-                              {leadStrikes[lead.id] > 0 && (
+                              {canShowLeadStrikeBadge(lead.status) && leadStrikes[lead.id] > 0 && (
+                                <>
                                 <motion.div
                                   initial={{ opacity: 0, scale: 0.9 }}
                                   animate={{ opacity: 1, scale: 1 }}
@@ -3784,6 +4106,17 @@ export function LeadList() {
                                       <AlertCircle className="h-2 w-2 mr-0.5 flex-shrink-0" />
                                   {leadStrikes[lead.id]} Strike{leadStrikes[lead.id] !== 1 ? 's' : ''}
                                 </motion.div>
+                                {canShowLeadStrikeCountdown(lead.status) && (() => {
+                                  const remaining = getLeadStrikeRemainingMs(lead.id);
+                                  if (!remaining) return null;
+                                  return (
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-red-50 text-red-700 border border-red-200 whitespace-nowrap flex-shrink-0">
+                                      <Clock className="h-2 w-2 mr-0.5 flex-shrink-0" />
+                                      {formatStrikeCountdown(remaining)}
+                                    </span>
+                                  );
+                                })()}
+                                </>
                                   )}
                                 </div>
                               )}
@@ -3855,7 +4188,7 @@ export function LeadList() {
 
                     {/* Plan Details Section */}
                     <div className="space-y-2">
-                      {lead.plans?.map((plan, planIndex) => {
+                      {getLeadDisplayPlans(lead).map((plan, planIndex) => {
                         const planEtisalatId = (plan as any).etisalatLeadId || 
                           ((lead as any).etisalatLeadIds && Array.isArray((lead as any).etisalatLeadIds) 
                             ? (lead as any).etisalatLeadIds[planIndex] 
@@ -3875,7 +4208,7 @@ export function LeadList() {
                             </div>
                             <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5 mb-0.5">
-                                    <p className="text-[11px] font-semibold text-gray-900 break-all">
+                                    <p className={`text-[11px] font-semibold break-all ${plan.numberStruckThrough ? 'text-red-800 line-through decoration-red-600 decoration-2' : 'text-gray-900'}`}>
                                     {plan.number || 'N/A'}
                                     </p>
                                     {plan.group && (
@@ -3889,6 +4222,20 @@ export function LeadList() {
                                       Etisalat ID: <span className="text-gray-900">{planEtisalatId}</span>
                                 </p>
                               )}
+                                  {numberFlags[plan.numberId] && (
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                      {numberFlags[plan.numberId].leavingSoon && (
+                                        <span className="inline-flex items-center rounded-full bg-red-100 px-1.5 py-0.5 text-[9px] font-bold text-red-700">
+                                          Leaving Soon
+                                        </span>
+                                      )}
+                                      {numberFlags[plan.numberId].exchange && (
+                                        <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-700">
+                                          Exchange
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
                             </div>
                           </div>
                               
@@ -4009,19 +4356,6 @@ export function LeadList() {
                             >
                               <Settings className="h-3.5 w-3.5" />
                             </motion.button>
-                            <motion.button
-                              whileHover={{ scale: 1.05 }}
-                              whileTap={{ scale: 0.95 }}
-                              onClick={() => {
-                                setSelectedLeadForDelete(lead);
-                                setDeleteConfirmNumber('');
-                                setShowDeleteConfirmDialog(true);
-                              }}
-                              title="Delete Lead"
-                              className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-all duration-200"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </motion.button>
                           </>
                       )}
                         {/* View Details Button */}
@@ -4048,7 +4382,7 @@ export function LeadList() {
                 <div className="absolute inset-0 z-0 bg-gradient-to-r from-indigo-500/0 to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all duration-200 pointer-events-none" />
               </motion.div>
             ))}
-          </AnimatePresence>
+          </>
           </div>
         </motion.div>
 
@@ -4348,7 +4682,7 @@ export function LeadList() {
                             <div key={plan.numberId || planIndex} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
                               <p className="text-xs text-gray-600 mb-1 flex justify-between items-center gap-2">
                                 <span><span className="text-gray-500">SR Number:</span>{' '}<span className="font-medium text-gray-900">{(plan as any).srNumber ?? (selectedLeadForGroupChange as any).srNumbers?.[planIndex] ?? (planIndex === 0 ? (selectedLeadForGroupChange as any).srNumber : null) ?? '—'}</span></span>
-                                <span><span className="text-gray-500">Number:</span>{' '}<span className="font-medium text-gray-900">{plan.number}</span></span>
+                                <span><span className="text-gray-500">Number:</span>{' '}<span className={`font-medium ${plan.numberStruckThrough ? 'text-red-800 line-through decoration-red-600 decoration-2' : 'text-gray-900'}`}>{plan.number}</span></span>
                               </p>
                               {planEtisalatId !== '—' && (
                                 <p className="text-xs text-gray-600 mb-2 text-center">
@@ -4631,7 +4965,7 @@ export function LeadList() {
                         <div key={plan.numberId || planIndex} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
                           <p className="text-xs text-gray-600 mb-1 flex justify-between items-center gap-2">
                             <span><span className="text-gray-500">SR Number:</span>{' '}<span className="font-medium text-gray-900">{(plan as any).srNumber ?? (selectedLeadForEtisalatSr as any).srNumbers?.[planIndex] ?? (planIndex === 0 ? (selectedLeadForEtisalatSr as any).srNumber : null) ?? '—'}</span></span>
-                            <span><span className="text-gray-500">Number:</span>{' '}<span className="font-medium text-gray-900">{plan.number}</span></span>
+                            <span><span className="text-gray-500">Number:</span>{' '}<span className={`font-medium ${plan.numberStruckThrough ? 'text-red-800 line-through decoration-red-600 decoration-2' : 'text-gray-900'}`}>{plan.number}</span></span>
                           </p>
                           {planEtisalatId !== '—' && (
                             <p className="text-xs text-gray-600 mb-2 text-center">

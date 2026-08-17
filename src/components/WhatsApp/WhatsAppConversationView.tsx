@@ -1,7 +1,7 @@
 import React from 'react';
 import { clsx } from 'clsx';
 import { Check, CheckCheck, XCircle, AlertCircle } from 'lucide-react';
-import { normalizeTimestamp, formatTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
+import { normalizeTimestamp, formatLocalTimestamp, getTimestampForSort } from '../../utils/timestampUtils';
 
 /**
  * WhatsApp Message Interface
@@ -190,7 +190,7 @@ export function WhatsAppConversationView({
         if (!created) {
           console.warn('Failed to normalize timestamp for message:', log.id, log.createdAt);
         }
-        const createdStr = formatTimestamp(created);
+        const createdStr = formatLocalTimestamp(created);
         const fromDigits = (log.from || '').toString().replace(/\D/g, '');
         const fromDisplay = fromDigits ? `+${fromDigits}` : '';
         const firstPlan = lead?.plans?.[0];
@@ -206,22 +206,25 @@ export function WhatsAppConversationView({
             <div className={clsx(
               'max-w-[85%] rounded-2xl px-4 py-3 shadow-sm border',
               isOutbound 
-                ? 'bg-indigo-50 text-indigo-900 border-indigo-100' 
-                : 'bg-emerald-50 text-emerald-900 border-emerald-100'
+                ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100' 
+                : 'bg-white text-gray-900 border-gray-200'
             )}>
               {/* Message Header */}
-              <div className="flex items-center justify-between text-[11px] text-gray-500/80 mb-2">
+              <div className={clsx(
+                'flex items-center justify-between text-[11px] mb-2',
+                isOutbound ? 'text-indigo-100/90' : 'text-gray-500/80'
+              )}>
                 <span className={clsx(
                   'px-2 py-0.5 rounded-full border',
                   isOutbound 
-                    ? 'bg-white text-indigo-700 border-indigo-100' 
-                    : 'bg-white text-emerald-700 border-emerald-100'
+                    ? 'bg-white/15 text-white border-white/20' 
+                    : 'bg-indigo-50 text-indigo-700 border-indigo-100'
                 )}>
                   {isOutbound ? 'Outbound' : 'Inbound'}
                 </span>
                 <span className="ml-2 flex items-center gap-1.5">
                   {fromDisplay && (
-                    <span className="font-bold text-blue-600">From {fromDisplay}</span>
+                    <span className={clsx('font-bold', isOutbound ? 'text-white' : 'text-indigo-600')}>From {fromDisplay}</span>
                   )}
                   {createdStr && ` · ${createdStr}`}
                   {isOutbound && (
@@ -230,13 +233,13 @@ export function WhatsAppConversationView({
                       title={effectiveStatus ? `Message ${STATUS_LABEL_MAP[effectiveStatus] || effectiveStatus}` : 'Message sent'}
                     >
                       {effectiveStatus === 'read' && (
-                        <CheckCheck className="w-4 h-4 text-green-500" />
+                        <CheckCheck className={clsx('w-4 h-4', isOutbound ? 'text-white' : 'text-green-500')} />
                       )}
                       {effectiveStatus === 'delivered' && (
-                        <CheckCheck className="w-4 h-4 text-gray-600" />
+                        <CheckCheck className={clsx('w-4 h-4', isOutbound ? 'text-indigo-100' : 'text-gray-600')} />
                       )}
                       {(!effectiveStatus || effectiveStatus === 'sent') && (
-                        <Check className="w-3.5 h-3.5 text-gray-500" />
+                        <Check className={clsx('w-3.5 h-3.5', isOutbound ? 'text-indigo-100' : 'text-gray-500')} />
                       )}
                       {effectiveStatus === 'failed' && (
                         <XCircle className="w-4 h-4 text-red-500" />
@@ -401,4 +404,3 @@ export function WhatsAppConversationView({
     </div>
   );
 }
-

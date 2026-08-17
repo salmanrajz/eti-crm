@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react';
 import { collection, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { toast } from 'react-hot-toast';
-import { Phone, Plus, Trash2, Users, Search, Filter, XCircle, Shield, UserCog } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Plus, Trash2, Users, Search, XCircle, Shield, UserCog, MessageCircle } from 'lucide-react';
 import { CoordinatorType } from '../../types';
+import { AdminToolSheet } from '../admin/AdminToolSheet';
 
 interface User {
   id: string;
@@ -19,7 +19,12 @@ interface User {
 
 type RoleFilter = 'all' | 'admin' | 'coordinator' | 'manager';
 
-export function AdminManagerPhoneNumbers() {
+interface AdminManagerPhoneNumbersProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export function AdminManagerPhoneNumbers({ isOpen, onClose }: AdminManagerPhoneNumbersProps) {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -29,8 +34,8 @@ export function AdminManagerPhoneNumbers() {
   const [isRemovingPhone, setIsRemovingPhone] = useState<string | null>(null);
 
   useEffect(() => {
-    loadUsers();
-  }, []);
+    if (isOpen) loadUsers();
+  }, [isOpen]);
 
   const loadUsers = async () => {
     try {
@@ -259,263 +264,189 @@ export function AdminManagerPhoneNumbers() {
     return matchesSearch && matchesRole;
   });
 
-  if (loading) {
-    return (
-      <div className="animate-pulse">
-        <div className="h-8 bg-gray-200 rounded w-1/4 mb-6"></div>
-        <div className="space-y-4">
-          {[1, 2, 3].map(i => (
-            <div key={i} className="h-16 bg-gray-200 rounded"></div>
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const rolePills: { id: RoleFilter; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'admin', label: 'Admins' },
+    { id: 'coordinator', label: 'Coordinators' },
+    { id: 'manager', label: 'Managers' },
+  ];
+
+  const roleTone = (role: string) => {
+    if (role === 'admin') return { icon: 'bg-rose-500', badge: 'bg-rose-50 text-rose-700', card: 'border-rose-100' };
+    if (role === 'coordinator') return { icon: 'bg-violet-500', badge: 'bg-violet-50 text-violet-700', card: 'border-violet-100' };
+    return { icon: 'bg-sky-500', badge: 'bg-sky-50 text-sky-700', card: 'border-sky-100' };
+  };
 
   return (
-    <div className="space-y-6">
-      {/* Role Filter */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center space-x-4">
-          <Filter className="h-5 w-5 text-gray-500" />
-          <div className="flex space-x-2">
-            {(['all', 'admin', 'coordinator', 'manager'] as RoleFilter[]).map((role) => (
+    <AdminToolSheet
+      isOpen={isOpen}
+      onClose={onClose}
+      title="WhatsApp Numbers"
+      subtitle="Notification numbers for admins, coordinators, and managers"
+      icon={MessageCircle}
+      headerClassName="bg-emerald-600"
+      wide
+    >
+      {loading ? (
+        <div className="space-y-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-24 animate-pulse rounded-2xl bg-slate-100" />
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search name, email, or team"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-9 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-emerald-400 focus:bg-white"
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-400 hover:text-slate-600"
+                >
+                  <XCircle className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            <div className="inline-flex items-center gap-1.5 self-start rounded-xl bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
+              <Users className="h-3.5 w-3.5" />
+              {filteredUsers.length}
+            </div>
+          </div>
+
+          <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+            {rolePills.map((pill) => (
               <button
-                key={role}
-                onClick={() => setRoleFilter(role)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  roleFilter === role
-                    ? 'bg-indigo-600 text-white shadow-md'
-                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                key={pill.id}
+                type="button"
+                onClick={() => setRoleFilter(pill.id)}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  roleFilter === pill.id
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                 }`}
               >
-                {role === 'all' ? 'All' : role.charAt(0).toUpperCase() + role.slice(1) + 's'}
+                {pill.label}
               </button>
             ))}
           </div>
-        </div>
-        <div className="bg-white rounded-xl px-4 py-3 shadow-sm border border-gray-200">
-          <div className="flex items-center space-x-3">
-            <Users className="h-5 w-5 text-indigo-500" />
-            <div className="text-right">
-              <div className="text-lg font-bold text-gray-900">{filteredUsers.length}</div>
-              <div className="text-xs text-gray-500">Total Users</div>
+
+          {filteredUsers.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center">
+              <Search className="mx-auto mb-3 h-8 w-8 text-slate-300" />
+              <p className="text-sm font-semibold text-slate-800">No people found</p>
+              <p className="mt-1 text-xs text-slate-500">Try another search or role filter.</p>
+              {(searchTerm || roleFilter !== 'all') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchTerm('');
+                    setRoleFilter('all');
+                  }}
+                  className="mt-4 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white"
+                >
+                  Clear filters
+                </button>
+              )}
             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Search */}
-      <div className="relative mb-6">
-        <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-        <input
-          type="text"
-          placeholder="Search by name, email, or team..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="w-full pl-12 pr-4 py-4 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200 bg-white shadow-sm text-lg"
-        />
-        {searchTerm && (
-          <button
-            onClick={() => setSearchTerm('')}
-            className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-          >
-            <XCircle className="h-5 w-5" />
-          </button>
-        )}
-      </div>
-
-      {/* Users Table */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gradient-to-r from-indigo-50 to-purple-50">
-              <tr>
-                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                  User
-                </th>
-                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                  Role
-                </th>
-                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                  Email / Team
-                </th>
-                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                  Phone Numbers
-                </th>
-                <th scope="col" className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-        <AnimatePresence>
-                {filteredUsers.map((user) => {
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-slate-200">
+              <div className="min-w-[40rem]">
+                <div className="grid grid-cols-[minmax(8rem,1fr)_minmax(7rem,0.9fr)_minmax(10rem,1.5fr)_11rem] border-b border-slate-200 bg-slate-50 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                  <div className="border-r border-slate-200 px-2 py-2 text-left">Name</div>
+                  <div className="border-r border-slate-200 px-2 py-2 text-center">Role</div>
+                  <div className="border-r border-slate-200 px-2 py-2 text-center">Numbers</div>
+                  <div className="px-2 py-2 text-center">Add</div>
+                </div>
+                {filteredUsers.map((user, rowIndex) => {
                   const RoleIcon = getRoleIcon(user.role);
+                  const tone = roleTone(user.role);
                   return (
-                    <motion.tr
+                    <div
                       key={user.id}
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      className="hover:bg-gray-50 transition-colors"
+                      className={`grid grid-cols-[minmax(8rem,1fr)_minmax(7rem,0.9fr)_minmax(10rem,1.5fr)_11rem] items-stretch border-b border-slate-200 last:border-b-0 ${
+                        rowIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'
+                      }`}
                     >
-                      {/* User Name */}
-                      <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="flex items-center space-x-3">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
-                            user.role === 'admin' ? 'bg-gradient-to-r from-red-500 via-orange-600 to-yellow-600' :
-                            user.role === 'coordinator' ? 'bg-gradient-to-r from-purple-500 via-pink-600 to-rose-600' :
-                            'bg-gradient-to-r from-blue-500 via-indigo-600 to-purple-600'
-                          }`}>
-                            <RoleIcon className="h-5 w-5 text-white" />
-                          </div>
-                          <div>
-                            <div className="text-sm font-semibold text-gray-900">{user.name}</div>
-                          </div>
+                      <div className="flex min-w-0 items-center justify-start gap-2 border-r border-slate-200 px-2 py-2">
+                        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white ${tone.icon}`}>
+                          <RoleIcon className="h-4 w-4" />
                         </div>
-                      </td>
+                        <div className="truncate text-sm font-bold text-slate-900">{user.name}</div>
+                      </div>
 
-                      {/* Role */}
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
-                          user.role === 'admin' ? 'bg-red-100 text-red-800' :
-                          user.role === 'coordinator' ? 'bg-purple-100 text-purple-800' :
-                          'bg-blue-100 text-blue-800'
-                        }`}>
+                      <div className="flex min-w-0 flex-col items-center justify-center border-r border-slate-200 px-2 py-2">
+                        <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${tone.badge}`}>
                           {getRoleDisplay(user.role, user.coordinatorType)}
                         </span>
-                      </td>
+                        {user.teamName && (
+                          <div className="mt-0.5 truncate text-center text-[11px] text-slate-500">{user.teamName}</div>
+                        )}
+                      </div>
 
-                      {/* Email / Team */}
-                      <td className="px-6 py-4">
-                        <div className="text-sm text-gray-900">
-                          {user.email && <div className="flex items-center space-x-1">
-                            <span className="w-1.5 h-1.5 bg-blue-500 rounded-full"></span>
-                            <span>{user.email}</span>
-                          </div>}
-                          {user.teamName && (
-                            <div className="flex items-center space-x-1 mt-1 text-gray-600">
-                              <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full"></span>
-                              <span>{user.teamName}</span>
-                            </div>
-                          )}
-                        </div>
-                      </td>
+                      <div className="flex min-w-0 flex-wrap items-center justify-center gap-1 border-r border-slate-200 px-2 py-2">
+                        {user.phoneNumbers.length === 0 && (
+                          <span className="text-[11px] text-slate-400">—</span>
+                        )}
+                        {user.phoneNumbers.map((phone, index) => (
+                          <div key={`${user.id}-${phone}-${index}`} className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-1.5 py-0.5">
+                            <span className="font-mono text-xs font-medium text-slate-800">{phone}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemovePhoneNumber(user.id, index)}
+                              disabled={isRemovingPhone === `${user.id}-${index}`}
+                              className="rounded p-0.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
+                              title="Remove number"
+                            >
+                              {isRemovingPhone === `${user.id}-${index}` ? (
+                                <div className="h-3 w-3 animate-spin rounded-full border-2 border-rose-500 border-t-transparent" />
+                              ) : (
+                                <Trash2 className="h-3 w-3" />
+                              )}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
 
-                      {/* Phone Numbers */}
-                      <td className="px-6 py-4">
-                        <div className="space-y-2">
-                          {user.phoneNumbers.length > 0 ? (
-                            user.phoneNumbers.map((phone, index) => (
-                              <div key={index} className="flex items-center justify-between group">
-                                <div className="flex items-center space-x-2">
-                                  <Phone className="h-4 w-4 text-green-500" />
-                                  <span className="text-sm text-gray-900 font-medium">{phone}</span>
-                        </div>
-                        <button
-                                  onClick={() => handleRemovePhoneNumber(user.id, index)}
-                                  disabled={isRemovingPhone === `${user.id}-${index}`}
-                                  className="opacity-0 group-hover:opacity-100 p-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-all disabled:opacity-50"
-                          title="Remove phone number"
-                        >
-                                  {isRemovingPhone === `${user.id}-${index}` ? (
-                                    <div className="w-3.5 h-3.5 border-2 border-red-600 border-t-transparent rounded-full animate-spin"></div>
-                          ) : (
-                                    <Trash2 className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-                              </div>
-                            ))
-                          ) : (
-                            <span className="text-sm text-gray-500 italic">No number set</span>
-                          )}
-                          
-                          {/* Add Phone Number Input */}
-                          <div className="flex items-center space-x-2 mt-2">
-                      <div className="flex-1 relative">
+                      <div className="flex items-center justify-center gap-1 px-2 py-2">
                         <input
                           type="tel"
-                                value={phoneInputs[user.id] || ''}
-                                onChange={(e) => setPhoneInputs(prev => ({ ...prev, [user.id]: e.target.value }))}
-                                placeholder="+1234567890"
-                                className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all bg-white"
-                          onKeyPress={(e) => {
-                            if (e.key === 'Enter') {
-                                    handleAddPhoneNumber(user.id);
-                            }
+                          value={phoneInputs[user.id] || ''}
+                          onChange={(e) => setPhoneInputs((prev) => ({ ...prev, [user.id]: e.target.value }))}
+                          placeholder="+971…"
+                          className="w-full min-w-0 max-w-[7.5rem] rounded-md border border-slate-200 bg-white px-2 py-1 text-center text-xs outline-none placeholder:text-slate-400 focus:border-emerald-400"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleAddPhoneNumber(user.id);
                           }}
                         />
+                        <button
+                          type="button"
+                          onClick={() => handleAddPhoneNumber(user.id)}
+                          disabled={isAddingPhone[user.id] || !phoneInputs[user.id]?.trim()}
+                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-emerald-600 text-white disabled:opacity-50"
+                        >
+                          {isAddingPhone[user.id] ? (
+                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          ) : (
+                            <Plus className="h-3.5 w-3.5" />
+                          )}
+                        </button>
                       </div>
-                      <button
-                              onClick={() => handleAddPhoneNumber(user.id)}
-                              disabled={isAddingPhone[user.id] || !phoneInputs[user.id]?.trim()}
-                              className="inline-flex items-center px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                      >
-                              {isAddingPhone[user.id] ? (
-                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                        ) : (
-                                <Plus className="h-3.5 w-3.5" />
-                        )}
-                      </button>
                     </div>
-                  </div>
-                      </td>
-
-                      {/* Actions / Status */}
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex items-center space-x-2">
-                          <div className={`flex items-center space-x-1 px-2 py-1 rounded-md text-xs font-medium ${
-                            user.phoneNumbers.length > 0 
-                              ? 'bg-green-50 text-green-700 border border-green-200' 
-                              : 'bg-gray-50 text-gray-500 border border-gray-200'
-                          }`}>
-                            <Phone className={`h-3 w-3 ${user.phoneNumbers.length > 0 ? 'text-green-500' : 'text-gray-400'}`} />
-                            <span>{user.phoneNumbers.length}</span>
-                </div>
-              </div>
-                      </td>
-                    </motion.tr>
                   );
                 })}
-        </AnimatePresence>
-
-              {filteredUsers.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="px-6 py-16 text-center">
-                    <div className="flex flex-col items-center">
-                      <div className="w-16 h-16 bg-gradient-to-r from-gray-100 to-gray-200 rounded-full flex items-center justify-center mb-4">
-                        <Search className="h-8 w-8 text-gray-400" />
+              </div>
             </div>
-                      <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                        {searchTerm || roleFilter !== 'all' ? 'No users found' : 'No users available'}
-            </h3>
-                      <p className="text-sm text-gray-500 mb-4">
-                        {searchTerm || roleFilter !== 'all'
-                          ? 'Try adjusting your search terms or filters'
-                          : 'No users are currently registered in the system'
-              }
-            </p>
-                      {(searchTerm || roleFilter !== 'all') && (
-              <button
-                          onClick={() => {
-                            setSearchTerm('');
-                            setRoleFilter('all');
-                          }}
-                          className="inline-flex items-center px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
-              >
-                <XCircle className="h-4 w-4 mr-2" />
-                          Clear Filters
-              </button>
-            )}
-                    </div>
-                  </td>
-                </tr>
-        )}
-            </tbody>
-          </table>
+          )}
         </div>
-      </div>
-    </div>
+      )}
+    </AdminToolSheet>
   );
 }

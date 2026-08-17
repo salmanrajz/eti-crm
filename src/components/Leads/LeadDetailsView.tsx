@@ -56,7 +56,9 @@ import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
 import { toast } from 'react-hot-toast';
 import { logNumberAction, resolveUserName } from '../../utils/numberLogging';
+import { rejectAwaitingLeadsForNumber, poolFieldsWhenNonVerified, poolFieldsWhenAttachingToLead, getStrikeWindowMs, strikeTimerFieldsForNumberStatus, claimQueueWouldConvertToStrikes, notifyOwnerOfClaimToStrikeConversion, checkLeadNumbersStillAttached } from '../../utils/strikeQueue';
 import { logLeadAction } from '../../utils/leadLogging';
+import { getLeadDashboardUrl } from '../../utils/leadUrl';
 import { getPlans } from '../../utils/planService';
 import { incrementVerifierCounters } from '../../utils/verifierCounters';
 import { 
@@ -204,6 +206,63 @@ const READY_MADE_MESSAGES = [
 
 type LeadMediaItem = Lead['verificationMedia'] extends Array<infer T> ? T : never;
 
+type NormalizedVerificationMedia = {
+  url: string;
+  type: 'image' | 'video' | 'audio' | 'pdf' | 'unknown';
+  name: string;
+};
+
+function inferVerificationMediaType(
+  url: string,
+  explicitType?: string
+): NormalizedVerificationMedia['type'] {
+  if (explicitType === 'image' || explicitType === 'video' || explicitType === 'audio' || explicitType === 'pdf') {
+    return explicitType;
+  }
+
+  const path = url.toLowerCase().split('?')[0];
+  if (/\.(jpe?g|png|gif|webp)$/.test(path)) return 'image';
+  if (/\.(mp3|wav|m4a|aac|ogg)$/.test(path)) return 'audio';
+  if (path.includes('/audio/') || path.includes('voice-note') || path.includes('voice_note')) return 'audio';
+  if (/\.pdf$/.test(path)) return 'pdf';
+  if (/\.(mp4|mov)$/.test(path)) return 'video';
+  // Verification voice notes are usually webm under /audio/
+  if (/\.webm$/.test(path)) return path.includes('/video/') ? 'video' : 'audio';
+  return 'unknown';
+}
+
+function normalizeVerificationMedia(
+  media: Lead['verificationMedia'] | undefined | null
+): NormalizedVerificationMedia[] {
+  if (!media) return [];
+  const items = Array.isArray(media) ? media : Object.values(media as Record<string, unknown>);
+
+  return items
+    .map((item, index) => {
+      if (typeof item === 'string') {
+        const url = item.trim();
+        if (!url) return null;
+        return {
+          url,
+          type: inferVerificationMediaType(url),
+          name: `Recording ${index + 1}`,
+        };
+      }
+      if (item && typeof item === 'object' && typeof (item as { url?: string }).url === 'string') {
+        const mediaObj = item as { url: string; type?: string; name?: string };
+        const url = mediaObj.url.trim();
+        if (!url) return null;
+        return {
+          url,
+          type: inferVerificationMediaType(url, mediaObj.type),
+          name: mediaObj.name?.trim() || `Recording ${index + 1}`,
+        };
+      }
+      return null;
+    })
+    .filter((item): item is NormalizedVerificationMedia => item !== null);
+}
+
 // Pure helpers outside component so they are never recreated on re-render
 function getCountryNameHelper(code?: string | null): string {
   if (!code) return '';
@@ -219,6 +278,55 @@ function getServiceProviderHelper(group: string): string {
     case 'G3': return 'Telecon';
     default: return group || 'Unknown Group';
   }
+}
+
+async function moveNumberPoolDocToActivatedNumbers(
+  numberId: string,
+  leadId: string,
+  activatedBy: string,
+  group?: string
+) {
+  if (!numberId || numberId.startsWith('virtual-')) return null;
+
+  const numberRef = doc(db, 'numberPool', numberId);
+  const numberDoc = await getDoc(numberRef);
+  const activatedRef = doc(db, 'activatedNumbers', numberId);
+
+  if (!numberDoc.exists()) {
+    const activeDoc = await getDoc(activatedRef);
+    if (activeDoc.exists()) {
+      await updateDoc(activatedRef, {
+        status: 'activated',
+        leadId,
+        ...(group ? { group } : {}),
+        lastStatusChange: serverTimestamp()
+      });
+      return activeDoc.data();
+    }
+    return null;
+  }
+
+  const numberData = numberDoc.data();
+  const batch = writeBatch(db);
+
+  batch.set(activatedRef, {
+    ...numberData,
+    status: 'activated',
+    leadId,
+    ...(group ? { group } : {}),
+    activatedAt: serverTimestamp(),
+    activatedBy,
+    originalId: numberId,
+    originalCollection: 'numberPool',
+    lastStatusChange: serverTimestamp()
+  });
+  batch.delete(numberRef);
+
+  await batch.commit();
+  void rejectAwaitingLeadsForNumber(numberId).catch((err) => {
+    console.error('Failed to reject awaiting leads after activation:', err);
+  });
+  return numberData;
 }
 
 export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { lead: Lead; onEdit: () => void; onResubmit?: () => void; isResubmitting?: boolean }) {
@@ -249,6 +357,7 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
   const [isManagerActionProcessing, setIsManagerActionProcessing] = useState(false);
   const [showNumberErrorModal, setShowNumberErrorModal] = useState(false);
   const [missingNumbers, setMissingNumbers] = useState<string[]>([]);
+  const [numberErrorMode, setNumberErrorMode] = useState<'missing' | 'not_with_lead'>('missing');
   const [editError, setEditError] = useState<{ reason: string; number: string } | null>(null);
   const [isValidatingEdit, setIsValidatingEdit] = useState(false);
   const [etisalatLeadId, setEtisalatLeadId] = useState('');
@@ -901,12 +1010,12 @@ export function LeadDetailsView({ lead, onEdit, onResubmit, isResubmitting }: { 
     // Agents can edit & resubmit both 'non_verified' and legacy 'follow_verification' leads
     (user?.role === 'agent' &&
       user.id === lead.agentId &&
-      (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
+      (lead.status === 'non_verified' || lead.status === 'follow_verification' || lead.status === 'awaiting_for_number')) ||
     // Multi-team managers can edit non_verified leads from their managed teams
     (isManager() &&
       user?.managedTeams &&
       user.managedTeams.includes(lead.teamId || '') &&
-      (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
+      (lead.status === 'non_verified' || lead.status === 'follow_verification' || lead.status === 'awaiting_for_number')) ||
     isAdmin() ||
     isCoordinator()
   ), [isVerifier, isManager, isAdmin, isCoordinator, user, lead.status, lead.agentId, lead.teamId]);
@@ -1041,28 +1150,24 @@ Language: ${lead.language || 'N/A'}`;
   }, []);
 
   useEffect(() => {
-    if (lead.verificationMedia) {
-      const transformedMedia = lead.verificationMedia.map(media => {
-        if (typeof media === 'string') {
-          const isImage = media.toLowerCase().endsWith('.jpg') || 
-                         media.toLowerCase().endsWith('.jpeg') || 
-                         media.toLowerCase().endsWith('.png');
-          const isVideo = media.toLowerCase().endsWith('.mp4') || 
-                         media.toLowerCase().endsWith('.webm');
-          
-          return {
-            url: media,
-            type: isImage ? 'image' as const : isVideo ? 'video' as const : 'audio' as const,
-            name: `Media ${media.split('/').pop()}`
-          };
-        }
-        return media;
-      });
-      setVerificationMedia(transformedMedia);
-      setUploadComplete(transformedMedia.length > 0);
-      setUploadProgress(transformedMedia.length > 0 ? 100 : 0);
-    }
+    const transformedMedia = normalizeVerificationMedia(lead.verificationMedia);
+    setVerificationMedia(transformedMedia as LeadMediaItem[]);
+    setUploadComplete(transformedMedia.length > 0);
+    setUploadProgress(transformedMedia.length > 0 ? 100 : 0);
   }, [lead.verificationMedia]);
+
+  const normalizedVerificationMedia = useMemo(
+    () => normalizeVerificationMedia(lead.verificationMedia),
+    [lead.verificationMedia]
+  );
+  const verificationRecordings = useMemo(
+    () => normalizedVerificationMedia.filter((item) => item.type === 'audio'),
+    [normalizedVerificationMedia]
+  );
+  const verificationOtherMedia = useMemo(
+    () => normalizedVerificationMedia.filter((item) => item.type !== 'audio'),
+    [normalizedVerificationMedia]
+  );
 
   useEffect(() => {
     if (!showMediaModal) {
@@ -1129,6 +1234,92 @@ Language: ${lead.language || 'N/A'}`;
     return { valid: missing.length === 0, missingNumbers: missing };
   }, [lead.plans]);
 
+  /** Returns false and shows popup when lead is awaiting number / numbers no longer attached.
+   * Must run before opening Assign / other coordinator dialogs. */
+  const ensureLeadNumbersAttachedForAction = useCallback(async (): Promise<boolean> => {
+    const plans = Array.isArray(lead.plans) ? lead.plans : [];
+    const struckLocal = plans.filter(
+      (p: any) =>
+        p?.numberStruckThrough &&
+        p?.numberId &&
+        !String(p.numberId).startsWith('virtual-')
+    );
+    const awaitingLocal =
+      localStatus === 'awaiting_for_number' ||
+      lead.status === 'awaiting_for_number' ||
+      (Array.isArray((lead as any).awaitingNumberIds) &&
+        (lead as any).awaitingNumberIds.length > 0 &&
+        struckLocal.length > 0);
+
+    const blockWithPopup = (numbers: string[]) => {
+      setNumberErrorMode('not_with_lead');
+      setMissingNumbers(numbers);
+      setShowNumberErrorModal(true);
+      setShowCoordinatorDialog(false);
+      setCoordinatorAction(null);
+      setShowManagerAssignDialog(false);
+      if (awaitingLocal || lead.status === 'awaiting_for_number') {
+        setLocalStatus('awaiting_for_number');
+      }
+    };
+
+    if (awaitingLocal || struckLocal.length > 0) {
+      blockWithPopup(
+        struckLocal
+          .map((p: any) => String(p.number || p.numberId || '').trim())
+          .filter(Boolean)
+      );
+      return false;
+    }
+
+    const check = await checkLeadNumbersStillAttached({
+      id: lead.id,
+      status: lead.status || localStatus,
+      plans: lead.plans,
+    });
+    if (check.leadStatus && check.leadStatus !== localStatus) {
+      setLocalStatus(check.leadStatus);
+    }
+    if (!check.ok) {
+      blockWithPopup(check.numbers);
+      return false;
+    }
+    return true;
+  }, [lead.id, lead.status, lead.plans, localStatus]);
+
+  const openCoordinatorAction = useCallback(
+    async (
+      action:
+        | 'assign'
+        | 'activate'
+        | 'activate_non_verified'
+        | 'followup'
+        | 'later'
+        | 'reject'
+        | 'reassign'
+        | 'reverification'
+    ) => {
+      // Do not open Assign Lead / Etisalat dialog until the check passes
+      if (!(await ensureLeadNumbersAttachedForAction())) {
+        return;
+      }
+      if (action === 'assign' || action === 'reassign') {
+        if (lead.etisalatLeadId) {
+          setEtisalatLeadId(lead.etisalatLeadId);
+        }
+        if (lead.emirate) {
+          setSelectedEmirate(lead.emirate);
+        }
+      }
+      if (action === 'reject') {
+        setRejectionReason('');
+      }
+      setCoordinatorAction(action);
+      setShowCoordinatorDialog(true);
+    },
+    [ensureLeadNumbersAttachedForAction, lead.etisalatLeadId, lead.emirate]
+  );
+
   const handleVerificationAction = async (actionOverride?: 'verify' | 'reject' | 'non_verified' | 'verify_at_location', noteOverride?: string) => {
     setIsVerifyActionProcessing(true);
     try {
@@ -1141,6 +1332,7 @@ Language: ${lead.language || 'N/A'}`;
       // Validate that all numbers exist in numberPool
       const numberValidation = await validateNumbersExist();
       if (!numberValidation.valid) {
+        setNumberErrorMode('missing');
         setMissingNumbers(numberValidation.missingNumbers);
         setShowNumberErrorModal(true);
         setIsVerifyActionProcessing(false);
@@ -1314,104 +1506,28 @@ Language: ${lead.language || 'N/A'}`;
               );
           }
           } else if (leadStatus === 'non_verified') {
-            // For non_verified leads, reserve the number for the original agent (use persisted value, not in-memory lead)
-            const agentId = persistedAgentId;
+            const agentId = persistedAgentId || numberData?.reservedBy || null;
             const now = new Date();
-            const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
-            
-            // Check if there's a claim queue or existing claiming agent
-            const claimQueue = numberData?.claimQueue || [];
-            const existingClaimingAgentId = numberData?.claimingAgentId;
-            
-            if (claimQueue.length > 0) {
-              // Get the first claim in queue
-              const nextClaim = claimQueue[0];
-              
-              // Reserve for the original agent, but start the claim timer for the first claim
-              await updateDoc(numberRef, {
-                status: 'reserved',
-                reservedBy: agentId,
-                reservedAt: serverTimestamp(),
-                expiresAt: expiresAt,
-                lastStatusChange: serverTimestamp(),
-                claimingAgentId: nextClaim.agentId,
-                claimingStartedAt: serverTimestamp(),
-                claimingExpiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes claim timer
-                claimQueue: claimQueue.slice(1),
-                leadId: lead.id
-              });
+            const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+            await updateDoc(numberRef, {
+              status: 'non_verified',
+              reservedBy: agentId,
+              reservedAt: serverTimestamp(),
+              expiresAt: expiresAt,
+              lastStatusChange: serverTimestamp(),
+              leadId: lead.id,
+              ...poolFieldsWhenNonVerified(),
+            });
 
-              // Log status change
-              const agentName = await resolveUserName(agentId);
-              await logNumberAction(
-                plan.numberId,
-                plan.number || '',
-                'status_changed',
-                { status: numberData?.status },
-                { status: 'reserved', reservedBy: agentId, leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName}, claim timer started`
-              );
-
-              // If there's a second claim, send them notification
-              if (claimQueue.length > 1) {
-                await addDoc(collection(db, 'notifications'), {
-                  userId: claimQueue[1].agentId,
-                  type: 'number_claimed',
-                  title: 'Number Claim Started',
-                  message: `The number is now available for your claim. You have 15 minutes to take ownership.`,
-                  read: false,
-                  createdAt: serverTimestamp(),
-                  numberId: plan.numberId
-                });
-              }
-            } else if (existingClaimingAgentId) {
-              // No queue but there's an existing claiming agent, restart their timer
-              await updateDoc(numberRef, {
-                status: 'reserved',
-                reservedBy: agentId,
-                reservedAt: serverTimestamp(),
-                expiresAt: expiresAt,
-                lastStatusChange: serverTimestamp(),
-                claimingAgentId: existingClaimingAgentId,
-                claimingStartedAt: serverTimestamp(),
-                claimingExpiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes claim timer
-                leadId: lead.id
-              });
-
-              const agentName2 = await resolveUserName(agentId);
-              await logNumberAction(
-                plan.numberId,
-                plan.number || '',
-                'status_changed',
-                { status: numberData?.status },
-                { status: 'reserved', reservedBy: agentId, leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName2}, existing claim timer restarted`
-              );
-            } else {
-              // No claims in queue and no existing claiming agent, just reserve for the original agent
-              await updateDoc(numberRef, {
-                status: 'reserved',
-                reservedBy: agentId,
-                reservedAt: serverTimestamp(),
-                expiresAt: expiresAt,
-                lastStatusChange: serverTimestamp(),
-                claimingAgentId: null,
-                claimingStartedAt: null,
-                claimingExpiresAt: null,
-                claimQueue: [],
-                leadId: lead.id
-              });
-
-              const agentName3 = await resolveUserName(agentId);
-              await logNumberAction(
-                plan.numberId,
-                plan.number || '',
-                'status_changed',
-                { status: numberData?.status },
-                { status: 'reserved', reservedBy: agentId, leadId: lead.id },
-                `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number reserved for agent ${agentName3}`
-              );
-            }
+            const agentName = await resolveUserName(agentId);
+            await logNumberAction(
+              plan.numberId,
+              plan.number || '',
+              'status_changed',
+              { status: numberData?.status },
+              { status: 'non_verified', reservedBy: agentId, leadId: lead.id },
+              `Verifier ${user?.name || 'Unknown'} marked lead as non verified, number held for agent ${agentName}`
+            );
           } else if (leadStatus === 'assigned_to_cord' && isVerifyAtLocation) {
             // For verify_at_location, set number status to assigned_to_cord
             await updateDoc(numberRef, {
@@ -1429,30 +1545,52 @@ Language: ${lead.language || 'N/A'}`;
               `Verifier ${user?.name || 'Unknown'} verified at location, assigned to coordinator`
             );
           } else if (leadStatus === 'verified' || leadStatus === 'activated') {
-            // For verified/activated leads, clear ALL claim data
-            const updateData: any = {
-              status: leadStatus,
-              lastStatusChange: serverTimestamp(),
-              leadId: lead.id,
-              // Clear all claim-related fields
-              claimingAgentId: null,
-              claimingStartedAt: null,
-              claimingExpiresAt: null,
-              claimQueue: [],
-              claims: [],
-              claimedAt: null,
-              lastClaimedAt: null
-            };
-            
-            await updateDoc(numberRef, updateData);
+            const agentId = persistedAgentId;
+            // For activated leads, move the number out of numberPool into activatedNumbers.
+            // For verified leads, keep existing strikes/claims (convert claim queue into strikes).
+            if (leadStatus === 'activated') {
+              await moveNumberPoolDocToActivatedNumbers(
+                plan.numberId,
+                lead.id,
+                user?.id || 'verifier-activation',
+                plan.group
+              );
+            } else {
+              const strikeWindowMs = await getStrikeWindowMs();
+              const convertingClaims = claimQueueWouldConvertToStrikes(numberData);
+              const attachFields = poolFieldsWhenAttachingToLead(numberData, strikeWindowMs);
+              const mergedForTimer = {
+                claims: (attachFields as any).claims || numberData?.claims,
+                strikeExpiresAt:
+                  (attachFields as any).strikeExpiresAt ?? numberData?.strikeExpiresAt,
+              };
+              await updateDoc(numberRef, {
+                status: leadStatus,
+                lastStatusChange: serverTimestamp(),
+                leadId: lead.id,
+                reservedBy: agentId || null,
+                reservedAt: agentId ? serverTimestamp() : null,
+                expiresAt: null,
+                ...attachFields,
+                ...strikeTimerFieldsForNumberStatus(leadStatus, mergedForTimer, strikeWindowMs),
+              });
+              if (convertingClaims && lead.id) {
+                notifyOwnerOfClaimToStrikeConversion({
+                  leadId: lead.id,
+                  numberId: plan.numberId,
+                  number: plan.number,
+                });
+              }
+            }
 
+            const agentName = agentId ? await resolveUserName(agentId) : 'Unknown';
             await logNumberAction(
               plan.numberId,
               plan.number || '',
               'status_changed',
-              { status: numberData?.status },
-              { status: leadStatus, leadId: lead.id },
-              `Verifier ${user?.name || 'Unknown'} verified lead, cleared claim data`
+              { status: numberData?.status, reservedBy: numberData?.reservedBy },
+              { status: leadStatus, leadId: lead.id, reservedBy: agentId },
+              `Verifier ${user?.name || 'Unknown'} verified lead, reservedBy set to agent ${agentName}`
             );
           } else {
             // For other verification actions, update normally
@@ -1520,7 +1658,7 @@ Language: ${lead.language || 'N/A'}`;
                     { type: 'text', text: lead.plans?.[0]?.number || 'N/A' },
                     { type: 'text', text: statusMessage },
                     { type: 'text', text: user?.name || 'N/A' },
-                    { type: 'text', text: `${window.location.origin}/dashboard/leads/${lead.id}` }
+                    { type: 'text', text: getLeadDashboardUrl(lead.id) }
                   ],
                 });
               } catch (e) {
@@ -1577,6 +1715,9 @@ Language: ${lead.language || 'N/A'}`;
   const handleManagerAssign = async () => {
     setIsManagerActionProcessing(true);
     try {
+      if (!(await ensureLeadNumbersAttachedForAction())) {
+        return;
+      }
       const leadRef = doc(db, 'leads', lead.id);
       const trimmedLocationUrl = managerLocationUrl.trim();
 
@@ -2181,9 +2322,14 @@ Language: ${lead.language || 'N/A'}`;
   };
 
   const handleCoordinatorAction = async () => {
+    if (!(await ensureLeadNumbersAttachedForAction())) {
+      return;
+    }
+
     // Validate that all numbers exist in numberPool
     const numberValidation = await validateNumbersExist();
     if (!numberValidation.valid) {
+      setNumberErrorMode('missing');
       setMissingNumbers(numberValidation.missingNumbers);
       setShowNumberErrorModal(true);
       return;
@@ -2669,16 +2815,17 @@ Language: ${lead.language || 'N/A'}`;
                     lastStatusChange: new Date(),
                     leadId: lead.id,
                     ...(selectedGroups[index] ? { group: selectedGroups[index] } : {})
-                  }).then(() =>
-                    logNumberAction(
+                  }).then(() => {
+                    void rejectAwaitingLeadsForNumber(newNumberId);
+                    return logNumberAction(
                       newNumberId,
                       newNumber || '',
                       'status_changed',
                       { status: newNumberDoc.data()?.status },
                       { status: 'activated_non_verified', leadId: lead.id },
                       `Coordinator ${user?.name || 'Unknown'} activated with number change`
-                    )
-                  )
+                    );
+                  })
                 );
               }
             }
@@ -2691,12 +2838,24 @@ Language: ${lead.language || 'N/A'}`;
                 ? 'activated_non_verified'
                 : 'activated';
               numberPoolUpdates.push(
-                updateDoc(numberRef, {
-                  status: finalStatus,
-                  lastStatusChange: new Date(),
-                  leadId: lead.id,
-                  ...(selectedGroups[index] ? { group: selectedGroups[index] } : {})
-                }).then(() =>
+                (finalStatus === 'activated'
+                  ? moveNumberPoolDocToActivatedNumbers(
+                      oldNumberId,
+                      lead.id,
+                      user?.id || 'coordinator-activation',
+                      selectedGroups[index]
+                    )
+                  : updateDoc(numberRef, {
+                      status: finalStatus,
+                      lastStatusChange: new Date(),
+                      leadId: lead.id,
+                      ...(selectedGroups[index] ? { group: selectedGroups[index] } : {})
+                    }).then(() => {
+                      if (finalStatus === 'activated_non_verified') {
+                        void rejectAwaitingLeadsForNumber(oldNumberId);
+                      }
+                    })
+                ).then(() =>
                   logNumberAction(
                     oldNumberId,
                     oldNumber || '',
@@ -2724,16 +2883,17 @@ Language: ${lead.language || 'N/A'}`;
                   lastStatusChange: new Date(),
                   leadId: lead.id,
                   ...(newNum.selectedGroup ? { group: newNum.selectedGroup } : {})
-                }).then(() =>
-                  logNumberAction(
+                }).then(() => {
+                  void rejectAwaitingLeadsForNumber(newNum.numberId);
+                  return logNumberAction(
                     newNum.numberId,
                     newNum.number,
                     'status_changed',
                     { status: numberDoc.data()?.status },
                     { status: 'activated_non_verified', leadId: lead.id },
                     `Coordinator ${user?.name || 'Unknown'} added and activated new number`
-                  )
-                )
+                  );
+                })
               );
             }
           }
@@ -2780,6 +2940,7 @@ Language: ${lead.language || 'N/A'}`;
               leadId: lead.id,
               ...(selectedGroup ? { group: selectedGroup } : {})
             });
+            void rejectAwaitingLeadsForNumber(editableNumberId);
             
             await logNumberAction(
               editableNumberId,
@@ -2830,6 +2991,7 @@ Language: ${lead.language || 'N/A'}`;
                 { status: 'activated', leadId: null },
                 `Coordinator ${user?.name || 'Unknown'} rejected lead (Number Already Active), set number to activated`
               );
+              void rejectAwaitingLeadsForNumber(plan.numberId);
             } else if (rejectionReason === 'number_return') {
               // Delete number from numberPool and add to deletedNumbers with status 'returned'
               const batch = writeBatch(db);
@@ -2938,12 +3100,26 @@ Language: ${lead.language || 'N/A'}`;
               return;
             }
             const numberData = numberDoc.data();
-            await updateDoc(numberRef, {
-              status: updateData.status,
-              lastStatusChange: new Date(),
-              leadId: lead.id,
-              ...(selectedGroup ? { group: selectedGroup } : {})
-            });
+            if (updateData.status === 'activated') {
+              await moveNumberPoolDocToActivatedNumbers(
+                plan.numberId,
+                lead.id,
+                user?.id || 'coordinator-activation',
+                selectedGroup || plan.group
+              );
+            } else {
+              await updateDoc(numberRef, {
+                status: updateData.status,
+                lastStatusChange: new Date(),
+                leadId: lead.id,
+                ...(selectedGroup ? { group: selectedGroup } : {}),
+                ...strikeTimerFieldsForNumberStatus(
+                  updateData.status,
+                  numberData,
+                  await getStrikeWindowMs()
+                ),
+              });
+            }
 
             await logNumberAction(
               plan.numberId,
@@ -3122,8 +3298,8 @@ Language: ${lead.language || 'N/A'}`;
     try {
       // Check if user can edit/resubmit this lead
       const canEditResubmit = 
-        (user.role === 'agent' && user.id === lead.agentId && (lead.status === 'non_verified' || lead.status === 'follow_verification')) ||
-        (isManager() && user.managedTeams && user.managedTeams.includes(lead.teamId || '') && (lead.status === 'non_verified' || lead.status === 'follow_verification'));
+        (user.role === 'agent' && user.id === lead.agentId && (lead.status === 'non_verified' || lead.status === 'follow_verification' || lead.status === 'awaiting_for_number')) ||
+        (isManager() && user.managedTeams && user.managedTeams.includes(lead.teamId || '') && (lead.status === 'non_verified' || lead.status === 'follow_verification' || lead.status === 'awaiting_for_number'));
 
       if (!canEditResubmit) {
         // If not edit/resubmit scenario, just open edit modal directly
@@ -3132,17 +3308,23 @@ Language: ${lead.language || 'N/A'}`;
       }
 
       // Get all numbers attached to this lead
-      const plans = (lead.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+      const isAwaiting = lead.status === 'awaiting_for_number';
+      const plans = (lead.plans || []).filter((p: any) =>
+        p?.numberId &&
+        !p.numberId.startsWith('virtual-') &&
+        (isAwaiting || !p.numberStruckThrough)
+      );
+      const numbersToCheck = plans.length > 0
+        ? plans
+        : (lead.awaitingNumbers || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
       
-      if (plans.length === 0) {
-        // No numbers to validate, proceed with edit
+      if (numbersToCheck.length === 0) {
         onEdit();
         return;
       }
 
-      // Validate that all numbers are either open or reserved by this agent
       const numberChecks = await Promise.all(
-        plans.map(async (p: any) => {
+        numbersToCheck.map(async (p: any) => {
           try {
             const numberRef = doc(db, 'numberPool', p.numberId);
             const numberDoc = await getDoc(numberRef);
@@ -3156,9 +3338,11 @@ Language: ${lead.language || 'N/A'}`;
             
             // Number is valid only if: open, OR reserved by this agent, OR attached to this lead with resubmittable status (non_verified/follow_verification)
             const isOpen = numberStatus === 'open';
-            const isReservedByAgent = numberStatus === 'reserved' && (reservedBy === user.id || reservedBy === lead.agentId);
+            const isReservedByAgent = (numberStatus === 'reserved' || numberStatus === 'non_verified') && (reservedBy === user.id || reservedBy === lead.agentId);
             const isOnThisLeadResubmittable = numberLeadId === lead.id && ['non_verified', 'follow_verification'].includes(numberStatus);
-            const isValid = isOpen || isReservedByAgent || isOnThisLeadResubmittable;
+            const isValid = lead.status === 'awaiting_for_number'
+              ? (isOpen || isReservedByAgent)
+              : (isOpen || isReservedByAgent || isOnThisLeadResubmittable);
             
             if (!isValid) {
               const reason = numberStatus === 'reserved' 
@@ -3405,7 +3589,10 @@ Language: ${lead.language || 'N/A'}`;
         <div className="flex flex-wrap gap-2 sm:gap-3 justify-end">
           {(canManagerAssign || canAgentAssignToCoordinator) && (
             <button
-              onClick={() => setShowManagerAssignDialog(true)}
+              onClick={async () => {
+                if (!(await ensureLeadNumbersAttachedForAction())) return;
+                setShowManagerAssignDialog(true);
+              }}
               className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
             >
               <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
@@ -3419,58 +3606,35 @@ Language: ${lead.language || 'N/A'}`;
                (localStatus === 'assigned_to_cord') ? (
                 <>
                   <button
-                    onClick={() => {
-                      // Prefill Etisalat Lead ID and Emirates if they exist
-                      if (lead.etisalatLeadId) {
-                        setEtisalatLeadId(lead.etisalatLeadId);
-                      }
-                      if (lead.emirate) {
-                        setSelectedEmirate(lead.emirate);
-                      }
-                      setCoordinatorAction('assign');
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('assign')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                   >
                     <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Assign
                   </button>
                   <button
-                    onClick={() => {
-                      setCoordinatorAction('followup');
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('followup')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
                   >
                     <Calendar className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Follow-up
                   </button>
                   <button
-                    onClick={() => {
-                      setCoordinatorAction('reverification');
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('reverification')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                   >
                     <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Send for Reverification
                   </button>
                   <button
-                    onClick={() => {
-                      setCoordinatorAction('later');
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('later')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
                   >
                     <Clock className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
                     Later
                   </button>
                   <button
-                    onClick={() => {
-                      setCoordinatorAction('reject');
-                      setRejectionReason(''); // Reset rejection reason when opening dialog
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('reject')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
                   >
                     <XCircle className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
@@ -3484,8 +3648,7 @@ Language: ${lead.language || 'N/A'}`;
                   {!((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && (
                   <button
                     onClick={() => {
-                      setCoordinatorAction('activate');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('activate');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                   >
@@ -3495,8 +3658,7 @@ Language: ${lead.language || 'N/A'}`;
                   )}
                   <button
                     onClick={() => {
-                      setCoordinatorAction('activate_non_verified');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('activate_non_verified');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
                   >
@@ -3505,8 +3667,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('followup');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('followup');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
                   >
@@ -3515,8 +3676,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('later');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('later');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
                   >
@@ -3525,9 +3685,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('reject');
-                      setRejectionReason(''); // Reset rejection reason when opening dialog
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('reject');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
                   >
@@ -3542,8 +3700,7 @@ Language: ${lead.language || 'N/A'}`;
                   {!((lead as any).pendingVerificationAtLocation === true || (lead as any).pendingVerificationAtLocation === 'true') && (
                   <button
                     onClick={() => {
-                      setCoordinatorAction('activate');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('activate');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                   >
@@ -3553,8 +3710,7 @@ Language: ${lead.language || 'N/A'}`;
                   )}
                   <button
                     onClick={() => {
-                      setCoordinatorAction('activate_non_verified');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('activate_non_verified');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
                   >
@@ -3563,8 +3719,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('followup');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('followup');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
                   >
@@ -3573,8 +3728,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('reverification');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('reverification');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                   >
@@ -3583,9 +3737,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('reject');
-                      setRejectionReason(''); // Reset rejection reason when opening dialog
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('reject');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
                   >
@@ -3603,8 +3755,7 @@ Language: ${lead.language || 'N/A'}`;
                   {isAdmin() && (
                     <button
                       onClick={() => {
-                        setCoordinatorAction('activate_non_verified');
-                        setShowCoordinatorDialog(true);
+                        openCoordinatorAction('activate_non_verified');
                       }}
                       className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
                     >
@@ -3614,9 +3765,7 @@ Language: ${lead.language || 'N/A'}`;
                   )}
                   <button
                     onClick={() => {
-                      setCoordinatorAction('reject');
-                      setRejectionReason(''); // Reset rejection reason when opening dialog
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('reject');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
                   >
@@ -3629,17 +3778,7 @@ Language: ${lead.language || 'N/A'}`;
               {lead.status === 'follow_up' && !lead.managerAssigned && (
                 <>
                   <button
-                    onClick={() => {
-                      // Prefill Etisalat Lead ID and Emirates if they exist
-                      if (lead.etisalatLeadId) {
-                        setEtisalatLeadId(lead.etisalatLeadId);
-                      }
-                      if (lead.emirate) {
-                        setSelectedEmirate(lead.emirate);
-                      }
-                      setCoordinatorAction('assign');
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('assign')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                   >
                     <CheckCircleIcon className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
@@ -3647,8 +3786,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('followup');
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('followup');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
                   >
@@ -3657,9 +3795,7 @@ Language: ${lead.language || 'N/A'}`;
                   </button>
                   <button
                     onClick={() => {
-                      setCoordinatorAction('reject');
-                      setRejectionReason(''); // Reset rejection reason when opening dialog
-                      setShowCoordinatorDialog(true);
+                      openCoordinatorAction('reject');
                     }}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
                   >
@@ -3686,17 +3822,7 @@ Language: ${lead.language || 'N/A'}`;
                 
                 return (
                   <button
-                    onClick={() => {
-                      // Prefill Etisalat Lead ID and Emirates if they exist
-                      if (lead.etisalatLeadId) {
-                        setEtisalatLeadId(lead.etisalatLeadId);
-                      }
-                      if (lead.emirate) {
-                        setSelectedEmirate(lead.emirate);
-                      }
-                      setCoordinatorAction('reassign');
-                      setShowCoordinatorDialog(true);
-                    }}
+                    onClick={() => openCoordinatorAction('reassign')}
                     className="inline-flex items-center px-3 sm:px-4 py-2 border border-transparent rounded-md shadow-sm text-xs sm:text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
                   >
                     <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
@@ -3752,7 +3878,7 @@ Language: ${lead.language || 'N/A'}`;
                 <>
               {user?.role === 'agent' &&
               user.id === lead.agentId &&
-              (lead.status === 'non_verified' || lead.status === 'follow_verification')
+              (lead.status === 'non_verified' || lead.status === 'follow_verification' || lead.status === 'awaiting_for_number')
                 ? 'Edit & Resubmit'
                 : 'Edit Lead'}
                 </>
@@ -3774,7 +3900,7 @@ Language: ${lead.language || 'N/A'}`;
           )}
           {((user?.role === 'agent' && user.id === lead.agentId) ||
             (isManager() && user?.managedTeams && user.managedTeams.includes(lead.teamId || ''))) &&
-            (lead.status === 'non_verified' || lead.status === 'follow_verification') && (
+            (lead.status === 'non_verified' || lead.status === 'follow_verification' || lead.status === 'awaiting_for_number') && (
             <button
               onClick={() => !isResubmitting && onResubmit && onResubmit()}
               disabled={isResubmitting}
@@ -4379,7 +4505,7 @@ Language: ${lead.language || 'N/A'}`;
                           )}
 
                           {/* Activation Details */}
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                             <div>
                               <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
                               <input
@@ -4520,7 +4646,7 @@ Language: ${lead.language || 'N/A'}`;
                             </div>
 
                             {/* Activation Details */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                               <div>
                                 <label className="block text-sm font-semibold text-gray-900">Activation Date <span className="text-red-500">*</span></label>
                                 <input
@@ -5213,7 +5339,7 @@ Language: ${lead.language || 'N/A'}`;
 
             {/* Footer Actions */}
             <div className={`bg-gray-50 px-3 py-2.5 sm:px-6 sm:py-4 border-t border-gray-100 ${isActivationDialog ? 'mb-0' : ''}`}
-                 style={isActivationDialog ? { paddingBottom: 'max(1rem, calc(0.75rem + env(safe-area-inset-bottom)))' } : {}}>
+                 style={{ paddingBottom: isActivationDialog ? 'max(1rem, calc(0.75rem + env(safe-area-inset-bottom)))' : 'max(0.75rem, env(safe-area-inset-bottom, 0px))' }}>
               <div className="flex flex-col sm:flex-row justify-end gap-1.5 sm:gap-3">
                 <button
                   onClick={() => {
@@ -5652,7 +5778,13 @@ Language: ${lead.language || 'N/A'}`;
             ) : null
           }
         >
-          {lead.plans?.map((plan, index) => (
+          {(lead.plans?.length
+            ? lead.plans
+            : ((lead as any).awaitingNumbers || []).map((entry: any) => ({
+                ...entry,
+                numberStruckThrough: true,
+              }))
+          ).map((plan, index) => (
             <div key={index} className="col-span-1 lg:col-span-2">
               <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-4 sm:p-6 rounded-xl border border-gray-200/60 shadow-sm hover:shadow-md transition-all duration-200">
                 <div className="space-y-4">
@@ -5663,7 +5795,7 @@ Language: ${lead.language || 'N/A'}`;
                         <Package className="w-5 h-5 text-white" />
                       </div>
                       <div>
-                        <p className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                        <p className={`text-lg font-semibold flex items-center gap-2 ${plan.numberStruckThrough ? 'text-red-800 line-through decoration-red-600 decoration-2' : 'text-gray-900'}`}>
                           {plan.number}
                           {plan.group && (
                             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-100 text-indigo-700">
@@ -5858,71 +5990,97 @@ Language: ${lead.language || 'N/A'}`;
           </FormSection>
         )}
 
-        {lead.verificationMedia && lead.verificationMedia.length > 0 && (
+        {normalizedVerificationMedia.length > 0 && (
           <FormSection
             icon={FileCheck}
             title="Verification Media"
             description="Media files attached during verification"
           >
-            <div className="col-span-1 lg:col-span-2">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                {lead.verificationMedia.map((media, index) => {
-                  // Ensure we're working with the correct media object structure
-                  const mediaUrl = typeof media === 'string' ? media : media.url;
-                  const mediaType = typeof media === 'string' 
-                    ? media.toLowerCase().endsWith('.jpg') || media.toLowerCase().endsWith('.jpeg') || media.toLowerCase().endsWith('.png')
-                      ? 'image'
-                      : media.toLowerCase().endsWith('.mp4') || media.toLowerCase().endsWith('.webm')
-                        ? 'video'
-                        : media.toLowerCase().endsWith('.mp3') || media.toLowerCase().endsWith('.wav')
-                          ? 'audio'
-                          : media.toLowerCase().endsWith('.pdf')
-                            ? 'pdf'
-                            : 'unknown'
-                    : media.type;
-                  const mediaName = typeof media === 'string' ? `Media ${index + 1}` : media.name;
-
-                  return (
-                  <div key={index} className="bg-gray-50 p-3 sm:p-4 rounded-lg">
-                    <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
-                        {mediaType === 'image' ? (
-                        <img
-                            src={mediaUrl}
-                            alt={mediaName}
-                          className="w-full h-full object-cover"
-                        />
-                        ) : mediaType === 'video' ? (
-                        <video
-                            src={mediaUrl}
-                          controls
-                          className="w-full h-full object-cover"
-                        />
-                        ) : mediaType === 'audio' ? (
-                        <audio
-                            src={mediaUrl}
-                          controls
-                          className="w-full"
-                        />
-                        ) : mediaType === 'pdf' ? (
-                        <a href={mediaUrl} target="_blank" rel="noreferrer" className="flex items-center justify-center h-full text-indigo-600 underline">
-                          Open PDF
-                        </a>
-                        ) : (
-                          <div className="flex items-center justify-center h-full">
-                            <FileText className="w-8 h-8 text-gray-400" />
-                          </div>
-                      )}
-                    </div>
-                      <div className="mt-2 text-xs sm:text-sm text-gray-700 space-y-1">
-                        <div className="font-medium">{mediaName}</div>
-                        <div className="flex flex-wrap gap-2">
-                          <a href={mediaUrl} target="_blank" rel="noreferrer" className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-indigo-700 bg-white hover:bg-indigo-50">Open File</a>
+            <div className="col-span-1 lg:col-span-2 space-y-4">
+              {verificationRecordings.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-semibold text-gray-800">
+                    Recordings ({verificationRecordings.length})
+                  </div>
+                  <div className="space-y-3">
+                    {verificationRecordings.map((media, index) => (
+                      <div key={`${media.url}-${index}`} className="bg-gray-50 p-3 sm:p-4 rounded-lg border border-gray-200">
+                        <div className="text-xs sm:text-sm font-medium text-gray-700 mb-2">
+                          {media.name || `Recording ${index + 1}`}
                         </div>
+                        <audio src={media.url} controls className="w-full" preload="metadata" />
+                        <div className="mt-2">
+                          <a
+                            href={media.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-indigo-700 bg-white hover:bg-indigo-50"
+                          >
+                            Open File
+                          </a>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {verificationOtherMedia.length > 0 && (
+                <div className="space-y-2">
+                  {verificationRecordings.length > 0 && (
+                    <div className="text-sm font-semibold text-gray-800">
+                      Other media ({verificationOtherMedia.length})
                     </div>
-          </div>
-                  );
-                })}
-              </div>
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                    {verificationOtherMedia.map((media, index) => (
+                      <div key={`${media.url}-${index}`} className="bg-gray-50 p-3 sm:p-4 rounded-lg">
+                        <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
+                          {media.type === 'image' ? (
+                            <img
+                              src={media.url}
+                              alt={media.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : media.type === 'video' ? (
+                            <video
+                              src={media.url}
+                              controls
+                              className="w-full h-full object-cover"
+                            />
+                          ) : media.type === 'pdf' ? (
+                            <a
+                              href={media.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="flex items-center justify-center h-full text-indigo-600 underline"
+                            >
+                              Open PDF
+                            </a>
+                          ) : (
+                            <div className="flex items-center justify-center h-full">
+                              <FileText className="w-8 h-8 text-gray-400" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="mt-2 text-xs sm:text-sm text-gray-700 space-y-1">
+                          <div className="font-medium">{media.name}</div>
+                          <div className="flex flex-wrap gap-2">
+                            <a
+                              href={media.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center px-2 py-1 rounded border border-gray-200 text-xs text-indigo-700 bg-white hover:bg-indigo-50"
+                            >
+                              Open File
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </FormSection>
         )}
@@ -6401,9 +6559,9 @@ Language: ${lead.language || 'N/A'}`;
                   </div>
                 </div>
                 
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <textarea
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <textarea
                       rows={1}
                       value={replyText}
                       onChange={(e) => setReplyText(e.target.value)}
@@ -6414,12 +6572,12 @@ Language: ${lead.language || 'N/A'}`;
                         }
                       }}
                       placeholder="Write a message..."
-                      className="w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 placeholder:text-gray-400 min-h-[38px] max-h-[80px]"
-                    />
-                  </div>
-                  <button
-                    disabled={sendingReply || !replyText.trim()}
-                    onClick={sendWhatsAppReply}
+                        className="w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 placeholder:text-gray-400 min-h-[38px] max-h-[80px]"
+                      />
+                    </div>
+                    <button
+                      disabled={sendingReply || !replyText.trim()}
+                      onClick={sendWhatsAppReply}
                     className="inline-flex items-center px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {sendingReply ? 'Sending...' : 'Send'}
@@ -6433,47 +6591,55 @@ Language: ${lead.language || 'N/A'}`;
       </AnimatePresence>
       </div>
 
-      {/* Number Error Modal */}
-      <Dialog open={showNumberErrorModal} onClose={() => setShowNumberErrorModal(false)} className="relative z-50">
-        <div className="fixed inset-0 bg-black bg-opacity-30" aria-hidden="true" />
-        <div className="fixed inset-0 flex items-center justify-center p-4">
-          <Dialog.Panel className="mx-auto max-w-md w-full bg-white rounded-xl shadow-2xl p-6">
+      {/* Number Error Modal — portaled above Assign Lead (zIndex 999999) */}
+      {showNumberErrorModal && createPortal(
+        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 10000000 }}>
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowNumberErrorModal(false)} aria-hidden="true" />
+          <div className="relative mx-auto max-w-md w-full bg-white rounded-xl shadow-2xl p-6">
             <div className="flex items-center gap-3 mb-4">
               <div className="p-2 bg-red-100 rounded-lg">
                 <AlertTriangle className="h-6 w-6 text-red-600" />
               </div>
-              <Dialog.Title className="text-xl font-bold text-gray-900">
-                Number Not Available
-              </Dialog.Title>
+              <h3 className="text-xl font-bold text-gray-900">
+                {numberErrorMode === 'not_with_lead' ? 'Number Not With This Lead' : 'Number Not Available'}
+              </h3>
             </div>
             <div className="mb-6">
               <p className="text-gray-600 mb-3">
-                The following number(s) are not available in the number pool:
+                {numberErrorMode === 'not_with_lead'
+                  ? 'This lead is awaiting a number. The number below is no longer assigned to this lead:'
+                  : 'The following number(s) are not available in the number pool:'}
               </p>
-              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                <ul className="list-disc list-inside space-y-1">
-                  {missingNumbers.map((number, idx) => (
-                    <li key={idx} className="text-red-800 font-mono text-sm">
-                      {number}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              {missingNumbers.length > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <ul className="list-disc list-inside space-y-1">
+                    {missingNumbers.map((number, idx) => (
+                      <li key={idx} className="text-red-800 font-mono text-sm">
+                        {number}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <p className="text-sm text-gray-500 mt-3">
-                Please ensure all numbers exist in the number pool before performing this action.
+                {numberErrorMode === 'not_with_lead'
+                  ? 'The agent must get the number again (open or reserved to them) and resubmit the lead before you can assign or take other actions.'
+                  : 'Please ensure all numbers exist in the number pool before performing this action.'}
               </p>
             </div>
             <div className="flex justify-end">
               <button
+                type="button"
                 onClick={() => setShowNumberErrorModal(false)}
                 className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
               >
                 Close
               </button>
             </div>
-          </Dialog.Panel>
-        </div>
-      </Dialog>
+          </div>
+        </div>,
+        document.body
+      )}
 
       {/* Edit Error Modal - Same format as Resubmit Error */}
       {editError && (

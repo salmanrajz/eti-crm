@@ -1,192 +1,149 @@
-/**
- * ===============================================================================
- * MODERN LOADING COMPONENT - ANIMATED LOADING SPINNER
- * ===============================================================================
- * 
- * This component provides a modern, animated loading interface with progress
- * indication and smooth transitions. It features glass morphism effects and
- * elegant animations for a polished user experience.
- * 
- * FEATURES:
- * 
- * 1. PROGRESS ANIMATION
- *    - Animated progress bar that fills over time
- *    - Smooth transitions and completion states
- *    - Customizable animation duration and steps
- * 
- * 2. VISUAL DESIGN
- *    - Glass morphism effects with backdrop blur
- *    - Gradient backgrounds and floating elements
- *    - Modern, minimalist aesthetic with subtle animations
- * 
- * 3. COMPLETION HANDLING
- *    - Automatic fade-out when loading completes
- *    - Scale animations for smooth transitions
- *    - Clean exit animations for component unmounting
- * 
- * USAGE:
- * This component is used throughout the application to provide
- * consistent loading states with modern visual appeal.
- * ===============================================================================
- */
-
 import { motion } from 'framer-motion';
 import { useState, useEffect } from 'react';
 
+const COLS = 5;
+const ROWS = 5;
+const TOTAL = COLS * ROWS;
+
+function cubicEase(t: number) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
 export function ModernLoading() {
   const [progress, setProgress] = useState(0);
-  const [isComplete, setIsComplete] = useState(false);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setIsComplete(true);
-          return 100;
-        }
-        return prev + 2; // 2% every 100ms = 5 seconds total
-      });
-    }, 100);
+    const start = Date.now();
+    const duration = 800;
 
-    return () => clearInterval(interval);
+    const tick = () => {
+      const elapsed = Date.now() - start;
+      const raw = Math.min(elapsed / duration, 1);
+      setProgress(cubicEase(raw) * 100);
+      if (raw < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }, []);
 
   return (
-    <motion.div 
-      className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 flex items-center justify-center relative overflow-hidden"
-      animate={{ 
-        opacity: isComplete ? 0 : 1,
-        scale: isComplete ? 0.95 : 1
-      }}
-      transition={{ 
-        duration: 0.5, 
-        ease: "easeInOut" 
-      }}
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-white overflow-hidden"
+      initial={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.35, ease: 'easeInOut' }}
     >
-      {/* Subtle Background Elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        {/* Single floating orb for minimalism */}
+      {/* Ambient glow orbs */}
+      <div className="absolute inset-0 pointer-events-none">
         <motion.div
-          className="absolute top-1/4 left-1/4 w-40 h-40 bg-gradient-to-br from-indigo-400/10 to-purple-600/10 rounded-full blur-3xl"
-          animate={{
-            y: [0, -30, 0],
-            x: [0, 20, 0],
-            scale: [1, 1.1, 1],
+          className="absolute top-1/4 left-1/3 w-[600px] h-[600px] rounded-full"
+          style={{
+            background: 'radial-gradient(circle, rgba(99,102,241,0.07) 0%, transparent 70%)',
           }}
-          transition={{
-            duration: 6,
-            repeat: Infinity,
-            ease: "easeInOut"
-          }}
+          animate={{ scale: [1, 1.15, 1], opacity: [0.6, 1, 0.6] }}
+          transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
         />
         <motion.div
-          className="absolute bottom-1/4 right-1/4 w-32 h-32 bg-gradient-to-br from-purple-400/10 to-cyan-600/10 rounded-full blur-3xl"
-          animate={{
-            y: [0, 25, 0],
-            x: [0, -15, 0],
-            scale: [1, 0.9, 1],
+          className="absolute bottom-1/4 right-1/3 w-[500px] h-[500px] rounded-full"
+          style={{
+            background: 'radial-gradient(circle, rgba(139,92,246,0.06) 0%, transparent 70%)',
           }}
-          transition={{
-            duration: 5,
-            repeat: Infinity,
-            ease: "easeInOut",
-            delay: 1
-          }}
+          animate={{ scale: [1, 0.9, 1], opacity: [0.5, 0.9, 0.5] }}
+          transition={{ duration: 5, repeat: Infinity, ease: 'easeInOut', delay: 1 }}
         />
       </div>
 
-      {/* Main Loading Content */}
-      <div className="relative z-10 flex flex-col items-center justify-center space-y-6">
-        {/* Minimalist Spinner */}
-        <div className="relative">
-          {/* Single elegant ring */}
-          <motion.div
-            className="w-16 h-16 border-2 border-indigo-200 rounded-full"
-            animate={{ rotate: 360 }}
-            transition={{
-              duration: 2,
-              repeat: Infinity,
-              ease: "linear"
-            }}
-          />
-          
-          {/* Inner accent ring */}
-          <motion.div
-            className="absolute top-1 left-1 w-14 h-14 border-2 border-transparent border-t-indigo-500 rounded-full"
-            animate={{ rotate: -360 }}
-            transition={{
-              duration: 1.5,
-              repeat: Infinity,
-              ease: "linear"
-            }}
-          />
-          
-          {/* Center dot */}
-          <motion.div
-            className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-2 h-2 bg-indigo-500 rounded-full"
-            animate={{
-              scale: [1, 1.5, 1],
-              opacity: [0.7, 1, 0.7],
-            }}
-            transition={{
-              duration: 2,
-              repeat: Infinity,
-              ease: "easeInOut"
-            }}
-          />
+      <div className="relative z-10 flex flex-col items-center gap-10">
+        {/* Cubic grid */}
+        <div
+          className="grid gap-[6px]"
+          style={{ gridTemplateColumns: `repeat(${COLS}, 1fr)` }}
+        >
+          {Array.from({ length: TOTAL }).map((_, i) => {
+            const row = Math.floor(i / COLS);
+            const col = i % COLS;
+            // Wave delay: diagonal ripple
+            const delay = (row + col) * 0.08;
+
+            return (
+              <motion.div
+                key={i}
+                className="rounded-[3px] relative overflow-hidden"
+                style={{ width: 28, height: 28 }}
+                initial={{ opacity: 0, scale: 0.2, rotateX: 90 }}
+                animate={{
+                  opacity: [0, 1, 1, 0.5, 1],
+                  scale: [0.2, 1, 0.88, 1, 0.92, 1],
+                  rotateX: [90, 0, 0, 0, 0],
+                }}
+                transition={{
+                  duration: 1.8,
+                  delay,
+                  repeat: Infinity,
+                  repeatDelay: TOTAL * 0.08 + 0.6,
+                  ease: [0.34, 1.56, 0.64, 1],
+                }}
+              >
+                {/* Cube face */}
+                <div
+                  className="absolute inset-0 rounded-[3px]"
+                  style={{
+                    background: `linear-gradient(135deg,
+                      rgba(${99 + col * 8},${102 + row * 8},241,0.9) 0%,
+                      rgba(139,92,246,0.85) 100%)`,
+                    boxShadow: `0 0 12px rgba(99,102,241,0.4), inset 0 1px 0 rgba(255,255,255,0.15)`,
+                  }}
+                />
+                {/* Highlight shimmer */}
+                <motion.div
+                  className="absolute inset-0 rounded-[3px]"
+                  style={{
+                    background:
+                      'linear-gradient(135deg, rgba(255,255,255,0.18) 0%, transparent 60%)',
+                  }}
+                  animate={{ opacity: [0.5, 1, 0.5] }}
+                  transition={{
+                    duration: 1.6,
+                    delay: delay + 0.2,
+                    repeat: Infinity,
+                    repeatDelay: TOTAL * 0.08 + 0.6,
+                  }}
+                />
+              </motion.div>
+            );
+          })}
         </div>
 
-        {/* Clean Typography */}
+        {/* Brand + text */}
         <motion.div
-          className="text-center space-y-3"
-          initial={{ opacity: 0, y: 20 }}
+          className="flex flex-col items-center gap-3"
+          initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3, duration: 0.6 }}
+          transition={{ delay: 0.4, duration: 0.6 }}
         >
-          <motion.h2
-            className="text-xl font-semibold text-gray-800"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.6, duration: 0.6 }}
+          <p
+            className="text-[11px] font-semibold tracking-[0.3em] uppercase"
+            style={{ color: 'rgba(99,102,241,0.5)' }}
           >
-            Loading
-          </motion.h2>
-          
-          <motion.p
-            className="text-sm text-gray-500"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.9, duration: 0.6 }}
+            Initialising
+          </p>
+
+          {/* Progress bar */}
+          <div
+            className="w-[140px] h-[2px] rounded-full overflow-hidden"
+            style={{ background: 'rgba(99,102,241,0.12)' }}
           >
-            Please wait...
-          </motion.p>
+            <motion.div
+              className="h-full rounded-full"
+              style={{
+                background:
+                  'linear-gradient(90deg, rgba(99,102,241,0.9), rgba(139,92,246,0.9))',
+                boxShadow: '0 0 8px rgba(139,92,246,0.7)',
+              }}
+              animate={{ width: `${progress}%` }}
+              transition={{ duration: 0.05, ease: 'linear' }}
+            />
+          </div>
         </motion.div>
-
-        {/* Progress Bar */}
-        <motion.div
-          className="w-48 h-1 bg-gray-200 rounded-full overflow-hidden"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 1.2, duration: 0.6 }}
-        >
-          <motion.div
-            className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full"
-            initial={{ width: "0%" }}
-            animate={{ width: `${progress}%` }}
-            transition={{ duration: 0.1, ease: "easeOut" }}
-          />
-        </motion.div>
-
-        {/* Progress Text */}
-        <motion.p
-          className="text-xs text-gray-400"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 1.5, duration: 0.6 }}
-        >
-          {Math.round(progress)}%
-        </motion.p>
       </div>
     </motion.div>
   );

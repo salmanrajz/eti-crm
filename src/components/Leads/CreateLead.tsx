@@ -51,6 +51,7 @@ import { useAuthStore } from '../../store/authStore';
 import { User, NumberPool, Lead } from '../../types';
 import { toast } from 'react-hot-toast';
 import { logNumberAction } from '../../utils/numberLogging';
+import { poolFieldsWhenAttachingToLead, getStrikeWindowMs, claimQueueWouldConvertToStrikes, notifyOwnerOfClaimToStrikeConversion } from '../../utils/strikeQueue';
 import { logLeadAction } from '../../utils/leadLogging';
 import { format, addMinutes } from 'date-fns';
 import { getPlanCategoriesWithPlans, PlanCategoryGroup, getPlans, Plan } from '../../utils/planService';
@@ -1420,12 +1421,22 @@ function CreateLead({ isEditing, initialData, onSave, onCancel }: CreateLeadProp
               const numberRef = doc(db, 'numberPool', plan.numberId);
               const numberDoc = numberDocs[index];
               const oldData = numberDoc.exists() ? numberDoc.data() : null;
+              const strikeWindowMs = await getStrikeWindowMs();
+              const convertingClaims = claimQueueWouldConvertToStrikes(oldData);
               await updateDoc(numberRef, {
                 status: 'pending_verification',
                 lastStatusChange: new Date(),
                 leadId: docRef.id,
-                reservedBy: selectedAgentId || user?.id || null
+                reservedBy: selectedAgentId || user?.id || null,
+                ...poolFieldsWhenAttachingToLead(oldData, strikeWindowMs),
               });
+              if (convertingClaims) {
+                notifyOwnerOfClaimToStrikeConversion({
+                  leadId: docRef.id,
+                  numberId: plan.numberId,
+                  number: plan.number,
+                });
+              }
               logNumberAction(
                 plan.numberId,
                 plan.number,

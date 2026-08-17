@@ -43,6 +43,7 @@ import { Lead } from '../../types';
 import { db } from '../../lib/firebase';
 import { doc, updateDoc, addDoc, collection } from 'firebase/firestore';
 import { toast } from 'react-hot-toast';
+import { pausedClaimTimerFields } from '../../utils/claimTimer';
 
 interface SplitLeadProps {
   isOpen: boolean;
@@ -155,12 +156,14 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
           updateDoc(doc(db, 'numberPool', firstPlan.numberId), {
             status: 'pending_verification',
             lastStatusChange: new Date(),
-            leadId: firstLeadRef.id
+            leadId: firstLeadRef.id,
+            ...pausedClaimTimerFields(),
           }),
           updateDoc(doc(db, 'numberPool', secondPlan.numberId), {
             status: 'pending_verification',
             lastStatusChange: new Date(),
-            leadId: secondLeadRef.id
+            leadId: secondLeadRef.id,
+            ...pausedClaimTimerFields(),
           })
         ]);
 
@@ -197,7 +200,8 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
               status: 'pending_verification',
               lastStatusChange: new Date(),
               leadId: combinedLeadRef.id,
-              group: combineGroup // Update the group name in number pool
+              group: combineGroup,
+              ...pausedClaimTimerFields(),
             })
           )
         );
@@ -250,7 +254,8 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
             status: 'pending_verification',
             lastStatusChange: new Date(),
             leadId: firstLeadRef.id,
-            group: firstLeadGroup
+            group: firstLeadGroup,
+            ...pausedClaimTimerFields(),
           }));
         }
         if (!secondPlan.numberId.startsWith('virtual-')) {
@@ -258,7 +263,8 @@ export function SplitLead({ isOpen, onClose, lead, onSplit }: SplitLeadProps) {
             status: 'pending_verification',
             lastStatusChange: new Date(),
             leadId: secondLeadRef.id,
-            group: secondLeadGroup
+            group: secondLeadGroup,
+            ...pausedClaimTimerFields(),
           }));
         }
         await Promise.all(updates);

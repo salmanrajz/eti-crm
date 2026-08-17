@@ -45,8 +45,8 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSunday, isSameDay, addMonths, subMonths } from 'date-fns';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { addDays, format, startOfMonth, endOfMonth, eachDayOfInterval, isSunday, isSameDay, addMonths, subMonths, isAfter, startOfDay } from 'date-fns';
 import { ChevronLeft, ChevronRight, Users, User } from 'lucide-react';
 import { User as UserType } from '../types';
 import { collection, query, where, getDocs, doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
@@ -86,7 +86,7 @@ const initDB = (): Promise<IDBDatabase> => {
 };
 
 // Cache operations
-const getFromCache = async (key: string): Promise<any> => {
+const getFromCache = async <T,>(key: string): Promise<T | null> => {
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
@@ -97,7 +97,7 @@ const getFromCache = async (key: string): Promise<any> => {
       request.onsuccess = () => {
         const result = request.result;
         if (result && Date.now() - result.timestamp < result.ttl) {
-          resolve(result.data);
+          resolve(result.data as T);
         } else {
           resolve(null);
         }
@@ -110,7 +110,7 @@ const getFromCache = async (key: string): Promise<any> => {
   }
 };
 
-const setCache = async (key: string, data: any, ttl: number = 2 * 60 * 1000): Promise<void> => {
+const setCache = async <T,>(key: string, data: T, ttl: number = 2 * 60 * 1000): Promise<void> => {
   try {
     const db = await initDB();
     return new Promise((resolve, reject) => {
@@ -177,11 +177,53 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [viewMode, setViewMode] = useState<'individual' | 'team'>('individual');
-  const [snapshotUnsubscribers, setSnapshotUnsubscribers] = useState<(() => void)[]>([]);
+  const [selectedTeamDate, setSelectedTeamDate] = useState(new Date());
+  const snapshotUnsubscribersRef = useRef<(() => void)[]>([]);
   
   // Cache leave balance for the selected agent and month
   const [leaveBalance, setLeaveBalance] = useState<LeaveBalance | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
+
+  const today = startOfDay(new Date());
+  const selectedTeamDay = startOfDay(selectedTeamDate);
+  const selectedTeamDateStr = format(selectedTeamDay, 'yyyy-MM-dd');
+  const selectedTeamMonthStr = format(selectedTeamDay, 'yyyy-MM');
+  const isSelectedTeamDateToday = isSameDay(selectedTeamDay, today);
+  const isSelectedTeamDateFuture = isAfter(selectedTeamDay, today);
+  const selectedAgentIndex = agents.findIndex(agent => agent.id === selectedAgent);
+  const hasMultipleAgents = agents.length > 1;
+
+  const parseDateInput = (value: string) => {
+    const [year, monthIndex, day] = value.split('-').map(Number);
+    return new Date(year, monthIndex - 1, day);
+  };
+
+  const changeSelectedTeamDate = useCallback((date: Date) => {
+    const nextDate = startOfDay(date);
+    if (isAfter(nextDate, today)) return;
+    setSelectedTeamDate(nextDate);
+    if (format(nextDate, 'yyyy-MM') !== format(month, 'yyyy-MM')) {
+      onMonthChange(nextDate);
+    }
+  }, [month, onMonthChange, today]);
+
+  const handleMonthChange = useCallback((date: Date) => {
+    onMonthChange(date);
+    if (viewMode === 'team') {
+      const currentMonth = format(new Date(), 'yyyy-MM');
+      const targetMonth = format(date, 'yyyy-MM');
+      setSelectedTeamDate(targetMonth === currentMonth ? startOfDay(new Date()) : startOfMonth(date));
+    }
+  }, [onMonthChange, viewMode]);
+
+  const navigateAgent = useCallback((direction: 'previous' | 'next') => {
+    if (!agents.length) return;
+    const currentIndex = selectedAgentIndex >= 0 ? selectedAgentIndex : 0;
+    const nextIndex = direction === 'next'
+      ? (currentIndex + 1) % agents.length
+      : (currentIndex - 1 + agents.length) % agents.length;
+    setSelectedAgent(agents[nextIndex].id);
+  }, [agents, selectedAgentIndex]);
 
   useEffect(() => {
     if (role === 'manager') {
@@ -275,25 +317,20 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
     fetchAttendance();
   }, [selectedAgent, month]);
 
-  // Load team attendance for team view - only current date
+  // Load team attendance for team view - selected date
   useEffect(() => {
     async function fetchTeamAttendance() {
       if (viewMode !== 'team' || !agents.length) return;
       setLoading(true);
-      const today = new Date();
-      const todayStr = format(today, 'yyyy-MM-dd');
-      const monthStr = format(today, 'yyyy-MM');
       const teamData: TeamAttendance = {};
       
       for (const agent of agents) {
-        const docRef = doc(db, 'attendance', `${agent.id}_${monthStr}`);
+        const docRef = doc(db, 'attendance', `${agent.id}_${selectedTeamMonthStr}`);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           const days = docSnap.data().days || {};
-          // Only keep today's data
-          teamData[agent.id] = {
-            [todayStr]: days[todayStr] || null
-          };
+          // Only keep selected date's data
+          teamData[agent.id] = days[selectedTeamDateStr] ? { [selectedTeamDateStr]: days[selectedTeamDateStr] } : {};
         } else {
           teamData[agent.id] = {};
         }
@@ -303,26 +340,23 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
       setLoading(false);
     }
     fetchTeamAttendance();
-  }, [viewMode, agents]);
+  }, [viewMode, agents, selectedTeamDateStr, selectedTeamMonthStr]);
 
   // Optimized team attendance loading with caching and real-time updates
   useEffect(() => {
     if (viewMode !== 'team' || !agents.length) return;
 
-    const today = new Date();
-    const todayStr = format(today, 'yyyy-MM-dd');
-    const monthStr = format(today, 'yyyy-MM');
-    const cacheKey = `team_attendance_${user.teamId}_${todayStr}`;
+    const cacheKey = `team_attendance_${user.teamId}_${selectedTeamDateStr}`;
 
     // Clean up previous snapshots
-    snapshotUnsubscribers.forEach(unsub => unsub());
-    setSnapshotUnsubscribers([]);
+    snapshotUnsubscribersRef.current.forEach(unsub => unsub());
+    snapshotUnsubscribersRef.current = [];
 
     const loadTeamAttendance = async () => {
       setLoading(true);
       
       // Try to load from cache first
-      const cachedData = await getFromCache(cacheKey);
+      const cachedData = await getFromCache<TeamAttendance>(cacheKey);
       if (cachedData) {
         setTeamAttendance(cachedData);
         setLoading(false);
@@ -333,14 +367,12 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
       const teamData: TeamAttendance = {};
 
       for (const agent of agents) {
-        const docRef = doc(db, 'attendance', `${agent.id}_${monthStr}`);
+        const docRef = doc(db, 'attendance', `${agent.id}_${selectedTeamMonthStr}`);
         
         const unsubscribe = onSnapshot(docRef, (docSnap) => {
           if (docSnap.exists()) {
             const days = docSnap.data().days || {};
-            teamData[agent.id] = {
-              [todayStr]: days[todayStr] || null
-            };
+            teamData[agent.id] = days[selectedTeamDateStr] ? { [selectedTeamDateStr]: days[selectedTeamDateStr] } : {};
           } else {
             teamData[agent.id] = {};
           }
@@ -366,7 +398,7 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
         unsubscribers.push(unsubscribe);
       }
 
-      setSnapshotUnsubscribers(unsubscribers);
+      snapshotUnsubscribersRef.current = unsubscribers;
       setLoading(false);
     };
 
@@ -374,9 +406,10 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
 
     // Cleanup function
     return () => {
-      snapshotUnsubscribers.forEach(unsub => unsub());
+      snapshotUnsubscribersRef.current.forEach(unsub => unsub());
+      snapshotUnsubscribersRef.current = [];
     };
-  }, [viewMode, agents, user.teamId]);
+  }, [viewMode, agents, user.teamId, selectedTeamDateStr, selectedTeamMonthStr]);
 
   // Load leave balance when agent or month changes
   useEffect(() => {
@@ -449,11 +482,10 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
   }, [selectedAgent, month, role]);
 
   // Save team attendance
-  const saveTeamAttendance = useCallback(async (agentId: string, newAttendance: { [date: string]: keyof typeof STATUS_COLORS }) => {
+  const saveTeamAttendance = useCallback(async (agentId: string, newAttendance: { [date: string]: keyof typeof STATUS_COLORS }, attendanceDate: Date) => {
     setSaving(true);
     try {
-      const today = new Date();
-      const monthStr = format(today, 'yyyy-MM');
+      const monthStr = format(attendanceDate, 'yyyy-MM');
       const docRef = doc(db, 'attendance', `${agentId}_${monthStr}`);
       await setDoc(docRef, {
         userId: agentId,
@@ -559,7 +591,7 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
     }));
     
     // Save to database in background
-    saveTeamAttendance(agentId, newAttendance);
+    saveTeamAttendance(agentId, newAttendance, day);
   }, [teamAttendance, saveTeamAttendance]);
 
   // Right-click for halfday (manager only) - also optimized
@@ -613,17 +645,15 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
       [agentId]: newAttendance
     }));
     
-    saveTeamAttendance(agentId, newAttendance);
+    saveTeamAttendance(agentId, newAttendance, day);
   }, [role, teamAttendance, saveTeamAttendance]);
 
   if (loading) return <div className="p-6 text-gray-400">Loading attendance...</div>;
 
   // Team view component
   const TeamAttendanceView = () => {
-    const today = new Date();
-    const todayStr = format(today, 'yyyy-MM-dd');
-    const dayName = format(today, 'EEE'); // Mon, Tue, etc.
-    const dayNumber = format(today, 'd');
+    const dayName = format(selectedTeamDay, 'EEE'); // Mon, Tue, etc.
+    const dayNumber = format(selectedTeamDay, 'd');
     
     return (
       <div className="overflow-x-auto">
@@ -638,9 +668,9 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
           
           {/* Employee rows */}
           {agents.map(agent => {
-            const status = teamAttendance[agent.id]?.[todayStr];
-            const isSunday = today.getDay() === 0;
-            const finalStatus = isSunday ? 'holiday' : status;
+            const status = teamAttendance[agent.id]?.[selectedTeamDateStr];
+            const isSundayForSelectedDate = isSunday(selectedTeamDay);
+            const finalStatus = isSundayForSelectedDate ? 'holiday' : status;
             
             return (
               <div key={agent.id} className="grid grid-cols-2 gap-4 mb-3">
@@ -649,13 +679,13 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
                 </div>
                 <div className="w-32 flex justify-center">
                   <button
-                    onClick={!isSunday ? () => handleTeamDayClick(today, agent.id) : undefined}
-                    onContextMenu={!isSunday ? (e) => handleTeamDayContextMenu(today, agent.id, e) : undefined}
+                    onClick={!isSundayForSelectedDate ? () => handleTeamDayClick(selectedTeamDay, agent.id) : undefined}
+                    onContextMenu={!isSundayForSelectedDate ? (e) => handleTeamDayContextMenu(selectedTeamDay, agent.id, e) : undefined}
                     className={`w-20 h-12 rounded-lg text-sm font-bold border transition-colors duration-150 flex flex-col items-center justify-center
                       ${finalStatus ? STATUS_COLORS[finalStatus] : 'bg-gray-50 text-gray-400'}
-                      ${isSunday ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50 cursor-pointer'}`}
-                    disabled={isSunday}
-                    title={isSunday ? 'Sunday is a holiday' : 'Click to cycle through attendance states. Right-click for halfday leave.'}
+                      ${isSundayForSelectedDate ? 'cursor-not-allowed opacity-60' : 'hover:bg-indigo-50 cursor-pointer'}`}
+                    disabled={isSundayForSelectedDate}
+                    title={isSundayForSelectedDate ? 'Sunday is a holiday' : 'Click to cycle through attendance states. Right-click for halfday leave.'}
                   >
                     {finalStatus ? STATUS_LABELS[finalStatus] : 'Mark'}
                   </button>
@@ -669,20 +699,20 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
   };
 
   return (
-    <div className="p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <button onClick={() => onMonthChange(subMonths(month, 1))} className="p-2 rounded hover:bg-gray-100"><ChevronLeft /></button>
-          <span className="font-bold text-lg">{format(month, 'MMMM yyyy')}</span>
-          <button onClick={() => onMonthChange(addMonths(month, 1))} className="p-2 rounded hover:bg-gray-100"><ChevronRight /></button>
+    <div className="p-4 sm:p-6">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex w-full items-center justify-between rounded-xl bg-gray-50 px-2 py-1 sm:w-auto sm:bg-transparent sm:px-0 sm:py-0">
+          <button onClick={() => handleMonthChange(subMonths(month, 1))} className="rounded-lg p-2 text-gray-600 hover:bg-gray-100"><ChevronLeft className="h-5 w-5" /></button>
+          <span className="px-3 text-center text-base font-bold text-gray-900 sm:text-lg">{format(month, 'MMMM yyyy')}</span>
+          <button onClick={() => handleMonthChange(addMonths(month, 1))} className="rounded-lg p-2 text-gray-600 hover:bg-gray-100"><ChevronRight className="h-5 w-5" /></button>
         </div>
         {role === 'manager' && (
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
             {/* View mode toggle */}
-            <div className="flex bg-gray-100 rounded-lg p-1">
+            <div className="grid grid-cols-2 rounded-lg bg-gray-100 p-1 sm:flex">
               <button
                 onClick={() => setViewMode('individual')}
-                className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                className={`rounded-md px-3 py-2 text-sm font-medium transition-colors sm:py-1 ${
                   viewMode === 'individual' 
                     ? 'bg-white text-indigo-600 shadow-sm' 
                     : 'text-gray-600 hover:text-gray-900'
@@ -693,7 +723,7 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
               </button>
               <button
                 onClick={() => setViewMode('team')}
-                className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                className={`rounded-md px-3 py-2 text-sm font-medium transition-colors sm:py-1 ${
                   viewMode === 'team' 
                     ? 'bg-white text-indigo-600 shadow-sm' 
                     : 'text-gray-600 hover:text-gray-900'
@@ -707,16 +737,40 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
             {/* Individual view controls */}
             {viewMode === 'individual' && (
               <>
-                <select value={selectedAgent} onChange={e => setSelectedAgent(e.target.value)} className="ml-4 px-3 py-2 rounded border">
-                  {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
+                <div className="flex w-full items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 shadow-sm sm:ml-4 sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={() => navigateAgent('previous')}
+                    disabled={!hasMultipleAgents}
+                    className="rounded p-2 text-gray-600 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 sm:p-1"
+                    title="Previous employee"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <select
+                    value={selectedAgent}
+                    onChange={e => setSelectedAgent(e.target.value)}
+                    className="min-w-0 flex-1 border-0 bg-transparent px-1 text-center text-sm font-semibold text-gray-800 focus:outline-none focus:ring-0 sm:w-40 sm:flex-none"
+                  >
+                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => navigateAgent('next')}
+                    disabled={!hasMultipleAgents}
+                    className="rounded p-2 text-gray-600 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 sm:p-1"
+                    title="Next employee"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
                 {(balanceLoading || saving) && (
-                  <span className="text-xs text-gray-500">
+                  <span className="text-center text-xs text-gray-500 sm:text-left">
                     {balanceLoading ? 'Loading balance...' : 'Saving...'}
                   </span>
                 )}
                 {leaveBalance && !balanceLoading && (
-                  <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">
+                  <span className="rounded bg-gray-100 px-2 py-1 text-center text-xs text-gray-500 sm:text-left">
                     Available: {leaveBalance.availableBalance} days
                   </span>
                 )}
@@ -725,9 +779,46 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
             
             {/* Team view status */}
             {viewMode === 'team' && (
-              <span className="text-xs text-gray-500 bg-blue-100 px-2 py-1 rounded">
-                {saving ? 'Saving...' : `Today - ${agents.length} employees`}
-              </span>
+              <>
+                <div className="flex w-full items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 shadow-sm sm:ml-2 sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={() => changeSelectedTeamDate(addDays(selectedTeamDay, -1))}
+                    className="rounded p-2 text-gray-600 hover:bg-gray-100 sm:p-1"
+                    title="Previous day"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <input
+                    type="date"
+                    value={selectedTeamDateStr}
+                    onChange={(e) => changeSelectedTeamDate(parseDateInput(e.target.value))}
+                    max={format(new Date(), 'yyyy-MM-dd')}
+                    className="min-w-0 flex-1 border-0 bg-transparent px-1 text-center text-sm font-medium text-gray-700 focus:outline-none focus:ring-0 sm:w-36 sm:flex-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => changeSelectedTeamDate(addDays(selectedTeamDay, 1))}
+                    disabled={isSelectedTeamDateToday || isSelectedTeamDateFuture}
+                    className="rounded p-2 text-gray-600 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 sm:p-1"
+                    title="Next day"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+                {!isSelectedTeamDateToday && (
+                  <button
+                    type="button"
+                    onClick={() => changeSelectedTeamDate(new Date())}
+                    className="w-full rounded-lg bg-gray-100 px-2 py-2 text-xs font-medium text-gray-700 hover:bg-gray-200 sm:w-auto sm:py-1"
+                  >
+                    Today
+                  </button>
+                )}
+                <span className="rounded bg-blue-100 px-2 py-2 text-center text-xs text-gray-500 sm:py-1">
+                  {saving ? 'Saving...' : `${isSelectedTeamDateToday ? 'Today' : format(selectedTeamDay, 'dd MMM yyyy')} - ${agents.length} employees`}
+                </span>
+              </>
             )}
           </div>
         )}
@@ -813,10 +904,10 @@ export default function AttendanceTable({ user, role, month, onMonthChange }: At
         )}
         {viewMode === 'team' && role === 'manager' && (
           <span className="ml-4 text-blue-600">
-            💡 Today's Team View: Click to mark attendance for today. Right-click for halfday leave.
+            Team View: choose a date above, then click to mark attendance. Right-click for halfday leave.
           </span>
         )}
       </div>
     </div>
   );
-} 
+}

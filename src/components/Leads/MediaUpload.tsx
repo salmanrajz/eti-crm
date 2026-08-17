@@ -38,7 +38,7 @@
 import { useState, useRef } from 'react';
 import { getStorage, ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { db } from '../../lib/firebase';
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { Upload, X, CheckCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
@@ -114,14 +114,20 @@ export function MediaUpload({ leadId, onUploadComplete, onUploadingChange, onUpl
         throw new Error('One or more uploads failed');
       }
 
-      // Update lead document with media files
-      await updateDoc(doc(db, 'leads', leadId), {
-        verificationMedia: mediaFiles,
+      const leadRef = doc(db, 'leads', leadId);
+      const leadSnap = await getDoc(leadRef);
+      const existingMedia = leadSnap.exists() ? leadSnap.data()?.verificationMedia : [];
+      const existingArray = Array.isArray(existingMedia) ? existingMedia : [];
+      const mergedMedia = [...existingArray, ...mediaFiles];
+
+      // Append to existing verification media so multiple upload sessions are all kept
+      await updateDoc(leadRef, {
+        verificationMedia: mergedMedia,
       });
 
       toast.success('Files uploaded successfully');
       setFiles([]);
-      onUploadComplete(mediaFiles);
+      onUploadComplete(mergedMedia);
     } catch (error) {
       console.error('Error uploading files:', error);
       toast.error('Failed to upload files');

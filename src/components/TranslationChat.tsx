@@ -46,9 +46,8 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Switch } from '@headlessui/react';
 import { toast } from 'react-hot-toast';
-import { FiCopy, FiSend, FiX, FiMessageSquare, FiUser, FiPackage, FiCalendar, FiCheckCircle, FiAlertCircle, FiExternalLink } from 'react-icons/fi';
+import { FiCopy, FiX, FiCheckCircle, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../lib/firebase';
@@ -56,7 +55,7 @@ import { useAuthStore } from '../store/authStore';
 import { NumberPool, Lead } from '../types';
 import { clsx } from 'clsx';
 import { useNavigate } from 'react-router-dom';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, ArrowUp, Languages } from 'lucide-react';
 import { motion } from 'framer-motion';
 import chatIcon from '../../chatbox.png';
 
@@ -64,7 +63,7 @@ interface Message {
   text: string;
   isUser: boolean;
   timestamp: Date;
-  type?: 'number' | 'lead' | 'text';
+  type?: 'number' | 'lead' | 'text' | 'welcome';
   data?: {
     number?: NumberPool;
     leads?: Lead[];
@@ -247,7 +246,49 @@ const LeadCard: React.FC<{ lead: Lead }> = ({ lead }) => {
   );
 };
 
+const WelcomeCard: React.FC = () => {
+  const capabilities = [
+    { label: 'Translate', detail: 'English ↔ Arabic' },
+    { label: 'Numbers', detail: 'Check pool status' },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start gap-2.5">
+        <div className="mt-0.5 w-8 h-8 rounded-full bg-gradient-to-br from-indigo-400 to-violet-500 flex items-center justify-center shadow-sm shrink-0">
+          <Sparkles size={14} className="text-white" />
+        </div>
+        <div className="min-w-0 pt-0.5">
+          <p className="text-sm font-semibold text-gray-900">Hello! I’m your AI assistant</p>
+          <p className="text-xs text-gray-500 mt-0.5">Here’s what I can help you with</p>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        {capabilities.map((item) => (
+          <div
+            key={item.label}
+            className="flex items-center gap-2.5 rounded-xl bg-white/70 border border-white/80 px-3 py-2"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
+            <div className="min-w-0 flex items-baseline gap-1.5">
+              <span className="text-xs font-semibold text-gray-800">{item.label}</span>
+              <span className="text-[11px] text-gray-500">— {item.detail}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-xs text-gray-600 pt-0.5">How may I help you today?</p>
+    </div>
+  );
+};
+
 const MessageContent: React.FC<{ message: Message }> = ({ message }) => {
+  if (message.type === 'welcome') {
+    return <WelcomeCard />;
+  }
+
   if (message.type === 'text' && (message.data?.number || message.data?.leads)) {
     return (
       <div className="space-y-3">
@@ -285,6 +326,7 @@ const TranslationChat: React.FC = () => {
   const navigate = useNavigate();
   const [copiedEnIndex, setCopiedEnIndex] = useState<number | null>(null);
   const [copiedArIndex, setCopiedArIndex] = useState<number | null>(null);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   
   // Initialize Firebase Functions
   const functions = getFunctions();
@@ -320,10 +362,10 @@ const TranslationChat: React.FC = () => {
       // Show welcome message if this is the first time opening
       if (!hasShownWelcome && messages.length === 0) {
         const welcomeMessage: Message = {
-          text: "Hello! I'm your AI assistant. I can help you with:\n\n• Translating text between English and Arabic\n• Checking number pool status\n• Finding lead information\n\nHow may I help you today?",
+          text: "Hello! I'm your AI assistant",
           isUser: false,
           timestamp: new Date(),
-          type: 'text'
+          type: 'welcome'
         };
         setMessages([welcomeMessage]);
         setHasShownWelcome(true);
@@ -579,6 +621,21 @@ const TranslationChat: React.FC = () => {
     navigator.clipboard.writeText(text);
   };
 
+  const handleRefresh = () => {
+    setMessages([]);
+    setHasShownWelcome(false);
+    setInputText('');
+    setIsLoading(false);
+    setCopiedEnIndex(null);
+    setCopiedArIndex(null);
+    setCopiedIndex(null);
+  };
+
+  const lastUserMessageIndex = messages.reduce(
+    (last, msg, i) => (msg.isUser ? i : last),
+    -1
+  );
+
   return (
     <>
       {/* Modern AI Welcome Message as a chat bubble from the button */}
@@ -613,172 +670,218 @@ const TranslationChat: React.FC = () => {
       {/* Chat Modal */}
       {isOpen && (
         <div 
-          className="fixed inset-0 z-[100] flex items-end justify-end p-4 sm:p-6"
-          onClick={(e) => {
-            // Close when clicking on the overlay (outside the chat box)
-            if (e.target === e.currentTarget) {
-              setIsOpen(false);
-            }
-          }}
+          className="fixed inset-0 z-[100] flex items-end justify-end p-3 sm:p-6 pointer-events-none"
         >
-          <div 
-            className="bg-white rounded-lg shadow-xl border border-gray-200 flex flex-col w-full max-w-sm sm:max-w-md md:max-w-lg lg:max-w-md h-[500px] sm:h-[600px]"
-            ref={chatBoxRef}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-3 border-b flex justify-between items-center bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-t-lg">
-              <div>
-              <h2 className="text-sm font-semibold">AI Assistant</h2>
-                <p className="text-[10px] opacity-90 -mt-0.5">Translate • Numbers • Leads</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs">Arabic</span>
-                  <Switch
-                    checked={translateToArabic}
-                    onChange={setTranslateToArabic}
-                    className={`${
-                      translateToArabic ? 'bg-white/20' : 'bg-white/10'
-                    } relative inline-flex h-4 w-8 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-white/50 focus:ring-offset-2`}
-                  >
-                    <span
-                      className={`${
-                        translateToArabic ? 'translate-x-4' : 'translate-x-1'
-                      } inline-block h-2 w-2 transform rounded-full bg-white transition-transform`}
-                    />
-                  </Switch>
-                </div>
+          <div className="pointer-events-auto relative w-full max-w-[380px] sm:max-w-[400px]">
+            <div
+              className="relative flex flex-col w-full h-[min(88vh,640px)] rounded-[28px] overflow-hidden shadow-[0_8px_40px_rgba(99,102,241,0.22),0_2px_12px_rgba(0,0,0,0.08)] border border-white/60"
+              style={{
+                background: `
+                  radial-gradient(ellipse 80% 50% at 20% 10%, rgba(255,255,255,0.95) 0%, transparent 70%),
+                  radial-gradient(ellipse 60% 40% at 80% 30%, rgba(199,210,254,0.5) 0%, transparent 60%),
+                  radial-gradient(ellipse 70% 50% at 50% 80%, rgba(196,181,253,0.35) 0%, transparent 65%),
+                  linear-gradient(165deg, #f8faff 0%, #eef2ff 35%, #e9e0ff 65%, #ddd6fe 100%)
+                `
+              }}
+              ref={chatBoxRef}
+            >
+            {/* Header pill */}
+            <div className="relative z-10 px-3 pt-3 pb-1">
+              <div
+                className="flex items-center gap-2 h-11 px-2 rounded-full border border-white/70 shadow-sm backdrop-blur-md"
+                style={{
+                  background:
+                    'linear-gradient(135deg, rgba(255,255,255,0.92) 0%, rgba(224,231,255,0.88) 45%, rgba(221,214,254,0.9) 100%)',
+                }}
+              >
                 <button
-                  onClick={() => setIsOpen(false)}
-                  className="text-white/80 hover:text-white"
+                  type="button"
+                  onClick={() => setTranslateToArabic(!translateToArabic)}
+                  className={clsx(
+                    'shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-full text-xs font-medium transition-all',
+                    translateToArabic
+                      ? 'bg-indigo-500 text-white shadow-sm'
+                      : 'bg-white/60 text-gray-600 hover:bg-white/90 hover:text-gray-800'
+                  )}
+                  title={translateToArabic ? 'Arabic mode on' : 'Arabic mode off'}
                 >
-                  <FiX size={16} />
+                  <Languages size={13} />
+                  <span>AR</span>
+                </button>
+
+                <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5">
+                  <Sparkles size={14} className="shrink-0 text-indigo-500" />
+                  <div className="min-w-0 text-center leading-tight">
+                    <p className="text-[12px] font-semibold text-gray-800 truncate">AI Assistant</p>
+                    <p className="text-[9px] text-gray-500 truncate">Translate • Numbers • Leads</p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center rounded-full bg-white/60 text-gray-500 hover:bg-white/90 hover:text-gray-700 transition-colors"
+                  aria-label="Refresh conversation"
+                >
+                  <FiRefreshCw size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsOpen(false)}
+                  className="shrink-0 w-8 h-8 flex items-center justify-center rounded-full bg-white/60 text-gray-500 hover:bg-white/90 hover:text-gray-700 transition-colors"
+                  aria-label="Close"
+                >
+                  <FiX size={15} />
                 </button>
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gradient-to-b from-white to-gray-50/60">
+            {/* Messages area */}
+            <div className="flex-1 overflow-y-auto custom-scrollbar px-4 pt-3 pb-2 space-y-4 min-h-0">
               {messages.map((message, index) => (
                 <div
                   key={index}
-                  className={`flex ${
-                    message.isUser ? 'justify-end' : 'justify-start'
-                  }`}
+                  className={clsx(
+                    'flex flex-col',
+                    message.isUser ? 'items-end' : 'items-start'
+                  )}
                 >
-                  <div
-                    className={`max-w-[85%] rounded-2xl p-3 shadow-sm ring-1 ${
-                      message.isUser
-                        ? 'bg-indigo-600 text-white ring-indigo-500/20'
-                        : 'bg-white text-gray-800 ring-gray-200'
-                    }`}
-                  >
-                    <MessageContent message={message} />
-                    {!message.isUser && message.type === 'text' && !message.data?.number && !message.data?.leads && !message.text.includes("Hello! I'm your AI assistant") && (
-                      <div className="mt-1.5 flex items-center gap-2">
-                        {(() => {
-                          const lines = message.text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                          const englishLine = lines.find(l => !(/[\u0600-\u06FF]/.test(l)));
-                          const arabicLine = lines.find(l => /[\u0600-\u06FF]/.test(l));
-                          const isEnCopied = copiedEnIndex === index;
-                          const isArCopied = copiedArIndex === index;
-                          return (
-                            <>
-                              <motion.button
-                                whileHover={{ scale: englishLine ? 1.04 : 1 }}
-                                whileTap={{ scale: englishLine ? 0.96 : 1 }}
-                                onClick={() => {
-                                  if (!englishLine) return;
-                                  navigator.clipboard.writeText(englishLine).then(() => {
-                                    setCopiedEnIndex(index);
-                                    toast.success('Copied English');
-                                    setTimeout(() => setCopiedEnIndex(prev => (prev === index ? null : prev)), 600);
-                                  });
-                                }}
-                                disabled={!englishLine}
-                                className={`text-xs flex items-center gap-1 px-2 py-1 rounded-md transition-colors ${
-                                  englishLine ? (isEnCopied ? 'text-white bg-emerald-500' : 'text-gray-700 bg-gray-100 hover:bg-gray-200') : 'text-gray-400 bg-gray-100 cursor-not-allowed'
-                                }`}
-                                style={{ transition: 'all 0.15s ease-in-out' }}
-                              >
-                                {isEnCopied ? <FiCheckCircle size={12} /> : <FiCopy size={12} />}
-                                {isEnCopied ? 'Copied' : 'Copy English'}
-                              </motion.button>
-                              <motion.button
-                                whileHover={{ scale: arabicLine ? 1.04 : 1 }}
-                                whileTap={{ scale: arabicLine ? 0.96 : 1 }}
-                                onClick={() => {
-                                  if (!arabicLine) return;
-                                  navigator.clipboard.writeText(arabicLine).then(() => {
-                                    setCopiedArIndex(index);
-                                    toast.success('Copied Arabic');
-                                    setTimeout(() => setCopiedArIndex(prev => (prev === index ? null : prev)), 600);
-                                  });
-                                }}
-                                disabled={!arabicLine}
-                                className={`text-xs flex items-center gap-1 px-2 py-1 rounded-md transition-colors ${
-                                  arabicLine ? (isArCopied ? 'text-white bg-emerald-500' : 'text-gray-700 bg-gray-100 hover:bg-gray-200') : 'text-gray-400 bg-gray-100 cursor-not-allowed'
-                                }`}
-                                style={{ transition: 'all 0.15s ease-in-out' }}
-                              >
-                                {isArCopied ? <FiCheckCircle size={12} /> : <FiCopy size={12} />}
-                                {isArCopied ? 'Copied' : 'Copy Arabic'}
-                              </motion.button>
-                            </>
-                          );
-                        })()}
+                  {!message.isUser &&
+                    message.type === 'text' &&
+                    !message.data?.number &&
+                    !message.data?.leads && (
+                      <div className="flex items-center gap-3 mb-1.5 ml-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            copyToClipboard(message.text);
+                            setCopiedIndex(index);
+                            toast.success('Copied');
+                            setTimeout(() => setCopiedIndex((prev) => (prev === index ? null : prev)), 600);
+                          }}
+                          className={clsx(
+                            'p-0.5 transition-colors',
+                            copiedIndex === index ? 'text-indigo-500' : 'text-gray-400 hover:text-gray-600'
+                          )}
+                          aria-label="Copy"
+                        >
+                          {copiedIndex === index ? <FiCheckCircle size={14} /> : <FiCopy size={14} />}
+                        </button>
                       </div>
                     )}
+
+                  <div
+                    className={clsx(
+                      'rounded-2xl px-4 py-2.5 shadow-sm',
+                      message.type === 'welcome'
+                        ? 'max-w-[95%] bg-white/80 backdrop-blur-sm text-gray-800 border border-white/90'
+                        : message.isUser
+                          ? 'max-w-[88%] bg-white/90 backdrop-blur-sm text-gray-800 border border-white/80'
+                          : 'max-w-[88%] bg-white/90 backdrop-blur-sm text-gray-800 border border-white/80'
+                    )}
+                  >
+                    <MessageContent message={message} />
+                    {!message.isUser &&
+                      message.type === 'text' &&
+                      !message.data?.number &&
+                      !message.data?.leads &&
+                      translateToArabic && (
+                        <div className="mt-2 flex items-center gap-2 pt-2 border-t border-gray-100">
+                          {(() => {
+                            const lines = message.text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                            const englishLine = lines.find(l => !/[\u0600-\u06FF]/.test(l));
+                            const arabicLine = lines.find(l => /[\u0600-\u06FF]/.test(l));
+                            const isEnCopied = copiedEnIndex === index;
+                            const isArCopied = copiedArIndex === index;
+                            return (
+                              <>
+                                {englishLine && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(englishLine).then(() => {
+                                        setCopiedEnIndex(index);
+                                        toast.success('Copied English');
+                                        setTimeout(() => setCopiedEnIndex((prev) => (prev === index ? null : prev)), 600);
+                                      });
+                                    }}
+                                    className={clsx(
+                                      'text-[10px] flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors',
+                                      isEnCopied ? 'text-indigo-600 bg-indigo-50' : 'text-gray-500 bg-gray-50 hover:bg-gray-100'
+                                    )}
+                                  >
+                                    {isEnCopied ? <FiCheckCircle size={10} /> : <FiCopy size={10} />}
+                                    EN
+                                  </button>
+                                )}
+                                {arabicLine && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(arabicLine).then(() => {
+                                        setCopiedArIndex(index);
+                                        toast.success('Copied Arabic');
+                                        setTimeout(() => setCopiedArIndex((prev) => (prev === index ? null : prev)), 600);
+                                      });
+                                    }}
+                                    className={clsx(
+                                      'text-[10px] flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors',
+                                      isArCopied ? 'text-indigo-600 bg-indigo-50' : 'text-gray-500 bg-gray-50 hover:bg-gray-100'
+                                    )}
+                                  >
+                                    {isArCopied ? <FiCheckCircle size={10} /> : <FiCopy size={10} />}
+                                    AR
+                                  </button>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
                   </div>
+
+                  {message.isUser && isLoading && index === lastUserMessageIndex && (
+                    <span className="text-[11px] text-gray-400 mt-1 mr-1">Sending</span>
+                  )}
                 </div>
               ))}
-              {/* Typing indicator */}
+
+              {/* Thinking indicator — centered when loading */}
               {isLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-white ring-1 ring-gray-200 rounded-2xl px-3 py-2 shadow-sm">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.2s]"></span>
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                    </div>
-                  </div>
+                <div className="flex items-center justify-center gap-2 py-8">
+                  <Sparkles size={16} className="text-indigo-500 animate-pulse" />
+                  <span className="text-sm text-gray-600 font-medium">Thinking...</span>
                 </div>
               )}
               <div ref={messagesEndRef} />
             </div>
 
-            <form id="tc-form" onSubmit={handleSubmit} className="p-3 border-t">
-              <div className="flex gap-2 items-center">
-                <div className="flex-1 flex items-center gap-2 bg-white rounded-full border border-gray-200 px-3 py-2 shadow-sm">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onClick={(e) => {
-                    // Keep focus on input when clicked
-                    e.currentTarget.focus();
-                  }}
-                  placeholder="Type in English or Arabic…"
-                  className="flex-1 bg-transparent text-sm focus:outline-none"
-                  disabled={isLoading}
-                  autoFocus
-                />
+            {/* Input */}
+            <div className="shrink-0 px-4 pt-2 pb-4">
+              <form id="tc-form" onSubmit={handleSubmit}>
+                <div className="relative flex items-center">
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    placeholder={isLoading ? 'Wait for response...' : 'Type in English or Arabic…'}
+                    className="w-full bg-white/55 backdrop-blur-md text-sm text-gray-800 placeholder:text-gray-400 rounded-full border border-white/70 py-3 pl-5 pr-14 focus:outline-none focus:ring-2 focus:ring-indigo-300/40 focus:border-white/90 shadow-sm disabled:opacity-70"
+                    disabled={isLoading}
+                    autoFocus
+                  />
+                  <button
+                    type="submit"
+                    disabled={isLoading || !inputText.trim()}
+                    className="absolute right-1.5 w-9 h-9 flex items-center justify-center rounded-full bg-[#a5b4fc] hover:bg-[#818cf8] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                    aria-label="Send"
+                  >
+                    <ArrowUp size={18} strokeWidth={2.5} />
+                  </button>
                 </div>
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="bg-indigo-600 text-white w-10 h-10 rounded-full hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center shadow"
-                >
-                  {isLoading ? (
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <FiSend size={16} />
-                  )}
-                </button>
-              </div>
-              {/* Quick suggestions */}
-             
-            </form>
+              </form>
+            </div>
+            </div>
           </div>
         </div>
       )}

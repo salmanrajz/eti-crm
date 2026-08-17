@@ -46,7 +46,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, getDoc, updateDoc, collection, query, orderBy, onSnapshot, where, addDoc, getDocs } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, collection, query, orderBy, onSnapshot, where, addDoc, getDocs, deleteField } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db } from '../../lib/firebase';
 import { useAuthStore } from '../../store/authStore';
@@ -58,6 +58,8 @@ import { LeadDetailsView } from './LeadDetailsView';
 import { CreateLead } from './CreateLead';
 import { format } from 'date-fns';
 import { logNumberAction } from '../../utils/numberLogging';
+import { pausedClaimTimerFields } from '../../utils/claimTimer';
+import { poolFieldsWhenAttachingToLead, getStrikeWindowMs, claimQueueWouldConvertToStrikes, notifyOwnerOfClaimToStrikeConversion } from '../../utils/strikeQueue';
 import { logLeadAction } from '../../utils/leadLogging';
 
 const VoiceNotePlayer = ({ src, durationMs, onPlay, currentlyPlaying }: { src: string; durationMs?: number; onPlay: () => void; currentlyPlaying: string | null }) => {
@@ -321,41 +323,29 @@ export function LeadDetails() {
       
       if (leadDoc.exists()) {
         const leadData = leadDoc.data();
-        
+        // Get manager, agent, and team data in parallel
+        const [managerDoc, agentDoc, teamDoc] = await Promise.all([
+          leadData.managerId ? getDoc(doc(db, 'users', leadData.managerId)).catch(() => null) : Promise.resolve(null),
+          leadData.agentId ? getDoc(doc(db, 'users', leadData.agentId)).catch((e) => { console.error('Error fetching agent data for lead:', id, e); return null; }) : Promise.resolve(null),
+          leadData.teamId ? getDoc(doc(db, 'teams', leadData.teamId)).catch((e) => { console.error('Error fetching team data for lead:', id, e); return null; }) : Promise.resolve(null)
+        ]);
+        const managerData = managerDoc?.exists() ? { id: managerDoc.id, ...managerDoc.data() } : null;
+        let resolvedAgentName = leadData.agentName || '';
+        if (agentDoc?.exists()) {
+          const agentData = agentDoc.data() as any;
+          resolvedAgentName = agentData.name || agentData.fullName || agentData.displayName || resolvedAgentName;
+        }
+        let resolvedTeamName = leadData.teamName || '';
+        if (teamDoc?.exists()) {
+          resolvedTeamName = (teamDoc.data() as any).name || resolvedTeamName;
+        }
+
+        // Convert Firestore timestamps to Date objects
         const startDate = leadData.startDate?.toDate?.() || leadData.startDate || new Date();
         const createdAt = leadData.createdAt?.toDate?.() || leadData.createdAt || new Date();
         const updatedAt = leadData.updatedAt?.toDate?.() || leadData.updatedAt || new Date();
 
-        // Fetch manager, agent and team IN PARALLEL — previously these were 3 sequential
-        // awaits (each waiting for the prior), adding up to 3 extra round-trips of latency.
-        let managerData = null;
-        let resolvedAgentName = '';
-        let resolvedTeamName = '';
-
-        const [managerDoc, agentDoc, teamDoc] = await Promise.all([
-          leadData.managerId
-            ? getDoc(doc(db, 'users', leadData.managerId)).catch(() => null)
-            : Promise.resolve(null),
-          leadData.agentId
-            ? getDoc(doc(db, 'users', leadData.agentId)).catch((e) => { console.error('Error fetching agent data for lead:', id, e); return null; })
-            : Promise.resolve(null),
-          leadData.teamId
-            ? getDoc(doc(db, 'teams', leadData.teamId)).catch((e) => { console.error('Error fetching team data for lead:', id, e); return null; })
-            : Promise.resolve(null),
-        ]);
-
-        if (managerDoc?.exists()) {
-          managerData = { id: managerDoc.id, ...managerDoc.data() };
-        }
-        if (agentDoc?.exists()) {
-          const agentData = agentDoc.data() as any;
-          resolvedAgentName = agentData.name || agentData.fullName || agentData.displayName || '';
-        }
-        if (teamDoc?.exists()) {
-          resolvedTeamName = (teamDoc.data() as any).name || '';
-        }
-        
-        const lead = {
+        setLead({
           id: leadDoc.id,
           numberId: leadData.numberId,
           customerName: leadData.customerName,
@@ -408,9 +398,7 @@ export function LeadDetails() {
           managerNotes: leadData.managerNotes || '',
           leadNumber: leadData.leadNumber || '',
           leadNumberGeneratedAt: leadData.leadNumberGeneratedAt?.toDate?.() || leadData.leadNumberGeneratedAt || undefined
-        } as Lead;
-        
-        setLead(lead);
+        } as Lead);
       } else {
         console.error('Lead document does not exist');
         toast.error('Lead not found');
@@ -939,7 +927,8 @@ export function LeadDetails() {
                 updateDoc(doc(db, 'numberPool', plan.numberId), {
                   status: 'pending_verification',
                   lastStatusChange: new Date(),
-                  leadId: id
+                  leadId: id,
+                  ...pausedClaimTimerFields(),
                 })
               );
             }
@@ -1763,7 +1752,8 @@ export function LeadDetails() {
               // Always reserve for the lead creator (agent); never link the verifier's id to the number
               reservedBy: agentId || null,
               reservedAt: now,
-              expiresAt
+              expiresAt,
+              ...(leadData.status === 'activated_non_verified' ? {} : pausedClaimTimerFields()),
             });
           } catch (err) {
             console.error('Failed updating numberPool for plan', plan.numberId, err);
@@ -1790,8 +1780,105 @@ export function LeadDetails() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
+      <div
+        className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 py-2 px-0 sm:px-4 md:px-6 lg:px-8"
+        style={{
+          paddingTop: 'max(0.5rem, env(safe-area-inset-top, 0px))',
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+        }}
+      >
+        <div className="w-full max-w-6xl mx-auto">
+          <div className="overflow-hidden rounded-[28px] border border-slate-200/80 bg-white shadow-[0_24px_80px_-32px_rgba(15,23,42,0.18)]">
+            <div className="border-b border-slate-200 px-5 py-6 sm:px-8">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-3">
+                  <div className="h-10 w-36 animate-pulse rounded-xl bg-slate-200" />
+                  <div className="h-8 w-56 animate-pulse rounded-xl bg-slate-200" />
+                  <div className="h-4 w-48 animate-pulse rounded-full bg-slate-100" />
+                </div>
+                <div className="self-start space-y-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 sm:self-auto">
+                  <div className="h-4 w-44 animate-pulse rounded-full bg-slate-200" />
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-slate-300" />
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-slate-300 [animation-delay:120ms]" />
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-slate-300 [animation-delay:240ms]" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-6 px-5 py-6 sm:px-8 lg:grid-cols-[minmax(0,1.35fr)_360px]">
+              <div className="space-y-6">
+                <div className="rounded-3xl border border-slate-200/70 bg-white p-5 shadow-sm">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="h-12 w-12 animate-pulse rounded-2xl bg-slate-200" />
+                    <div className="flex-1 space-y-3">
+                      <div className="h-5 w-40 animate-pulse rounded-full bg-slate-200" />
+                      <div className="h-4 w-64 animate-pulse rounded-full bg-slate-100" />
+                    </div>
+                    <div className="h-9 w-24 animate-pulse rounded-full bg-slate-200" />
+                  </div>
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {[...Array(6)].map((_, index) => (
+                      <div
+                        key={index}
+                        className="rounded-2xl border border-slate-100 bg-slate-50/80 p-4"
+                      >
+                        <div className="h-3 w-20 animate-pulse rounded-full bg-slate-200" />
+                        <div className="mt-3 h-5 w-28 animate-pulse rounded-full bg-slate-300" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-slate-200/70 bg-white p-5 shadow-sm">
+                  <div className="mb-5 flex items-center justify-between">
+                    <div className="space-y-3">
+                      <div className="h-5 w-32 animate-pulse rounded-full bg-slate-200" />
+                      <div className="h-4 w-52 animate-pulse rounded-full bg-slate-100" />
+                    </div>
+                    <div className="h-9 w-28 animate-pulse rounded-full bg-slate-200" />
+                  </div>
+                  <div className="space-y-4">
+                    {[...Array(4)].map((_, index) => (
+                      <div key={index} className="flex gap-3">
+                        <div className="h-10 w-10 flex-none animate-pulse rounded-2xl bg-slate-200" />
+                        <div className="flex-1 space-y-2">
+                          <div className="h-4 w-24 animate-pulse rounded-full bg-slate-200" />
+                          <div className="h-16 w-full animate-pulse rounded-3xl bg-slate-100" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                <div className="rounded-3xl border border-slate-200/70 bg-slate-50 p-5 shadow-sm">
+                  <div className="space-y-3">
+                    <div className="h-5 w-36 animate-pulse rounded-full bg-slate-200" />
+                    <div className="h-24 w-full animate-pulse rounded-3xl bg-slate-100" />
+                  </div>
+                  <div className="mt-4 grid gap-3">
+                    {[...Array(3)].map((_, index) => (
+                      <div key={index} className="rounded-2xl border border-slate-100 bg-white p-4">
+                        <div className="h-3 w-24 animate-pulse rounded-full bg-slate-200" />
+                        <div className="mt-3 h-4 w-32 animate-pulse rounded-full bg-slate-100" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5 shadow-sm">
+                  <div className="h-4 w-28 animate-pulse rounded-full bg-slate-200" />
+                  <div className="mt-4 overflow-hidden rounded-2xl bg-white/80 p-4">
+                    <div className="h-24 w-full animate-pulse rounded-2xl bg-slate-100" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1865,15 +1952,30 @@ export function LeadDetails() {
                   // Allow agent resubmission for both 'non_verified' and legacy 'follow_verification' statuses
                   // Also allow multi-team managers to resubmit leads from their managed teams
                   const canResubmit = (user.role === 'agent' && data.agentId === user.id) ||
-                    (user.role === 'manager' && user.managedTeams && user.managedTeams.includes(data.teamId || '') && (data.status === 'non_verified' || data.status === 'follow_verification'));
+                    (user.role === 'manager' && user.managedTeams && user.managedTeams.includes(data.teamId || '') && (data.status === 'non_verified' || data.status === 'follow_verification' || data.status === 'awaiting_for_number'));
 
                   if (canResubmit) {
-                    // Get all numbers attached to this lead
-                    const plans = (data.plans || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+                    const isAwaiting = data.status === 'awaiting_for_number';
+                    const plans = (data.plans || []).filter((p: any) =>
+                      p?.numberId &&
+                      !p.numberId.startsWith('virtual-') &&
+                      (isAwaiting || !p.numberStruckThrough)
+                    );
+                    const numbersToCheck = plans.length > 0
+                      ? plans
+                      : (data.awaitingNumbers || []).filter((p: any) => p?.numberId && !p.numberId.startsWith('virtual-'));
+
+                    if (isAwaiting && numbersToCheck.length === 0) {
+                      setResubmitError({
+                        reason: 'No number on this lead to resubmit. The number must be open or reserved for you.',
+                        number: 'N/A',
+                      });
+                      setIsResubmitting(false);
+                      return;
+                    }
                     
-                    // Validate that all numbers are either open or reserved by this agent
                     const numberChecks = await Promise.all(
-                      plans.map(async (p: any) => {
+                      numbersToCheck.map(async (p: any) => {
                         try {
                           const numberRef = doc(db, 'numberPool', p.numberId);
                           const numberDoc = await getDoc(numberRef);
@@ -1887,9 +1989,11 @@ export function LeadDetails() {
                           
                           // Number is valid only if: open, OR reserved by this agent, OR attached to this lead with resubmittable status (non_verified/follow_verification)
                           const isOpen = numberStatus === 'open';
-                          const isReservedByAgent = numberStatus === 'reserved' && (reservedBy === user.id || reservedBy === data.agentId);
+                          const isReservedByAgent = (numberStatus === 'reserved' || numberStatus === 'non_verified') && (reservedBy === user.id || reservedBy === data.agentId);
                           const isOnThisLeadResubmittable = numberLeadId === id && ['non_verified', 'follow_verification'].includes(numberStatus);
-                          const isValid = isOpen || isReservedByAgent || isOnThisLeadResubmittable;
+                          const isValid = data.status === 'awaiting_for_number'
+                            ? (isOpen || isReservedByAgent)
+                            : (isOpen || isReservedByAgent || isOnThisLeadResubmittable);
                           
                           if (!isValid) {
                             const reason = numberStatus === 'reserved' 
@@ -1921,22 +2025,56 @@ export function LeadDetails() {
                       return;
                     }
                     
-                    // All numbers are valid, proceed with resubmission
-                    await updateDoc(leadRef, {
-                      status: 'pending_verification',
-                      updatedAt: new Date(),
-                      updatedBy: user.id
-                    });
-                    // Update numbers to pending_verification
-                    await Promise.all(
-                      plans.map((p: any) => updateDoc(doc(db, 'numberPool', p.numberId), {
-                        status: 'pending_verification',
-                        lastStatusChange: new Date(),
-                        leadId: id
-                      }))
+                    const restoredStatus = isAwaiting
+                      ? (data.statusBeforeAwaiting || 'pending_verification')
+                      : 'pending_verification';
+                    const restoredPlans = (data.plans || []).map((plan: any) =>
+                      numbersToCheck.some((checked: any) => checked.numberId === plan.numberId)
+                        ? { ...plan, numberStruckThrough: false }
+                        : plan
                     );
-                    setLead(prev => prev ? { ...prev, status: 'pending_verification' } : prev);
-                    toast.success('Lead resubmitted for verification');
+
+                    await updateDoc(leadRef, {
+                      status: restoredStatus,
+                      updatedAt: new Date(),
+                      updatedBy: user.id,
+                      ...(isAwaiting ? {
+                        plans: restoredPlans,
+                        awaitingNumbers: [],
+                        awaitingNumberIds: [],
+                        statusBeforeAwaiting: deleteField(),
+                      } : {}),
+                    });
+                    const strikeWindowMs = await getStrikeWindowMs();
+                    await Promise.all(
+                      numbersToCheck.map(async (p: any) => {
+                        const numberRef = doc(db, 'numberPool', p.numberId);
+                        const numberSnap = await getDoc(numberRef);
+                        const numberData = numberSnap.exists() ? numberSnap.data() : null;
+                        const convertingClaims = claimQueueWouldConvertToStrikes(numberData);
+                        await updateDoc(numberRef, {
+                          status: restoredStatus,
+                          lastStatusChange: new Date(),
+                          leadId: id,
+                          reservedBy: data.agentId || user.id,
+                          reservedAt: new Date(),
+                          ...poolFieldsWhenAttachingToLead(numberData, strikeWindowMs),
+                        });
+                        if (convertingClaims && id) {
+                          notifyOwnerOfClaimToStrikeConversion({
+                            leadId: id,
+                            numberId: p.numberId,
+                            number: p.number,
+                          });
+                        }
+                      })
+                    );
+                    setLead(prev => prev ? { ...prev, status: restoredStatus, plans: restoredPlans } : prev);
+                    toast.success(
+                      isAwaiting
+                        ? `Lead resubmitted as ${String(restoredStatus).replace(/_/g, ' ')}`
+                        : 'Lead resubmitted for verification'
+                    );
                   }
                 } catch (e) {
                   console.error(e);

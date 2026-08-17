@@ -146,7 +146,7 @@ const NUMBER_GROUPS = [
 ];
 
 const STATUS_OPTIONS = [
-  'verified', 'pending', 'assigned', 'activated', 'activated_non_verified', 'rejected', 'follow_up'
+  'verified', 'pending', 'assigned', 'activated', 'activated_non_verified', 'rejected', 'follow_up', 'later'
 ];
 
 function getStatusDisplayText(status: string | undefined): string {

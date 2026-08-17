@@ -25,12 +25,11 @@
  * ===============================================================================
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { collection, query, getDocs, where, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { Lead, Team, User, NumberPool } from '../../types';
 import { format, startOfDay, endOfDay, startOfMonth, endOfMonth, subMonths, getDaysInMonth, differenceInDays, isAfter, isBefore, isToday } from 'date-fns';
-import ExcelJS from 'exceljs';
 import { 
   BarChart3, 
   Users, 
@@ -91,6 +90,7 @@ interface GroupCategoryMetrics {
     newActivations?: number;
     mnpActivations?: number;
     p2pActivations?: number; // Prepaid to postpaid
+    homeWifiActivations?: number;
   };
 }
 
@@ -149,6 +149,21 @@ function normalizeCategory(category?: string): string {
   return normalized;
 }
 
+function getActivationProductBucket(productType?: string): 'New' | 'MNP' | 'P2P' | 'Home Wifi' {
+  const normalized = (productType || '').trim().toLowerCase();
+
+  if (normalized.includes('home wifi') || normalized.includes('home-wifi')) return 'Home Wifi';
+  if (normalized.includes('mnp')) return 'MNP';
+  if (
+    normalized.includes('p2p') ||
+    (normalized.includes('prepaid') && normalized.includes('postpaid'))
+  ) {
+    return 'P2P';
+  }
+
+  return 'New';
+}
+
 function getActivatedAt(lead: any): Date | null {
   const raw = lead?.activatedAt || lead?.updatedAt;
   if (!raw) return null;
@@ -157,6 +172,19 @@ function getActivatedAt(lead: any): Date | null {
     return isNaN(d.getTime()) ? null : d;
   }
   if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function toComparableDate(raw: any): Date | null {
+  if (!raw) return null;
+  if (typeof raw?.toDate === 'function') {
+    const d = raw.toDate();
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (raw instanceof Date) {
+    return isNaN(raw.getTime()) ? null : raw;
+  }
   const d = new Date(raw);
   return isNaN(d.getTime()) ? null : d;
 }
@@ -196,6 +224,10 @@ interface AgentDetailsData {
   performanceData: AgentPerformanceData[];
 }
 
+// Module-level in-flight dedupe for date-range lead queries.
+// This avoids duplicate network requests during React StrictMode dev remounts.
+const leadsRangeInFlight = new Map<string, Promise<Lead[]>>();
+
 export function Reports() {
   const [view, setView] = useState<'daily' | 'monthly'>('monthly');
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -226,6 +258,47 @@ export function Reports() {
   const [teamTargets, setTeamTargets] = useState<Record<string, number>>({});
   const [groupMnpActivations, setGroupMnpActivations] = useState<Record<string, number>>({});
   const [groupP2pActivations, setGroupP2pActivations] = useState<Record<string, number>>({});
+  const reportLoadSeqRef = useRef(0);
+
+  const fetchLeadsByDateRange = async (field: 'updatedAt' | 'verifiedAt' | 'activatedAt', start: Date, end: Date) => {
+    const cacheKey = `${field}:${start.toISOString()}:${end.toISOString()}`;
+    const existing = leadsRangeInFlight.get(cacheKey);
+    if (existing) {
+      return existing;
+    }
+
+    const leadsRef = collection(db, 'leads');
+    const q = query(
+      leadsRef,
+      where(field, '>=', start),
+      where(field, '<=', end)
+    );
+    const requestPromise = getDocs(q)
+      .then(snapshot => snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
+        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
+      })) as Lead[])
+      .finally(() => {
+        leadsRangeInFlight.delete(cacheKey);
+      });
+
+    leadsRangeInFlight.set(cacheKey, requestPromise);
+    return requestPromise;
+  };
+
+  /** Same merge as monthly metrics: leads touched in range via updatedAt or activatedAt. */
+  const fetchMergedLeadsForRange = async (start: Date, end: Date): Promise<Lead[]> => {
+    const [updatedLeads, activatedLeads] = await Promise.all([
+      fetchLeadsByDateRange('updatedAt', start, end),
+      fetchLeadsByDateRange('activatedAt', start, end),
+    ]);
+    const leadMap = new Map<string, Lead>();
+    updatedLeads.forEach(lead => leadMap.set(lead.id, lead));
+    activatedLeads.forEach(lead => leadMap.set(lead.id, lead));
+    return Array.from(leadMap.values());
+  };
 
   useEffect(() => {
     Promise.all([loadTeams(), loadTeamAgentCounts(), loadGroupAliases()]);
@@ -349,6 +422,7 @@ export function Reports() {
         newActivations: 0,
         mnpActivations: 0,
         p2pActivations: 0,
+        homeWifiActivations: 0,
       };
       
       // Initialize all categories for each group
@@ -378,43 +452,30 @@ export function Reports() {
   };
 
   const loadDailyMetrics = async (date: Date) => {
+    const loadSeq = ++reportLoadSeqRef.current;
     setLoading(true);
     try {
       const start = startOfDay(date);
       const end = endOfDay(date);
       
-      const leadsQuery = query(collection(db, 'leads'));
-      const leadsSnapshot = await getDocs(leadsQuery);
-      const allLeads = leadsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
-        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
-      })) as Lead[];
+      // Fetch only the needed date window (updatedAt OR verifiedAt) and merge.
+      // This avoids full collection scans while preserving existing behavior.
+      const [updatedLeads, verifiedLeads] = await Promise.all([
+        fetchLeadsByDateRange('updatedAt', start, end),
+        fetchLeadsByDateRange('verifiedAt', start, end)
+      ]);
+      const leadMap = new Map<string, Lead>();
+      updatedLeads.forEach(lead => leadMap.set(lead.id, lead));
+      verifiedLeads.forEach(lead => leadMap.set(lead.id, lead));
+      const allLeads = Array.from(leadMap.values());
 
       const filteredLeads = allLeads.filter(lead => {
         // For "daily" metrics, align with admin dashboard:
         // - Activated / other statuses use updatedAt range
         // - Verified uses verifiedAt specifically
-        const updatedRaw: any = lead.updatedAt;
-        const updated =
-          updatedRaw && typeof updatedRaw.toDate === 'function'
-            ? updatedRaw.toDate()
-            : updatedRaw instanceof Date
-              ? updatedRaw
-              : new Date(updatedRaw);
-
-        const verifiedRaw: any = (lead as any).verifiedAt;
-        const verifiedAt =
-          verifiedRaw && typeof verifiedRaw.toDate === 'function'
-            ? verifiedRaw.toDate()
-            : verifiedRaw instanceof Date
-              ? verifiedRaw
-              : verifiedRaw
-                ? new Date(verifiedRaw)
-                : null;
-
-        const inUpdatedRange = updated >= start && updated <= end;
+        const updated = toComparableDate((lead as any).updatedAt);
+        const verifiedAt = toComparableDate((lead as any).verifiedAt);
+        const inUpdatedRange = updated ? updated >= start && updated <= end : false;
         const inVerifiedRange = verifiedAt ? verifiedAt >= start && verifiedAt <= end : false;
 
         // Keep leads that either changed today (for non-verified stats)
@@ -443,15 +504,7 @@ export function Reports() {
         const teamId = lead.teamId || 'unknown';
         const team = teams.find(t => t.id === teamId);
         const status = lead.status;
-        const verifiedRaw: any = (lead as any).verifiedAt;
-        const verifiedAt =
-          verifiedRaw && typeof verifiedRaw.toDate === 'function'
-            ? verifiedRaw.toDate()
-            : verifiedRaw instanceof Date
-              ? verifiedRaw
-              : verifiedRaw
-                ? new Date(verifiedRaw)
-                : null;
+        const verifiedAt = toComparableDate((lead as any).verifiedAt);
         const inVerifiedRange = verifiedAt ? verifiedAt >= start && verifiedAt <= end : false;
         
         // Initialize team if not exists
@@ -481,6 +534,7 @@ export function Reports() {
                 newActivations: 0,
                 mnpActivations: 0,
                 p2pActivations: 0,
+                homeWifiActivations: 0,
               };
             CATEGORIES.forEach(cat => {
               metrics.teamWise[teamId].groups[group][cat] = 0;
@@ -503,18 +557,21 @@ export function Reports() {
             metrics.teamWise[teamId].groups[group][category]++;
             metrics.teamWise[teamId].groupStatus[group].total++;
 
-            // Track New + MNP + Prepaid to postpaid activations specifically for G2
+            // Track New, MNP, P2P and Home Wifi activations specifically for G2
             if (group === 'G2') {
-              const productType = (lead as any).productType;
-              if (productType === 'New') {
+              const productBucket = getActivationProductBucket((lead as any).productType);
+              if (productBucket === 'New') {
                 metrics.teamWise[teamId].groups[group].newActivations =
                   (metrics.teamWise[teamId].groups[group].newActivations || 0) + 1;
-              } else if (productType === 'MNP') {
+              } else if (productBucket === 'MNP') {
                 metrics.teamWise[teamId].groups[group].mnpActivations =
                   (metrics.teamWise[teamId].groups[group].mnpActivations || 0) + 1;
-              } else if (productType === 'Prepaid to postpaid') {
+              } else if (productBucket === 'P2P') {
                 metrics.teamWise[teamId].groups[group].p2pActivations =
                   (metrics.teamWise[teamId].groups[group].p2pActivations || 0) + 1;
+              } else if (productBucket === 'Home Wifi') {
+                metrics.teamWise[teamId].groups[group].homeWifiActivations =
+                  (metrics.teamWise[teamId].groups[group].homeWifiActivations || 0) + 1;
               }
             }
           });
@@ -599,15 +656,23 @@ export function Reports() {
         }
       });
 
+      if (loadSeq !== reportLoadSeqRef.current) return;
       setDailyMetrics(metrics);
 
-      // Reuse the already-fetched leads for monthly category activations
-      computeMonthlyCategoryActivations(allLeads, date);
+      // Full calendar month of activations by category (same basis as Monthly report).
+      // Do not reuse daily-window `allLeads` — that only covers one day and understates the month.
+      const monthStart = startOfMonth(date);
+      const monthEnd = endOfMonth(date);
+      const monthLeadsMerged = await fetchMergedLeadsForRange(monthStart, monthEnd);
+      if (loadSeq !== reportLoadSeqRef.current) return;
+      computeMonthlyCategoryActivations(monthLeadsMerged, date);
     } catch (error) {
       console.error('Error loading daily metrics:', error);
       toast.error('Failed to load daily metrics');
     } finally {
-      setLoading(false);
+      if (loadSeq === reportLoadSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -682,22 +747,14 @@ export function Reports() {
     }
   };
 
-  const computeGroupActivations = (allLeads: Lead[], month: Date) => {
-    const start = startOfMonth(month);
-    const end = endOfMonth(month);
+  const computeGroupActivations = (monthActivatedLeads: Lead[]) => {
     const gCounts: Record<string, number> = {};
     const cCounts: Record<string, number> = {};
     const mnpCounts: Record<string, number> = {};
     const p2pCounts: Record<string, number> = {};
-    
-    const monthActivated = allLeads.filter(lead => {
-      if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
-      const activatedAt = getActivatedAt(lead);
-      return activatedAt !== null && activatedAt >= start && activatedAt <= end;
-    });
-    
-    monthActivated.forEach(lead => {
-      const productType = (lead as any).productType;
+
+    monthActivatedLeads.forEach(lead => {
+      const productBucket = getActivationProductBucket((lead as any).productType);
 
       (lead.plans || []).forEach(plan => {
         const grp = normalizeGroup(plan.group);
@@ -706,7 +763,7 @@ export function Reports() {
         // For Express Dial (G2), only count "New" productType towards the group target/achieved
         const shouldCountForGroup =
           grp === 'G2'
-            ? productType === 'New'
+            ? productBucket === 'New'
             : true;
 
         if (shouldCountForGroup) {
@@ -715,9 +772,9 @@ export function Reports() {
         
         // Track MNP and P2P activations for G2
         if (grp === 'G2') {
-          if (productType === 'MNP') {
+          if (productBucket === 'MNP') {
             mnpCounts[grp] = (mnpCounts[grp] || 0) + 1;
-          } else if (productType === 'Prepaid to postpaid') {
+          } else if (productBucket === 'P2P') {
             p2pCounts[grp] = (p2pCounts[grp] || 0) + 1;
           }
         }
@@ -760,18 +817,21 @@ export function Reports() {
   };
 
   const loadMonthlyMetrics = async (month: Date) => {
+    const loadSeq = ++reportLoadSeqRef.current;
     setLoading(true);
     try {
       const start = startOfMonth(month);
       const end = endOfMonth(month);
       
-      const leadsQuery = query(collection(db, 'leads'));
-      const leadsSnapshot = await getDocs(leadsQuery);
-      const allLeads = leadsSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt
-      })) as Lead[];
+      // Fetch only relevant month window, then preserve exact prior filtering logic in-memory.
+      const [updatedLeads, activatedLeads] = await Promise.all([
+        fetchLeadsByDateRange('updatedAt', start, end),
+        fetchLeadsByDateRange('activatedAt', start, end)
+      ]);
+      const leadMap = new Map<string, Lead>();
+      updatedLeads.forEach(lead => leadMap.set(lead.id, lead));
+      activatedLeads.forEach(lead => leadMap.set(lead.id, lead));
+      const allLeads = Array.from(leadMap.values());
 
       const filteredLeads = allLeads.filter(lead => {
         if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
@@ -779,8 +839,8 @@ export function Reports() {
         return activatedAt !== null && activatedAt >= start && activatedAt <= end;
       });
 
-      // Calculate group and category activations
-      computeGroupActivations(allLeads, month);
+      // Calculate group and category activations from the already filtered monthly set
+      computeGroupActivations(filteredLeads);
 
       const metrics: MonthlyMetrics = {
         total: 0,
@@ -818,6 +878,7 @@ export function Reports() {
               newActivations: 0,
               mnpActivations: 0,
               p2pActivations: 0,
+              homeWifiActivations: 0,
             };
             CATEGORIES.forEach(cat => {
               metrics.teamWise[teamId].groups[group][cat] = 0;
@@ -833,29 +894,35 @@ export function Reports() {
           metrics.teamWise[teamId].groups[group].total += 1;
           metrics.teamWise[teamId].groups[group][category] += 1;
 
-          // Track New + MNP + Prepaid to postpaid activations specifically for G2
+          // Track New, MNP, P2P and Home Wifi activations specifically for G2
           if (group === 'G2') {
-            const productType = (lead as any).productType;
-            if (productType === 'New') {
+            const productBucket = getActivationProductBucket((lead as any).productType);
+            if (productBucket === 'New') {
               metrics.teamWise[teamId].groups[group].newActivations =
                 (metrics.teamWise[teamId].groups[group].newActivations || 0) + 1;
-            } else if (productType === 'MNP') {
+            } else if (productBucket === 'MNP') {
               metrics.teamWise[teamId].groups[group].mnpActivations =
                 (metrics.teamWise[teamId].groups[group].mnpActivations || 0) + 1;
-            } else if (productType === 'Prepaid to postpaid') {
+            } else if (productBucket === 'P2P') {
               metrics.teamWise[teamId].groups[group].p2pActivations =
                 (metrics.teamWise[teamId].groups[group].p2pActivations || 0) + 1;
+            } else if (productBucket === 'Home Wifi') {
+              metrics.teamWise[teamId].groups[group].homeWifiActivations =
+                (metrics.teamWise[teamId].groups[group].homeWifiActivations || 0) + 1;
             }
           }
         });
       });
 
+      if (loadSeq !== reportLoadSeqRef.current) return;
       setMonthlyMetrics(metrics);
     } catch (error) {
       console.error('Error loading monthly metrics:', error);
       toast.error('Failed to load monthly metrics');
     } finally {
-      setLoading(false);
+      if (loadSeq === reportLoadSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -918,19 +985,52 @@ export function Reports() {
 
       const currentMonthStart = startOfMonth(teamPerformanceMonth);
       const currentMonthEnd = endOfMonth(teamPerformanceMonth);
+      const sixMonthStart = startOfMonth(subMonths(teamPerformanceMonth, 5));
+
+      // Precompute per-agent aggregates in one pass for faster rendering
+      const perAgentStats = new Map<string, {
+        totalLeads: number;
+        verified: number;
+        currentMonthActivated: number;
+        sixMonthActivations: number;
+      }>();
+
+      teamLeads.forEach((lead) => {
+        const agentId = (lead as any).agentId;
+        if (!agentId) return;
+        if (!perAgentStats.has(agentId)) {
+          perAgentStats.set(agentId, {
+            totalLeads: 0,
+            verified: 0,
+            currentMonthActivated: 0,
+            sixMonthActivations: 0,
+          });
+        }
+        const stats = perAgentStats.get(agentId)!;
+        stats.totalLeads += 1;
+        if (lead.status === 'verified') {
+          stats.verified += 1;
+        }
+
+        const isActivated = lead.status === 'activated' || lead.status === 'activated_non_verified';
+        if (!isActivated) return;
+        const activatedAt = getActivatedAt(lead);
+        if (!activatedAt) return;
+        const planCount = lead.plans?.length || 0;
+        if (activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd) {
+          stats.currentMonthActivated += planCount;
+        }
+        if (activatedAt >= sixMonthStart && activatedAt <= currentMonthEnd) {
+          stats.sixMonthActivations += planCount;
+        }
+      });
 
       // Calculate team metrics
       const totalLeads = teamLeads.length;
-      const activatedLeads = teamLeads.filter(lead => {
-        if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
-        const activatedAt = getActivatedAt(lead);
-        return activatedAt !== null && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
-      });
-      const activated = activatedLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
+      const activated = Array.from(perAgentStats.values()).reduce((sum, s) => sum + s.currentMonthActivated, 0);
 
       // Calculate agent metrics
       const monthStr = format(teamPerformanceMonth, 'yyyy-MM');
-      const sixMonthsAgo = subMonths(teamPerformanceMonth, 5);
 
       const agentMetrics = await Promise.all(agents.map(async (agent) => {
         // Get agent target
@@ -938,34 +1038,22 @@ export function Reports() {
         const targetDoc = await getDoc(targetRef);
         const target = targetDoc.exists() ? targetDoc.data()?.target || 0 : 0;
 
-        // Get agent leads
-        const agentLeads = teamLeads.filter(lead => lead.agentId === agent.id);
-        const verified = agentLeads.filter(lead => lead.status === 'verified').length;
-
-        // Calculate activated for current month
-        const agentActivatedLeads = agentLeads.filter(lead => {
-          if (lead.status !== 'activated' && lead.status !== 'activated_non_verified') return false;
-          const activatedAt = getActivatedAt(lead);
-          return activatedAt !== null && activatedAt >= currentMonthStart && activatedAt <= currentMonthEnd;
-        });
-        const agentActivated = agentActivatedLeads.reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
-
-        // Calculate 6-month average
-        const sixMonthActivations = teamLeads
-          .filter(lead => {
-            if (lead.agentId !== agent.id || (lead.status !== 'activated' && lead.status !== 'activated_non_verified')) return false;
-            const activatedAt = getActivatedAt(lead);
-            return activatedAt !== null && activatedAt >= startOfMonth(sixMonthsAgo) && activatedAt <= currentMonthEnd;
-          })
-          .reduce((sum, lead) => sum + (lead.plans?.length || 0), 0);
+        const stats = perAgentStats.get(agent.id) || {
+          totalLeads: 0,
+          verified: 0,
+          currentMonthActivated: 0,
+          sixMonthActivations: 0,
+        };
+        const agentActivated = stats.currentMonthActivated;
+        const sixMonthActivations = stats.sixMonthActivations;
         const sixMonthAverage = Math.round(sixMonthActivations / 6);
 
         return {
           id: agent.id,
           name: agent.name,
           role: agent.role,
-          totalLeads: agentLeads.length,
-          verified,
+          totalLeads: stats.totalLeads,
+          verified: stats.verified,
           activated: agentActivated,
           target,
           achievement: target > 0 ? (agentActivated / target) * 100 : 0,
@@ -1106,6 +1194,7 @@ export function Reports() {
   const handleDownloadNumberPool = async () => {
     setDownloading(true);
     try {
+      const ExcelJS = (await import('exceljs')).default;
       // Fetch all numbers from numberPool collection, excluding active and activated numbers
       const numbersRef = collection(db, 'numberPool');
       let queryConstraints: any[] = [];
@@ -1306,7 +1395,7 @@ export function Reports() {
                     return (
                       <th
                         key={group}
-                        colSpan={isExpanded ? (group === 'G2' ? CATEGORIES.length + 2 : CATEGORIES.length) : 1}
+                        colSpan={isExpanded ? (group === 'G2' ? CATEGORIES.length + 4 : CATEGORIES.length) : 1}
                         className={`${
                           group === 'G2' ? 'px-1 sm:px-3 md:px-6 min-w-[180px] sm:min-w-[200px] md:min-w-[220px]' : 'px-1 sm:px-2 md:px-4'
                         } py-2 sm:py-3 md:py-4 text-center text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider border-r border-indigo-400 cursor-pointer hover:bg-indigo-700 transition-colors ${isExpanded ? 'bg-indigo-700' : ''}`}
@@ -1361,7 +1450,7 @@ export function Reports() {
                                 </span>
                   </th>
                 ))}
-                            {/* Extra columns for G2 (Express Dial): New, MNP and P2P */}
+                            {/* Extra columns for G2 (Express Dial): New, MNP, P2P and Home Wifi */}
                             {group === 'G2' && (
                               <>
                                 <th
@@ -1389,6 +1478,15 @@ export function Reports() {
                                 >
                                   <span className="px-1 py-0.5 bg-white/20 rounded text-[10px] font-medium text-white uppercase block whitespace-nowrap">
                                     P2P
+                                  </span>
+                                </th>
+                                <th
+                                  key={`${group}-HOME-WIFI`}
+                                  className="px-1 py-2 text-center border-r border-indigo-400 min-w-[80px]"
+                                  title="Home Wifi Activations"
+                                >
+                                  <span className="px-1 py-0.5 bg-white/20 rounded text-[10px] font-medium text-white uppercase block whitespace-nowrap">
+                                    Home Wifi
                                   </span>
                                 </th>
                               </>
@@ -1507,7 +1605,7 @@ export function Reports() {
                           </td>
                         );
                       })}
-                                {/* Extra data columns for G2: New, MNP and P2P activations */}
+                                {/* Extra data columns for G2: New, MNP, P2P and Home Wifi activations */}
                                 {group === 'G2' && (
                                   <>
                                     <td
@@ -1535,6 +1633,15 @@ export function Reports() {
                                     >
                                       <span className="text-[10px] sm:text-xs font-semibold text-sky-700">
                                         {groupData.p2pActivations || 0}
+                                      </span>
+                                    </td>
+                                    <td
+                                      key={`${group}-HOME-WIFI-data`}
+                                      className="px-0.5 sm:px-1 py-1 sm:py-1.5 md:py-2 text-center border-r border-gray-200 min-w-[70px] sm:min-w-[90px] bg-violet-50"
+                                      title="Home Wifi Activations"
+                                    >
+                                      <span className="text-[10px] sm:text-xs font-semibold text-violet-700">
+                                        {groupData.homeWifiActivations || 0}
                                       </span>
                                     </td>
                                   </>
@@ -1575,6 +1682,14 @@ export function Reports() {
                                     </span>
                                     <span className="text-[10px] font-bold text-sky-800 leading-none">
                                       {groupData.p2pActivations || 0}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-col items-center px-1 py-0.5 rounded bg-violet-50">
+                                    <span className="text-[9px] font-semibold text-violet-700 leading-none">
+                                      Wifi
+                                    </span>
+                                    <span className="text-[10px] font-bold text-violet-800 leading-none">
+                                      {groupData.homeWifiActivations || 0}
                                     </span>
                                   </div>
                                 </div>
@@ -1625,6 +1740,10 @@ export function Reports() {
                       const groupData = team.groups[group] || { total: 0 };
                       return sum + (groupData.p2pActivations || 0);
                 }, 0);
+                    const homeWifiTotal = sortedTeams.reduce((sum, team) => {
+                      const groupData = team.groups[group] || { total: 0 };
+                      return sum + (groupData.homeWifiActivations || 0);
+                    }, 0);
                     const isExpanded = expandedGroup === group;
                     
                     if (isExpanded) {
@@ -1646,7 +1765,7 @@ export function Reports() {
                               <span className="text-[10px] sm:text-xs font-bold text-gray-700">{total}</span>
                       </td>
                     ))}
-                          {/* Extra total columns for G2: New, MNP and P2P */}
+                          {/* Extra total columns for G2: New, MNP, P2P and Home Wifi */}
                           {group === 'G2' && (
                             <>
                               <td
@@ -1669,6 +1788,13 @@ export function Reports() {
                                 title="Total Prepaid to postpaid Activations"
                               >
                                 <span className="text-[10px] sm:text-xs font-bold text-sky-800">{p2pTotal}</span>
+                              </td>
+                              <td
+                                key={`${group}-HOME-WIFI-total`}
+                                className="px-0.5 sm:px-1 py-1 sm:py-1.5 md:py-2 text-center border-r border-gray-200 bg-violet-100 min-w-[70px] sm:min-w-[90px]"
+                                title="Total Home Wifi Activations"
+                              >
+                                <span className="text-[10px] sm:text-xs font-bold text-violet-800">{homeWifiTotal}</span>
                               </td>
                             </>
                           )}
@@ -1706,6 +1832,14 @@ export function Reports() {
                                   </span>
                                   <span className="text-[10px] font-bold text-sky-900 leading-none">
                                     {p2pTotal}
+                                  </span>
+                                </div>
+                                <div className="flex flex-col items-center px-1 py-0.5 rounded bg-violet-100">
+                                  <span className="text-[9px] font-semibold text-violet-800 leading-none">
+                                    Wifi
+                                  </span>
+                                  <span className="text-[10px] font-bold text-violet-900 leading-none">
+                                    {homeWifiTotal}
                                   </span>
                                 </div>
                               </div>
@@ -1944,8 +2078,14 @@ export function Reports() {
           </div>
         </motion.div>
 
-        {/* Daily Report */}
-        {view === 'daily' && dailyMetrics && (
+        {/* Daily Report — show inline loader on first open: full-page loader skips when monthlyMetrics already exists */}
+        {view === 'daily' && (
+          loading && !dailyMetrics ? (
+            <div className="flex flex-col items-center justify-center min-h-[280px] rounded-2xl border border-gray-100 bg-white shadow-xl">
+              <RefreshCw className="h-10 w-10 animate-spin text-indigo-600 mb-3" />
+              <p className="text-gray-600">Loading daily report...</p>
+            </div>
+          ) : dailyMetrics ? (
           <div className="space-y-6">
             {/* Group-wise Data */}
             <div className="bg-white rounded-2xl sm:rounded-2xl shadow-xl p-2 sm:p-4 md:p-6 border border-gray-100 -mx-2 sm:mx-0">
@@ -1966,7 +2106,9 @@ export function Reports() {
                 <div className="p-1.5 sm:p-2 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg">
                   <Package className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-white" />
                 </div>
-                <span className="text-sm sm:text-base md:text-xl">Category-wise Activations ({format(startOfMonth(selectedDate), 'MMM yyyy')})</span>
+                <span className="text-sm sm:text-base md:text-xl">
+                  Monthly category-wise activations ({format(startOfMonth(selectedDate), 'MMM yyyy')})
+                </span>
               </h2>
               
               <div className="overflow-x-auto">
@@ -2019,6 +2161,7 @@ export function Reports() {
                 </div>
             </div>
           </div>
+          ) : null
         )}
 
         {/* Monthly Report */}

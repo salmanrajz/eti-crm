@@ -46,7 +46,7 @@
  * ===============================================================================
  */
 
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Toaster } from 'react-hot-toast';
@@ -67,7 +67,7 @@ import TranslationChat from '../TranslationChat';
 import { MARStrip } from '../MARStrip';
 import NoticeBoard from '../NoticeBoard';
 import { DNCCheckModal } from '../modals/DNCCheckModal';
-const DNCManagement = lazy(() => import('../admin/DNCManagement').then((m) => ({ default: m.DNCManagement })));
+import { DNCManagement } from '../admin/DNCManagement';
 import { clearAllStorage } from '../../utils/clearStorage';
 import { BroadcastPoster } from '../BroadcastPoster';
 
@@ -666,8 +666,8 @@ export function DashboardLayout() {
 
       {/* Top Navigation */}
       <div className="fixed top-0 left-0 right-0 z-50">
-        <div className="bg-white/80 backdrop-blur-lg border-b border-gray-200/80 shadow-sm">
-          <div className="flex h-12 items-center justify-between px-4">
+        <div className="bg-white/80 backdrop-blur-lg border-b border-gray-200/80 shadow-sm pt-[env(safe-area-inset-top,0px)] h-[calc(56px+env(safe-area-inset-top,0px))] sm:h-[calc(64px+env(safe-area-inset-top,0px))]">
+          <div className="flex h-full items-center justify-between px-3 sm:px-4">
             {/* Left side */}
             <div className="flex items-center space-x-4">
                 <div 
@@ -1217,9 +1217,9 @@ export function DashboardLayout() {
         "transition-all duration-200 ease-in-out",
         // Only apply margin on desktop (md and up), not on mobile
         isSidebarOpen ? "md:ml-64" : "md:ml-0",
-        "px-0 sm:px-4 md:px-6 lg:px-8 pt-12"
+        "px-0 sm:px-3 md:px-4 lg:px-5 pt-[calc(56px+env(safe-area-inset-top,0px))] sm:pt-[calc(64px+env(safe-area-inset-top,0px))] overflow-x-hidden"
       )}>
-        <div className="min-h-screen w-full max-w-7xl mx-auto flex flex-col">
+        <div className="min-h-screen w-full max-w-none mx-auto flex flex-col">
           <div className="flex-1">
           <Outlet />
           </div>
@@ -1421,20 +1421,10 @@ export function DashboardLayout() {
       />
 
       {/* DNC Management Modal */}
-      {dncManagementOpen && (
-        <Suspense
-          fallback={
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-              <div className="bg-white rounded-xl px-5 py-4 text-sm text-gray-600 shadow-lg">Loading DNC Management...</div>
-            </div>
-          }
-        >
-          <DNCManagement
-            isOpen={dncManagementOpen}
-            onClose={() => setDncManagementOpen(false)}
-          />
-        </Suspense>
-      )}
+      <DNCManagement 
+        isOpen={dncManagementOpen} 
+        onClose={() => setDncManagementOpen(false)} 
+      />
 
       {/* Broadcast Poster (global premium announcement) */}
       <BroadcastPoster />

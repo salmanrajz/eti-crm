@@ -15,7 +15,7 @@ interface QuickNumberSelectProps {
   selectedNumberId?: string;
 }
 
-const SEARCH_DEBOUNCE = 300;
+const SEARCH_DEBOUNCE = 200;
 const MIN_SEARCH_LENGTH = 3;
 const SEARCH_LIMIT = 20;
 const SECONDARY_SCAN_LIMIT = 200;
@@ -55,9 +55,14 @@ export function QuickNumberSelect({
   const [showingReserved, setShowingReserved] = useState(true);
   const debouncedSearch = useDebounce(searchTerm, SEARCH_DEBOUNCE);
   const inputRef = useRef<HTMLInputElement>(null);
+  const latestSearchRequestRef = useRef(0);
   const agentAllowedGroups = user?.role === 'agent' && user?.allowedGroups?.length
     ? user.allowedGroups
     : null;
+
+  const isSearchRequestCurrent = useCallback((requestId: number) => {
+    return latestSearchRequestRef.current === requestId;
+  }, []);
 
   const filterByVisibility = useCallback((list: NumberPool[]): NumberPool[] => {
     if (isAdmin() || user?.role === 'manager' || user?.role === 'coordinator') return list;
@@ -72,9 +77,14 @@ export function QuickNumberSelect({
     return list;
   }, [isAdmin, user?.role, user?.teamId, agentAllowedGroups]);
 
-  const addStatusChecks = useCallback(async (list: NumberPool[]) => {
+  const addStatusChecks = useCallback(async (list: NumberPool[], requestId?: number) => {
+    const applyResults = (nextList: NumberPool[]) => {
+      if (requestId !== undefined && !isSearchRequestCurrent(requestId)) return;
+      setNumbers(nextList);
+    };
+
     const g4g5 = list.filter(n => n.group?.includes('G4') || n.group?.includes('G5'));
-    if (g4g5.length === 0) { setNumbers(list); return; }
+    if (g4g5.length === 0) { applyResults(list); return; }
 
     const q = query(
       collection(db, 'statusChecks'),
@@ -88,13 +98,13 @@ export function QuickNumberSelect({
         .filter(d => d.data().expiresAt?.toDate() > now)
         .map(d => d.data().numberId)
     );
-    setNumbers(list.map(n => ({
+    applyResults(list.map(n => ({
       ...n,
       statusCheck: (n.group?.includes('G4') || n.group?.includes('G5')) && available.has(n.id)
         ? { status: 'available' as const }
         : undefined,
     })));
-  }, []);
+  }, [isSearchRequestCurrent]);
 
   // Load ALL reserved numbers for this user across all categories — no category filter
   // so the Reserved tab is instant regardless of which category is active
@@ -147,6 +157,9 @@ export function QuickNumberSelect({
 
   // When searching from Reserved tab, search across all categories (cat = undefined)
   const searchNumbers = useCallback(async (term: string) => {
+    const requestId = latestSearchRequestRef.current + 1;
+    latestSearchRequestRef.current = requestId;
+
     if (!term || term.length < MIN_SEARCH_LENGTH) {
       setNumbers([]);
       return;
@@ -154,6 +167,31 @@ export function QuickNumberSelect({
     setLoading(true);
     const cat = showingReserved ? undefined : selectedCategory;
     try {
+      // Full-number searches with initials (for example 0569865000) are
+      // cheaper as a direct exact lookup than going through the broader cache path.
+      if (/^0\d{9}$/.test(term)) {
+        const exactSnap = await getDocs(
+          query(
+            collection(db, 'numberPool'),
+            where('number', '==', term),
+            limit(SEARCH_LIMIT)
+          )
+        ).catch(() => null);
+
+        if (exactSnap && !exactSnap.empty) {
+          const exactResults = (exactSnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[])
+            .filter(n =>
+              (!cat || n.category === cat) &&
+              ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
+            );
+
+          if (exactResults.length) {
+            await addStatusChecks(filterByVisibility(exactResults), requestId);
+            return;
+          }
+        }
+      }
+
       // 1) cache fast search
       const cached = await searchCachedNumbersFast(term, cat || '', SEARCH_LIMIT);
       if (cached?.length) {
@@ -166,7 +204,7 @@ export function QuickNumberSelect({
           ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
         );
         if (statusFiltered.length) {
-          await addStatusChecks(filterByVisibility(statusFiltered));
+          await addStatusChecks(filterByVisibility(statusFiltered), requestId);
           return;
         }
       }
@@ -179,44 +217,17 @@ export function QuickNumberSelect({
           const sf = tokenResults.filter(n =>
             ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
           );
-          if (sf.length) { await addStatusChecks(filterByVisibility(sf)); return; }
+          if (sf.length) { await addStatusChecks(filterByVisibility(sf), requestId); return; }
         }
         const fbResults = await searchFirebaseByTokens(tokens, cat).catch(() => []);
-        if (fbResults.length) { await addStatusChecks(filterByVisibility(fbResults)); return; }
+        if (fbResults.length) { await addStatusChecks(filterByVisibility(fbResults), requestId); return; }
       }
 
       // 3) single token firebase
       if (tokens.length === 1) {
         const singleToken = tokens[0];
-
-        // Full-number searches with initials (for example 0569865000) should
-        // hit an exact number lookup first instead of falling through to the
-        // slower token/prefix path.
-        if (/^0\d{9}$/.test(singleToken)) {
-          const exactSnap = await getDocs(
-            query(
-              collection(db, 'numberPool'),
-              where('number', '==', singleToken),
-              limit(SEARCH_LIMIT)
-            )
-          ).catch(() => null);
-
-          if (exactSnap && !exactSnap.empty) {
-            const exactResults = (exactSnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[])
-              .filter(n =>
-                (!cat || n.category === cat) &&
-                ['open', 'pending_verification', 'verified', 'assigned', 'reserved'].includes(n.status)
-              );
-
-            if (exactResults.length) {
-              await addStatusChecks(filterByVisibility(exactResults));
-              return;
-            }
-          }
-        }
-
         const singleResults = await searchFirebaseBySingleToken(singleToken, cat).catch(() => []);
-        if (singleResults.length) { await addStatusChecks(filterByVisibility(singleResults)); return; }
+        if (singleResults.length) { await addStatusChecks(filterByVisibility(singleResults), requestId); return; }
       }
 
       // 4) fallback prefix + substring Firestore scan
@@ -235,21 +246,27 @@ export function QuickNumberSelect({
       ];
       if (cat) secondaryConstraints.unshift(where('category', '==', cat));
 
-      const prefixSnap = await getDocs(query(collection(db, 'numberPool'), ...prefixConstraints));
-      const secondarySnap = await getDocs(query(collection(db, 'numberPool'), ...secondaryConstraints));
+      const [prefixSnap, secondarySnap] = await Promise.all([
+        getDocs(query(collection(db, 'numberPool'), ...prefixConstraints)),
+        getDocs(query(collection(db, 'numberPool'), ...secondaryConstraints))
+      ]);
       const prefix = prefixSnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[];
       const contains = (secondarySnap.docs.map(d => ({ id: d.id, ...d.data() })) as NumberPool[])
         .filter(n => n.number?.toString().includes(term));
       const merged = new Map<string, NumberPool>();
       [...prefix, ...contains].forEach(n => { if (!merged.has(n.id)) merged.set(n.id, n); });
-      await addStatusChecks(filterByVisibility(Array.from(merged.values()).slice(0, SEARCH_LIMIT)));
+      await addStatusChecks(filterByVisibility(Array.from(merged.values()).slice(0, SEARCH_LIMIT)), requestId);
     } catch (err) {
       console.error('Search error:', err);
-      setNumbers([]);
+      if (isSearchRequestCurrent(requestId)) {
+        setNumbers([]);
+      }
     } finally {
-      setLoading(false);
+      if (isSearchRequestCurrent(requestId)) {
+        setLoading(false);
+      }
     }
-  }, [showingReserved, selectedCategory, filterByVisibility, addStatusChecks, searchFirebaseByTokens, searchFirebaseBySingleToken]);
+  }, [showingReserved, selectedCategory, filterByVisibility, addStatusChecks, searchFirebaseByTokens, searchFirebaseBySingleToken, isSearchRequestCurrent]);
 
   useEffect(() => {
     searchNumbers(debouncedSearch);

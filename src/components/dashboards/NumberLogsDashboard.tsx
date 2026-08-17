@@ -621,8 +621,8 @@ export function NumberLogsDashboard() {
                             </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className={`inline-flex px-2.5 py-1.5 rounded-full text-xs font-medium border shadow-sm ${getActionColor(latestLog.action)}`}>
-                              {formatActionText(latestLog.action)}
+                            <div className={`inline-flex px-2.5 py-1.5 rounded-full text-xs font-medium border shadow-sm ${getActionColor(latestLog.action, latestLog.details)}`}>
+                              {formatActionText(latestLog.action, latestLog.details)}
                             </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
@@ -677,8 +677,8 @@ export function NumberLogsDashboard() {
                                         <div key={log.id} className="group rounded-lg border border-gray-200 bg-white/60 px-4 py-3 shadow-sm hover:shadow transition">
                                           <div className="flex items-center justify-between">
                                             <div className="flex items-center gap-3">
-                                              <div className={`px-2 py-0.5 rounded-full text-xs font-medium border ${getActionColor(log.action)}`}>
-                                                {formatActionText(log.action)}
+                                              <div className={`px-2 py-0.5 rounded-full text-xs font-medium border ${getActionColor(log.action, log.details)}`}>
+                                                {formatActionText(log.action, log.details)}
                                               </div>
                                               <span className="text-sm text-gray-600">
                                                 {log.userName} ({log.userRole})
